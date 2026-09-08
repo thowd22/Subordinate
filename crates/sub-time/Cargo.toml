@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+sub-core = { path = "../sub-core" }
 
 [lints]
 workspace = true

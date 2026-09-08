@@ -3021,6 +3021,9 @@ dependencies = [
 [[package]]
 name = "sub-time"
 version = "0.1.0"
+dependencies = [
+ "sub-core",
+]
 
 [[package]]
 name = "sub-ui"
