@@ -1,0 +1,5 @@
+# Normalise line endings to LF on every platform (rustfmt enforces newline_style = "Unix").
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.wasm binary

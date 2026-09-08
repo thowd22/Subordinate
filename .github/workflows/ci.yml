@@ -75,6 +75,8 @@ jobs:
           sudo installer -pkg "gstreamer-1.0-devel-$GST_VERSION-universal.pkg" -target /
           fw=/Library/Frameworks/GStreamer.framework/Versions/1.0
           echo "PKG_CONFIG_PATH=$fw/lib/pkgconfig" >> "$GITHUB_ENV"
+          # rpath for test binaries is set in .cargo/config.toml; this covers tools run directly.
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$fw/lib" >> "$GITHUB_ENV"
           echo "$fw/bin" >> "$GITHUB_PATH"
 
       - name: GStreamer diagnostics

@@ -74,6 +74,9 @@ export PKG_CONFIG_PATH=/Library/Frameworks/GStreamer.framework/Versions/1.0/lib/
 export PATH=/Library/Frameworks/GStreamer.framework/Versions/1.0/bin:$PATH
 ```
 
+The framework's dylibs use `@rpath` install names; `.cargo/config.toml` in
+the repo adds the framework rpath for Apple targets so test binaries load.
+
 Homebrew's `gstreamer` formula also works but cannot be pinned to a patch
 release. The macOS build includes `applemedia` (`vtenc_h264`).
 

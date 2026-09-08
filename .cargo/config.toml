@@ -1,0 +1,7 @@
+# The official macOS GStreamer framework ships dylibs with @rpath install
+# names, so binaries and test executables need an rpath into the framework.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/Library/Frameworks/GStreamer.framework/Versions/1.0/lib"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/Library/Frameworks/GStreamer.framework/Versions/1.0/lib"]
