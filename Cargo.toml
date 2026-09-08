@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/sub-core",
     "crates/sub-time",
     "crates/sub-model",
     "crates/sub-edit",
