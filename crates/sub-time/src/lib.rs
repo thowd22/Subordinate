@@ -19,11 +19,21 @@
 //! let clip = TimeRange::new(a, RationalTime::new(48, Rational::FPS_23_976)).unwrap();
 //! assert!(clip.contains(RationalTime::new(10, Rational::FPS_23_976)));
 //! ```
+//!
+//! ```
+//! use sub_time::{Rational, Timecode, TimecodeRate};
+//!
+//! // Drop-frame counting skips labels so the clock tracks wall time.
+//! let rate = TimecodeRate::drop_frame(Rational::FPS_29_97).unwrap();
+//! assert_eq!(Timecode::from_frame_number(17_982, rate).to_string(), "00;10;00;00");
+//! ```
 
 mod rational;
 mod rational_time;
 mod time_range;
+pub mod timecode;
 
 pub use rational::Rational;
 pub use rational_time::{RationalTime, Rounding};
 pub use time_range::TimeRange;
+pub use timecode::{Timecode, TimecodeRate};
