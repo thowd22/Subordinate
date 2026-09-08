@@ -30,7 +30,7 @@ jobs:
       # Toolchain version mirrors rust-toolchain.toml.
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.93.1"
+          toolchain: "1.95.0"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -115,6 +115,18 @@ jobs:
         shell: bash
         run: ./scripts/gen-fixtures.sh
 
+      # ---------------- GPU (TASK-19) ----------------
+      # Hosted runners have no GPU. Linux gets Mesa's lavapipe so wgpu can
+      # enumerate a software Vulkan adapter, plus Xvfb to give winit a
+      # display; Windows falls back to WARP through D3D12 and macOS runners
+      # already provide Metal.
+      - name: Install a software GPU and a virtual display (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers libvulkan1 xvfb libxkbcommon-x11-0
+      # -----------------------------------------------
+
       - name: Build
         run: cargo build --workspace --all-targets
 
@@ -126,3 +138,17 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Start the real app, paint a few empty frames and exit. This is what
+      # proves eframe comes up on the wgpu backend on every OS (TASK-19 #3).
+      - name: GUI smoke test (Linux)
+        if: runner.os == 'Linux'
+        env:
+          RUST_LOG: info
+        run: xvfb-run -a cargo run -p subordinate -- --smoke-test
+
+      - name: GUI smoke test (Windows and macOS)
+        if: runner.os != 'Linux'
+        env:
+          RUST_LOG: info
+        run: cargo run -p subordinate -- --smoke-test

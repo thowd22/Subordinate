@@ -7,8 +7,10 @@ above it. CI pins **GStreamer 1.28.x** on every OS (see `GST_VERSION` in
 
 ## Rust
 
-`rust-toolchain.toml` pins the toolchain (currently 1.93.1 with rustfmt and
-clippy). `rustup` picks it up automatically.
+`rust-toolchain.toml` pins the toolchain (currently 1.95.0 with rustfmt and
+clippy). `rustup` picks it up automatically. The floor comes from the GUI
+stack: egui/eframe 0.36 declares `rust-version = 1.95`, so the pin cannot go
+below it while PLAN.md §3 mandates that version.
 
 ```
 cargo build --workspace --all-targets

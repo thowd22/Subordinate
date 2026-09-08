@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+pollster = "1.0"
+wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan", "metal", "dx12", "webgpu"] }
 
 [lints]
 workspace = true
