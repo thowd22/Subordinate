@@ -56,6 +56,7 @@ Cargo workspace, layered so that nothing above `core` is needed to run a headles
 ```
 subordinate/
   crates/
+    sub-core        shared conventions: SubError with stable codes, tracing setup
     sub-time        rational time, timecode, frame rates (drop-frame aware)
     sub-model       project/sequence/track/clip data model, serde schema, migrations
     sub-edit        editing operations, undo/redo (command pattern), validation

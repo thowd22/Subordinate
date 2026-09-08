@@ -94,8 +94,114 @@ but cannot encode there; hardware verification tasks are manual.
 
 ## Errors and logging
 
-See the conventions task (TASK-11) once implemented: errors are `SubError`
-values with stable string codes; logging uses `tracing`.
+Both conventions live in `sub-core`, the lowest crate in the workspace. Every
+other crate may depend on it; it depends on nothing of ours.
+
+### Errors are `SubError`
+
+Anything that can reach the Command API, the MCP bridge or a plugin fails with a
+`SubError`, because agents have to match on failures rather than read prose
+(PLAN §6.4). Its JSON shape is stable:
+
+```json
+{
+  "code": "media.decode_failed",
+  "message": "could not decode frame 42",
+  "details": { "path": "/tmp/a.mp4", "pts_ns": 1400000000 },
+  "cause": "gstreamer: pipeline failed to start: no element \"nvh264dec\""
+}
+```
+
+- `code` — a stable, machine-readable `domain.reason` string.
+- `message` — one line for a human, lowercase, no trailing period.
+- `details` — optional map of machine-readable specifics: field paths, ids,
+  file names. Omitted when empty.
+- `cause` — the lower-level error's whole `source()` chain, flattened to a
+  string at construction time so `SubError` stays `Clone`, `Send` and
+  serializable. Omitted when absent.
+
+Use `SubResult<T>` (`Result<T, SubError>`) for fallible public functions.
+
+### Error codes
+
+Codes are two or more dot-separated segments of `[a-z0-9_]`: a domain (usually
+the crate — `model`, `media`, `render`, `export`, `plugin`, `command`) and a
+reason. `ErrorCode::from_static` builds them in `const` context;
+`ErrorCode::parse` validates one built at runtime (a plugin manifest, a
+deserialized message) and deserialization rejects a malformed one.
+
+Each crate declares its own codes as constants in one `codes` module, next to
+the shared ones in `sub_core::codes` (`core.invalid_argument`, `core.not_found`,
+`core.invalid_state`, `core.unimplemented`, `core.cancelled`, `core.timeout`,
+`core.io`, `core.internal`, `core.logging_init`):
+
+```rust
+pub mod codes {
+    use sub_core::ErrorCode;
+
+    /// The file exists but no decoder could handle it.
+    pub const UNSUPPORTED_CODEC: ErrorCode = ErrorCode::from_static("media.unsupported_codec");
+}
+```
+
+**When to add a code.** Add one when a caller could reasonably react
+differently to this failure than to its neighbours — retry, relink, prompt,
+fall back, give up. If the only sensible reaction is the same as an existing
+code's, reuse that code and put the specifics in `details`. A code is a public
+contract: once it ships it is never renamed and never given a new meaning; a
+changed meaning is a new code. Document every constant with the situation it
+names, and keep the domain equal to the crate that owns it.
+
+### Wrapping lower-level errors
+
+Never surface a foreign error type (`std::io::Error`, `serde_json::Error`, a
+GStreamer or wasmtime error) across a crate boundary, and never discard it
+either. Wrap it at the boundary where you know what the caller was trying to
+do, with `ResultExt::sub_context` (or `sub_context_with` when the message
+allocates):
+
+```rust
+use sub_core::{ResultExt, SubError, SubResult, codes};
+
+let text = std::fs::read_to_string(path)
+    .sub_context_with(codes::IO, || format!("could not read project {}", path.display()))?;
+
+let project: Project = serde_json::from_str(&text)
+    .map_err(|err| {
+        SubError::wrap(codes::PARSE_FAILED, "project file is not valid JSON", &err)
+            .with_detail("path", path.display().to_string())
+            .with_detail("line", err.line())
+    })?;
+```
+
+Rules of thumb: wrap once, at the crate boundary, not at every call site; put
+the caller's intent in `message` and the machine-usable facts in `details`;
+`code` describes the situation, not the library that produced it. Inside a
+crate, a private `thiserror` enum is fine — convert it to `SubError` on the way
+out. `core.internal` is for broken invariants (i.e. bugs), never for a user's
+bad input.
+
+### Logging
+
+Logging is `tracing`. Every binary calls `sub_core::logging::init("info")` as
+its first statement and exits non-zero if that fails. Logs always go to
+**stderr**: `subordinate-mcp` speaks its protocol on stdout and the CLI prints
+results there.
+
+| Variable | Effect |
+|---|---|
+| `SUBORDINATE_LOG` | env-filter directive, e.g. `info,sub_media=debug` |
+| `RUST_LOG` | same, used only when `SUBORDINATE_LOG` is unset |
+| `SUBORDINATE_LOG_FORMAT` | `text` (default) or `json` — one JSON object per event |
+| `NO_COLOR` | disables colour in text output (colour is also off when stderr is not a terminal) |
+
+Use structured fields, not formatted strings: `tracing::warn!(clip_id = %id,
+"clip is offline")`, not `warn!("clip {id} is offline")`. Spans go around
+units of work that cross threads (a decode request, a command, an export job).
+Log a `SubError` by its `Display` (`[code] message: cause`) or its fields; do
+not log and return the same error — the caller decides.
+
+Nothing in the audio callback logs, allocates or locks.
 
 ## Project files
 
