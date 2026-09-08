@@ -32,7 +32,7 @@ Ubuntu 26.04 (and Debian 14) ship GStreamer 1.28 in apt, which is what CI uses:
 ```
 sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-  gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools
+  gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x
 ```
 
 Ubuntu 24.04 ships 1.24, which builds the crates but lacks the newer hardware

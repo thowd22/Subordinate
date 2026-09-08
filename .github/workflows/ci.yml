@@ -48,6 +48,8 @@ jobs:
           path: ~/apt-archives
           key: apt-gst-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
 
+      # gstreamer1.0-x carries the pango plugin (timeoverlay), which the fixture
+      # pipelines need for the timecode burn-in; no other package pulls it in.
       - name: Install GStreamer (Linux, apt)
         if: runner.os == 'Linux'
         run: |
@@ -57,7 +59,7 @@ jobs:
             -o Acquire::Retries=3 -o APT::Keep-Downloaded-Packages=true \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-            gstreamer1.0-libav gstreamer1.0-tools pkg-config
+            gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x pkg-config
           v=$(pkg-config --modversion gstreamer-1.0)
           echo "gstreamer-1.0 = $v"
           case "$v" in "$GST_MINOR".*) ;; *) echo "::error::expected GStreamer $GST_MINOR.x, got $v"; exit 1;; esac
