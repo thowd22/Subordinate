@@ -108,6 +108,13 @@ jobs:
           echo "::endgroup::"
       # -------------------------------------------------------
 
+      # ---------------- Test media fixtures (TASK-10) ----------------
+      # Fixtures are synthesised, never committed. The 10-minute long-GOP clip
+      # is deliberately not generated here; pass --long locally for that one.
+      - name: Generate test fixtures
+        shell: bash
+        run: ./scripts/gen-fixtures.sh
+
       - name: Build
         run: cargo build --workspace --all-targets
 
