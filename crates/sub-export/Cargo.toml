@@ -1,0 +1,13 @@
+[package]
+name = "sub-export"
+description = "Rendering a sequence to a file through GStreamer encoders and muxers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

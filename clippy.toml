@@ -1,0 +1,6 @@
+# Proper nouns that clippy::doc_markdown should not demand backticks around.
+doc-valid-idents = [
+    "GStreamer", "OpenTimelineIO", "VideoToolbox", "WebAssembly", "MoltenVK",
+    "NVENC", "NVDEC", "WGSL", "WASI", "OpenFX", "JSON-RPC", "PipeWire", "WASAPI", "CoreAudio",
+    "..",
+]

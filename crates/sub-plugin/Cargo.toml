@@ -1,0 +1,13 @@
+[package]
+name = "sub-plugin"
+description = "WASM plugin host on wasmtime: manifests, capabilities, WIT worlds and hot reload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

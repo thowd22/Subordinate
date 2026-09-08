@@ -1,0 +1,13 @@
+[package]
+name = "sub-ui"
+description = "The egui application: timeline, media bin, viewer, inspector and export panels"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

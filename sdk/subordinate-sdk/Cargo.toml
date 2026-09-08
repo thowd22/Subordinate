@@ -1,0 +1,13 @@
+[package]
+name = "subordinate-sdk"
+description = "Plugin SDK for Subordinate: typed bindings and helpers for WASM plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+
+[lints]
+workspace = true

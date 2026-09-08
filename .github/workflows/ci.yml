@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  # Pinned GStreamer release. All three OSes must stay on the same minor (1.28).
+  # Linux comes from Ubuntu 26.04 apt (1.28.x); Windows and macOS use the
+  # official binaries at this exact version. Keep docs/DEVELOPMENT.md in sync.
+  GST_VERSION: "1.28.6"
+  GST_MINOR: "1.28"
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Toolchain version mirrors rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.1"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ matrix.os }}
+
+      # ---------------- GStreamer (TASK-1.3) ----------------
+      - name: Install GStreamer (Linux, apt)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav gstreamer1.0-tools pkg-config
+          v=$(pkg-config --modversion gstreamer-1.0)
+          echo "gstreamer-1.0 = $v"
+          case "$v" in "$GST_MINOR".*) ;; *) echo "::error::expected GStreamer $GST_MINOR.x, got $v"; exit 1;; esac
+
+      - name: Install GStreamer (Windows, official installer)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ver = $env:GST_VERSION
+          $exe = "gstreamer-1.0-msvc-x86_64-$ver.exe"
+          $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc/$exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          $dir = "C:\gstreamer\1.0\msvc_x86_64"
+          Start-Process -Wait -FilePath ".\$exe" -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/TYPE=devel","/ALLUSERS","/DIR=$dir"
+          # The 1.28 installer does not reliably set the root variable; set everything explicitly.
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$dir\lib\pkgconfig" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          # GStreamer's own pkg-config.exe must win over any other on PATH.
+          "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Install GStreamer (macOS, official pkg)
+        if: runner.os == 'macOS'
+        run: |
+          base="https://gstreamer.freedesktop.org/data/pkg/osx/$GST_VERSION"
+          curl -fsSLO "$base/gstreamer-1.0-$GST_VERSION-universal.pkg"
+          curl -fsSLO "$base/gstreamer-1.0-devel-$GST_VERSION-universal.pkg"
+          sudo installer -pkg "gstreamer-1.0-$GST_VERSION-universal.pkg" -target /
+          sudo installer -pkg "gstreamer-1.0-devel-$GST_VERSION-universal.pkg" -target /
+          fw=/Library/Frameworks/GStreamer.framework/Versions/1.0
+          echo "PKG_CONFIG_PATH=$fw/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "$fw/bin" >> "$GITHUB_PATH"
+
+      - name: GStreamer diagnostics
+        shell: bash
+        run: |
+          gst-inspect-1.0 --version
+          echo "pkg-config gstreamer-1.0: $(pkg-config --modversion gstreamer-1.0)"
+          echo "::group::Encoder elements"
+          for e in x264enc x265enc nvh264enc nvh265enc nvav1enc vah264enc vah265enc amfh264enc amfh265enc mfh264enc mfh265enc vtenc_h264 vtenc_h265; do
+            if gst-inspect-1.0 --exists "$e"; then echo "present  $e"; else echo "absent   $e"; fi
+          done
+          echo "::endgroup::"
+          echo "::group::All encoders"
+          gst-inspect-1.0 | grep -i 'Codec/Encoder' || true
+          echo "::endgroup::"
+      # -------------------------------------------------------
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

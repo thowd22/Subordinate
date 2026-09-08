@@ -1,0 +1,13 @@
+[package]
+name = "sub-model"
+description = "Project data model: projects, sequences, tracks, clips, media items and bins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
