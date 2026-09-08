@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11", "accesskit"] }
+log = "0.4"
+sub-render = { version = "0.1.0", path = "../sub-render" }
 
 [lints]
 workspace = true

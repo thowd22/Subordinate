@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+log = "0.4"
+sub-ui = { version = "0.1.0", path = "../../crates/sub-ui" }
 
 [lints]
 workspace = true
