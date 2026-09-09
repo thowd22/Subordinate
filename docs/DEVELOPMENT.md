@@ -133,6 +133,57 @@ lock file as soon as the endpoint is bound, then serves until its stdin
 reaches end of file (Ctrl-D in a terminal). That is how `subordinate-mcp`
 launches an editor when no GUI is running and knows when to connect.
 
+## Driving the editor from an agent (MCP)
+
+`subordinate-mcp` speaks the Model Context Protocol on stdin and stdout and
+forwards every tool call to the Command API (PLAN.md §7). It holds no state of
+its own: it connects to the editor the socket lock file advertises, and starts
+`subordinate-cli serve` when no editor is running — so an agent can work
+whether or not a window is open, and the headless server it started stops with
+it.
+
+Its tools are generated from `docs/schema/command-api.json`, one per Command
+API method, with the same descriptions and parameter schemas. Method names are
+dotted and MCP tool names may not be, so each dot becomes an underscore:
+`clip.trim_in` is the tool `clip_trim_in`, and the tool's title is the method
+name unchanged. Nothing is hand-written, so a new command is a new tool as soon
+as the schema is re-exported (`cargo run -p subordinate-cli -- schema`).
+
+Register it with Claude Code by copying `docs/examples/mcp.json` into the
+project's `.mcp.json` (or merging the `subordinate` entry into the one that is
+there):
+
+```json
+{
+  "mcpServers": {
+    "subordinate": {
+      "type": "stdio",
+      "command": "target/release/subordinate-mcp",
+      "args": [],
+      "env": {
+        "SUBORDINATE_INSTANCE": "default",
+        "SUBORDINATE_LOG": "info"
+      }
+    }
+  }
+}
+```
+
+Build it first with `cargo build --release -p subordinate-mcp`, or point
+`command` at an installed binary. The environment it reads:
+
+| Variable | What it does |
+| --- | --- |
+| `SUBORDINATE_INSTANCE` | Which editor instance to reach; defaults to `default` |
+| `SUBORDINATE_ENDPOINT_DIR` | Where the socket and lock file live, overriding the per-user default |
+| `SUBORDINATE_CLI` | The `subordinate-cli` to launch, when it is not the one beside `subordinate-mcp` |
+| `SUBORDINATE_MCP_NO_LAUNCH` | `1` to fail with `command.not_running` rather than start a headless server |
+| `SUBORDINATE_LOG` | The log filter; diagnostics go to stderr, because stdout is the protocol |
+
+A tool call that the engine rejects comes back as a tool error whose content is
+the usual JSON `SubError`, code and all, rather than a protocol error, so the
+agent can read the reason and try something else.
+
 ## Test media fixtures
 
 Media tests need deterministic sample files, and binaries are never committed.
