@@ -135,11 +135,21 @@ fn av_file(layout: Layout) -> Option<PathBuf> {
          num-buffers={AUDIO_BUFFERS} \
          ! audio/x-raw,format=S16LE,rate={RATE},{channel_caps} \
          ! audioconvert ! flacenc ! m.",
-        location = partial.display(),
+        location = launch_path(&partial),
     );
     run_to_eos(&description);
     std::fs::rename(&partial, &path).expect("the synthesised file must be renamable");
     Some(path)
+}
+
+/// A path as `gst::parse::launch` wants to see it.
+///
+/// The parser treats a backslash as an escape character, so a Windows path
+/// pasted straight into a pipeline description loses its separators and
+/// `filesink` silently writes to a drive-relative path instead. GStreamer
+/// accepts forward slashes on every platform, so swap them in.
+fn launch_path(path: &std::path::Path) -> String {
+    path.display().to_string().replace('\\', "/")
 }
 
 /// Runs one `gst-launch`-shaped pipeline until it reaches end of stream.
