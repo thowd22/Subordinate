@@ -10,5 +10,8 @@ repository.workspace = true
 [dependencies]
 sub-core = { path = "../sub-core" }
 
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true

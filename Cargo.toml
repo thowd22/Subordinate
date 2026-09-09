@@ -29,6 +29,7 @@ repository = "https://github.com/thowd22/Subordinate"
 [workspace.dependencies]
 serde = "1"
 serde_json = "1"
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
