@@ -4,12 +4,12 @@ title: Verify VideoToolbox on macOS and Media Foundation fallback on Windows
 status: To Do
 assignee: []
 created_date: '2026-09-08 21:05'
+updated_date: '2026-09-09 17:28'
 labels:
   - export
   - verify
 milestone: m-4
-dependencies:
-  - TASK-63
+dependencies: []
 references:
   - docs/PLAN.md
 priority: medium
@@ -27,3 +27,9 @@ Completes the cross-OS encoder matrix.
 - [ ] #1 cli-render with vtenc_h264 on macOS and mfh264enc on a Windows machine without vendor encoders produce valid files
 - [ ] #2 Findings recorded in a backlog doc
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-09-09: VideoToolbox half needs the physical Mac runner; Media Foundation half runs on the Windows GPU AMI.
+<!-- SECTION:NOTES:END -->
