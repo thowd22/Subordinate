@@ -8,6 +8,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+sub-core = { path = "../sub-core" }
+sub-time = { path = "../sub-time" }
+symphonia = { version = "0.6", features = ["aac", "isomp4", "mp3"] }
+tracing = "0.1"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+sub-test-support = { path = "../sub-test-support" }
