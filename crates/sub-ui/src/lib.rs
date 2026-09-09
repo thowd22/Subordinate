@@ -8,6 +8,16 @@
 
 pub mod app;
 pub mod diagnostics;
+pub mod timeline;
 
 pub use app::{AppOptions, SubordinateApp, run};
 pub use diagnostics::DiagnosticsPanel;
+pub use timeline::{ClipPlacement, TimelineView, TrackLayout, ZoomLevel};
+
+/// The stable error codes this crate reports.
+pub mod codes {
+    use sub_core::ErrorCode;
+
+    /// A zoom level falls outside the timeline's zoom ladder.
+    pub const INVALID_ZOOM: ErrorCode = ErrorCode::from_static("ui.invalid_zoom");
+}
