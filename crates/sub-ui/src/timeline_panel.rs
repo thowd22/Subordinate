@@ -17,12 +17,14 @@
 //! `Painter` demands screen coordinates.
 
 use eframe::egui::{
-    Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, Visuals, pos2,
+    Align2, Color32, CornerRadius, FontId, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2,
+    Visuals, pos2,
 };
 use sub_model::{Clip, MediaItem, Project, Sequence, Track, TrackKind};
 use sub_time::{Rational, RationalTime, Timecode, TimecodeRate};
 
 use crate::timeline::{TimelineView, TrackLayout, ZoomLevel};
+use crate::track_header::{TrackAction, TrackHeaderState, empty_column_menu};
 
 /// The narrowest a labelled ruler tick may be spaced, in points.
 ///
@@ -38,6 +40,12 @@ const MIN_NAME_WIDTH_PX: f32 = 26.0;
 
 /// How wide the bar marking a trimmed clip edge is, in points.
 const TRIM_BAR_WIDTH: f32 = 3.0;
+
+/// How much of its colour a clip on a locked track keeps.
+///
+/// A locked track refuses clip edits (`edit.track_locked`), and the lane has
+/// to say so before the edit is attempted rather than after.
+const LOCKED_DIM: f32 = 0.45;
 
 /// How far from 1.0 a zoom factor has to be before it counts as a gesture.
 const ZOOM_EPSILON: f32 = 0.001;
@@ -354,6 +362,22 @@ pub struct TimelinePanel {
     synced_revision: Option<u64>,
     /// How far the lanes are scrolled down, in points; never negative.
     lane_scroll_px: f32,
+    /// The track header column's widgets: the inline rename, and nothing else.
+    header_state: TrackHeaderState,
+    /// Where the panel's parts sat the last time it was painted.
+    last_layout: Option<PanelLayout>,
+}
+
+/// What one painted frame of the panel produced.
+///
+/// The panel mutates nothing itself: the actions are what the header controls
+/// asked for, for the caller to turn into commands with
+/// [`TrackAction::into_command`] and apply through the Command API.
+pub struct TimelineResponse {
+    /// The response of the whole panel, for hover and drag tests.
+    pub response: Response,
+    /// The track actions raised this frame, in the order they were raised.
+    pub actions: Vec<TrackAction>,
 }
 
 impl TimelinePanel {
@@ -366,7 +390,30 @@ impl TimelinePanel {
             layouts: Vec::new(),
             synced_revision: None,
             lane_scroll_px: 0.0,
+            header_state: TrackHeaderState::new(),
+            last_layout: None,
         }
+    }
+
+    /// Where the panel's parts sat the last time it was painted.
+    ///
+    /// `None` until the first frame. Hit tests against the header column go
+    /// through this rather than guessing at the layout.
+    #[must_use]
+    pub const fn layout(&self) -> Option<PanelLayout> {
+        self.last_layout
+    }
+
+    /// The rectangle track `index`'s header occupied when the panel was last
+    /// painted, whether or not it was on screen.
+    #[must_use]
+    pub fn header_rect(&self, index: usize) -> Option<Rect> {
+        let layout = self.last_layout?;
+        let top = self.lane_top(layout.headers.top(), index);
+        Some(Rect::from_min_size(
+            pos2(layout.headers.left(), top),
+            Vec2::new(layout.headers.width(), self.metrics.track_height),
+        ))
     }
 
     /// The view model behind the panel.
@@ -515,14 +562,10 @@ impl TimelinePanel {
     /// The panel is read-only: it never mutates `project` or `sequence`, and
     /// every edit still goes through the Command API. Call
     /// [`TimelinePanel::sync`] first so the indexes match the sequence.
-    pub fn ui(
-        &mut self,
-        ui: &mut Ui,
-        project: &Project,
-        sequence: &Sequence,
-    ) -> eframe::egui::Response {
+    pub fn ui(&mut self, ui: &mut Ui, project: &Project, sequence: &Sequence) -> TimelineResponse {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let layout = PanelLayout::new(rect, &self.metrics);
+        self.last_layout = Some(layout);
         self.view.set_width_px(width_px(layout.content.width()));
         let tracks = sequence.tracks.len();
         self.set_lane_scroll(self.lane_scroll_px, layout.content.height(), tracks);
@@ -535,7 +578,60 @@ impl TimelinePanel {
         paint_frame(&painter, &layout, &visuals);
         self.paint_ruler(&painter, &layout, &visuals);
         self.paint_lanes(&painter, &layout, &visuals, project, sequence);
-        response
+        let actions = self.header_controls(ui, &layout, sequence);
+        TimelineResponse { response, actions }
+    }
+
+    /// Runs the header column's controls over the visible tracks.
+    ///
+    /// The controls are widgets rather than painted shapes — see
+    /// [`crate::track_header`] — and they are the only interactive part of the
+    /// panel, so they are laid out after everything is painted, on top of the
+    /// header backgrounds.
+    fn header_controls(
+        &mut self,
+        ui: &mut Ui,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+    ) -> Vec<TrackAction> {
+        let mut actions = Vec::new();
+        let count = sequence.tracks.len();
+        let mut column = ui.new_child(
+            eframe::egui::UiBuilder::new()
+                .max_rect(layout.headers)
+                .id_salt("track_headers"),
+        );
+        column.set_clip_rect(layout.headers);
+        let mut filled_to = layout.headers.top();
+        for index in self.visible_tracks(layout.headers.height(), count) {
+            let Some(track) = sequence.tracks.get(index) else {
+                continue;
+            };
+            let top = self.lane_top(layout.headers.top(), index);
+            let rect = Rect::from_min_size(
+                pos2(layout.headers.left(), top),
+                Vec2::new(layout.headers.width(), self.metrics.track_height),
+            );
+            filled_to = filled_to.max(rect.bottom());
+            if let Some(action) = self.header_state.ui(&mut column, rect, track, index, count) {
+                actions.push(action);
+            }
+        }
+        let spare = Rect::from_min_max(
+            pos2(layout.headers.left(), filled_to.max(layout.headers.top())),
+            layout.headers.max,
+        );
+        if spare.height() > 1.0 {
+            let response = column.interact(
+                spare,
+                column.id().with("empty_column"),
+                Sense::click_and_drag(),
+            );
+            if let Some(action) = empty_column_menu(&response, count) {
+                actions.push(action);
+            }
+        }
+        actions
     }
 
     /// Paints the timecode ruler and the grid lines that drop from it.
@@ -620,7 +716,6 @@ impl TimelinePanel {
                     Vec2::new(layout.headers.width(), self.metrics.track_height),
                 ),
                 visuals,
-                track,
             );
             if let Some(index) = self.layouts.get(index) {
                 self.paint_clips(&lanes, lane, index, track, project);
@@ -659,6 +754,7 @@ impl TimelinePanel {
                 clip,
                 ClipMediaKind::of(media),
                 TrimmedEdges::of(clip, media),
+                !clip_edits_allowed(track),
             );
         }
     }
@@ -672,27 +768,25 @@ fn paint_clip(
     clip: &Clip,
     kind: ClipMediaKind,
     trimmed: TrimmedEdges,
+    dimmed: bool,
 ) {
     let radius = CornerRadius::same(3);
-    painter.rect_filled(rect, radius, kind.fill());
-    painter.rect_stroke(
-        rect,
-        radius,
-        Stroke::new(1.0, kind.outline()),
-        StrokeKind::Inside,
-    );
+    let fill = dim(kind.fill(), dimmed);
+    let outline = dim(kind.outline(), dimmed);
+    painter.rect_filled(rect, radius, fill);
+    painter.rect_stroke(rect, radius, Stroke::new(1.0, outline), StrokeKind::Inside);
     if trimmed.head {
         painter.rect_filled(
             Rect::from_min_max(rect.min, pos2(rect.left() + TRIM_BAR_WIDTH, rect.bottom())),
             CornerRadius::ZERO,
-            kind.outline(),
+            outline,
         );
     }
     if trimmed.tail {
         painter.rect_filled(
             Rect::from_min_max(pos2(rect.right() - TRIM_BAR_WIDTH, rect.top()), rect.max),
             CornerRadius::ZERO,
-            kind.outline(),
+            outline,
         );
     }
     if rect.width() >= MIN_NAME_WIDTH_PX && !clip.name.is_empty() {
@@ -701,43 +795,39 @@ fn paint_clip(
             Align2::LEFT_TOP,
             &clip.name,
             FontId::proportional(11.0),
-            Color32::from_gray(235),
+            dim(Color32::from_gray(235), dimmed),
         );
     }
 }
 
-/// Paints one track header: the name, the kind, and the mute and lock states.
-fn paint_header(painter: &eframe::egui::Painter, rect: Rect, visuals: &Visuals, track: &Track) {
-    painter.rect_filled(rect, CornerRadius::same(2), visuals.extreme_bg_color);
-    painter.text(
-        pos2(rect.left() + 6.0, rect.top() + 4.0),
-        Align2::LEFT_TOP,
-        &track.name,
-        FontId::proportional(12.0),
-        visuals.strong_text_color(),
-    );
-    painter.text(
-        pos2(rect.left() + 6.0, rect.bottom() - 4.0),
-        Align2::LEFT_BOTTOM,
-        header_state(track),
-        FontId::proportional(10.0),
-        visuals.weak_text_color(),
-    );
+/// Whether the clips on `track` may be edited.
+///
+/// A locked track refuses every clip command with `edit.track_locked`
+/// (see `sub_edit::commands::track_for_clip_edit`), so the panel neither
+/// offers a clip edit on one nor paints its clips at full strength.
+#[must_use]
+pub const fn clip_edits_allowed(track: &Track) -> bool {
+    !track.locked
 }
 
-/// The second line of a track header: its kind and any state flags.
-fn header_state(track: &Track) -> String {
-    let mut line = match track.kind {
-        TrackKind::Video => "video".to_owned(),
-        TrackKind::Audio => "audio".to_owned(),
-    };
-    if track.muted {
-        line.push_str(" · muted");
+/// `color`, dimmed when it belongs to a locked track.
+#[must_use]
+fn dim(color: Color32, dimmed: bool) -> Color32 {
+    if dimmed {
+        color.gamma_multiply(LOCKED_DIM)
+    } else {
+        color
     }
-    if track.locked {
-        line.push_str(" · locked");
-    }
-    line
+}
+
+/// Paints the plate one track header's controls sit on.
+///
+/// The name, the kind and the mute and lock toggles are widgets, painted over
+/// this by [`TrackHeaderState::ui`](crate::track_header::TrackHeaderState::ui),
+/// because a header is worth an id and a layout pass in a way a clip rectangle
+/// is not.
+fn paint_header(painter: &eframe::egui::Painter, rect: Rect, visuals: &Visuals) {
+    painter.rect_filled(rect, CornerRadius::same(2), visuals.extreme_bg_color);
 }
 
 /// Paints the panel's backgrounds and the two lines dividing its areas.
@@ -768,11 +858,12 @@ fn lane_color(visuals: &Visuals, track: &Track) -> Color32 {
         TrackKind::Video => visuals.extreme_bg_color,
         TrackKind::Audio => visuals.faint_bg_color,
     };
-    if track.muted {
+    let base = if track.muted {
         base.gamma_multiply(0.6)
     } else {
         base
-    }
+    };
+    dim(base, !clip_edits_allowed(track))
 }
 
 /// Reads this frame's wheel and pinch input, anchored at the pointer.
