@@ -225,10 +225,13 @@ fn autosaving_never_blocks_the_thread_that_edits() {
     );
 
     let store = autosave.stop().expect("stop");
-    assert_eq!(
-        store.list().expect("list").len(),
-        3,
-        "the history is still bounded by K"
+    // How many snapshots land depends on how fast the machine runs the 200
+    // edits: a quick one finishes them in fewer than K intervals. What the
+    // test is about is the bound, so assert that and not an exact count.
+    let kept = store.list().expect("list").len();
+    assert!(
+        (1..=3).contains(&kept),
+        "the history is still bounded by K, got {kept}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
