@@ -12,6 +12,7 @@ sub-core = { path = "../sub-core" }
 sub-time = { path = "../sub-time" }
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1.26", features = ["v7", "serde"] }
+blake3 = "1"
 
 [dev-dependencies]
 serde_json = "1"

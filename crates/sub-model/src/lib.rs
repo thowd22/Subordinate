@@ -13,11 +13,13 @@
 //!   no float in this crate.
 //!
 //! ```
-//! use sub_model::{Clip, MediaItem, Project, Sequence, SequenceSettings, Track, TrackKind};
+//! use sub_model::{
+//!     Clip, MediaItem, MediaPath, Project, Sequence, SequenceSettings, Track, TrackKind,
+//! };
 //! use sub_time::{Rational, RationalTime, TimeRange};
 //!
 //! let mut project = Project::new("Doc cut");
-//! let media = MediaItem::new("interview.mp4");
+//! let media = MediaItem::new(MediaPath::new("footage/interview.mp4").unwrap());
 //! let media_id = media.id;
 //! project.media.push(media);
 //!
@@ -32,6 +34,7 @@
 //! project.sequences.push(sequence);
 //! ```
 
+pub mod content;
 pub mod ids;
 pub mod marker;
 pub mod media;
@@ -39,9 +42,10 @@ pub mod project;
 pub mod sequence;
 pub mod track;
 
+pub use content::{ContentHash, MediaPath};
 pub use ids::{BinId, ClipId, MarkerId, MediaId, ProjectId, SequenceId, TrackId};
 pub use marker::Marker;
-pub use media::{Bin, MediaItem};
+pub use media::{AudioStream, Bin, MediaItem, ProxyState, StreamInfo, VideoStream};
 pub use project::Project;
 pub use sequence::{
     ColorPrimaries, ColorSpace, ColorTags, Resolution, Sequence, SequenceSettings, TransferFunction,
@@ -59,6 +63,12 @@ pub mod codes {
     pub const INVALID_ID: ErrorCode = ErrorCode::from_static("model.invalid_id");
     /// Sequence settings are out of range (zero resolution or sample rate).
     pub const INVALID_SETTINGS: ErrorCode = ErrorCode::from_static("model.invalid_settings");
+    /// A media path is not a valid project-relative path.
+    pub const INVALID_PATH: ErrorCode = ErrorCode::from_static("model.invalid_path");
+    /// A string is not a valid content hash.
+    pub const INVALID_HASH: ErrorCode = ErrorCode::from_static("model.invalid_hash");
+    /// A media file could not be opened or read while hashing it.
+    pub const FILE_UNREADABLE: ErrorCode = ErrorCode::from_static("model.file_unreadable");
 }
 
 #[cfg(test)]
@@ -67,7 +77,13 @@ mod tests {
 
     #[test]
     fn error_codes_live_in_the_model_domain() {
-        for code in [codes::INVALID_ID, codes::INVALID_SETTINGS] {
+        for code in [
+            codes::INVALID_ID,
+            codes::INVALID_SETTINGS,
+            codes::INVALID_PATH,
+            codes::INVALID_HASH,
+            codes::FILE_UNREADABLE,
+        ] {
             assert_eq!(code.domain(), "model");
             assert!(sub_core::ErrorCode::parse(code.as_str()).is_ok());
         }
