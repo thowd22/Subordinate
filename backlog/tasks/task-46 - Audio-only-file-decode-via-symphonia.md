@@ -1,10 +1,10 @@
 ---
 id: TASK-46
 title: Audio-only file decode via symphonia
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-09 15:09'
+updated_date: '2026-09-09 15:51'
 labels:
   - audio
 milestone: m-3
@@ -24,7 +24,7 @@ Decision-4: audio-only files skip GStreamer.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 WAV, FLAC, MP3, AAC and Ogg decode to f32 PCM with seek support
+- [x] #1 WAV, FLAC, MP3, AAC and Ogg decode to f32 PCM with seek support
 - [x] #2 Probe reports duration and channels for audio-only items
 - [x] #3 Test decodes the WAV and FLAC fixtures bit-exactly
 <!-- AC:END -->
@@ -57,10 +57,24 @@ Verification (all run in this environment):
 AC #1 is left unchecked: WAV and FLAC decode to f32 with sample-accurate seek is proven against real files, but this machine has no MP3, AAC or Ogg fixture and no encoder to make one (GStreamer is only present as a headers-and-core-elements sysroot, with no lamemp3enc, voaacenc or vorbisenc, and no ffmpeg). The MP3, AAC and Ogg Vorbis decoders are compiled in and a unit test asserts they are registered in the codec registry, and tests/decode_fixtures.rs decodes tone_48k_stereo.mp3/.m4a/.aac/.ogg automatically if a fixture set ever contains them, but the criterion is not proven here. Adding those fixtures to scripts/gen-fixtures.sh would be a scope change (and risks the existing sub-media probe duration assertions, since lossy encoders add delay and padding), so it was not done.
 
 Requeued 2026-09-09 by supervisor: implementation merged on main, remaining criterion needs MP3, AAC and Ogg test media. The stable GStreamer env (source /home/admin2/.cache/subordinate/env-gst.sh) has gst-launch-1.0 with lamemp3enc, vorbisenc and avenc_aac available; extend scripts/gen-fixtures.sh (and the PowerShell mirror) to emit small tone files in those formats and test against them. CI generates fixtures on all three OSes.
+
+Follow-up wave 3: added the missing MP3, AAC and Ogg test media, so acceptance criterion 1 is now proven against real files.
+
+- scripts/gen-fixtures.sh and the PowerShell mirror now emit tone_48k_stereo.mp3 (lamemp3enc, 192 kbit/s CBR), tone_48k_stereo.m4a (avenc_aac + aacparse + mp4mux) and tone_48k_stereo.ogg (vorbisenc + oggmux) alongside the WAV and FLAC tones. The catalogue gained a `lossy` column and the manifest a `lossy` field (serde default, so manifests written before this still parse and the schema stays version 1). A lossy fixture whose encoder is not installed is skipped and recorded as `"generated": false` rather than failing the run, so a minimal GStreamer install still produces a usable fixture set.
+- Duration expectations stay exact for lossless files and get a documented tolerance for lossy ones (100 ms in sub-media's probe test, 4800 frames in sub-audio's), because a lossy encoder brackets the signal with priming and padding frames that no container trims here.
+- New sub-audio tests, driven by the manifest rather than a hard-coded list: every generated lossy fixture decodes to 48 kHz stereo f32 whose RMS is within 10% of the WAV reference, and seeking each of them to frames 0, 4001, 96000 and 200000 lands exactly on the requested frame and returns audio, not silence. The lossless WAV/FLAC bit-exactness and sample-accurate seek tests are unchanged.
+
+Verification in this environment (fixtures generated with the stable GStreamer sysroot into a scratch directory, SUB_FIXTURES_DIR pointed at it):
+- scripts/gen-fixtures.sh wrote tone_48k_stereo.mp3, .m4a and .ogg and a manifest carrying lossy: true for all three; symphonia decodes them to 241920, 241664 and 240000 frames against the authored 240000.
+- cargo test -p sub-audio -p sub-test-support: 11 unit + 5 integration + 1 generated-fixture + 7 sub-test-support tests, all pass, including the two new lossy tests.
+- cargo test -p sub-media --test probe_fixtures: 7 pass; the GStreamer probe reports duration, channels and rate for the three new audio-only files within the lossy tolerance.
+- cargo fmt --all -- --check and cargo clippy --workspace --all-targets -- -D warnings: clean.
+
+Not verifiable here: scripts/gen-fixtures.ps1 (no PowerShell on this machine); it was changed to mirror the bash script, and CI runs the bash script on all three OSes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added sub-audio::decode: a symphonia-based probe and file decoder for audio-only media (decision-4), yielding interleaved f32 blocks with exact RationalTime positions in audio frames and sample-accurate seeking, with stable audio.* error codes. Verified by cargo fmt --check, workspace clippy with -D warnings, and cargo test -p sub-audio against the generated fixtures, where the WAV and FLAC tone fixtures decode bit-identically and seeks land on the exact frame. Left In Progress because acceptance criterion 1 cannot be proven here: MP3, AAC and Ogg decoders are compiled in and registry-tested, but this machine has no fixture or encoder for those formats.
+Added sub-audio::decode: a symphonia-based probe and file decoder for audio-only media (decision-4), yielding interleaved f32 blocks with exact RationalTime positions in audio frames and sample-accurate seeking, with stable audio.* error codes. The fixture generator now also produces MP3, AAC (in MP4) and Ogg Vorbis tones next to the WAV and FLAC ones, with a `lossy` flag in the manifest so tests hold lossless files exact and give lossy files a documented tolerance; a missing encoder skips its fixture instead of failing the run. Verified with cargo fmt --check, workspace clippy at -D warnings, cargo test -p sub-audio -p sub-test-support and sub-media's probe_fixtures against a freshly generated fixture set: WAV and FLAC decode bit-identically and seek to the exact frame, and every lossy fixture decodes to 48 kHz stereo at the reference signal level and seeks to the requested frame.
 <!-- SECTION:FINAL_SUMMARY:END -->

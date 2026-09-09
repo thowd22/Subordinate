@@ -9,7 +9,9 @@
     manifest.json describing every fixture.
 
     Requires gst-launch-1.0.exe on PATH (the official MSVC install puts it in
-    <root>\bin; see docs/DEVELOPMENT.md). Keep this script and
+    <root>\bin; see docs/DEVELOPMENT.md). The lossy audio fixtures also want
+    lamemp3enc, avenc_aac and vorbisenc; where one of those is absent that
+    fixture is skipped rather than failing the run. Keep this script and
     scripts/gen-fixtures.sh in sync.
 
 .PARAMETER OutDir
@@ -47,42 +49,60 @@ if (-not $OutDir) { $OutDir = Join-Path $repoRoot 'fixtures' }
 # duration_ns is an exact integer count of nanoseconds and frame rates are exact
 # rationals; nothing here is ever expressed as a float.
 #
+# lossy marks a fixture whose codec cannot reproduce its input samples. A lossy
+# encoder also adds priming and padding frames, so duration_ns is the authored
+# length, which the file itself only matches to within a few tens of
+# milliseconds; tests give lossy fixtures a tolerance and keep the lossless
+# ones exact.
+#
 # 29.97 drop-frame: 300 frames at 30000/1001 is 10_010_000_000 ns exactly.
 # VFR: 90 frames at 30/1 (3 s) then 180 frames at 60/1 (3 s) = 6 s.
 $catalogue = @(
     [pscustomobject]@{ name = 'bars_1080p_h264.mp4'; kind = 'video'; width = 1920; height = 1080
-        duration_ns = 5000000000L; fps_num = 25; fps_den = 1; vfr = $false; long = $false
+        duration_ns = 5000000000L; fps_num = 25; fps_den = 1; vfr = $false; lossy = $false; long = $false
         description = '1080p SMPTE colour bars, H.264, timecode burn-in'
     }
     [pscustomobject]@{ name = 'bars_2160p_h264.mp4'; kind = 'video'; width = 3840; height = 2160
-        duration_ns = 5000000000L; fps_num = 25; fps_den = 1; vfr = $false; long = $false
+        duration_ns = 5000000000L; fps_num = 25; fps_den = 1; vfr = $false; lossy = $false; long = $false
         description = '4K SMPTE colour bars, H.264, timecode burn-in'
     }
     [pscustomobject]@{ name = 'dropframe_2997_h264.mp4'; kind = 'video'; width = 1920; height = 1080
-        duration_ns = 10010000000L; fps_num = 30000; fps_den = 1001; vfr = $false; long = $false
+        duration_ns = 10010000000L; fps_num = 30000; fps_den = 1001; vfr = $false; lossy = $false; long = $false
         description = '29.97 drop-frame clip with drop-frame timecode burn-in'
     }
     [pscustomobject]@{ name = 'vfr_60_30.mkv'; kind = 'video'; width = 1280; height = 720
-        duration_ns = 6000000000L; fps_num = 60; fps_den = 1; vfr = $true; long = $false
+        duration_ns = 6000000000L; fps_num = 60; fps_den = 1; vfr = $true; lossy = $false; long = $false
         description = 'Variable-frame-rate clip: 3 s at 30 fps then 3 s at 60 fps'
     }
     [pscustomobject]@{ name = 'longgop_720p_10min.mp4'; kind = 'video'; width = 1280; height = 720
-        duration_ns = 600000000000L; fps_num = 25; fps_den = 1; vfr = $false; long = $true
+        duration_ns = 600000000000L; fps_num = 25; fps_den = 1; vfr = $false; lossy = $false; long = $true
         description = '10-minute long-GOP H.264 clip (250-frame GOP, B-frames)'
     }
     [pscustomobject]@{ name = 'tone_48k_stereo.wav'; kind = 'audio'; width = 0; height = 0
-        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; long = $false
+        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $false; long = $false
         description = 'Audio only: 5 s 440 Hz sine, 48 kHz stereo, 16-bit WAV'
     }
     [pscustomobject]@{ name = 'tone_48k_stereo.flac'; kind = 'audio'; width = 0; height = 0
-        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; long = $false
+        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $false; long = $false
         description = 'Audio only: 5 s 440 Hz sine, 48 kHz stereo, FLAC'
+    }
+    [pscustomobject]@{ name = 'tone_48k_stereo.mp3'; kind = 'audio'; width = 0; height = 0
+        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $true; long = $false
+        description = 'Audio only: 5 s 440 Hz sine, 48 kHz stereo, MP3 at 192 kbit/s CBR'
+    }
+    [pscustomobject]@{ name = 'tone_48k_stereo.m4a'; kind = 'audio'; width = 0; height = 0
+        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $true; long = $false
+        description = 'Audio only: 5 s 440 Hz sine, 48 kHz stereo, AAC-LC in MP4'
+    }
+    [pscustomobject]@{ name = 'tone_48k_stereo.ogg'; kind = 'audio'; width = 0; height = 0
+        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $true; long = $false
+        description = 'Audio only: 5 s 440 Hz sine, 48 kHz stereo, Ogg Vorbis'
     }
 )
 
 if ($List) {
     $catalogue | Format-Table name, kind,
-    @{ Label = 'ms'; Expression = { $_.duration_ns / 1000000 } }, vfr, long, description
+    @{ Label = 'ms'; Expression = { $_.duration_ns / 1000000 } }, vfr, lossy, long, description
     exit 0
 }
 
@@ -190,20 +210,47 @@ function New-VideoFixture {
     }
 }
 
-# 5 s at 48 kHz with 4800 samples per buffer is exactly 50 buffers.
-function New-AudioFixture {
+# The encoder tail of an audio fixture's pipeline. The lossless formats need a
+# single encoder; the lossy ones need an encoder and, for AAC, a parser and a
+# container. '!' separates elements, as in a gst-launch description.
+function Get-AudioEncoderChain {
     param([string]$Name)
-    $encoder = switch ([System.IO.Path]::GetExtension($Name)) {
-        '.wav' { 'wavenc' }
-        '.flac' { 'flacenc' }
+    switch ([System.IO.Path]::GetExtension($Name)) {
+        '.wav' { , @('wavenc') }
+        '.flac' { , @('flacenc') }
+        '.mp3' { , @('lamemp3enc', 'target=bitrate', 'bitrate=192', 'cbr=true') }
+        '.m4a' { , @('avenc_aac', 'bitrate=192000', '!', 'aacparse', '!', 'mp4mux') }
+        '.ogg' { , @('vorbisenc', 'quality=0.6', '!', 'oggmux') }
         default { throw "gen-fixtures: no pipeline for '$Name'" }
     }
-    Invoke-Pipeline @(
-        'audiotestsrc', 'wave=sine', 'freq=440', 'samplesperbuffer=4800', 'num-buffers=50',
-        '!', 'audio/x-raw,format=S16LE,rate=48000,channels=2',
-        '!', 'audioconvert', '!', $encoder,
-        '!', 'filesink', "location=$(Join-Path $OutDir $Name)"
-    )
+}
+
+# True when every element an audio fixture needs is installed. MP3, AAC and Ogg
+# Vorbis encoders live in plugin sets a minimal install may not carry, so a
+# missing one skips that fixture instead of failing the whole run.
+function Test-AudioEncoderAvailable {
+    param([string]$Name)
+    if ($DryRun) { return $true }
+    foreach ($word in (Get-AudioEncoderChain $Name)) {
+        if ($word -eq '!' -or $word.Contains('=')) { continue }
+        & gst-inspect-1.0 --exists $word | Out-Null
+        if ($LASTEXITCODE -ne 0) { return $false }
+    }
+    return $true
+}
+
+# 5 s at 48 kHz with 4800 samples per buffer is exactly 50 buffers. Lossy
+# encoders add priming and padding around those 240000 frames, so the file is
+# a little longer than the catalogue's authored duration.
+function New-AudioFixture {
+    param([string]$Name)
+    Invoke-Pipeline (@(
+            'audiotestsrc', 'wave=sine', 'freq=440', 'samplesperbuffer=4800', 'num-buffers=50',
+            '!', 'audio/x-raw,format=S16LE,rate=48000,channels=2',
+            '!', 'audioconvert', '!'
+        ) + (Get-AudioEncoderChain $Name) + @(
+            '!', 'filesink', "location=$(Join-Path $OutDir $Name)"
+        ))
 }
 
 # ------------------------------------------------------------------- generate
@@ -211,6 +258,10 @@ $entries = foreach ($f in $catalogue) {
     $generated = $true
     if ($f.long -and (-not $Long)) {
         Write-Host "gen-fixtures: skipping $($f.name) (pass -Long to generate it)"
+        $generated = $false
+    }
+    elseif (($f.kind -eq 'audio') -and (-not (Test-AudioEncoderAvailable $f.name))) {
+        Write-Host "gen-fixtures: skipping $($f.name) (its encoder is not installed)"
         $generated = $false
     }
     elseif (Test-Needed $f.name) {
@@ -229,6 +280,7 @@ $entries = foreach ($f in $catalogue) {
         fps_num     = $f.fps_num
         fps_den     = $f.fps_den
         vfr         = $f.vfr
+        lossy       = $f.lossy
         generated   = $generated
         description = $f.description
     }

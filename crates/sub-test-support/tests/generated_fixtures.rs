@@ -58,6 +58,9 @@ fn every_generated_fixture_resolves() {
         "longgop_720p_10min.mp4",
         "tone_48k_stereo.wav",
         "tone_48k_stereo.flac",
+        "tone_48k_stereo.mp3",
+        "tone_48k_stereo.m4a",
+        "tone_48k_stereo.ogg",
     ] {
         assert!(
             manifest.get(required).is_some(),
