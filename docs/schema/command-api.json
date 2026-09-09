@@ -964,6 +964,34 @@
       ],
       "type": "object"
     },
+    "MoveBin": {
+      "additionalProperties": false,
+      "description": "Reparents a bin, carrying everything inside it.\n\nThe bin is lifted out of the parent it is in and inserted into `parent`, at\nthe end unless `index` names a position in the child list it lands in\n*after* the lift. The inverse puts it back under the parent and at the\nindex it held, so a mis-drag in the bin panel is one undo.\n\n# Errors\n\nThe root bin is the tree itself and has no parent, so moving it is refused\nwith `edit.root_bin`. Moving a bin into itself or into one of its own\ndescendants would detach the subtree from the tree, and is refused with\n`edit.invalid_index`: the destination is not a position this bin can hold.\nAn unknown bin or parent is `edit.bin_not_found`.",
+      "properties": {
+        "bin": {
+          "$ref": "#/$defs/BinId",
+          "description": "The bin to reparent."
+        },
+        "index": {
+          "description": "Where in that parent's children it goes. Appended when absent.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "parent": {
+          "$ref": "#/$defs/BinId",
+          "description": "The bin it goes inside."
+        }
+      },
+      "required": [
+        "bin",
+        "parent"
+      ],
+      "type": "object"
+    },
     "MoveClip": {
       "additionalProperties": false,
       "description": "Moves a clip to another position, and optionally to another track.\n\nThe clip leaves a hole behind and overwrites what it lands on.",
@@ -2273,6 +2301,17 @@
       "name": "bin.insert",
       "params": {
         "$ref": "#/$defs/InsertBin"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Move a bin into another bin.",
+      "kind": "command",
+      "name": "bin.move",
+      "params": {
+        "$ref": "#/$defs/MoveBin"
       },
       "result": {
         "$ref": "#/$defs/AppliedResult"

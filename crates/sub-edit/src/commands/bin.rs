@@ -334,6 +334,107 @@ impl Command for MoveToBin {
     }
 }
 
+/// Reparents a bin, carrying everything inside it.
+///
+/// The bin is lifted out of the parent it is in and inserted into `parent`, at
+/// the end unless `index` names a position in the child list it lands in
+/// *after* the lift. The inverse puts it back under the parent and at the
+/// index it held, so a mis-drag in the bin panel is one undo.
+///
+/// # Errors
+///
+/// The root bin is the tree itself and has no parent, so moving it is refused
+/// with `edit.root_bin`. Moving a bin into itself or into one of its own
+/// descendants would detach the subtree from the tree, and is refused with
+/// `edit.invalid_index`: the destination is not a position this bin can hold.
+/// An unknown bin or parent is `edit.bin_not_found`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveBin {
+    /// The bin to reparent.
+    pub bin: BinId,
+    /// The bin it goes inside.
+    pub parent: BinId,
+    /// Where in that parent's children it goes. Appended when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
+}
+
+impl MoveBin {
+    /// Files `bin` at the end of `parent`.
+    #[must_use]
+    pub fn new(bin: BinId, parent: BinId) -> Self {
+        Self {
+            bin,
+            parent,
+            index: None,
+        }
+    }
+
+    /// The same command, inserting at `index` instead of appending.
+    #[must_use]
+    pub fn at(mut self, index: usize) -> Self {
+        self.index = Some(index);
+        self
+    }
+}
+
+impl Command for MoveBin {
+    const KIND: &'static str = "bin.move";
+    const DESCRIPTION: &'static str = "Move a bin into another bin.";
+
+    fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
+        if self.bin == project.root_bin.id {
+            return Err(
+                SubError::new(codes::ROOT_BIN, "the root bin cannot be reparented")
+                    .with_detail("bin_id", self.bin),
+            );
+        }
+        let (previous_parent, previous_index) =
+            parent_of(&project.root_bin, self.bin).ok_or_else(|| {
+                SubError::new(codes::BIN_NOT_FOUND, "no such bin").with_detail("bin_id", self.bin)
+            })?;
+        // The destination is resolved, and checked for sitting inside the
+        // subtree being moved, before anything is lifted out: a refused move
+        // leaves the tree exactly as it was.
+        let moving = project.root_bin.find(self.bin).ok_or_else(|| {
+            SubError::new(codes::BIN_NOT_FOUND, "no such bin").with_detail("bin_id", self.bin)
+        })?;
+        if moving.find(self.parent).is_some() {
+            return Err(SubError::new(
+                codes::INVALID_INDEX,
+                "a bin cannot be moved into itself or into its own subtree",
+            )
+            .with_detail("bin_id", self.bin)
+            .with_detail("parent_id", self.parent));
+        }
+        let destination = bin_mut(project, self.parent)?;
+        let room = if self.parent == previous_parent {
+            // The bin is lifted out first, so it does not count as a slot.
+            destination.children.len() - 1
+        } else {
+            destination.children.len()
+        };
+        let index = self.index.unwrap_or(room);
+        check_insert_index(index, room, "bin")?;
+
+        let lifted = bin_mut(project, previous_parent)?
+            .children
+            .remove(previous_index);
+        bin_mut(project, self.parent)?
+            .children
+            .insert(index, lifted);
+
+        Ok(Inverse::new(
+            Self::new(self.bin, previous_parent).at(previous_index),
+        ))
+    }
+
+    fn label(&self) -> String {
+        "Move bin".to_owned()
+    }
+}
+
 /// The bin holding `media` and the position it holds in that bin's list.
 pub(super) fn filed_at(project: &Project, media: MediaId) -> Option<(BinId, usize)> {
     let bin = project.root_bin.bin_of(media)?;

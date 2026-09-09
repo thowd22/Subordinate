@@ -34,7 +34,7 @@ use sub_model::{
     TrackItem,
 };
 
-pub use bin::{CreateBin, InsertBin, MoveToBin, RemoveBin, RenameBin};
+pub use bin::{CreateBin, InsertBin, MoveBin, MoveToBin, RemoveBin, RenameBin};
 pub use marker::{AddMarker, MarkerTarget, MoveMarker, RemoveMarker};
 pub use media::{Filing, ImportMedia, InsertMedia, RelinkMedia, RemoveMedia};
 pub use params::SetClipParams;
@@ -93,6 +93,7 @@ pub fn register_builtin(registry: &mut CommandRegistry) -> SubResult<()> {
     registry.register::<RemoveBin>()?;
     registry.register::<RenameBin>()?;
     registry.register::<MoveToBin>()?;
+    registry.register::<MoveBin>()?;
     Ok(())
 }
 
@@ -341,6 +342,7 @@ mod tests {
             [
                 "bin.create",
                 "bin.insert",
+                "bin.move",
                 "bin.move_media",
                 "bin.remove",
                 "bin.rename",
