@@ -1,11 +1,11 @@
 ---
 id: TASK-113
 title: Request EC2 G-family vCPU quotas for on-demand and spot GPU instances
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-09 17:29'
-updated_date: '2026-09-09 20:20'
+updated_date: '2026-09-09 22:24'
 labels:
   - infra
   - gpu
@@ -25,7 +25,7 @@ New AWS accounts have a zero or tiny quota for G-family instances, so g4dn and g
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Service quota requests filed for 'Running On-Demand G and VT instances' and 'All G and VT Spot Instance Requests' to at least 16 vCPUs each in the RunsOn region
-- [ ] #2 Approved values are confirmed with aws service-quotas get-service-quota and recorded in the task notes
+- [x] #2 Approved values are confirmed with aws service-quotas get-service-quota and recorded in the task notes
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -40,4 +40,12 @@ New AWS accounts have a zero or tiny quota for G-family instances, so g4dn and g
 2026-09-09: both quotas were 0.0 in us-east-1. Filed increase requests to 16 vCPUs for L-DB2E81BA (Running On-Demand G and VT instances) and L-3819A6DF (All G and VT Spot Instance Requests); both PENDING. g4dn.xlarge and g4ad.xlarge are 4 vCPUs each, so 16 allows four concurrent GPU jobs.
 
 2026-09-09 (later): on-demand G-family quota approved at 8 vCPUs (requested 16, case still open for the rest); spot G-family quota still 0.0 with the case open. 8 on-demand vCPUs allows two concurrent g4dn/g4ad xlarge jobs. RunsOn automatically falls back from spot to on-demand when the spot request is refused (observed on the first gpu-smoke dispatch, run 34400346107).
+
+2026-09-09 22:xx UTC: spot G-family quota now 8.0 as well (confirmed via get-service-quota). Both quotas 8 vCPUs = two concurrent g4dn.xlarge jobs, sufficient for the hardware workflow; the 16-vCPU cases may still be open.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Filed G-family on-demand and spot vCPU quota increases in us-east-1; AWS approved 8 vCPUs each (two concurrent GPU jobs). Verified with aws service-quotas get-service-quota; the RunsOn GPU smoke job launched on both on-demand and, once approved, spot is used automatically.
+<!-- SECTION:FINAL_SUMMARY:END -->
