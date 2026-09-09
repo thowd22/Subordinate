@@ -132,7 +132,15 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
+      # GStreamer's discoverer autoplugs a real decoder while probing. On the
+      # hosted macOS runners the hardware-only VideoToolbox decoder aborts the
+      # process inside Metal ("invalid descriptor.maxCommandBufferCount value
+      # 0"), which kills the probe tests. Deranking it leaves `vtdec` — the one
+      # sub-media itself promotes and plugs — so hardware decode is still
+      # covered, and probing falls back to it too.
       - name: Test
+        env:
+          GST_PLUGIN_FEATURE_RANK: ${{ runner.os == 'macOS' && 'vtdec_hw:NONE' || '' }}
         run: cargo test --workspace
 
       - name: Format
