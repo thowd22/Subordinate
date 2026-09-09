@@ -5,24 +5,38 @@
 //! adapter (a CI runner). Where no adapter exists at all — a container with
 //! no ICD installed — the test reports that and passes rather than failing
 //! the build on an environment problem.
+//!
+//! Every test here shares one context and runs one at a time. The software
+//! Vulkan driver CI falls back to (Mesa's lavapipe) has segfaulted when
+//! several threads create instances and drive devices at once, so the driver
+//! is only ever touched by one thread.
 
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use sub_render::{RenderContext, RenderError};
 
-/// Build a context, or `None` when this machine has no usable adapter.
-fn context_or_skip() -> Option<RenderContext> {
-    match RenderContext::headless() {
+/// Held for the length of a test: only one test may talk to the driver.
+static DRIVER: Mutex<()> = Mutex::new(());
+/// The one context, built under `DRIVER`. `None` means no usable adapter.
+static CONTEXT: OnceLock<Option<RenderContext>> = OnceLock::new();
+
+/// Exclusive use of the shared context, or `None` when this machine has no
+/// usable adapter. The guard must outlive every use of the context.
+fn context_or_skip() -> Option<(MutexGuard<'static, ()>, RenderContext)> {
+    let guard = DRIVER.lock().unwrap_or_else(PoisonError::into_inner);
+    let context = CONTEXT.get_or_init(|| match RenderContext::headless() {
         Ok(context) => Some(context),
         Err(RenderError::NoAdapter { backends }) => {
             eprintln!("skipping: no wgpu adapter for backends [{backends}]");
             None
         }
         Err(error) => panic!("[{}] {error}", error.code()),
-    }
+    });
+    context.clone().map(|context| (guard, context))
 }
 
 #[test]
 fn a_headless_context_reports_its_adapter() {
-    let Some(context) = context_or_skip() else {
+    let Some((_driver, context)) = context_or_skip() else {
         return;
     };
 
@@ -97,7 +111,7 @@ fn clear_a_frame(texture_context: &RenderContext, encoder_context: &RenderContex
 
 #[test]
 fn a_headless_context_renders_an_empty_frame() {
-    let Some(context) = context_or_skip() else {
+    let Some((_driver, context)) = context_or_skip() else {
         return;
     };
     clear_a_frame(&context, &context);
@@ -105,7 +119,7 @@ fn a_headless_context_renders_an_empty_frame() {
 
 #[test]
 fn cloning_a_context_keeps_the_same_device() {
-    let Some(context) = context_or_skip() else {
+    let Some((_driver, context)) = context_or_skip() else {
         return;
     };
 
