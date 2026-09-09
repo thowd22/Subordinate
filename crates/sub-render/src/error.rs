@@ -32,6 +32,26 @@ pub enum RenderError {
         /// What is wrong with the layout.
         reason: String,
     },
+    /// A readback was asked for while the staging ring is already full.
+    ///
+    /// Export may not drop frames, so the caller receives one before
+    /// submitting another rather than the ring quietly overwriting a buffer
+    /// still in flight.
+    ReadbackRingFull {
+        /// How many frames the ring holds in flight.
+        depth: usize,
+    },
+    /// A one-shot readback was asked for while pipelined frames are still in
+    /// flight, which would hand back the wrong frame's pixels.
+    ReadbackPending {
+        /// Frames submitted but not yet received.
+        pending: usize,
+    },
+    /// The device could not be polled, or a staging buffer would not map.
+    ReadbackFailed {
+        /// What went wrong, as wgpu reported it.
+        reason: String,
+    },
     /// A frame's plane slice is too short for the geometry it claims.
     ShortPlane {
         /// Which plane fell short: `luma` or `chroma`.
@@ -54,6 +74,9 @@ impl RenderError {
             Self::DeviceRequestFailed { .. } => "render.device_request_failed",
             Self::MissingRenderState => "render.missing_render_state",
             Self::BadGeometry { .. } => "render.bad_geometry",
+            Self::ReadbackRingFull { .. } => "render.readback_ring_full",
+            Self::ReadbackPending { .. } => "render.readback_pending",
+            Self::ReadbackFailed { .. } => "render.readback_failed",
             Self::ShortPlane { .. } => "render.short_plane",
         }
     }
@@ -72,6 +95,13 @@ impl fmt::Display for RenderError {
                 f.write_str("the UI was started without a wgpu render state")
             }
             Self::BadGeometry { reason } => write!(f, "unusable frame geometry: {reason}"),
+            Self::ReadbackRingFull { depth } => {
+                write!(f, "the readback ring already holds {depth} frames")
+            }
+            Self::ReadbackPending { pending } => {
+                write!(f, "{pending} readback frames are still in flight")
+            }
+            Self::ReadbackFailed { reason } => write!(f, "frame readback failed: {reason}"),
             Self::ShortPlane { plane, have, need } => {
                 write!(f, "{plane} plane holds {have} bytes, {need} needed")
             }
@@ -112,6 +142,21 @@ mod tests {
             }
             .code(),
             "render.bad_geometry"
+        );
+        assert_eq!(
+            RenderError::ReadbackRingFull { depth: 3 }.code(),
+            "render.readback_ring_full"
+        );
+        assert_eq!(
+            RenderError::ReadbackPending { pending: 2 }.code(),
+            "render.readback_pending"
+        );
+        assert_eq!(
+            RenderError::ReadbackFailed {
+                reason: "device lost".to_owned(),
+            }
+            .code(),
+            "render.readback_failed"
         );
         assert_eq!(
             RenderError::ShortPlane {
