@@ -7,9 +7,13 @@
 //! GStreamer pipeline (decision-4): see [`decode`].
 
 pub mod decode;
+pub mod mixer;
 pub mod resample;
 
 pub use decode::{AudioInfo, Block, FileDecoder, Pcm, decode_file, probe_audio};
+pub use mixer::{
+    ClipSpec, MixGraph, MixGraphBuilder, Mixer, MixerConfig, MixerControl, TrackSpec, mixer,
+};
 pub use resample::{PcmReader, PcmWriter, ResampleStage, Resampler, pcm_ring};
 
 /// Stable [`sub_core::ErrorCode`] constants this crate returns.
@@ -34,6 +38,12 @@ pub mod codes {
     pub const UNSUPPORTED_LAYOUT: ErrorCode = ErrorCode::from_static("audio.unsupported_layout");
     /// A sample rate conversion could not be built or could not run.
     pub const RESAMPLE_FAILED: ErrorCode = ErrorCode::from_static("audio.resample_failed");
+    /// A gain is not a finite level within the fader's range.
+    pub const INVALID_GAIN: ErrorCode = ErrorCode::from_static("audio.invalid_gain");
+    /// A mixer graph describes something the mixer cannot play: a negative or
+    /// unrepresentable time, fades longer than their clip, or a shape the
+    /// mixer it is published to does not have room for.
+    pub const GRAPH_INVALID: ErrorCode = ErrorCode::from_static("audio.graph_invalid");
 }
 
 #[cfg(test)]
@@ -48,6 +58,8 @@ mod tests {
             super::codes::NO_AUDIO_TRACK,
             super::codes::UNSUPPORTED_LAYOUT,
             super::codes::RESAMPLE_FAILED,
+            super::codes::INVALID_GAIN,
+            super::codes::GRAPH_INVALID,
         ];
         for code in &codes {
             assert_eq!(code.domain(), "audio", "wrong domain for {code}");
