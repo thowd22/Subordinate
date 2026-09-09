@@ -1,19 +1,18 @@
-//! The compositor frame graph, version 0: one video track, opacity and a
-//! position/scale/rotation transform.
+//! The compositor frame graph: stacked video tracks, opacity and a
+//! position/scale/rotation transform per clip.
 //!
 //! docs/PLAN.md §5.3 describes the graph as, per frame and per video track
 //! top-down: sample the clip frame, colour convert, apply transform and
-//! opacity, blend. This module is the skeleton of that walk with a single
-//! track resolved and a single quad drawn; multi-track blending (TASK-39),
-//! crossfades (TASK-38) and shader effects (TASK-87) extend it rather than
-//! replace it.
+//! opacity, blend. This module is that walk. Crossfades (TASK-38) and shader
+//! effects (TASK-87) extend it rather than replace it.
 //!
 //! Three pieces are deliberately separated so most of the behaviour is
 //! testable without a GPU:
 //!
-//! - [`resolve_clip_at`] is pure model arithmetic. It answers "which clip is
-//!   under the playhead, and what source time does it want" entirely in
-//!   `RationalTime`; no float and no wgpu call is involved.
+//! - [`resolve_layers_at`] is pure model arithmetic. It answers "which clips
+//!   are under the playhead, on which tracks, and what source time does each
+//!   want" entirely in `RationalTime`; no float and no wgpu call is
+//!   involved. [`resolve_clip_at`] is its topmost layer.
 //! - [`LetterboxFit`] and [`QuadTransform`] are the geometry. A source
 //!   picture is fitted into the sequence canvas (letterbox or pillarbox, as
 //!   the aspect ratios demand) and the clip's transform is applied about the
@@ -25,6 +24,8 @@
 //! compositor asks a [`FrameSource`] for the already-converted RGB texture of
 //! a resolved clip, so decoding and NV12 conversion stay in `sub-media` and
 //! [`crate::Nv12Converter`], and this crate keeps no GStreamer dependency.
+
+use std::num::NonZeroU64;
 
 use sub_model::{Clip, ClipId, Resolution, Sequence, TrackId, TrackKind, Transform};
 use sub_time::{RationalTime, TimeRange};
@@ -64,26 +65,35 @@ impl ResolvedClip<'_> {
     }
 }
 
-/// The clip under the playhead, or `None` when the playhead sits over a gap,
-/// past the end of every track, or on a sequence with no video at all.
+/// Every clip under the playhead, one per video track, in composite order:
+/// the bottom track first and the top track last.
 ///
-/// Video tracks composite top-down, so the search runs from the last track
-/// backwards and takes the first clip it finds; muted tracks are skipped, as
-/// a muted video track contributes nothing to the composite. That is already
-/// the multi-track walk of §5.3, stopped after the first hit: v0 draws one
-/// layer, and TASK-39 keeps going and blends.
+/// This is the §5.3 walk. A track contributes at most one layer, and only if
+/// it is a video track, is not muted — a muted video track contributes
+/// nothing to the composite — and has a clip rather than a gap under the
+/// playhead. A gap therefore yields no layer at all, which is what makes it
+/// transparent: whatever the tracks below it drew stays visible.
+///
+/// The iterator yields in draw order rather than top-down so a caller can
+/// blend as it goes; [`resolve_clip_at`] takes the topmost element for the
+/// callers that only want the front layer.
 ///
 /// `time` is in sequence time. It is rescaled to the sequence timebase for
 /// the comparison, so a caller may hand in a playhead counted in nanoseconds.
-pub fn resolve_clip_at(sequence: &Sequence, time: RationalTime) -> Option<ResolvedClip<'_>> {
+pub fn resolve_layers_at(
+    sequence: &Sequence,
+    time: RationalTime,
+) -> impl Iterator<Item = ResolvedClip<'_>> {
     let rate = sequence.settings.frame_rate;
-    let playhead = time.checked_rescaled_to(rate)?;
+    // A playhead that will not rescale to the sequence timebase resolves to
+    // nothing at all rather than to a rounded frame.
+    let playhead = time.checked_rescaled_to(rate);
     sequence
         .tracks
         .iter()
-        .rev()
         .filter(|track| track.kind == TrackKind::Video && !track.muted)
-        .find_map(|track| {
+        .filter_map(move |track| {
+            let playhead = playhead?;
             let (clip, range) = track
                 .clip_placements(rate)
                 .find(|(_, range)| range.contains(playhead))?;
@@ -96,6 +106,16 @@ pub fn resolve_clip_at(sequence: &Sequence, time: RationalTime) -> Option<Resolv
                 source_time,
             })
         })
+}
+
+/// The frontmost clip under the playhead, or `None` when every video track
+/// shows a gap there, the playhead is past the end of them all, or the
+/// sequence has no video at all.
+///
+/// The topmost layer of [`resolve_layers_at`]: what the composite shows where
+/// that layer is opaque and covers the canvas.
+pub fn resolve_clip_at(sequence: &Sequence, time: RationalTime) -> Option<ResolvedClip<'_>> {
+    resolve_layers_at(sequence, time).last()
 }
 
 /// A source picture fitted into the sequence canvas, centred, in canvas
@@ -294,25 +314,59 @@ where
     }
 }
 
-/// What one [`Compositor::render`] call did.
-///
-/// Enough for the viewer to show "no picture here" and for a test to assert
-/// on the graph's decisions without reading pixels back.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FrameSummary {
-    /// The clip the playhead resolved to, if any. Set even when the source
-    /// had no picture ready for it.
-    pub clip: Option<ClipId>,
-    /// The source time asked for, if a clip was resolved.
-    pub source_time: Option<RationalTime>,
-    /// Where the picture landed, if one was drawn.
+/// One layer of a composite: the clip that resolved on one video track, and
+/// what became of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerSummary {
+    /// The track the layer came from.
+    pub track: TrackId,
+    /// The clip the playhead resolved to on that track.
+    pub clip: ClipId,
+    /// The source time asked for.
+    pub source_time: RationalTime,
+    /// The clip's opacity, as the shader received it.
+    pub opacity: f32,
+    /// Where the picture landed, or `None` when the source had no picture
+    /// ready and nothing was drawn for this layer.
     pub placement: Option<QuadTransform>,
 }
 
-impl FrameSummary {
-    /// True when the composite is the bare canvas: no clip, or no picture.
-    pub fn is_blank(&self) -> bool {
+impl LayerSummary {
+    /// True when the layer resolved but no picture was drawn for it.
+    pub fn is_missing(&self) -> bool {
         self.placement.is_none()
+    }
+}
+
+/// What one [`Compositor::render`] call did.
+///
+/// Enough for the viewer to show "no picture here" and for a test to assert
+/// on the graph's decisions without reading pixels back. Layers are listed in
+/// composite order: the bottom track first, the top track last.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameSummary {
+    /// Every video track that had a clip under the playhead, bottom-up.
+    pub layers: Vec<LayerSummary>,
+}
+
+impl FrameSummary {
+    /// The frontmost resolved layer, whether or not it was drawn.
+    pub fn top(&self) -> Option<&LayerSummary> {
+        self.layers.last()
+    }
+
+    /// How many layers were actually drawn.
+    pub fn drawn(&self) -> usize {
+        self.layers
+            .iter()
+            .filter(|layer| layer.placement.is_some())
+            .count()
+    }
+
+    /// True when the composite is the bare black canvas: no clip resolved
+    /// anywhere, or no source had a picture ready.
+    pub fn is_blank(&self) -> bool {
+        self.drawn() == 0
     }
 }
 
@@ -371,8 +425,10 @@ fn vs(@builtin(vertex_index) index: u32) -> VsOut {
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(source, source_sampler, in.uv);
-    // Straight (non-premultiplied) alpha: the blend state multiplies by it.
-    return vec4<f32>(texel.rgb, texel.a * params.opacity.x);
+    let alpha = texel.a * params.opacity.x;
+    // Premultiplied alpha: the layer carries its own coverage, so the blend
+    // state adds it straight onto what the tracks below already drew.
+    return vec4<f32>(texel.rgb * alpha, alpha);
 }
 ";
 
@@ -390,6 +446,10 @@ pub struct Compositor {
     output: wgpu::Texture,
     output_view: wgpu::TextureView,
     uniforms: wgpu::Buffer,
+    /// Bytes between one layer's uniform block and the next, which is
+    /// [`UNIFORM_BYTES`] rounded up to the device's uniform binding
+    /// alignment.
+    uniform_stride: u64,
     sampler: wgpu::Sampler,
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
@@ -405,12 +465,12 @@ impl Compositor {
         let device = context.device();
         let output = target_texture(device, resolution);
         let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
-        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("compositor params"),
-            size: UNIFORM_BYTES as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // Every layer of a frame gets its own slice of one buffer: a uniform
+        // binding may only start on a device-defined boundary, so the blocks
+        // are spaced out to it rather than packed.
+        let alignment = u64::from(device.limits().min_uniform_buffer_offset_alignment).max(1);
+        let uniform_stride = (UNIFORM_BYTES as u64).div_ceil(alignment) * alignment;
+        let uniforms = layer_uniform_buffer(device, uniform_stride, 1);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("compositor source"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -458,6 +518,7 @@ impl Compositor {
             output,
             output_view,
             uniforms,
+            uniform_stride,
             sampler,
             bind_group_layout,
             pipeline,
@@ -507,8 +568,11 @@ impl Compositor {
     ///
     /// The canvas first follows the sequence settings, so changing a
     /// sequence's resolution needs no separate call. The target is cleared to
-    /// opaque black — that black *is* the letterbox — and the clip under the
-    /// playhead, if any, is drawn over it with its opacity and transform.
+    /// opaque black — that black is both the letterbox and the bottom of the
+    /// stack — and then every video track that has a clip under the playhead
+    /// is drawn over it, bottom track first, each with its own opacity and
+    /// transform and blended with premultiplied alpha. Muted tracks and gaps
+    /// contribute nothing, so the layers below them show through.
     pub fn render(
         &mut self,
         sequence: &Sequence,
@@ -517,30 +581,52 @@ impl Compositor {
     ) -> FrameSummary {
         self.resize(sequence.settings.resolution);
 
-        let resolved = resolve_clip_at(sequence, time);
-        let layer = resolved.and_then(|resolved| {
-            let frame = source
+        // Ask every layer for its picture first: the source may hand back the
+        // same view for several clips, and the uniform buffer can only be
+        // sized once the number of drawn layers is known.
+        let mut summaries = Vec::with_capacity(sequence.tracks.len());
+        let mut drawn = Vec::with_capacity(sequence.tracks.len());
+        for resolved in resolve_layers_at(sequence, time) {
+            let opacity = resolved.clip.opacity.as_f32();
+            let layer = source
                 .frame(&resolved)
-                .filter(|frame| frame.width > 0 && frame.height > 0)?;
-            let placement = QuadTransform::new(
-                self.resolution,
-                frame.width,
-                frame.height,
-                &resolved.clip.transform,
-            );
-            Some((frame, placement, resolved.clip.opacity.as_f32()))
-        });
+                .filter(|frame| frame.width > 0 && frame.height > 0)
+                .map(|frame| {
+                    let placement = QuadTransform::new(
+                        self.resolution,
+                        frame.width,
+                        frame.height,
+                        &resolved.clip.transform,
+                    );
+                    (frame, placement)
+                });
+            summaries.push(LayerSummary {
+                track: resolved.track,
+                clip: resolved.clip_id(),
+                source_time: resolved.source_time,
+                opacity,
+                placement: layer.as_ref().map(|(_, placement)| *placement),
+            });
+            if let Some((frame, placement)) = layer {
+                drawn.push((frame, placement, opacity));
+            }
+        }
 
-        // The uniform write and the bind group are prepared before the pass:
-        // a pass borrows every resource it binds for its whole lifetime.
-        let bound = layer.as_ref().map(|(frame, placement, opacity)| {
+        // The uniform writes and the bind groups are prepared before the
+        // pass: a pass borrows every resource it binds for its whole
+        // lifetime, and growing the buffer would invalidate a bind group.
+        self.reserve_uniforms(drawn.len());
+        let mut bound = Vec::with_capacity(drawn.len());
+        let mut offset = 0;
+        for (frame, placement, opacity) in &drawn {
             self.context.queue().write_buffer(
                 &self.uniforms,
-                0,
+                offset,
                 &placement.uniform_bytes(*opacity),
             );
-            self.layer_bind_group(&frame.view)
-        });
+            bound.push(self.layer_bind_group(&frame.view, offset));
+            offset += self.uniform_stride;
+        }
 
         let mut encoder =
             self.context
@@ -565,19 +651,18 @@ impl Compositor {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let Some(bind_group) = bound.as_ref() {
+            if !bound.is_empty() {
                 pass.set_pipeline(&self.pipeline);
+            }
+            // Bottom track first: each draw blends over what is already there.
+            for bind_group in &bound {
                 pass.set_bind_group(0, bind_group, &[]);
                 pass.draw(0..4, 0..1);
             }
         }
         self.context.queue().submit([encoder.finish()]);
 
-        FrameSummary {
-            clip: resolved.map(|resolved| resolved.clip_id()),
-            source_time: resolved.map(|resolved| resolved.source_time),
-            placement: layer.map(|(_, placement, _)| placement),
-        }
+        FrameSummary { layers: summaries }
     }
 
     /// Copy the target back to the CPU as tightly packed RGBA rows.
@@ -642,10 +727,25 @@ impl Compositor {
         pixels
     }
 
-    /// The bind group for one layer. Source views change frame to frame, so
-    /// this is built per draw; it is a handful of refcount bumps, not a GPU
+    /// Make sure the uniform buffer holds `layers` blocks.
+    ///
+    /// It only ever grows, so a steady stack of tracks stops reallocating
+    /// after the first frame that needs the room.
+    fn reserve_uniforms(&mut self, layers: usize) {
+        // A layer count that does not fit in a u64 cannot exist: it would
+        // need more tracks than the machine has addresses.
+        let layers = u64::try_from(layers).unwrap_or(u64::MAX);
+        if self.uniform_stride.saturating_mul(layers) <= self.uniforms.size() {
+            return;
+        }
+        self.uniforms = layer_uniform_buffer(self.context.device(), self.uniform_stride, layers);
+    }
+
+    /// The bind group for one layer: the uniform block at `offset` and the
+    /// layer's own picture. Source views change frame to frame, so this is
+    /// built per draw; it is a handful of refcount bumps, not a GPU
     /// allocation.
-    fn layer_bind_group(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
+    fn layer_bind_group(&self, view: &wgpu::TextureView, offset: u64) -> wgpu::BindGroup {
         self.context
             .device()
             .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -654,7 +754,11 @@ impl Compositor {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.uniforms.as_entire_binding(),
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.uniforms,
+                            offset,
+                            size: NonZeroU64::new(UNIFORM_BYTES as u64),
+                        }),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -674,6 +778,16 @@ impl Compositor {
 #[allow(clippy::cast_precision_loss)]
 fn pixels(value: u32) -> f32 {
     value as f32
+}
+
+/// Create a uniform buffer holding `layers` blocks spaced `stride` apart.
+fn layer_uniform_buffer(device: &wgpu::Device, stride: u64, layers: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("compositor params"),
+        size: stride.saturating_mul(layers.max(1)),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 /// Create the offscreen target for `resolution`.
@@ -722,7 +836,7 @@ fn build_pipeline(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> wgpu
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: OUTPUT_FORMAT,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
@@ -741,7 +855,7 @@ fn build_pipeline(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> wgpu
 
 #[cfg(test)]
 mod tests {
-    use super::{LetterboxFit, QuadTransform, resolve_clip_at};
+    use super::{LetterboxFit, QuadTransform, resolve_clip_at, resolve_layers_at};
     use sub_model::params::{Fixed6, Point2, Scale2};
     use sub_model::{
         Clip, Gap, MediaId, Opacity, Resolution, Sequence, SequenceSettings, Track, TrackKind,
@@ -895,6 +1009,86 @@ mod tests {
 
         sequence.tracks[0].muted = true;
         assert!(resolve_clip_at(&sequence, frames(2)).is_none());
+    }
+
+    /// A sequence whose two video tracks both cover frame 2, with an audio
+    /// track between them to prove it is ignored. Returns the sequence and
+    /// the clip ids, bottom first.
+    fn two_video_tracks() -> (Sequence, [sub_model::ClipId; 2]) {
+        let media = MediaId::new();
+        let mut sequence = Sequence::new("Main", SequenceSettings::default());
+
+        let mut bottom = Track::new("V1", TrackKind::Video);
+        bottom
+            .items
+            .push(Clip::new("bottom", media, range(0, 10)).into());
+        let bottom_clip = bottom.items[0].as_clip().expect("a clip").id;
+
+        let mut audio = Track::new("A1", TrackKind::Audio);
+        audio
+            .items
+            .push(Clip::new("sound", media, range(0, 10)).into());
+
+        let mut top = Track::new("V2", TrackKind::Video);
+        top.items
+            .push(Clip::new("top", media, range(50, 10)).into());
+        let top_clip = top.items[0].as_clip().expect("a clip").id;
+
+        sequence.tracks.push(bottom);
+        sequence.tracks.push(audio);
+        sequence.tracks.push(top);
+        (sequence, [bottom_clip, top_clip])
+    }
+
+    #[test]
+    fn every_video_track_contributes_a_layer_bottom_first() {
+        let (sequence, [bottom_clip, top_clip]) = two_video_tracks();
+        let layers: Vec<_> = resolve_layers_at(&sequence, frames(2)).collect();
+
+        assert_eq!(layers.len(), 2, "the audio track is not a layer");
+        assert_eq!(layers[0].clip_id(), bottom_clip);
+        assert_eq!(layers[0].track, sequence.tracks[0].id);
+        assert_eq!(layers[0].source_time, frames(2));
+        assert_eq!(layers[1].clip_id(), top_clip);
+        assert_eq!(layers[1].track, sequence.tracks[2].id);
+        // The top clip's source starts at 50, so the same playhead asks it
+        // for a different source time.
+        assert_eq!(layers[1].source_time, frames(52));
+
+        // The frontmost layer is what the single-clip resolver returns.
+        assert_eq!(
+            resolve_clip_at(&sequence, frames(2)).expect("frame 2 is covered"),
+            layers[1]
+        );
+    }
+
+    #[test]
+    fn muted_tracks_and_gaps_drop_out_of_the_layer_walk() {
+        let (mut sequence, [bottom_clip, top_clip]) = two_video_tracks();
+
+        sequence.tracks[0].muted = true;
+        let layers: Vec<_> = resolve_layers_at(&sequence, frames(2)).collect();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].clip_id(), top_clip);
+
+        // A gap under the playhead on the top track leaves only the layer
+        // below it, which is what makes the gap transparent.
+        sequence.tracks[0].muted = false;
+        sequence.tracks[2].items.insert(
+            0,
+            Gap {
+                duration: frames(5),
+            }
+            .into(),
+        );
+        let layers: Vec<_> = resolve_layers_at(&sequence, frames(2)).collect();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].clip_id(), bottom_clip);
+
+        // With both tracks muted nothing composites at all.
+        sequence.tracks[0].muted = true;
+        sequence.tracks[2].muted = true;
+        assert_eq!(resolve_layers_at(&sequence, frames(2)).count(), 0);
     }
 
     #[test]
