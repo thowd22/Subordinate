@@ -8,6 +8,7 @@
 
 pub mod app;
 pub mod diagnostics;
+pub mod keymap;
 pub mod sequence_tabs;
 pub mod shortcuts;
 pub mod timeline;
@@ -17,6 +18,7 @@ pub mod viewer;
 
 pub use app::{AppOptions, SubordinateApp, run};
 pub use diagnostics::DiagnosticsPanel;
+pub use keymap::{LoadedKeymap, chord_spec, config_dir, keymap_path, parse_chord};
 pub use sequence_tabs::{
     NewSequenceDialog, SequenceTabAction, SequenceTabs, SequenceViewState, default_sequence_name,
 };
@@ -47,4 +49,16 @@ pub mod codes {
 
     /// One keyboard chord is claimed by more than one action.
     pub const SHORTCUT_CONFLICT: ErrorCode = ErrorCode::from_static("ui.shortcut_conflict");
+
+    /// A keymap file is not valid TOML, or an entry has the wrong shape.
+    pub const KEYMAP_PARSE: ErrorCode = ErrorCode::from_static("ui.keymap_parse");
+
+    /// A keymap entry names an action this editor does not have.
+    pub const KEYMAP_UNKNOWN_ACTION: ErrorCode = ErrorCode::from_static("ui.keymap_unknown_action");
+
+    /// A keymap entry's value is not a keyboard chord.
+    pub const KEYMAP_INVALID_CHORD: ErrorCode = ErrorCode::from_static("ui.keymap_invalid_chord");
+
+    /// A keymap file exists but could not be read.
+    pub const KEYMAP_UNREADABLE: ErrorCode = ErrorCode::from_static("ui.keymap_unreadable");
 }

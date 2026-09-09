@@ -1,0 +1,51 @@
+# A Premiere Pro-flavoured keymap for Subordinate.
+#
+# Copy this file to your config directory as `keymap.toml`:
+#
+#   Linux    ~/.config/subordinate/keymap.toml
+#   macOS    ~/Library/Application Support/subordinate/keymap.toml
+#   Windows  %APPDATA%\subordinate\keymap.toml
+#
+# or point SUBORDINATE_CONFIG_DIR at a directory holding it.
+#
+# Each entry is a stable action id on the left and a chord on the right.
+# Modifier names are Ctrl (Cmd on macOS), Alt and Shift; key names are the
+# egui ones, so `Left`, `Space`, `Comma` and `,` all work. `none` unbinds an
+# action. Anything not listed here keeps its shipped binding, and an entry
+# that names an unknown action or an unparsable chord is reported in the
+# keyboard shortcut window rather than stopping the editor.
+
+[bindings]
+
+# Transport. JKL and the arrow keys are the same everywhere, so only the
+# playhead extremes move: Premiere uses Home and End too, but its editors
+# reach for Shift+Left / Shift+Right to travel five frames, which Subordinate
+# does not have yet.
+"transport.play_backward" = "J"
+"transport.pause" = "K"
+"transport.play_forward" = "L"
+"transport.toggle_playback" = "Space"
+"transport.step_back" = "Left"
+"transport.step_forward" = "Right"
+"transport.go_to_start" = "Home"
+"transport.go_to_end" = "End"
+
+# Marking. I and O are shared; Premiere drops a marker on M without a
+# modifier for a clip marker and Ctrl+M is close enough to the sequence
+# marker its editors use, which also frees M.
+"marking.set_in_point" = "I"
+"marking.set_out_point" = "O"
+"marking.add_marker" = "Ctrl+M"
+
+# Editing. C is the razor tool in Premiere, so the split moves off Ctrl+K
+# onto it. Nudging is Alt+Left / Alt+Right.
+"editing.split_at_playhead" = "C"
+"editing.nudge_back" = "Alt+Left"
+"editing.nudge_forward" = "Alt+Right"
+"editing.undo" = "Ctrl+Z"
+"editing.redo" = "Ctrl+Shift+Z"
+
+# View. Premiere snaps with S, and its keyboard shortcut window is on
+# Ctrl+Alt+K; F1 stays free for the manual.
+"view.toggle_snapping" = "S"
+"view.show_shortcut_help" = "Ctrl+Alt+K"

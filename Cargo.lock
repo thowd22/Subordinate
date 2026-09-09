@@ -3517,6 +3517,7 @@ dependencies = [
  "sub-model",
  "sub-render",
  "sub-time",
+ "toml",
 ]
 
 [[package]]

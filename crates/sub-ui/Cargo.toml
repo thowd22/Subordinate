@@ -17,6 +17,7 @@ sub-media = { version = "0.1.0", path = "../sub-media" }
 sub-model = { version = "0.1.0", path = "../sub-model" }
 sub-render = { version = "0.1.0", path = "../sub-render" }
 sub-time = { version = "0.1.0", path = "../sub-time" }
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 
 [lints]
 workspace = true
