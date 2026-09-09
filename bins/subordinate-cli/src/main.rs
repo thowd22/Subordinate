@@ -61,13 +61,23 @@ fn diag(pretty: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let json = match diagnostics.to_json() {
+    let mut json = match diagnostics.to_json() {
         Ok(json) => json,
         Err(err) => {
             eprintln!("{}", err.to_json());
             return ExitCode::FAILURE;
         }
     };
+    // The registry says which encoders are installed; the probe says which of
+    // them this machine can actually start, which is what export selection
+    // goes by. The panel shows both, so the CLI prints both.
+    match sub_export::EncoderProbe::cached().and_then(sub_export::EncoderProbe::to_json) {
+        Ok(encoders) => json["encoder_probe"] = encoders,
+        Err(err) => {
+            eprintln!("{}", err.to_json());
+            return ExitCode::FAILURE;
+        }
+    }
     let text = if pretty {
         serde_json::to_string_pretty(&json)
     } else {

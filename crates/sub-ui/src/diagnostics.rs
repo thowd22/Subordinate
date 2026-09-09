@@ -8,6 +8,7 @@
 //! afterwards so the UI thread never repeats it while painting.
 
 use eframe::egui;
+use sub_export::{CODECS, EncoderPreferences, EncoderProbe, EncoderStatus, VideoCodec};
 use sub_media::{HardwareDiagnostics, VendorReport};
 
 /// The panel's state: the report once it has been collected, and whether the
@@ -17,6 +18,9 @@ pub struct DiagnosticsPanel {
     /// `None` until the first scan; then the report or the error it failed
     /// with, kept so a failure is shown rather than retried every frame.
     report: Option<Result<HardwareDiagnostics, sub_core::SubError>>,
+    /// The user's encoder overrides, so the panel shows what an export would
+    /// actually pick rather than what it would pick with default settings.
+    pub encoder_preferences: EncoderPreferences,
     /// Whether the window is showing.
     pub open: bool,
 }
@@ -63,7 +67,18 @@ impl DiagnosticsPanel {
         if ui.button("Rescan").clicked() {
             self.refresh();
         }
-        match self.report() {
+        // Split the borrow by hand: the report is behind `&mut self` because
+        // the first use scans, while the preferences the encoder section reads
+        // are a plain field.
+        let Self {
+            report,
+            encoder_preferences: preferences,
+            ..
+        } = self;
+        match report
+            .get_or_insert_with(HardwareDiagnostics::collect)
+            .as_ref()
+        {
             Ok(report) => {
                 ui.label(summary_line(report));
                 ui.separator();
@@ -71,6 +86,8 @@ impl DiagnosticsPanel {
                     for vendor in &report.vendors {
                         vendor_ui(ui, vendor);
                     }
+                    ui.separator();
+                    encoders_ui(ui, preferences);
                 });
             }
             Err(err) => {
@@ -117,6 +134,76 @@ fn summary_line(report: &HardwareDiagnostics) -> String {
     )
 }
 
+/// Draws the export encoder probe: what each codec would actually encode
+/// with, and why the alternatives were passed over.
+///
+/// The probe is cached for the session by `sub_export`, so painting this every
+/// frame costs a lookup and no element instantiation.
+fn encoders_ui(ui: &mut egui::Ui, preferences: &EncoderPreferences) {
+    ui.label("Export encoders");
+    match EncoderProbe::cached() {
+        Ok(probe) => {
+            for codec in CODECS {
+                egui::CollapsingHeader::new(codec_heading(probe, codec, preferences))
+                    .id_salt(codec.as_str())
+                    .default_open(probe.can_encode(codec))
+                    .show(ui, |ui| {
+                        for status in probe.for_codec(codec) {
+                            ui.label(encoder_line(status));
+                        }
+                    });
+            }
+        }
+        Err(err) => {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("encoder probe unavailable: {err}"),
+            );
+        }
+    }
+}
+
+/// One codec's heading: which encoder an export would use, or why none.
+fn codec_heading(
+    probe: &EncoderProbe,
+    codec: VideoCodec,
+    preferences: &EncoderPreferences,
+) -> String {
+    match probe.select(codec, preferences) {
+        Ok(status) => {
+            let how = if preferences.override_for(codec).is_some() {
+                "set in settings"
+            } else if status.hardware {
+                "hardware, chosen automatically"
+            } else {
+                "software, chosen automatically"
+            };
+            format!("{}: {} ({how})", codec.label(), status.element)
+        }
+        Err(err) => format!("{}: unavailable - {}", codec.label(), err.message),
+    }
+}
+
+/// One encoder's line: whether it can be used, and what stopped it.
+fn encoder_line(status: &EncoderStatus) -> String {
+    if status.ready {
+        format!("[x] {} ({}) - ready", status.element, status.vendor.label())
+    } else if status.present {
+        format!(
+            "[ ] {} ({}) - registered but not usable: {}",
+            status.element,
+            status.vendor.label(),
+            status.detail.as_deref().unwrap_or("no reason given")
+        )
+    } else {
+        format!(
+            "[ ] {} ({}) - not registered",
+            status.element,
+            status.vendor.label()
+        )
+    }
+}
+
 /// One vendor's heading: name, plugin version and how much of it is there.
 fn vendor_heading(vendor: &VendorReport) -> String {
     let (decoders, encoders) = vendor.counts();
@@ -153,8 +240,11 @@ fn element_line(element: &sub_media::ElementStatus) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiagnosticsPanel, element_line, summary_line, vendor_heading};
+    use super::{
+        DiagnosticsPanel, codec_heading, element_line, encoder_line, summary_line, vendor_heading,
+    };
     use eframe::egui;
+    use sub_export::{CODECS, EncoderPreferences, EncoderProbe, VideoCodec};
     use sub_media::{HardwareDiagnostics, Vendor};
 
     fn scan() -> HardwareDiagnostics {
@@ -266,6 +356,81 @@ mod tests {
                 assert!(line.contains(element.kind.as_str()), "line: {line}");
                 assert_eq!(line.starts_with("[x]"), element.present, "line: {line}");
             }
+        }
+    }
+
+    #[test]
+    fn the_painted_panel_shows_the_encoder_probe_for_every_codec() {
+        let mut panel = DiagnosticsPanel::new();
+        let probe = EncoderProbe::cached().expect("GStreamer must initialise");
+        let painted = painted_text(&mut panel);
+        assert!(
+            painted.iter().any(|text| text == "Export encoders"),
+            "painted: {painted:?}"
+        );
+        for codec in CODECS {
+            assert!(
+                painted.iter().any(|text| text.starts_with(codec.label())),
+                "{codec} has no heading: {painted:?}"
+            );
+            if !probe.can_encode(codec) {
+                continue;
+            }
+            for status in probe.for_codec(codec) {
+                assert!(
+                    painted.iter().any(|text| text.contains(&status.element)),
+                    "{} is not painted: {painted:?}",
+                    status.element
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_codec_heading_names_the_encoder_an_export_would_use() {
+        let probe = EncoderProbe::cached().expect("GStreamer must initialise");
+        for codec in CODECS {
+            let heading = codec_heading(probe, codec, &EncoderPreferences::new());
+            assert!(heading.starts_with(codec.label()), "heading: {heading}");
+            match probe.select(codec, &EncoderPreferences::new()) {
+                Ok(status) => {
+                    assert!(heading.contains(&status.element), "heading: {heading}");
+                    assert!(
+                        heading.contains("chosen automatically"),
+                        "heading: {heading}"
+                    );
+                }
+                Err(_) => assert!(heading.contains("unavailable"), "heading: {heading}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_override_is_labelled_as_coming_from_settings() {
+        let probe = EncoderProbe::cached().expect("GStreamer must initialise");
+        let mut preferences = EncoderPreferences::new();
+        preferences
+            .set_override(VideoCodec::H264, "x264enc")
+            .expect("x264enc encodes H.264");
+        let heading = codec_heading(probe, VideoCodec::H264, &preferences);
+        assert!(heading.contains("x264enc"), "heading: {heading}");
+        if probe
+            .status("x264enc")
+            .is_some_and(sub_export::EncoderStatus::is_usable)
+        {
+            assert!(heading.contains("set in settings"), "heading: {heading}");
+        } else {
+            assert!(heading.contains("unavailable"), "heading: {heading}");
+        }
+    }
+
+    #[test]
+    fn every_encoder_gets_a_line_that_says_whether_it_is_usable() {
+        let probe = EncoderProbe::cached().expect("GStreamer must initialise");
+        for status in &probe.encoders {
+            let line = encoder_line(status);
+            assert!(line.contains(&status.element), "line: {line}");
+            assert_eq!(line.starts_with("[x]"), status.ready, "line: {line}");
         }
     }
 
