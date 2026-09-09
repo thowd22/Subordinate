@@ -1,11 +1,11 @@
 ---
 id: TASK-19
 title: wgpu device and eframe integration with a shared render context
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-19'
 created_date: '2026-09-08 21:04'
-updated_date: '2026-09-08 22:54'
+updated_date: '2026-09-09 01:54'
 labels:
   - render
   - ui
@@ -28,7 +28,7 @@ The compositor and UI share one wgpu device so preview textures need no copies (
 <!-- AC:BEGIN -->
 - [x] #1 eframe launches with the wgpu backend and exposes device, queue and adapter info to sub-render
 - [x] #2 Adapter selection prefers a discrete GPU and logs the backend (Vulkan, D3D12, Metal)
-- [ ] #3 App starts and renders an empty window on all three OSes in CI using a software adapter where needed
+- [x] #3 App starts and renders an empty window on all three OSes in CI using a software adapter where needed
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -65,10 +65,12 @@ Verification
 - RUST_LOG=info cargo run -p subordinate -- --smoke-test on this Linux box: window opened, logged 'adapter chosen: llvmpipe ... (software, Vulkan, ...)' and 'render device ready on Vulkan', painted 3 frames, closed, exit 0. That is AC #3 on Linux with a software adapter.
 
 AC #3 left unchecked: the Windows and macOS halves can only be proven by a CI run, which cannot be started from this environment. The workflow steps are in place; check it once CI is green on all three runners.
+
+AC #3 verified by CI run https://github.com/thowd22/Subordinate/actions/runs/34300476881: 'GUI smoke test' steps succeeded on ubuntu-26.04 (software Vulkan), windows-latest and macos-latest via subordinate --smoke-test.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added the shared wgpu render context: sub-render now owns RenderContext (shared Device/Queue/AdapterInfo, plus a headless constructor), a pure adapter-ranking rule that prefers a discrete GPU and falls back to software, and RenderError with stable codes; sub-ui runs eframe 0.36 on the wgpu backend, lifts eframe's RenderState into that context, logs the chosen backend and adapter, and gained a --smoke-test mode that paints a few empty frames and exits so CI can start the app headlessly. Verified with cargo fmt --check, clippy -D warnings and cargo test --workspace (14 new tests, including a headless empty-frame render), and by running the app with --smoke-test on a software Vulkan adapter (llvmpipe): it opened a window, logged the Vulkan backend and exited 0. AC #3 stays unchecked because only its Linux half could be proven here; the Windows and macOS smoke steps are wired into CI but need a CI run. Note that keeping eframe 0.36 and wgpu 30 (both plan of record) required bumping the pinned toolchain to 1.95.0.
+Shared wgpu RenderContext with discrete-GPU-preferring adapter selection, eframe wgpu integration and a --smoke-test mode; verified by unit tests, a local headless render, and CI smoke tests on all three OSes.
 <!-- SECTION:FINAL_SUMMARY:END -->

@@ -1,11 +1,11 @@
 ---
 id: TASK-10
 title: Test media fixture generator script
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-10'
 created_date: '2026-09-08 21:04'
-updated_date: '2026-09-08 22:38'
+updated_date: '2026-09-09 01:54'
 labels:
   - infra
   - media
@@ -26,7 +26,7 @@ Media tasks need deterministic sample files but binaries must not be committed. 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 scripts/gen-fixtures.sh (and a PowerShell equivalent or cross-platform Rust xtask) generates: 1080p and 4K H.264 colour bars with timecode burn-in, a 29.97 drop-frame clip, a variable-frame-rate clip, a 10-minute long-GOP clip, a WAV and a FLAC audio-only file
+- [x] #1 scripts/gen-fixtures.sh (and a PowerShell equivalent or cross-platform Rust xtask) generates: 1080p and 4K H.264 colour bars with timecode burn-in, a 29.97 drop-frame clip, a variable-frame-rate clip, a 10-minute long-GOP clip, a WAV and a FLAC audio-only file
 - [x] #2 Generated files land in fixtures/ which is gitignored, and a manifest JSON records name, duration, fps, VFR flag
 - [x] #3 CI generates the small fixtures (not the 10-minute clip) before running tests
 - [x] #4 Tests can locate fixtures via a helper in a shared test-support crate
@@ -48,10 +48,12 @@ Design decisions. The catalogue lives in one tab-separated table in the shell sc
 Verification. cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean; cargo test --workspace passes (7 unit tests plus 1 integration test plus 2 doctests in sub-test-support, rest of the workspace unchanged). bash -n on the shell script passes and --list and --dry-run were exercised. The script was then run end to end against stub gst-launch-1.0/gst-inspect-1.0 binaries: it created all six non-long fixture files, skipped the ten-minute clip, and wrote a manifest.json that sub-test-support parses, with the tests/generated_fixtures.rs integration test passing against it (SUB_FIXTURES_DIR pointed at the generated directory) and skipping cleanly when no manifest exists.
 
 Not verified here (AC #1 left unchecked). This environment has GStreamer development headers only, no gst-launch-1.0 and no plugins, so no fixture was ever really encoded; the pipelines are verified by construction and by dry run, not by producing media. PowerShell is also unavailable in this sandbox, so gen-fixtures.ps1 could not even be parse-checked. Both are exercised by the new CI step on Linux, Windows and macOS, which is where AC #1 should be confirmed.
+
+AC #1 verified by CI run https://github.com/thowd22/Subordinate/actions/runs/34300476881: the 'Generate test fixtures' step succeeded on ubuntu-26.04, windows-latest (PowerShell mirror) and macos-latest, and the sub-test-support integration test consumed the manifest. The 10-minute long-GOP clip is opt-in and not generated in CI by design.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Test media fixtures are now synthesised rather than committed. scripts/gen-fixtures.sh plus its PowerShell mirror generate 1080p and 4K H.264 colour bars with timecode burn-in, a 29.97 drop-frame clip, a variable-frame-rate clip, an opt-in ten-minute long-GOP clip and WAV/FLAC audio-only files into the ignored fixtures/ directory, alongside a manifest.json recording each fixture name, exact nanosecond duration, rational frame rate and VFR flag. Tests reach them through the new sub-test-support crate (fixture, try_fixture, load_manifest, SUB_FIXTURES_DIR override, coded FixtureError), and CI generates the small fixtures before building. Verified with cargo fmt --check, clippy -D warnings, cargo test --workspace, and an end-to-end run of the generator against stub GStreamer binaries whose manifest the crate integration test consumed. AC #1 is left unchecked because this environment has no gst-launch-1.0, so no fixture was actually encoded here.
+Fixture generator scripts (bash and PowerShell) plus the sub-test-support crate; verified locally by dry-run and stub run, and by CI generating the fixtures on all three OSes.
 <!-- SECTION:FINAL_SUMMARY:END -->
