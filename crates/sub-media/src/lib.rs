@@ -38,6 +38,9 @@ pub mod codes {
     pub const DECODE_TIMEOUT: ErrorCode = ErrorCode::from_static("media.decode_timeout");
     /// The file was opened for decoding but carries no video stream.
     pub const NO_VIDEO_STREAM: ErrorCode = ErrorCode::from_static("media.no_video_stream");
+    /// A seek could not be performed: the pipeline refused it, or never
+    /// reached a state in which it could be seeked.
+    pub const SEEK_FAILED: ErrorCode = ErrorCode::from_static("media.seek_failed");
 }
 
 /// Initialises GStreamer once and returns its runtime version.
@@ -75,6 +78,7 @@ mod tests {
             super::codes::DECODE_FAILED,
             super::codes::DECODE_TIMEOUT,
             super::codes::NO_VIDEO_STREAM,
+            super::codes::SEEK_FAILED,
         ];
         for code in &codes {
             assert_eq!(code.domain(), "media", "wrong domain for {code}");
