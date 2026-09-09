@@ -94,6 +94,20 @@ CI prints the presence of every hardware encoder element in its "GStreamer
 diagnostics" step. Hosted runners have no GPU, so hardware elements register
 but cannot encode there; hardware verification tasks are manual.
 
+The editor answers the same question about the machine it is running on:
+
+```
+cargo run -p subordinate-cli -- diag            # JSON report
+cargo run -p subordinate-cli -- diag --compact  # the same report on one line
+```
+
+`diag` walks the GStreamer registry for every decoder and encoder the editor
+can use, grouped by vendor (`nvcodec`, `va`, `amf`, `vtenc`, `mf`, `x264`),
+with the plugin and version behind each element. A vendor that should be
+present on the current platform but is missing elements carries a `hint`
+naming the install step from this file. The GUI shows the same report in its
+"Hardware diagnostics" panel.
+
 ## Test media fixtures
 
 Media tests need deterministic sample files, and binaries are never committed.

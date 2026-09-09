@@ -3399,6 +3399,8 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-pbutils",
  "gstreamer-video",
+ "serde",
+ "serde_json",
  "sub-core",
  "sub-model",
  "sub-test-support",
@@ -3456,6 +3458,8 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "log",
+ "sub-core",
+ "sub-media",
  "sub-render",
 ]
 
@@ -3474,6 +3478,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "sub-core",
+ "sub-media",
  "tracing",
 ]
 

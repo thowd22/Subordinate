@@ -9,6 +9,8 @@
 use eframe::egui;
 use sub_render::{RenderContext, RenderError, describe_adapter, select_adapter};
 
+use crate::diagnostics::DiagnosticsPanel;
+
 /// Options for launching the application.
 #[derive(Debug, Clone, Default)]
 pub struct AppOptions {
@@ -40,6 +42,7 @@ pub struct SubordinateApp {
     options: AppOptions,
     frames_painted: u32,
     closing: bool,
+    diagnostics: DiagnosticsPanel,
 }
 
 impl SubordinateApp {
@@ -72,12 +75,18 @@ impl SubordinateApp {
             options,
             frames_painted: 0,
             closing: false,
+            diagnostics: DiagnosticsPanel::new(),
         })
     }
 
     /// The wgpu device shared with the compositor.
     pub fn render_context(&self) -> &RenderContext {
         &self.render
+    }
+
+    /// The hardware diagnostics panel.
+    pub fn diagnostics(&mut self) -> &mut DiagnosticsPanel {
+        &mut self.diagnostics
     }
 
     /// How many frames have been painted since startup.
@@ -104,6 +113,10 @@ impl eframe::App for SubordinateApp {
             self.render.backend_label(),
             self.render.describe()
         ));
+        if ui.button("Hardware diagnostics").clicked() {
+            self.diagnostics.open = !self.diagnostics.open;
+        }
+        self.diagnostics.show(ui.ctx());
 
         self.frames_painted = self.frames_painted.saturating_add(1);
 
