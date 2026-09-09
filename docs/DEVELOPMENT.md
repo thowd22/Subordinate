@@ -241,5 +241,27 @@ Nothing in the audio callback logs, allocates or locks.
 
 ## Project files
 
-A project is `name.sub` (JSON). Its sidecar directory `name.sub.d/` holds
-thumbnails, waveforms, proxies and autosave snapshots and is gitignored.
+A project is `name.sub` (JSON). Its sidecar directory `name.sub.d/` sits beside
+the project file and holds thumbnails, waveforms, proxies and autosave
+snapshots. The naming is mechanical: append `.d` to the project file name, so
+`doc-cut.sub` owns `doc-cut.sub.d/`. Everything in it is derived data and can
+be deleted at the cost of regenerating it, so it is never committed: the
+repository `.gitignore` carries
+
+```gitignore
+*.sub.d/
+```
+
+Add the same line to any repository that keeps `.sub` projects under version
+control. See docs/PLAN.md §5.6.
+
+`crates/sub-model/tests/fixtures/sample-project.sub` is a committed sample
+project (two sequences, three tracks each, clips, a crossfade, markers and two
+bins). `crates/sub-model/tests/golden.rs` checks that it loads and saves
+byte-identically and that the builder in that test still produces exactly those
+bytes, so any change to the on-disk format fails with a line diff. When such a
+change is intended, regenerate the fixture and commit its diff:
+
+```bash
+SUB_UPDATE_GOLDEN=1 cargo test -p sub-model --test golden
+```
