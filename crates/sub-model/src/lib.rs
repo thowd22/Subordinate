@@ -9,8 +9,9 @@
 //!
 //! - Every entity carries a typed [`ids`] newtype backed by a `UUIDv7`, stable
 //!   across save, load, undo and any plugin or MCP round-trip.
-//! - Every position and duration is a `RationalTime` from `sub-time`. There is
-//!   no float in this crate.
+//! - Every position and duration is a `RationalTime` from `sub-time`, and
+//!   every other parameter a [`params::Fixed6`]. No float is ever stored:
+//!   floats appear only in the conversions at the edges of [`params`].
 //!
 //! ```
 //! use sub_model::{
@@ -38,6 +39,7 @@ pub mod content;
 pub mod ids;
 pub mod marker;
 pub mod media;
+pub mod params;
 pub mod project;
 pub mod sequence;
 pub mod track;
@@ -46,6 +48,7 @@ pub use content::{ContentHash, MediaPath};
 pub use ids::{BinId, ClipId, MarkerId, MediaId, ProjectId, SequenceId, TrackId};
 pub use marker::Marker;
 pub use media::{AudioStream, Bin, MediaItem, ProxyState, StreamInfo, VideoStream};
+pub use params::{Fixed6, GainDb, Opacity, Point2, Scale2, Transform};
 pub use project::Project;
 pub use sequence::{
     ColorPrimaries, ColorSpace, ColorTags, Resolution, Sequence, SequenceSettings, TransferFunction,
@@ -69,6 +72,11 @@ pub mod codes {
     pub const INVALID_HASH: ErrorCode = ErrorCode::from_static("model.invalid_hash");
     /// A media file could not be opened or read while hashing it.
     pub const FILE_UNREADABLE: ErrorCode = ErrorCode::from_static("model.file_unreadable");
+    /// A clip parameter value is out of range or not a finite number.
+    pub const INVALID_PARAMETER: ErrorCode = ErrorCode::from_static("model.invalid_parameter");
+    /// A clip breaks one of its own invariants (negative durations, fades
+    /// longer than the clip).
+    pub const INVALID_CLIP: ErrorCode = ErrorCode::from_static("model.invalid_clip");
 }
 
 #[cfg(test)]
@@ -83,6 +91,8 @@ mod tests {
             codes::INVALID_PATH,
             codes::INVALID_HASH,
             codes::FILE_UNREADABLE,
+            codes::INVALID_PARAMETER,
+            codes::INVALID_CLIP,
         ] {
             assert_eq!(code.domain(), "model");
             assert!(sub_core::ErrorCode::parse(code.as_str()).is_ok());
