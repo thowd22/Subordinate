@@ -9,6 +9,9 @@
 //! - [`dispatch`] — the [`Dispatcher`], which maps method names to engine
 //!   commands and queries and turns every failure into the standard JSON-RPC
 //!   error wrapping a [`sub_core::SubError`].
+//! - [`events`] — per-connection change-event subscriptions: `events.subscribe`,
+//!   `events.unsubscribe` and the `events.changed` notifications a subscriber
+//!   receives.
 //! - [`endpoint`] — where the server listens: the per-user Unix socket or
 //!   Windows named pipe, and the lock file that advertises it.
 //! - [`transport`] — the [`transport::Server`] that serves that endpoint with
@@ -32,11 +35,13 @@
 
 pub mod dispatch;
 pub mod endpoint;
+pub mod events;
 pub mod rpc;
 pub mod transport;
 
 pub use dispatch::{AppliedResult, Dispatcher, HistoryResult, MethodInfo};
 pub use endpoint::{Address, Endpoint, LockFile, Transport};
+pub use events::{ChangedParams, Outbox, Session, SubscriptionId};
 pub use rpc::{
     Call, Incoming, Notification, Outgoing, Payload, Request, RequestId, Response, RpcError,
     Version, error_codes,
@@ -69,6 +74,11 @@ pub mod codes {
     pub const NOT_RUNNING: ErrorCode = ErrorCode::from_static("command.not_running");
     /// The socket or pipe itself failed.
     pub const TRANSPORT_IO: ErrorCode = ErrorCode::from_static("command.transport_io");
+    /// A method that acts on a client connection was called without one.
+    pub const NO_SESSION: ErrorCode = ErrorCode::from_static("command.no_session");
+    /// A subscription id is not one this connection holds.
+    pub const UNKNOWN_SUBSCRIPTION: ErrorCode =
+        ErrorCode::from_static("command.unknown_subscription");
 }
 
 #[cfg(test)]
@@ -87,6 +97,8 @@ mod tests {
             codes::LOCK_FILE_INVALID,
             codes::NOT_RUNNING,
             codes::TRANSPORT_IO,
+            codes::NO_SESSION,
+            codes::UNKNOWN_SUBSCRIPTION,
         ] {
             assert_eq!(code.domain(), "command");
             assert_eq!(

@@ -55,6 +55,7 @@ use tracing::{debug, warn};
 
 use crate::codes;
 use crate::endpoint::{Address, Endpoint, LockFile};
+use crate::events::{DEFAULT_OUTBOX_CAPACITY, Outbox, Session};
 use crate::rpc::{Notification, Request, RequestId, Response};
 use crate::{Dispatcher, RpcError};
 
@@ -74,6 +75,12 @@ const ACCEPT_POLL: Duration = Duration::from_millis(5);
 /// How long [`Client::connect_to`] keeps trying an address that is there but
 /// momentarily busy.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How many messages one connection may have waiting to be written.
+///
+/// A client that lets this fill has stopped reading its socket; it is dropped
+/// rather than allowed to slow anything down (see [`Outbox`]).
+const OUTBOX_CAPACITY: usize = DEFAULT_OUTBOX_CAPACITY;
 
 /// Whether a failed connection means "come back in a moment" rather than
 /// "nobody is there".
@@ -285,9 +292,46 @@ fn accept_loop(
 }
 
 /// Serves one connection until its client goes away.
+///
+/// The connection has two threads: this one reads and dispatches, and a writer
+/// owns the socket's sending half. Everything sent — responses and the
+/// `events.changed` notifications a subscription produces — is queued on the
+/// connection's [`Session`], so the two never interleave mid-line and neither
+/// one can block the other.
 fn serve(stream: &Stream, dispatcher: &Dispatcher) {
+    let session = Session::new(OUTBOX_CAPACITY);
+    let sending = match stream.try_clone() {
+        Ok(sending) => sending,
+        Err(error) => {
+            warn!(%error, "a client connection could not be duplicated");
+            return;
+        }
+    };
+    let outbox = Arc::clone(session.outbox());
+    let writing = thread::Builder::new()
+        .name("sub-command-write".to_owned())
+        .spawn(move || write_loop(&sending, &outbox));
+    let writing = match writing {
+        Ok(writing) => writing,
+        Err(error) => {
+            warn!(%error, "a client writer thread could not be started");
+            return;
+        }
+    };
+
+    read_loop(stream, dispatcher, &session);
+
+    // Stopping the subscriptions first means no pump can queue anything after
+    // the outbox is drained; closing the outbox then ends the writer.
+    session.close();
+    if writing.join().is_err() {
+        warn!("a client writer thread panicked");
+    }
+}
+
+/// Reads and dispatches until the client goes away or stops reading.
+fn read_loop(stream: &Stream, dispatcher: &Dispatcher, session: &Session) {
     let mut reader = BufReader::new(stream);
-    let mut writer = stream;
     let mut line = Vec::new();
     loop {
         line.clear();
@@ -298,7 +342,7 @@ fn serve(stream: &Stream, dispatcher: &Dispatcher) {
                 if error.kind() != ErrorKind::UnexpectedEof {
                     warn!(%error, "a client connection failed while reading");
                 }
-                let _ = respond(&mut writer, &oversized_response(&error));
+                session.send(oversized_response(&error));
                 return;
             }
         }
@@ -307,7 +351,7 @@ fn serve(stream: &Stream, dispatcher: &Dispatcher) {
             continue;
         }
         let answer = match std::str::from_utf8(text) {
-            Ok(text) => dispatcher.handle_text(text),
+            Ok(text) => dispatcher.handle_text_in(Some(session), text),
             Err(error) => Some(
                 serde_json::to_string(&Response::error(
                     None,
@@ -317,9 +361,23 @@ fn serve(stream: &Stream, dispatcher: &Dispatcher) {
             ),
         };
         if let Some(answer) = answer
-            && let Err(error) = respond(&mut writer, &answer)
+            && !session.send(answer)
         {
+            debug!("a client that stopped reading was dropped");
+            return;
+        }
+    }
+}
+
+/// Writes everything the session queues, until it is closed and drained.
+fn write_loop(stream: &Stream, outbox: &Outbox) {
+    let mut writer = stream;
+    while let Some(message) = outbox.take() {
+        if let Err(error) = respond(&mut writer, &message) {
             debug!(%error, "a client connection failed while writing");
+            // Nothing more can reach this client, so let the readers and the
+            // event pumps notice at their next send.
+            outbox.close();
             return;
         }
     }
@@ -526,11 +584,17 @@ fn restrict_socket(_address: &Address) -> SubResult<()> {
 /// The client is deliberately blocking and single-threaded: one message out,
 /// one message back. That is what a CLI invocation and the MCP bridge's request
 /// loop want, and it keeps the framing obvious.
+///
+/// A connection that has subscribed to events also receives notifications,
+/// which arrive whenever the server has one to send. [`Client::call`] keeps
+/// them out of its own way by setting them aside; [`Client::next_notification`]
+/// and [`Client::recv_notification`] are how a caller collects them.
 #[derive(Debug)]
 pub struct Client {
     reader: BufReader<Stream>,
     writer: Stream,
     next_id: i64,
+    notifications: std::collections::VecDeque<Notification>,
 }
 
 impl Client {
@@ -594,6 +658,7 @@ impl Client {
             reader: BufReader::new(stream),
             writer,
             next_id: 1,
+            notifications: std::collections::VecDeque::new(),
         })
     }
 
@@ -667,17 +732,23 @@ impl Client {
                 .with_cause(&error)
         })?;
         self.send(&text)?;
-        let reply = self.receive()?.ok_or_else(|| {
-            SubError::new(
-                codes::TRANSPORT_IO,
-                "the server closed the connection without answering",
-            )
-        })?;
-        let response: Response = serde_json::from_str(&reply).map_err(|error| {
-            SubError::new(codes::TRANSPORT_IO, "the reply was not a JSON-RPC response")
-                .with_detail("reply", reply.clone())
-                .with_cause(&error)
-        })?;
+        let response = loop {
+            let reply = self.receive()?.ok_or_else(|| {
+                SubError::new(
+                    codes::TRANSPORT_IO,
+                    "the server closed the connection without answering",
+                )
+            })?;
+            if let Some(notification) = as_notification(&reply) {
+                self.notifications.push_back(notification);
+                continue;
+            }
+            break serde_json::from_str::<Response>(&reply).map_err(|error| {
+                SubError::new(codes::TRANSPORT_IO, "the reply was not a JSON-RPC response")
+                    .with_detail("reply", reply.clone())
+                    .with_cause(&error)
+            })?;
+        };
         if response.id.as_ref() != Some(&request.id) && !response.is_error() {
             return Err(
                 SubError::new(codes::TRANSPORT_IO, "the reply answered another request")
@@ -716,6 +787,51 @@ impl Client {
             )),
         }
     }
+
+    /// Takes a notification that has already arrived, without reading the
+    /// socket.
+    pub fn next_notification(&mut self) -> Option<Notification> {
+        self.notifications.pop_front()
+    }
+
+    /// Waits for the next notification, returning `None` when the server
+    /// closed the connection.
+    ///
+    /// A response arriving here means a request was left unanswered by a
+    /// caller, which is a programming error rather than a transport one, so it
+    /// is reported as `command.transport_io`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `command.transport_io` when the connection fails or a response
+    /// arrives where a notification was expected.
+    pub fn recv_notification(&mut self) -> SubResult<Option<Notification>> {
+        if let Some(notification) = self.notifications.pop_front() {
+            return Ok(Some(notification));
+        }
+        let Some(message) = self.receive()? else {
+            return Ok(None);
+        };
+        as_notification(&message).map(Some).ok_or_else(|| {
+            SubError::new(
+                codes::TRANSPORT_IO,
+                "a response arrived where a notification was expected",
+            )
+            .with_detail("message", message)
+        })
+    }
+}
+
+/// Reads one line as a notification, or `None` when it is something else.
+///
+/// A response always carries an `id` and a notification never does, so the two
+/// are told apart without guessing.
+fn as_notification(message: &str) -> Option<Notification> {
+    let value: Value = serde_json::from_str(message).ok()?;
+    if !value.is_object() || value.get("method").is_none() || value.get("id").is_some() {
+        return None;
+    }
+    serde_json::from_value(value).ok()
 }
 
 #[cfg(test)]

@@ -13,6 +13,10 @@
 //!   are not commands: [`PROJECT_GET`], [`PROJECT_REVISION`], [`HISTORY_GET`],
 //!   [`EDIT_UNDO`], [`EDIT_REDO`], the group methods, and
 //!   [`SYSTEM_LIST_METHODS`].
+//! - **Session methods.** [`EVENTS_SUBSCRIBE`] and [`EVENTS_UNSUBSCRIBE`] act
+//!   on the connection that called them rather than on the engine, so they are
+//!   served only when a [`Session`] is passed in with the message — the
+//!   `*_in` methods below — and answer `command.no_session` otherwise.
 //!
 //! Anything else — a plugin-contributed method, the transport's own
 //! housekeeping — goes on with [`Dispatcher::register`], so later work extends
@@ -57,6 +61,10 @@ use sub_edit::{
 use sub_model::json;
 
 use crate::codes;
+use crate::events::{
+    EVENTS_SUBSCRIBE, EVENTS_UNSUBSCRIBE, Session, SubscribeResult, UnsubscribeParams,
+    UnsubscribeResult,
+};
 use crate::rpc::{Call, Incoming, Outgoing, Request, RequestId, Response, RpcError, error_codes};
 
 /// The whole project as JSON, with the revision it was read at.
@@ -81,12 +89,17 @@ pub const SYSTEM_LIST_METHODS: &str = "system.list_methods";
 /// What a method call does, once the name has been resolved.
 type Handler = Box<dyn Fn(&EngineHandle, Value) -> SubResult<Value> + Send + Sync>;
 
+/// What a method that acts on the calling connection does.
+type SessionHandler = Box<dyn Fn(&EngineHandle, &Session, Value) -> SubResult<Value> + Send + Sync>;
+
 /// How a method reaches the engine.
 enum Method {
     /// A registered command kind, applied through the engine's registry.
     Command,
     /// A query or history operation.
     Query(Handler),
+    /// A method acting on the connection that called it.
+    Session(SessionHandler),
 }
 
 impl Method {
@@ -95,6 +108,7 @@ impl Method {
         match self {
             Self::Command => "command",
             Self::Query(_) => "query",
+            Self::Session(_) => "session",
         }
     }
 }
@@ -162,7 +176,8 @@ impl From<HistorySummary> for HistoryResult {
 pub struct MethodInfo {
     /// The method name.
     pub name: String,
-    /// `command` for an undoable mutation, `query` for everything else.
+    /// `command` for an undoable mutation, `session` for a method acting on
+    /// the calling connection, `query` for everything else.
     pub kind: String,
 }
 
@@ -225,6 +240,7 @@ impl Dispatcher {
             methods.insert(kind.to_owned(), Method::Command);
         }
         let mut dispatcher = Self { engine, methods };
+        dispatcher.install_events();
         dispatcher.install_queries();
         dispatcher
     }
@@ -283,7 +299,14 @@ impl Dispatcher {
     /// Runs one request and builds its response.
     #[must_use]
     pub fn call(&self, request: &Request) -> Response {
-        match self.invoke(&request.method, request.params.clone()) {
+        self.call_in(None, request)
+    }
+
+    /// Runs one request on behalf of `session`, which may serve the session
+    /// methods.
+    #[must_use]
+    pub fn call_in(&self, session: Option<&Session>, request: &Request) -> Response {
+        match self.invoke_in(session, &request.method, request.params.clone()) {
             Ok(value) => Response::result(request.id.clone(), value),
             Err(error) => {
                 Response::error(Some(request.id.clone()), RpcError::from_sub_error(&error))
@@ -294,10 +317,17 @@ impl Dispatcher {
     /// Runs one call, answering only if it was a request.
     #[must_use]
     pub fn handle_call(&self, call: &Call) -> Option<Response> {
+        self.handle_call_in(None, call)
+    }
+
+    /// Runs one call on behalf of `session`, answering only if it was a
+    /// request.
+    #[must_use]
+    pub fn handle_call_in(&self, session: Option<&Session>, call: &Call) -> Option<Response> {
         match call {
-            Call::Request(request) => Some(self.call(request)),
+            Call::Request(request) => Some(self.call_in(session, request)),
             Call::Notification(notification) => {
-                let _ = self.invoke(&notification.method, notification.params.clone());
+                let _ = self.invoke_in(session, &notification.method, notification.params.clone());
                 None
             }
         }
@@ -309,12 +339,22 @@ impl Dispatcher {
     /// a single notification.
     #[must_use]
     pub fn handle_incoming(&self, incoming: &Incoming) -> Option<Outgoing> {
+        self.handle_incoming_in(None, incoming)
+    }
+
+    /// Runs a whole message on behalf of `session`.
+    #[must_use]
+    pub fn handle_incoming_in(
+        &self,
+        session: Option<&Session>,
+        incoming: &Incoming,
+    ) -> Option<Outgoing> {
         match incoming {
-            Incoming::Single(call) => self.handle_call(call).map(Outgoing::Single),
+            Incoming::Single(call) => self.handle_call_in(session, call).map(Outgoing::Single),
             Incoming::Batch(calls) => {
                 let responses: Vec<Response> = calls
                     .iter()
-                    .filter_map(|call| self.handle_call(call))
+                    .filter_map(|call| self.handle_call_in(session, call))
                     .collect();
                 (!responses.is_empty()).then_some(Outgoing::Batch(responses))
             }
@@ -329,6 +369,12 @@ impl Dispatcher {
     /// discard the rest.
     #[must_use]
     pub fn handle_value(&self, message: &Value) -> Option<Outgoing> {
+        self.handle_value_in(None, message)
+    }
+
+    /// Runs one already-parsed JSON message on behalf of `session`.
+    #[must_use]
+    pub fn handle_value_in(&self, session: Option<&Session>, message: &Value) -> Option<Outgoing> {
         match message {
             Value::Array(elements) if elements.is_empty() => Some(Outgoing::Single(
                 Response::error(None, error_codes::invalid_request("the batch is empty")),
@@ -337,14 +383,14 @@ impl Dispatcher {
                 let responses: Vec<Response> = elements
                     .iter()
                     .filter_map(|element| match parse_call(element) {
-                        Ok(call) => self.handle_call(&call),
+                        Ok(call) => self.handle_call_in(session, &call),
                         Err(error) => Some(Response::error(recover_id(element), error)),
                     })
                     .collect();
                 (!responses.is_empty()).then_some(Outgoing::Batch(responses))
             }
             other => match parse_call(other) {
-                Ok(call) => self.handle_call(&call).map(Outgoing::Single),
+                Ok(call) => self.handle_call_in(session, &call).map(Outgoing::Single),
                 Err(error) => Some(Outgoing::Single(Response::error(recover_id(other), error))),
             },
         }
@@ -361,8 +407,21 @@ impl Dispatcher {
     /// Never in practice: a [`Response`] is plain JSON-compatible data.
     #[must_use]
     pub fn handle_text(&self, message: &str) -> Option<String> {
+        self.handle_text_in(None, message)
+    }
+
+    /// Runs one message as it arrived on the wire on behalf of `session`.
+    ///
+    /// This is what the transport calls: the connection's session is what
+    /// makes [`EVENTS_SUBSCRIBE`] and [`EVENTS_UNSUBSCRIBE`] serviceable.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: a [`Response`] is plain JSON-compatible data.
+    #[must_use]
+    pub fn handle_text_in(&self, session: Option<&Session>, message: &str) -> Option<String> {
         let outgoing = match serde_json::from_str::<Value>(message) {
-            Ok(value) => self.handle_value(&value),
+            Ok(value) => self.handle_value_in(session, &value),
             Err(error) => Some(Outgoing::Single(Response::error(
                 None,
                 error_codes::parse_error(error.to_string()),
@@ -378,6 +437,22 @@ impl Dispatcher {
     /// `command.unknown_method`, `command.invalid_params`, or whatever the
     /// engine returns.
     pub fn invoke(&self, method: &str, params: Option<Value>) -> SubResult<Value> {
+        self.invoke_in(None, method, params)
+    }
+
+    /// Resolves a method name and runs it on behalf of `session`.
+    ///
+    /// # Errors
+    ///
+    /// `command.unknown_method`, `command.invalid_params`,
+    /// `command.no_session` when a session method is called without a
+    /// connection, or whatever the engine returns.
+    pub fn invoke_in(
+        &self,
+        session: Option<&Session>,
+        method: &str,
+        params: Option<Value>,
+    ) -> SubResult<Value> {
         let Some(entry) = self.methods.get(method) else {
             return Err(SubError::new(codes::UNKNOWN_METHOD, "no such method")
                 .with_detail("method", method));
@@ -392,7 +467,33 @@ impl Dispatcher {
                 to_value(&AppliedResult::from(&applied))
             }
             Method::Query(handler) => handler(&self.engine, params),
+            Method::Session(handler) => {
+                let session = session.ok_or_else(|| {
+                    SubError::new(
+                        codes::NO_SESSION,
+                        "this method is only served on a client connection",
+                    )
+                    .with_detail("method", method)
+                })?;
+                handler(&self.engine, session, params)
+            }
         }
+    }
+
+    /// Puts the per-connection event methods on the table.
+    fn install_events(&mut self) {
+        self.add_session(EVENTS_SUBSCRIBE, |engine, session, params| {
+            typed::<NoParams>(params)?;
+            let subscription = session.subscribe(engine)?;
+            to_value(&SubscribeResult { subscription })
+        });
+        self.add_session(EVENTS_UNSUBSCRIBE, |_, session, params| {
+            let params: UnsubscribeParams = typed(params)?;
+            session.unsubscribe(&params.subscription)?;
+            to_value(&UnsubscribeResult {
+                subscription: params.subscription,
+            })
+        });
     }
 
     /// Puts the query and history methods on the table.
@@ -468,6 +569,17 @@ impl Dispatcher {
             .insert(name.to_owned(), Method::Query(Box::new(handler)));
         debug_assert!(previous.is_none(), "built-in method {name} collides");
     }
+
+    /// Adds a built-in method that acts on the calling connection.
+    fn add_session<F>(&mut self, name: &str, handler: F)
+    where
+        F: Fn(&EngineHandle, &Session, Value) -> SubResult<Value> + Send + Sync + 'static,
+    {
+        let previous = self
+            .methods
+            .insert(name.to_owned(), Method::Session(Box::new(handler)));
+        debug_assert!(previous.is_none(), "built-in method {name} collides");
+    }
 }
 
 /// Serialises a result value.
@@ -531,6 +643,7 @@ mod tests {
     use sub_model::{Project, Sequence, SequenceId, SequenceSettings};
 
     use super::{Dispatcher, EDIT_UNDO, PROJECT_GET, SYSTEM_LIST_METHODS};
+    use crate::events::{EVENTS_SUBSCRIBE, EVENTS_UNSUBSCRIBE, Session};
     use crate::rpc::{Notification, Outgoing, Request, RequestId, error_codes};
 
     /// A dispatcher over an engine holding a project with one sequence.
@@ -858,6 +971,59 @@ mod tests {
         assert_eq!(
             response.error_ref().unwrap().code,
             error_codes::INVALID_REQUEST,
+        );
+    }
+
+    #[test]
+    fn session_methods_need_a_connection() {
+        let (_engine, dispatcher) = fixture();
+        let response = dispatcher.call(&Request::new(1, EVENTS_SUBSCRIBE, None));
+        let error = response.error_ref().unwrap();
+        assert_eq!(
+            error.sub_error().unwrap().code.as_str(),
+            "command.no_session",
+        );
+    }
+
+    #[test]
+    fn a_session_subscribes_and_unsubscribes() {
+        let (engine, dispatcher) = fixture();
+        let session = Session::new(8);
+
+        let subscribed = dispatcher
+            .call_in(Some(&session), &Request::new(1, EVENTS_SUBSCRIBE, None))
+            .value()
+            .unwrap()
+            .clone();
+        let id = subscribed["subscription"].clone();
+        assert_eq!(engine.handle().subscriber_count(), 1);
+
+        let stopped = dispatcher.call_in(
+            Some(&session),
+            &Request::new(
+                2,
+                EVENTS_UNSUBSCRIBE,
+                Some(json!({ "subscription": id.clone() })),
+            ),
+        );
+        assert_eq!(stopped.value().unwrap()["subscription"], id);
+        assert_eq!(session.subscription_count(), 0);
+    }
+
+    #[test]
+    fn the_event_methods_are_listed_as_session_methods() {
+        let (_engine, dispatcher) = fixture();
+        let listed = dispatcher.invoke(SYSTEM_LIST_METHODS, None).unwrap();
+        let methods = listed["methods"].as_array().unwrap().clone();
+        let subscribe = methods
+            .iter()
+            .find(|method| method["name"] == EVENTS_SUBSCRIBE)
+            .expect("events.subscribe is listed");
+        assert_eq!(subscribe["kind"], "session");
+        assert!(
+            methods
+                .iter()
+                .any(|method| method["name"] == EVENTS_UNSUBSCRIBE)
         );
     }
 
