@@ -1,11 +1,11 @@
 ---
 id: TASK-114
 title: RunsOn runner definitions for NVIDIA and AMD GPU jobs on Linux and Windows
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-114'
 created_date: '2026-09-09 17:29'
-updated_date: '2026-09-09 21:35'
+updated_date: '2026-09-09 21:37'
 labels:
   - infra
   - gpu
@@ -29,8 +29,7 @@ Workflows should reference stable runner names rather than raw EC2 parameters. R
 <!-- AC:BEGIN -->
 - [x] #1 .github/runs-on.yml defines runners gpu-nvidia-linux (g4dn.xlarge, ubuntu24-gpu-x64, spot preferred), gpu-amd-linux (g4ad.xlarge), gpu-nvidia-windows and gpu-amd-windows (custom AMI placeholder), each with a cost cap
 - [x] #2 A workflow_dispatch smoke job on gpu-nvidia-linux prints nvidia-smi and gst-inspect-1.0 --exists nvh264enc succeeds
-- [ ] #3 A workflow_dispatch smoke job on gpu-amd-linux prints the DRM device and vainfo, and gst-inspect-1.0 --exists vah264enc succeeds after installing the va plugin
-- [ ] #4 A workflow_dispatch smoke job on the self-hosted box runner (labels self-hosted, linux, box, amd-gpu) prints vainfo encode profiles, confirms vah264enc, vah265enc, vah264dec and vapostproc exist, and hardware-encodes a 1080p clip that gst-discoverer validates as H.264
+- [x] #3 A workflow_dispatch smoke job on the self-hosted box runner (labels self-hosted, linux, box, amd-gpu) prints vainfo encode profiles, confirms vah264enc, vah265enc, vah264dec and vapostproc exist, and hardware-encodes a 1080p clip that gst-discoverer validates as H.264
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -66,3 +65,9 @@ AC #2 and #3 left unchecked: they require the EC2 G-family vCPU quota increase (
 
 2026-09-09 21:35 UTC: AMD target moved from AWS g4ad (retired) to 'box', the user's mini PC (Ubuntu 26.04.1, AMD Cezanne APU, radeonsi VA-API with H.264/HEVC EncSlice, GStreamer 1.28.2 from apt). Registered as a self-hosted GitHub runner (service, labels self-hosted,linux,x64,box,amd-gpu,vaapi), admin2 added to render/video groups, Rust 1.93.1 installed. Manual hardware encode via vah264enc produced a valid 1080p H.264 High MP4. Criterion 3 (g4ad) is superseded by the new criterion 4; gpu-smoke.yml AMD job retargeted to box.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Runner definitions in .github/runs-on.yml (NVIDIA g4dn on RunsOn spot with on-demand fallback; Windows placeholders pending the driver AMI) and gpu-smoke.yml. Verified by run 34407687696: NVIDIA T4 job on RunsOn (nvidia-smi, nvh264enc present) and AMD job on the self-hosted box runner (vainfo EncSlice profiles, vah264enc/vah265enc/vah264dec/vapostproc present, 1080p hardware H.264 encode validated by gst-discoverer). AWS has no AMD GPU instances, so the AMD target lives on box permanently.
+<!-- SECTION:FINAL_SUMMARY:END -->
