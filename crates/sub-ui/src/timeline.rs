@@ -171,6 +171,24 @@ impl ZoomLevel {
         Self::from_parts_clamped(numerator, denominator)
     }
 
+    /// This zoom multiplied by the fraction `numerator / denominator`,
+    /// clamped to the ladder.
+    ///
+    /// [`ZoomLevel::zoomed`] moves in whole octaves, which is what a keyboard
+    /// shortcut wants; a wheel or pinch gesture arrives as a finer factor and
+    /// gets it exactly, as a fraction, through here. A zero part leaves the
+    /// zoom alone rather than collapsing it.
+    #[must_use]
+    pub fn scaled(self, numerator: u32, denominator: u32) -> Self {
+        if numerator == 0 || denominator == 0 {
+            return self;
+        }
+        Self::from_parts_clamped(
+            u128::from(self.pixels_per_frame.numerator()) * u128::from(numerator),
+            u128::from(self.pixels_per_frame.denominator()) * u128::from(denominator),
+        )
+    }
+
     /// The scale, in pixels per frame.
     #[must_use]
     pub const fn pixels_per_frame(self) -> Rational {
@@ -626,6 +644,21 @@ mod tests {
         assert_eq!(zoom(3, 1).zoomed(-5).zoomed(5), zoom(3, 1));
         assert!(ZoomLevel::ONE.is_frame_resolvable());
         assert!(!ZoomLevel::ONE.zoomed(-1).is_frame_resolvable());
+    }
+
+    #[test]
+    fn scaling_by_a_fraction_is_exact_and_clamped() {
+        // A wheel notch: a fifth wider, and exactly a fifth narrower again.
+        assert_eq!(ZoomLevel::ONE.scaled(6, 5), zoom(6, 5));
+        assert_eq!(ZoomLevel::ONE.scaled(6, 5).scaled(5, 6), ZoomLevel::ONE);
+        // The fraction is reduced, so the same scale is the same level.
+        assert_eq!(ZoomLevel::ONE.scaled(4096, 2048), zoom(2, 1));
+        // Either end of the ladder holds.
+        assert_eq!(ZoomLevel::MAX.scaled(2, 1), ZoomLevel::MAX);
+        assert_eq!(ZoomLevel::MIN.scaled(1, 2), ZoomLevel::MIN);
+        // A zero part is a no-op rather than a collapsed timeline.
+        assert_eq!(ZoomLevel::ONE.scaled(0, 1), ZoomLevel::ONE);
+        assert_eq!(ZoomLevel::ONE.scaled(1, 0), ZoomLevel::ONE);
     }
 
     #[test]
