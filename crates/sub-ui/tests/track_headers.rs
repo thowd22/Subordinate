@@ -6,6 +6,7 @@
 //! Command API and undone, which is the whole contract of the header column.
 
 use eframe::egui::{self, Pos2, Rect, Vec2};
+use sub_audio::MeterLevels;
 use sub_edit::commands::SetClipParams;
 use sub_edit::{Command, History, codes};
 use sub_model::params::Opacity;
@@ -225,6 +226,70 @@ fn clicking_the_mute_and_lock_toggles_raises_undoable_actions() {
         let track = &project.sequences[0].tracks[0];
         assert!(!track.muted && !track.locked, "the action undoes");
     }
+}
+
+/// Every filled rectangle in `shapes`, with the colour it was filled in.
+fn filled_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<(Rect, egui::Color32)> {
+    fn walk(shape: &egui::Shape, into: &mut Vec<(Rect, egui::Color32)>) {
+        match shape {
+            egui::Shape::Rect(rect) => into.push((rect.rect, rect.fill)),
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, into);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in shapes {
+        walk(&clipped.shape, &mut found);
+    }
+    found
+}
+
+#[test]
+fn a_track_header_paints_the_level_meter_it_was_fed_and_lights_it_on_a_clip() {
+    let (project, sequence) = scene(2);
+    let mut panel = TimelinePanel::new(RATE);
+    let ctx = egui::Context::default();
+    // A frame first, so the header rectangles are known.
+    frame(&ctx, &mut panel, &project, &sequence, 1, Vec::new());
+
+    let first = sequence.tracks[0].id;
+    panel
+        .header_state_mut()
+        .update_meter(first, MeterLevels::new(1.2, 0.9), 1.0 / 60.0);
+    assert!(
+        panel
+            .header_state()
+            .meter(first)
+            .expect("a meter")
+            .clipping(),
+        "the header holds the clip the callback published"
+    );
+
+    let (_, shapes) = frame(&ctx, &mut panel, &project, &sequence, 1, Vec::new());
+    let header = panel.header_rect(0).expect("a painted header");
+    let meter = HeaderLayout::new(header).meter;
+    let lit: Vec<_> = filled_rects(&shapes)
+        .into_iter()
+        .filter(|(rect, color)| *color == sub_ui::CLIP_COLOR && meter.intersects(*rect))
+        .collect();
+    assert!(
+        !lit.is_empty(),
+        "the clipped meter is painted in the first header's meter rect {meter:?}"
+    );
+
+    // The second track was never fed, so nothing of its meter is lit.
+    let second = panel.header_rect(1).expect("a painted header");
+    let second_meter = HeaderLayout::new(second).meter;
+    assert!(
+        filled_rects(&shapes)
+            .into_iter()
+            .all(|(rect, color)| color != sub_ui::CLIP_COLOR || !second_meter.intersects(rect)),
+        "an unfed track's meter stays dark"
+    );
 }
 
 #[test]

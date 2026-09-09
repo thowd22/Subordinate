@@ -7,12 +7,14 @@
 //! GStreamer pipeline (decision-4): see [`decode`].
 
 pub mod decode;
+pub mod meter;
 pub mod mixer;
 pub mod offline;
 pub mod output;
 pub mod resample;
 
 pub use decode::{AudioInfo, Block, FileDecoder, Pcm, decode_file, probe_audio};
+pub use meter::{MeterBank, MeterLevels, levels_of};
 pub use mixer::{
     ClipSpec, MixGraph, MixGraphBuilder, Mixer, MixerConfig, MixerControl, TrackSpec, mixer,
 };

@@ -64,6 +64,7 @@ use sub_time::{Rational, RationalTime, Rounding};
 
 use crate::codes;
 use crate::decode::MAX_CHANNELS;
+use crate::meter::{MeterBank, levels_of};
 use crate::resample::PcmReader;
 
 /// The lowest gain the mixer accepts, in decibels. A bus at this level is
@@ -639,6 +640,8 @@ pub fn mixer(graph: Arc<MixGraph>, config: MixerConfig) -> SubResult<(MixerContr
         graph,
         slots,
         scratch: vec![0.0; config.max_block_frames * usize::from(channels)],
+        track_buf: vec![0.0; config.max_block_frames * usize::from(channels)],
+        meters: None,
         max_block_frames: config.max_block_frames,
         position: 0,
         underrun_frames: 0,
@@ -821,6 +824,20 @@ impl MixerControl {
     }
 }
 
+/// The scratch space one render pass borrows from the [`Mixer`], kept apart
+/// from the graph it reads so the borrow checker can see the two do not
+/// overlap.
+struct RenderScratch<'a> {
+    /// The reading end of each clip's ring, indexed by slot.
+    slots: &'a mut [Option<PcmReader>],
+    /// Room for one clip's frames within the block.
+    clip: &'a mut [f32],
+    /// Room for one track's frames within the block.
+    lane: &'a mut [f32],
+    /// Where levels are published, when a bank was attached.
+    meters: Option<&'a MeterBank>,
+}
+
 /// The audio callback's half of a mixer.
 ///
 /// [`Mixer::process`] is the only method the real-time thread calls, and it
@@ -832,6 +849,13 @@ pub struct Mixer {
     slots: Vec<Option<PcmReader>>,
     /// Preallocated room for one clip's frames within a block.
     scratch: Vec<f32>,
+    /// Preallocated room for one track's frames within a block. A track is
+    /// summed here first so that its own level can be measured before it
+    /// reaches the master.
+    track_buf: Vec<f32>,
+    /// Where per-track and master levels are published, when the engine
+    /// attached a bank.
+    meters: Option<Arc<MeterBank>>,
     /// The longest block `scratch` can hold.
     max_block_frames: usize,
     /// The transport position, in frames from sequence zero.
@@ -879,14 +903,13 @@ impl Mixer {
         while done < total {
             let frames = (total - done).min(self.max_block_frames);
             let block = &mut out[done * channels..(done + frames) * channels];
-            let underruns = Self::render(
-                &self.graph,
-                &mut self.slots,
-                &mut self.scratch,
-                block,
-                self.position,
-                frames,
-            );
+            let mut work = RenderScratch {
+                slots: &mut self.slots,
+                clip: &mut self.scratch,
+                lane: &mut self.track_buf,
+                meters: self.meters.as_deref(),
+            };
+            let underruns = Self::render(&self.graph, &mut work, block, self.position, frames);
             self.underrun_frames = self.underrun_frames.saturating_add(underruns);
             self.position += frames as u64;
             done += frames;
@@ -930,6 +953,23 @@ impl Mixer {
         self.slots.get(index).is_some_and(Option::is_some)
     }
 
+    /// Publishes levels into `meters` from every block this mixer renders.
+    ///
+    /// Called on the engine thread before the mixer is handed to the callback.
+    /// Tracks are metered by their position in the graph, post-fader, and the
+    /// master after the master fader; a graph with more tracks than the bank
+    /// has cells leaves the extra ones unmetered.
+    #[must_use]
+    pub fn with_meters(mut self, meters: Arc<MeterBank>) -> Self {
+        self.meters = Some(meters);
+        self
+    }
+
+    /// The bank this mixer publishes levels into, when one was attached.
+    pub fn meters(&self) -> Option<&Arc<MeterBank>> {
+        self.meters.as_ref()
+    }
+
     /// Swaps in whatever the engine has published, handing back what it
     /// displaces.
     ///
@@ -971,23 +1011,39 @@ impl Mixer {
     }
 
     /// Sums every clip that overlaps the block into `out`, applies the master
-    /// bus and returns the frames the rings could not supply.
+    /// bus, publishes the levels and returns the frames the rings could not
+    /// supply.
+    ///
+    /// Each track is summed into `track_buf` first: that is where its
+    /// post-fader level is measured, and adding a whole track to `out` at once
+    /// costs no more than adding its clips one at a time did. The master level
+    /// is measured last, after the master fader, so it is what the device
+    /// receives.
     #[allow(
         clippy::cast_possible_truncation,
         reason = "an overlap within one block always fits a usize"
     )]
     fn render(
         graph: &MixGraph,
-        slots: &mut [Option<PcmReader>],
-        scratch: &mut [f32],
+        work: &mut RenderScratch<'_>,
         out: &mut [f32],
         position: u64,
         frames: usize,
     ) -> u64 {
+        let RenderScratch {
+            slots,
+            clip: scratch,
+            lane: track_buf,
+            meters,
+        } = work;
+        let meters = *meters;
         let channels = usize::from(graph.channels);
         let block_end = position + frames as u64;
+        let samples = frames * channels;
         let mut underruns = 0u64;
-        for track in &graph.tracks {
+        for (index, track) in graph.tracks.iter().enumerate() {
+            let lane = &mut track_buf[..samples];
+            lane.fill(0.0);
             for clip in &track.clips {
                 let from = clip.start.max(position);
                 let to = clip.end().min(block_end);
@@ -1012,13 +1068,19 @@ impl Mixer {
                 let at = (from - position) as usize;
                 for frame in 0..taken {
                     let factor = gain * clip.envelope(offset + frame as u64);
-                    let out_frame = at + frame;
+                    let lane_frame = at + frame;
                     let src = &scratch[frame * channels..(frame + 1) * channels];
-                    let dst = &mut out[out_frame * channels..(out_frame + 1) * channels];
+                    let dst = &mut lane[lane_frame * channels..(lane_frame + 1) * channels];
                     for (sample, value) in dst.iter_mut().zip(src) {
                         *sample += value * factor;
                     }
                 }
+            }
+            if let Some(meters) = meters {
+                meters.publish_track(index, levels_of(lane));
+            }
+            for (sample, value) in out[..samples].iter_mut().zip(lane.iter()) {
+                *sample += *value;
             }
         }
         let master = if graph.master_muted {
@@ -1026,8 +1088,14 @@ impl Mixer {
         } else {
             graph.master_gain
         };
-        for sample in &mut out[..frames * channels] {
+        for sample in &mut out[..samples] {
             *sample *= master;
+        }
+        if let Some(meters) = meters {
+            meters.publish_master(levels_of(&out[..samples]));
+            for index in graph.tracks.len()..meters.track_capacity() {
+                meters.publish_track(index, crate::meter::MeterLevels::SILENT);
+            }
         }
         underruns
     }
@@ -1044,6 +1112,7 @@ mod tests {
         linear_gain, mixer,
     };
     use crate::codes;
+    use crate::meter::{MeterBank, MeterLevels};
     use crate::resample::{PcmWriter, pcm_ring};
 
     /// The 48 kHz sequence timebase every test works in.
@@ -1083,6 +1152,138 @@ mod tests {
         assert!(
             (left - right).abs() < 1e-4,
             "expected {right}, rendered {left}"
+        );
+    }
+
+    #[test]
+    fn a_mixer_without_meters_publishes_nothing() {
+        let graph = MixGraphBuilder::new(48_000, 1)
+            .track(TrackSpec::new().with_clip(ClipSpec::new(0, frames(0), frames(8))))
+            .build()
+            .expect("a graph");
+        let (mut control, mut mixer) = build(graph);
+        let _writer = install(&mut control, 0, 1.0, 8);
+        assert!(mixer.meters().is_none());
+        let mut out = [0.0f32; 8];
+        assert_eq!(mixer.process(&mut out), 8);
+    }
+
+    #[test]
+    fn track_and_master_levels_are_published_every_block() {
+        let bank = Arc::new(MeterBank::new(2));
+        let graph = MixGraphBuilder::new(48_000, 1)
+            .master_gain_db(-6.020_6)
+            .track(TrackSpec::new().with_clip(ClipSpec::new(0, frames(0), frames(8))))
+            .track(TrackSpec::new().with_clip(ClipSpec::new(1, frames(0), frames(8))))
+            .build()
+            .expect("a graph");
+        let (mut control, mixer) = build(graph);
+        let mut mixer = mixer.with_meters(Arc::clone(&bank));
+        assert!(mixer.meters().is_some());
+        let _first = install(&mut control, 0, 1.0, 8);
+        let _second = install(&mut control, 1, 0.5, 8);
+
+        let mut out = [0.0f32; 8];
+        assert_eq!(mixer.process(&mut out), 8);
+
+        let first = bank.track(0).expect("a cell");
+        close(first.peak, 1.0);
+        close(first.rms, 1.0);
+        let second = bank.track(1).expect("a cell");
+        close(second.peak, 0.5);
+        close(second.rms, 0.5);
+        // The master is measured after its fader: (1.0 + 0.5) * 0.5.
+        let master = bank.master();
+        close(master.peak, 0.75);
+        close(master.rms, 0.75);
+    }
+
+    #[test]
+    fn a_muted_track_meters_silent_while_its_ring_still_drains() {
+        let bank = Arc::new(MeterBank::new(1));
+        let graph = MixGraphBuilder::new(48_000, 1)
+            .track(TrackSpec::new().with_muted(true).with_clip(ClipSpec::new(
+                0,
+                frames(0),
+                frames(8),
+            )))
+            .build()
+            .expect("a graph");
+        let (mut control, mixer) = build(graph);
+        let mut mixer = mixer.with_meters(Arc::clone(&bank));
+        let _writer = install(&mut control, 0, 1.0, 8);
+
+        let mut out = [0.0f32; 8];
+        assert_eq!(mixer.process(&mut out), 8);
+        assert_eq!(bank.track(0), Some(MeterLevels::SILENT));
+        assert_eq!(bank.master(), MeterLevels::SILENT);
+        assert!(!mixer.slot_installed(1));
+    }
+
+    #[test]
+    fn a_track_the_bank_has_no_room_for_is_simply_unmetered() {
+        let bank = Arc::new(MeterBank::new(1));
+        let graph = MixGraphBuilder::new(48_000, 1)
+            .track(TrackSpec::new().with_clip(ClipSpec::new(0, frames(0), frames(8))))
+            .track(TrackSpec::new().with_clip(ClipSpec::new(1, frames(0), frames(8))))
+            .build()
+            .expect("a graph");
+        let (mut control, mixer) = build(graph);
+        let mut mixer = mixer.with_meters(Arc::clone(&bank));
+        let _first = install(&mut control, 0, 1.0, 8);
+        let _second = install(&mut control, 1, 1.0, 8);
+
+        let mut out = [0.0f32; 8];
+        assert_eq!(mixer.process(&mut out), 8);
+        close(bank.track(0).expect("a cell").peak, 1.0);
+        assert_eq!(bank.track(1), None);
+        close(bank.master().peak, 2.0);
+    }
+
+    #[test]
+    fn a_track_that_leaves_the_graph_stops_reading_hot() {
+        let bank = Arc::new(MeterBank::new(4));
+        let graph = MixGraphBuilder::new(48_000, 1)
+            .track(TrackSpec::new().with_clip(ClipSpec::new(0, frames(0), frames(8))))
+            .build()
+            .expect("a graph");
+        let (mut control, mixer) = build(graph);
+        let mut mixer = mixer.with_meters(Arc::clone(&bank));
+        let _writer = install(&mut control, 0, 1.0, 8);
+        let mut out = [0.0f32; 8];
+        assert_eq!(mixer.process(&mut out), 8);
+        close(bank.track(0).expect("a cell").peak, 1.0);
+
+        // A cell no track occupies reads silent rather than holding the level
+        // the removed track left there.
+        let empty = MixGraphBuilder::new(48_000, 1).build().expect("a graph");
+        control.publish(empty).expect("publish");
+        assert_eq!(mixer.process(&mut out), 8);
+        assert_eq!(bank.track(0), Some(MeterLevels::SILENT));
+        assert_eq!(bank.master(), MeterLevels::SILENT);
+    }
+
+    #[test]
+    fn clipping_shows_in_the_published_peak() {
+        let bank = Arc::new(MeterBank::new(1));
+        let graph = MixGraphBuilder::new(48_000, 1)
+            .master_gain_db(6.0)
+            .track(TrackSpec::new().with_clip(ClipSpec::new(0, frames(0), frames(8))))
+            .build()
+            .expect("a graph");
+        let (mut control, mixer) = build(graph);
+        let mut mixer = mixer.with_meters(Arc::clone(&bank));
+        let _writer = install(&mut control, 0, 0.9, 8);
+
+        let mut out = [0.0f32; 8];
+        assert_eq!(mixer.process(&mut out), 8);
+        assert!(
+            !bank.track(0).expect("a cell").is_clipping(),
+            "the track is below full scale before the master fader"
+        );
+        assert!(
+            bank.master().is_clipping(),
+            "the master fader pushed it past full scale"
         );
     }
 

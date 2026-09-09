@@ -563,6 +563,19 @@ impl TimelinePanel {
         &mut self.metrics
     }
 
+    /// The header column's state: the rename in progress and the per-track
+    /// level meters.
+    #[must_use]
+    pub fn header_state(&self) -> &TrackHeaderState {
+        &self.header_state
+    }
+
+    /// The header column's state, for feeding the track meters from the
+    /// mixer's meter bank once a frame.
+    pub fn header_state_mut(&mut self) -> &mut TrackHeaderState {
+        &mut self.header_state
+    }
+
     /// The per-track clip indexes, in track order.
     #[must_use]
     pub fn layouts(&self) -> &[TrackLayout] {

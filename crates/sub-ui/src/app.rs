@@ -16,14 +16,20 @@ use sub_render::{
     select_adapter,
 };
 
+use std::sync::Arc;
+
 use sub_audio::mixer::{MixGraphBuilder, MixerConfig, mixer};
-use sub_audio::{AudioOutput, CpalBackend, OutputOptions};
+use sub_audio::{AudioOutput, CpalBackend, MeterBank, OutputOptions};
 
 use crate::audio_settings::{AudioSettingsAction, AudioSettingsPanel};
 use crate::diagnostics::DiagnosticsPanel;
 use crate::keymap::LoadedKeymap;
 use crate::shortcuts::{Action, ShortcutMap, ShortcutsWindow};
 use crate::viewer::{ViewerAction, ViewerFrame, ViewerPanel};
+
+/// How many tracks the shared meter bank has room for. A sequence with more
+/// audio tracks than this still plays; the tracks past it are unmetered.
+const METERED_TRACKS: usize = 64;
 
 /// Options for launching the application.
 #[derive(Debug, Clone, Default)]
@@ -66,6 +72,9 @@ pub struct SubordinateApp {
     /// device while it is closed only records the choice, and selecting one
     /// while it is open reopens the stream there.
     audio: AudioOutput<CpalBackend>,
+    /// Where the mixer publishes its levels. Shared with whatever mixer the
+    /// output stage builds, so reopening a stream keeps the meters live.
+    meters: Arc<MeterBank>,
     /// The sequence being previewed. Loading a project replaces it; until
     /// then it is an empty sequence, which composites to black.
     sequence: Sequence,
@@ -120,7 +129,8 @@ impl SubordinateApp {
         let sequence = Sequence::new("Sequence", SequenceSettings::default());
         let compositor = Compositor::for_sequence(render.clone(), &sequence);
         let viewer = ViewerPanel::for_sequence(&sequence);
-        let audio = audio_output(sequence.settings.sample_rate);
+        let meters = Arc::new(MeterBank::new(METERED_TRACKS));
+        let audio = audio_output(sequence.settings.sample_rate, Arc::clone(&meters));
         Ok(Self {
             render,
             render_state: state.clone(),
@@ -130,6 +140,7 @@ impl SubordinateApp {
             diagnostics: DiagnosticsPanel::new(),
             audio_settings: AudioSettingsPanel::new(),
             audio,
+            meters,
             sequence,
             compositor,
             viewer,
@@ -303,6 +314,13 @@ impl eframe::App for SubordinateApp {
             self.needs_composite = true;
         }
 
+        // The meters are read once a frame, straight out of the atomics the
+        // audio callback stores into: two loads, no lock, and nothing the
+        // callback has to wait for.
+        let elapsed = ui.input(|input| input.stable_dt);
+        self.viewer
+            .update_master_meter(self.meters.master(), elapsed);
+
         let preview = self.composite();
         if self.viewer.ui(ui, Some(preview)) {
             self.needs_composite = true;
@@ -377,14 +395,14 @@ pub fn run(options: AppOptions) -> eframe::Result {
 /// because a reopened stream needs a mixer paired with a fresh control half.
 /// Until the transport is wired up (TASK-50) that mixer plays an empty graph,
 /// so the device the user picks here is remembered rather than opened.
-fn audio_output(sample_rate: u32) -> AudioOutput<CpalBackend> {
+fn audio_output(sample_rate: u32, meters: Arc<MeterBank>) -> AudioOutput<CpalBackend> {
     AudioOutput::new(
         CpalBackend::new(),
         OutputOptions::default(),
         Box::new(move || {
             let graph = MixGraphBuilder::new(sample_rate, 2).build()?;
             let (_control, mixer) = mixer(graph, MixerConfig::default())?;
-            Ok(mixer)
+            Ok(mixer.with_meters(Arc::clone(&meters)))
         }),
     )
 }
