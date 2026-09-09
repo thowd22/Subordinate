@@ -5,6 +5,7 @@
 //! addresses a position as well as an identifier, and why the inverse of a
 //! removal puts the track back at the index it came from.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
 use sub_model::{Project, SequenceId, Track, TrackId, TrackKind};
@@ -37,7 +38,7 @@ use crate::{Command, Inverse, codes};
 /// history.undo(&mut project).unwrap();
 /// assert!(project.sequences[0].tracks.is_empty());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddTrack {
     /// The sequence the track joins.
@@ -74,6 +75,8 @@ impl AddTrack {
 
 impl Command for AddTrack {
     const KIND: &'static str = "track.add";
+    const DESCRIPTION: &'static str =
+        "Add a new empty track of the given kind to the end of a sequence.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let sequence = sequence_mut(project, self.sequence)?;
@@ -96,7 +99,7 @@ impl Command for AddTrack {
 /// This is the inverse of [`RemoveTrack`], and therefore what redo runs after
 /// an [`AddTrack`] is undone. It carries the entire track — identifier, flags
 /// and items — so undo is exact rather than approximate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InsertTrack {
     /// The sequence the track joins.
@@ -121,6 +124,7 @@ impl InsertTrack {
 
 impl Command for InsertTrack {
     const KIND: &'static str = "track.insert";
+    const DESCRIPTION: &'static str = "Insert an existing track into a sequence at a given index.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let id = self.track.id;
@@ -151,7 +155,7 @@ impl Command for InsertTrack {
 /// the caller asked for twice, not something a mis-click does. A forced
 /// removal is undoable like any other command — the inverse carries the whole
 /// track back.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoveTrack {
     /// The sequence holding the track.
@@ -187,6 +191,7 @@ impl RemoveTrack {
 
 impl Command for RemoveTrack {
     const KIND: &'static str = "track.remove";
+    const DESCRIPTION: &'static str = "Remove a track and everything on it from a sequence.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let sequence_id = self.sequence;
@@ -221,7 +226,7 @@ impl Command for RemoveTrack {
 ///
 /// The index is the one the track ends up at, counted in the list *without*
 /// the track in it, which is what a drag in the track header does.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReorderTrack {
     /// The sequence holding the track.
@@ -246,6 +251,7 @@ impl ReorderTrack {
 
 impl Command for ReorderTrack {
     const KIND: &'static str = "track.reorder";
+    const DESCRIPTION: &'static str = "Move a track to a different index within its sequence.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let sequence_id = self.sequence;
@@ -270,7 +276,7 @@ impl Command for ReorderTrack {
 }
 
 /// Renames a track.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenameTrack {
     /// The sequence holding the track.
@@ -295,6 +301,7 @@ impl RenameTrack {
 
 impl Command for RenameTrack {
     const KIND: &'static str = "track.rename";
+    const DESCRIPTION: &'static str = "Rename a track.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let found = track_mut(project, self.sequence, self.track)?;
@@ -311,7 +318,7 @@ impl Command for RenameTrack {
 ///
 /// A muted audio track contributes nothing to the mixer and a muted video
 /// track nothing to the composite.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetTrackMuted {
     /// The sequence holding the track.
@@ -336,6 +343,7 @@ impl SetTrackMuted {
 
 impl Command for SetTrackMuted {
     const KIND: &'static str = "track.set_muted";
+    const DESCRIPTION: &'static str = "Mute or unmute a track.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let found = track_mut(project, self.sequence, self.track)?;
@@ -357,7 +365,7 @@ impl Command for SetTrackMuted {
 /// Clip commands refuse to touch a locked track — see
 /// [`track_for_clip_edit`](super::track_for_clip_edit) — but this command
 /// reaches it either way, or a locked track could never be unlocked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetTrackLocked {
     /// The sequence holding the track.
@@ -382,6 +390,7 @@ impl SetTrackLocked {
 
 impl Command for SetTrackLocked {
     const KIND: &'static str = "track.set_locked";
+    const DESCRIPTION: &'static str = "Lock or unlock a track against clip edits.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let found = track_mut(project, self.sequence, self.track)?;

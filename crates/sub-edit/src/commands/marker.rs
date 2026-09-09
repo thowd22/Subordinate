@@ -9,6 +9,7 @@
 //! the position it sat at, so undo restores its identifier, note and order
 //! rather than something that merely looks the same.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
 use sub_model::{ClipId, Marker, MarkerId, Project, SequenceId, TrackId};
@@ -22,7 +23,7 @@ use crate::{Command, Inverse, codes};
 /// The JSON shape is a tagged union, so an envelope reads
 /// `{ "on": "sequence", "sequence": … }` or
 /// `{ "on": "clip", "sequence": …, "track": …, "clip": … }`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "on", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MarkerTarget {
     /// The sequence's own marker list, in sequence time.
@@ -127,7 +128,7 @@ impl MarkerTarget {
 /// history.undo(&mut project).unwrap();
 /// assert!(project.sequences[0].markers.is_empty());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddMarker {
     /// What the marker is anchored to.
@@ -160,6 +161,7 @@ impl AddMarker {
 
 impl Command for AddMarker {
     const KIND: &'static str = "marker.add";
+    const DESCRIPTION: &'static str = "Add a marker to a sequence or a clip.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let id = self.marker.id;
@@ -186,7 +188,7 @@ impl Command for AddMarker {
 /// Removes a marker from a sequence or a clip.
 ///
 /// The inverse is an [`AddMarker`] carrying the removed marker and its index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoveMarker {
     /// What the marker is anchored to.
@@ -205,6 +207,7 @@ impl RemoveMarker {
 
 impl Command for RemoveMarker {
     const KIND: &'static str = "marker.remove";
+    const DESCRIPTION: &'static str = "Remove a marker from a sequence or a clip.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let index = self.target.index_of(project, self.marker)?;
@@ -221,7 +224,7 @@ impl Command for RemoveMarker {
 ///
 /// Dragging a point marker along the ruler is this command with an empty range
 /// at the new instant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MoveMarker {
     /// What the marker is anchored to.
@@ -246,6 +249,7 @@ impl MoveMarker {
 
 impl Command for MoveMarker {
     const KIND: &'static str = "marker.move";
+    const DESCRIPTION: &'static str = "Move a marker to a different time.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let index = self.target.index_of(project, self.marker)?;

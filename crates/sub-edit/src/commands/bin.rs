@@ -13,6 +13,7 @@
 //!   of the bin it is in and files it in another, and its inverse puts it back
 //!   at the index it held.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
 use sub_model::{Bin, BinId, MediaId, Project};
@@ -38,7 +39,7 @@ use crate::{Command, Inverse, codes};
 /// history.undo(&mut project).unwrap();
 /// assert!(project.root_bin.children.is_empty());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateBin {
     /// Display name, shown in the bin panel.
@@ -79,6 +80,7 @@ impl CreateBin {
 
 impl Command for CreateBin {
     const KIND: &'static str = "bin.create";
+    const DESCRIPTION: &'static str = "Create a new bin inside a parent bin.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let parent_id = self.parent.unwrap_or(project.root_bin.id);
@@ -102,7 +104,7 @@ impl Command for CreateBin {
 /// This is the inverse of [`RemoveBin`], and therefore what redo runs after a
 /// [`CreateBin`] is undone. It carries the entire subtree — identifiers, child
 /// bins and the media filed in them — so undo is exact.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InsertBin {
     /// The bin it goes inside.
@@ -123,6 +125,7 @@ impl InsertBin {
 
 impl Command for InsertBin {
     const KIND: &'static str = "bin.insert";
+    const DESCRIPTION: &'static str = "Insert an existing bin into a parent bin at a given index.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let id = self.bin.id;
@@ -153,7 +156,7 @@ impl Command for InsertBin {
 /// `edit.bin_not_empty` unless `force` is set. A forced removal leaves the
 /// media items in the project but files them nowhere, which is what
 /// [`crate::commands::RemoveMedia`] then reports as an unfiled item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoveBin {
     /// The bin to remove.
@@ -179,6 +182,7 @@ impl RemoveBin {
 
 impl Command for RemoveBin {
     const KIND: &'static str = "bin.remove";
+    const DESCRIPTION: &'static str = "Remove a bin and its contents from its parent.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         if self.bin == project.root_bin.id {
@@ -214,7 +218,7 @@ impl Command for RemoveBin {
 }
 
 /// Renames a bin, the root bin included.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenameBin {
     /// The bin to rename.
@@ -236,6 +240,7 @@ impl RenameBin {
 
 impl Command for RenameBin {
     const KIND: &'static str = "bin.rename";
+    const DESCRIPTION: &'static str = "Rename a bin.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let found = bin_mut(project, self.bin)?;
@@ -260,7 +265,7 @@ impl Command for RenameBin {
 /// [`crate::commands::ImportMedia`] always files what it imports — is refused
 /// with `edit.bin_not_found`, because there would be no bin for undo to
 /// return it to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MoveToBin {
     /// The media item to file.
@@ -293,6 +298,7 @@ impl MoveToBin {
 
 impl Command for MoveToBin {
     const KIND: &'static str = "bin.move_media";
+    const DESCRIPTION: &'static str = "Move a media item from one bin to another.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         require_media(project, self.media)?;

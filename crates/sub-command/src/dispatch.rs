@@ -50,6 +50,7 @@
 
 use std::collections::BTreeMap;
 
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -92,6 +93,15 @@ type Handler = Box<dyn Fn(&EngineHandle, Value) -> SubResult<Value> + Send + Syn
 /// What a method that acts on the calling connection does.
 type SessionHandler = Box<dyn Fn(&EngineHandle, &Session, Value) -> SubResult<Value> + Send + Sync>;
 
+/// How one method's `params` or `result` schema is produced, deferred so every
+/// method in one document shares a single generator and its `$defs`.
+type Schemer = fn(&mut SchemaGenerator) -> Schema;
+
+/// The [`Schemer`] for a type.
+fn schema_of<T: JsonSchema>(generator: &mut SchemaGenerator) -> Schema {
+    generator.subschema_for::<T>()
+}
+
 /// How a method reaches the engine.
 enum Method {
     /// A registered command kind, applied through the engine's registry.
@@ -113,12 +123,29 @@ impl Method {
     }
 }
 
+/// One method's table entry: what it does, and what it says about itself.
+struct Entry {
+    method: Method,
+    /// The one-sentence description, and the parameter and result schemas.
+    ///
+    /// `None` for a command: the [`CommandRegistry`] owns both, so the
+    /// exported schema cannot drift from the command the engine applies.
+    described: Option<Described>,
+}
+
+/// What a non-command method says about itself in the exported schema.
+struct Described {
+    description: &'static str,
+    params: Schemer,
+    result: Schemer,
+}
+
 /// What one applied, undone or redone command did.
 ///
 /// The project itself is deliberately not included: a caller that wants it
 /// asks for [`PROJECT_GET`], so a chatty edit session does not serialise the
 /// whole timeline on every call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct AppliedResult {
     /// The revision the project reached.
     pub revision: u64,
@@ -139,7 +166,7 @@ impl From<&Applied> for AppliedResult {
 }
 
 /// The state of the undo and redo stacks, as [`HISTORY_GET`] returns it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct HistoryResult {
     /// Whether there is a step to undo.
     pub can_undo: bool,
@@ -171,8 +198,27 @@ impl From<HistorySummary> for HistoryResult {
     }
 }
 
+/// One method of the Command API, as the exported JSON Schema describes it.
+///
+/// This is what the MCP bridge turns into a tool and what the plugin SDK
+/// generates bindings from, so `description` is written to be used verbatim as
+/// an MCP tool description.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MethodSchema {
+    /// The method name, such as `clip.trim_in`.
+    pub name: String,
+    /// `command`, `query` or `session`, as [`MethodInfo::kind`].
+    pub kind: String,
+    /// One sentence saying what the method does.
+    pub description: String,
+    /// The JSON Schema of the method's `params`.
+    pub params: Value,
+    /// The JSON Schema of the method's `result`.
+    pub result: Value,
+}
+
 /// One entry of [`SYSTEM_LIST_METHODS`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct MethodInfo {
     /// The method name.
     pub name: String,
@@ -182,17 +228,68 @@ pub struct MethodInfo {
 }
 
 /// The parameters of [`EDIT_BEGIN_GROUP`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BeginGroupParams {
+pub struct BeginGroupParams {
     /// The label the grouped step gets in the undo menu.
-    label: String,
+    pub label: String,
 }
 
 /// The parameters of every method that takes none.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct NoParams {}
+pub struct NoParams {}
+
+/// The result of [`PROJECT_GET`].
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
+pub struct ProjectResult {
+    /// The revision the project was read at.
+    pub revision: u64,
+    /// The whole project, in the shape the project file stores it.
+    pub project: sub_model::Project,
+}
+
+/// The result of [`PROJECT_REVISION`].
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
+pub struct RevisionResult {
+    /// The current revision.
+    pub revision: u64,
+}
+
+/// The result of [`EDIT_UNDO`] and [`EDIT_REDO`].
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
+pub struct UndoResult {
+    /// What the undo or redo did, or `null` when the stack was empty.
+    pub applied: Option<AppliedResult>,
+}
+
+/// The result of [`EDIT_BEGIN_GROUP`].
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
+pub struct BeginGroupResult {
+    /// Always `true`: a group is now open.
+    pub in_group: bool,
+}
+
+/// The result of [`EDIT_COMMIT_GROUP`].
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
+pub struct CommitGroupResult {
+    /// Whether the group held anything, and so became a history step.
+    pub committed: bool,
+}
+
+/// The result of [`EDIT_ABORT_GROUP`].
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
+pub struct AbortGroupResult {
+    /// Always `true`: the group was closed and reversed.
+    pub aborted: bool,
+}
+
+/// The result of [`SYSTEM_LIST_METHODS`].
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
+pub struct ListMethodsResult {
+    /// Every method this build serves, in lexicographic order.
+    pub methods: Vec<MethodInfo>,
+}
 
 /// Turns JSON-RPC method calls into engine work.
 ///
@@ -201,7 +298,8 @@ struct NoParams {}
 /// the transport accepts.
 pub struct Dispatcher {
     engine: EngineHandle,
-    methods: BTreeMap<String, Method>,
+    registry: CommandRegistry,
+    methods: BTreeMap<String, Entry>,
 }
 
 impl std::fmt::Debug for Dispatcher {
@@ -210,6 +308,7 @@ impl std::fmt::Debug for Dispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Dispatcher")
             .field("engine", &self.engine)
+            .field("registry", &self.registry)
             .field("methods", &self.methods.len())
             .finish()
     }
@@ -237,9 +336,19 @@ impl Dispatcher {
     pub fn with_registry(engine: EngineHandle, registry: &CommandRegistry) -> Self {
         let mut methods = BTreeMap::new();
         for kind in registry.kinds() {
-            methods.insert(kind.to_owned(), Method::Command);
+            methods.insert(
+                kind.to_owned(),
+                Entry {
+                    method: Method::Command,
+                    described: None,
+                },
+            );
         }
-        let mut dispatcher = Self { engine, methods };
+        let mut dispatcher = Self {
+            engine,
+            registry: registry.clone(),
+            methods,
+        };
         dispatcher.install_events();
         dispatcher.install_queries();
         dispatcher
@@ -248,12 +357,25 @@ impl Dispatcher {
     /// Adds a method that is neither a command nor one of the built-in
     /// queries, such as a transport or plugin method.
     ///
+    /// `P` and `R` are the method's parameter and result types, and
+    /// `description` is one sentence saying what it does. All three are
+    /// exported in the Command API schema, so a method added here is as
+    /// discoverable as a built-in one — a plugin's method reaches an agent
+    /// through the same MCP tool list.
+    ///
     /// # Errors
     ///
     /// Returns `command.duplicate_method` when the name is already served;
     /// silently shadowing a command would make the surface unpredictable.
-    pub fn register<F>(&mut self, name: impl Into<String>, handler: F) -> SubResult<()>
+    pub fn register<P, R, F>(
+        &mut self,
+        name: impl Into<String>,
+        description: &'static str,
+        handler: F,
+    ) -> SubResult<()>
     where
+        P: JsonSchema,
+        R: JsonSchema,
         F: Fn(&EngineHandle, Value) -> SubResult<Value> + Send + Sync + 'static,
     {
         let name = name.into();
@@ -263,7 +385,17 @@ impl Dispatcher {
                     .with_detail("method", name),
             );
         }
-        self.methods.insert(name, Method::Query(Box::new(handler)));
+        self.methods.insert(
+            name,
+            Entry {
+                method: Method::Query(Box::new(handler)),
+                described: Some(Described {
+                    description,
+                    params: schema_of::<P>,
+                    result: schema_of::<R>,
+                }),
+            },
+        );
         Ok(())
     }
 
@@ -289,9 +421,63 @@ impl Dispatcher {
     pub fn methods(&self) -> Vec<MethodInfo> {
         self.methods
             .iter()
-            .map(|(name, method)| MethodInfo {
+            .map(|(name, entry)| MethodInfo {
                 name: name.clone(),
-                kind: method.kind().to_owned(),
+                kind: entry.method.kind().to_owned(),
+            })
+            .collect()
+    }
+
+    /// The registry whose kinds are this dispatcher's command methods.
+    #[must_use]
+    pub fn registry(&self) -> &CommandRegistry {
+        &self.registry
+    }
+
+    /// The one-sentence description of `method`, or `None` when it is not
+    /// served.
+    #[must_use]
+    pub fn description(&self, method: &str) -> Option<&str> {
+        let entry = self.methods.get(method)?;
+        match &entry.described {
+            Some(described) => Some(described.description),
+            None => self.registry.description(method),
+        }
+    }
+
+    /// Every method served, described for the exported schema.
+    ///
+    /// The `params` and `result` schemas are drawn from `generator`, so
+    /// `generator`'s definitions are the `$defs` the returned schemas refer
+    /// to. See [`crate::schema`], which assembles the whole document.
+    pub fn method_schemas(&self, generator: &mut SchemaGenerator) -> Vec<MethodSchema> {
+        self.methods
+            .iter()
+            .map(|(name, entry)| {
+                let (description, params, result) = match &entry.described {
+                    Some(described) => (
+                        described.description.to_owned(),
+                        (described.params)(generator),
+                        (described.result)(generator),
+                    ),
+                    None => (
+                        self.registry
+                            .description(name)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        self.registry
+                            .params_schema(name, generator)
+                            .unwrap_or_default(),
+                        generator.subschema_for::<AppliedResult>(),
+                    ),
+                };
+                MethodSchema {
+                    name: name.clone(),
+                    kind: entry.method.kind().to_owned(),
+                    description,
+                    params: params.to_value(),
+                    result: result.to_value(),
+                }
             })
             .collect()
     }
@@ -458,7 +644,7 @@ impl Dispatcher {
                 .with_detail("method", method));
         };
         let params = params.unwrap_or_else(|| Value::Object(Map::new()));
-        match entry {
+        match &entry.method {
             Method::Command => {
                 let params = command_params(method, params)?;
                 let applied = self
@@ -482,102 +668,168 @@ impl Dispatcher {
 
     /// Puts the per-connection event methods on the table.
     fn install_events(&mut self) {
-        self.add_session(EVENTS_SUBSCRIBE, |engine, session, params| {
-            typed::<NoParams>(params)?;
-            let subscription = session.subscribe(engine)?;
-            to_value(&SubscribeResult { subscription })
-        });
-        self.add_session(EVENTS_UNSUBSCRIBE, |_, session, params| {
-            let params: UnsubscribeParams = typed(params)?;
-            session.unsubscribe(&params.subscription)?;
-            to_value(&UnsubscribeResult {
-                subscription: params.subscription,
-            })
-        });
+        self.add_session::<NoParams, SubscribeResult, _>(
+            EVENTS_SUBSCRIBE,
+            "Start receiving events.changed notifications for every project change on this \
+             connection.",
+            |engine, session, params| {
+                typed::<NoParams>(params)?;
+                let subscription = session.subscribe(engine)?;
+                to_value(&SubscribeResult { subscription })
+            },
+        );
+        self.add_session::<UnsubscribeParams, UnsubscribeResult, _>(
+            EVENTS_UNSUBSCRIBE,
+            "Stop one change-event subscription made on this connection.",
+            |_, session, params| {
+                let params: UnsubscribeParams = typed(params)?;
+                session.unsubscribe(&params.subscription)?;
+                to_value(&UnsubscribeResult {
+                    subscription: params.subscription,
+                })
+            },
+        );
     }
 
     /// Puts the query and history methods on the table.
     fn install_queries(&mut self) {
-        self.add(PROJECT_GET, |engine, params| {
-            typed::<NoParams>(params)?;
-            let project = engine.snapshot();
-            let text = json::to_json(&project)?;
-            let project = serde_json::from_str::<Value>(&text).map_err(|err| {
-                SubError::wrap(
-                    sub_core::codes::INTERNAL,
-                    "the project did not round-trip to JSON",
-                    &err,
-                )
-            })?;
-            Ok(serde_json::json!({
-                "revision": engine.revision(),
-                "project": project,
-            }))
-        });
-        self.add(PROJECT_REVISION, |engine, params| {
-            typed::<NoParams>(params)?;
-            Ok(serde_json::json!({ "revision": engine.revision() }))
-        });
-        self.add(HISTORY_GET, |engine, params| {
-            typed::<NoParams>(params)?;
-            to_value(&HistoryResult::from(engine.history()?))
-        });
-        self.add(EDIT_UNDO, |engine, params| {
-            typed::<NoParams>(params)?;
-            Ok(applied_option(engine.undo()?.as_ref()))
-        });
-        self.add(EDIT_REDO, |engine, params| {
-            typed::<NoParams>(params)?;
-            Ok(applied_option(engine.redo()?.as_ref()))
-        });
-        self.add(EDIT_BEGIN_GROUP, |engine, params| {
-            let params: BeginGroupParams = typed(params)?;
-            engine.begin_group(params.label)?;
-            Ok(serde_json::json!({ "in_group": true }))
-        });
-        self.add(EDIT_COMMIT_GROUP, |engine, params| {
-            typed::<NoParams>(params)?;
-            Ok(serde_json::json!({ "committed": engine.commit_group()? }))
-        });
-        self.add(EDIT_ABORT_GROUP, |engine, params| {
-            typed::<NoParams>(params)?;
-            engine.abort_group()?;
-            Ok(serde_json::json!({ "aborted": true }))
-        });
+        self.add::<NoParams, ProjectResult, _>(
+            PROJECT_GET,
+            "Read the whole project as JSON, with the revision it was read at.",
+            |engine, params| {
+                typed::<NoParams>(params)?;
+                let project = engine.snapshot();
+                let text = json::to_json(&project)?;
+                let project = serde_json::from_str::<Value>(&text).map_err(|err| {
+                    SubError::wrap(
+                        sub_core::codes::INTERNAL,
+                        "the project did not round-trip to JSON",
+                        &err,
+                    )
+                })?;
+                Ok(serde_json::json!({
+                    "revision": engine.revision(),
+                    "project": project,
+                }))
+            },
+        );
+        self.add::<NoParams, RevisionResult, _>(
+            PROJECT_REVISION,
+            "Read the project's current revision number without reading the project.",
+            |engine, params| {
+                typed::<NoParams>(params)?;
+                Ok(serde_json::json!({ "revision": engine.revision() }))
+            },
+        );
+        self.add::<NoParams, HistoryResult, _>(
+            HISTORY_GET,
+            "Read the state of the undo and redo stacks.",
+            |engine, params| {
+                typed::<NoParams>(params)?;
+                to_value(&HistoryResult::from(engine.history()?))
+            },
+        );
+        self.add::<NoParams, UndoResult, _>(
+            EDIT_UNDO,
+            "Undo the most recent history step.",
+            |engine, params| {
+                typed::<NoParams>(params)?;
+                Ok(applied_option(engine.undo()?.as_ref()))
+            },
+        );
+        self.add::<NoParams, UndoResult, _>(
+            EDIT_REDO,
+            "Redo the most recently undone history step.",
+            |engine, params| {
+                typed::<NoParams>(params)?;
+                Ok(applied_option(engine.redo()?.as_ref()))
+            },
+        );
+        self.add::<BeginGroupParams, BeginGroupResult, _>(
+            EDIT_BEGIN_GROUP,
+            "Open a command group, so that everything applied until it is committed undoes in \
+             one step.",
+            |engine, params| {
+                let params: BeginGroupParams = typed(params)?;
+                engine.begin_group(params.label)?;
+                Ok(serde_json::json!({ "in_group": true }))
+            },
+        );
+        self.add::<NoParams, CommitGroupResult, _>(
+            EDIT_COMMIT_GROUP,
+            "Close the open command group, leaving its contents as one history step.",
+            |engine, params| {
+                typed::<NoParams>(params)?;
+                Ok(serde_json::json!({ "committed": engine.commit_group()? }))
+            },
+        );
+        self.add::<NoParams, AbortGroupResult, _>(
+            EDIT_ABORT_GROUP,
+            "Close the open command group and reverse everything applied in it.",
+            |engine, params| {
+                typed::<NoParams>(params)?;
+                engine.abort_group()?;
+                Ok(serde_json::json!({ "aborted": true }))
+            },
+        );
 
         let methods = self.methods();
-        self.add(SYSTEM_LIST_METHODS, move |_, params| {
-            typed::<NoParams>(params)?;
-            let mut methods = methods.clone();
-            methods.push(MethodInfo {
-                name: SYSTEM_LIST_METHODS.to_owned(),
-                kind: "query".to_owned(),
-            });
-            methods.sort_by(|left, right| left.name.cmp(&right.name));
-            to_value(&serde_json::json!({ "methods": methods }))
-        });
+        self.add::<NoParams, ListMethodsResult, _>(
+            SYSTEM_LIST_METHODS,
+            "List every method this build serves, with its kind.",
+            move |_, params| {
+                typed::<NoParams>(params)?;
+                let mut methods = methods.clone();
+                methods.push(MethodInfo {
+                    name: SYSTEM_LIST_METHODS.to_owned(),
+                    kind: "query".to_owned(),
+                });
+                methods.sort_by(|left, right| left.name.cmp(&right.name));
+                to_value(&serde_json::json!({ "methods": methods }))
+            },
+        );
     }
 
     /// Adds a built-in query, which cannot collide because the names are
     /// distinct literals and command kinds are namespaced by their own crate.
-    fn add<F>(&mut self, name: &str, handler: F)
+    fn add<P, R, F>(&mut self, name: &str, description: &'static str, handler: F)
     where
+        P: JsonSchema,
+        R: JsonSchema,
         F: Fn(&EngineHandle, Value) -> SubResult<Value> + Send + Sync + 'static,
     {
-        let previous = self
-            .methods
-            .insert(name.to_owned(), Method::Query(Box::new(handler)));
+        let previous = self.methods.insert(
+            name.to_owned(),
+            Entry {
+                method: Method::Query(Box::new(handler)),
+                described: Some(Described {
+                    description,
+                    params: schema_of::<P>,
+                    result: schema_of::<R>,
+                }),
+            },
+        );
         debug_assert!(previous.is_none(), "built-in method {name} collides");
     }
 
     /// Adds a built-in method that acts on the calling connection.
-    fn add_session<F>(&mut self, name: &str, handler: F)
+    fn add_session<P, R, F>(&mut self, name: &str, description: &'static str, handler: F)
     where
+        P: JsonSchema,
+        R: JsonSchema,
         F: Fn(&EngineHandle, &Session, Value) -> SubResult<Value> + Send + Sync + 'static,
     {
-        let previous = self
-            .methods
-            .insert(name.to_owned(), Method::Session(Box::new(handler)));
+        let previous = self.methods.insert(
+            name.to_owned(),
+            Entry {
+                method: Method::Session(Box::new(handler)),
+                described: Some(Described {
+                    description,
+                    params: schema_of::<P>,
+                    result: schema_of::<R>,
+                }),
+            },
+        );
         debug_assert!(previous.is_none(), "built-in method {name} collides");
     }
 }
@@ -642,7 +894,7 @@ mod tests {
     use sub_edit::Engine;
     use sub_model::{Project, Sequence, SequenceId, SequenceSettings};
 
-    use super::{Dispatcher, EDIT_UNDO, PROJECT_GET, SYSTEM_LIST_METHODS};
+    use super::{Dispatcher, EDIT_UNDO, NoParams, PROJECT_GET, SYSTEM_LIST_METHODS};
     use crate::events::{EVENTS_SUBSCRIBE, EVENTS_UNSUBSCRIBE, Session};
     use crate::rpc::{Notification, Outgoing, Request, RequestId, error_codes};
 
@@ -848,7 +1100,9 @@ mod tests {
     fn registering_a_duplicate_method_fails() {
         let (_engine, mut dispatcher) = fixture();
         dispatcher
-            .register("plugin.ping", |_, _| Ok(json!("pong")))
+            .register::<NoParams, String, _>("plugin.ping", "Answer pong.", |_, _| {
+                Ok(json!("pong"))
+            })
             .unwrap();
         assert_eq!(
             dispatcher.invoke("plugin.ping", None).unwrap(),
@@ -856,11 +1110,13 @@ mod tests {
         );
 
         let err = dispatcher
-            .register("plugin.ping", |_, _| Ok(Value::Null))
+            .register::<NoParams, Value, _>("plugin.ping", "Answer pong.", |_, _| Ok(Value::Null))
             .unwrap_err();
         assert_eq!(err.code.as_str(), "command.duplicate_method");
         let err = dispatcher
-            .register("bin.create", |_, _| Ok(Value::Null))
+            .register::<NoParams, Value, _>("bin.create", "Shadow a command.", |_, _| {
+                Ok(Value::Null)
+            })
             .unwrap_err();
         assert_eq!(err.code.as_str(), "command.duplicate_method");
     }

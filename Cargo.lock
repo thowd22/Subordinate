@@ -3397,6 +3397,7 @@ name = "sub-command"
 version = "0.1.0"
 dependencies = [
  "interprocess",
+ "schemars",
  "serde",
  "serde_json",
  "sub-core",
@@ -3420,6 +3421,7 @@ dependencies = [
 name = "sub-edit"
 version = "0.1.0"
 dependencies = [
+ "schemars",
  "serde",
  "serde_json",
  "sub-core",
@@ -3533,9 +3535,12 @@ name = "subordinate-cli"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "sub-command",
  "sub-core",
+ "sub-edit",
  "sub-export",
  "sub-media",
+ "sub-model",
  "tracing",
 ]
 

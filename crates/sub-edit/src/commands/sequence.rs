@@ -5,6 +5,7 @@
 //! inverse carrying the whole thing — tracks, clips and markers — so that
 //! undoing a deletion is not a fresh empty timeline with the same name.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
 use sub_model::{Project, Sequence, SequenceId, SequenceSettings};
@@ -31,7 +32,7 @@ use crate::{Command, Inverse, codes};
 /// history.undo(&mut project).unwrap();
 /// assert!(project.sequences.is_empty());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateSequence {
     /// Display name, shown on the sequence tab.
@@ -64,6 +65,7 @@ impl CreateSequence {
 
 impl Command for CreateSequence {
     const KIND: &'static str = "sequence.create";
+    const DESCRIPTION: &'static str = "Create a new empty sequence with the given settings.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let index = self.index.unwrap_or(project.sequences.len());
@@ -84,7 +86,7 @@ impl Command for CreateSequence {
 ///
 /// This is the inverse of [`DeleteSequence`], and therefore what redo runs
 /// after a [`CreateSequence`] is undone.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InsertSequence {
     /// Where in [`Project::sequences`] it goes.
@@ -103,6 +105,8 @@ impl InsertSequence {
 
 impl Command for InsertSequence {
     const KIND: &'static str = "sequence.insert";
+    const DESCRIPTION: &'static str =
+        "Insert an existing sequence into the project at a given index.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         check_insert_index(self.index, project.sequences.len(), "sequence")?;
@@ -128,7 +132,7 @@ impl Command for InsertSequence {
 ///
 /// The inverse carries the whole sequence, so undo restores its tracks, clips,
 /// markers and identifiers unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteSequence {
     /// The sequence to delete.
@@ -145,6 +149,7 @@ impl DeleteSequence {
 
 impl Command for DeleteSequence {
     const KIND: &'static str = "sequence.delete";
+    const DESCRIPTION: &'static str = "Delete a sequence and all of its tracks from the project.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let index = project.sequence_index(self.sequence).ok_or_else(|| {
@@ -161,7 +166,7 @@ impl Command for DeleteSequence {
 }
 
 /// Renames a sequence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenameSequence {
     /// The sequence to rename.
@@ -183,6 +188,7 @@ impl RenameSequence {
 
 impl Command for RenameSequence {
     const KIND: &'static str = "sequence.rename";
+    const DESCRIPTION: &'static str = "Rename a sequence.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let found = sequence_mut(project, self.sequence)?;
@@ -200,7 +206,7 @@ impl Command for RenameSequence {
 /// [`SequenceSettings`] validates itself on the way in from JSON, so a command
 /// carrying a zero sample rate or a zero canvas dimension is refused while it
 /// is still an envelope, before it can touch the project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetSequenceSettings {
     /// The sequence to reconfigure.
@@ -219,6 +225,8 @@ impl SetSequenceSettings {
 
 impl Command for SetSequenceSettings {
     const KIND: &'static str = "sequence.set_settings";
+    const DESCRIPTION: &'static str =
+        "Replace a sequence's frame rate, resolution and colour settings.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let found = sequence_mut(project, self.sequence)?;

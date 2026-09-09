@@ -210,7 +210,7 @@ fn a_track_is_renamed_muted_and_locked_reversibly() {
 
 /// A stand-in for the clip commands of TASK-4.2: all it does is go through
 /// [`track_for_clip_edit`], which is the lock check every one of them shares.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, schemars::JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AppendGap {
     sequence: SequenceId,

@@ -5,7 +5,9 @@
 //! lanes of a sequence, [`sequence`] for the sequences of a project,
 //! [`params`] for a clip's inspector parameters, [`marker`] for annotations on
 //! sequences and clips, [`media`] for the sources a project references and
-//! [`bin`] for the folders they are filed in.
+//! [`bin`] for the folders they are filed in. The clip edits themselves live
+//! in [`crate::clip`]; [`register_builtin`] registers those too, so the whole
+//! mutation surface is one registry.
 //!
 //! Two conventions run through the whole set.
 //!
@@ -55,6 +57,7 @@ use crate::CommandRegistry;
 ///
 /// let mut registry = CommandRegistry::new();
 /// commands::register_builtin(&mut registry).unwrap();
+/// assert!(registry.contains("clip.add"));
 /// assert!(registry.contains("track.add"));
 /// assert!(registry.contains("sequence.create"));
 /// ```
@@ -64,6 +67,7 @@ use crate::CommandRegistry;
 /// Returns `edit.duplicate_command` if `registry` already holds one of the
 /// built-in kinds.
 pub fn register_builtin(registry: &mut CommandRegistry) -> SubResult<()> {
+    crate::clip::register(registry)?;
     registry.register::<AddTrack>()?;
     registry.register::<InsertTrack>()?;
     registry.register::<RemoveTrack>()?;
@@ -340,7 +344,15 @@ mod tests {
                 "bin.move_media",
                 "bin.remove",
                 "bin.rename",
+                "clip.add",
+                "clip.move",
+                "clip.remove",
+                "clip.ripple_delete",
                 "clip.set_params",
+                "clip.split",
+                "clip.trim_in",
+                "clip.trim_out",
+                "edit.restore_track_items",
                 "marker.add",
                 "marker.move",
                 "marker.remove",
@@ -366,5 +378,37 @@ mod tests {
         let mut registry = registry;
         let err = register_builtin(&mut registry).unwrap_err();
         assert_eq!(err.code, codes::DUPLICATE_COMMAND);
+    }
+
+    /// The Command API exports these two straight into its JSON Schema and,
+    /// from there, into the MCP tool list, so a kind without them would reach
+    /// an agent as an unlabelled tool.
+    #[test]
+    fn every_builtin_kind_carries_a_description_and_a_parameter_schema() {
+        let registry = builtin_registry().unwrap();
+        let mut generator = schemars::generate::SchemaSettings::draft2020_12().into_generator();
+        for kind in registry.kinds() {
+            let description = registry.description(kind).unwrap_or_default();
+            assert!(!description.is_empty(), "{kind} has no description");
+            assert!(
+                description.ends_with('.'),
+                "{kind}: a description is one sentence: {description:?}",
+            );
+            let schema = registry
+                .params_schema(kind, &mut generator)
+                .unwrap_or_else(|| panic!("{kind} has no parameter schema"));
+            assert!(
+                schema.as_object().is_some_and(
+                    |object| object.contains_key("$ref") || object.contains_key("type")
+                ),
+                "{kind}: {schema:?} describes nothing",
+            );
+        }
+        assert!(registry.description("nope.method").is_none());
+        assert!(
+            registry
+                .params_schema("nope.method", &mut generator)
+                .is_none()
+        );
     }
 }

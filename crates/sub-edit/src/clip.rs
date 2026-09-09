@@ -45,6 +45,7 @@
 //! and its own inverse is the same command carrying the lists it replaced, so
 //! redo is exact too.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
 use sub_model::{
@@ -77,7 +78,7 @@ pub fn register(registry: &mut CommandRegistry) -> SubResult<()> {
 ///
 /// The clip arrives whole, with its own identifier, so replaying the command
 /// from a log or a plugin reproduces the same project byte for byte.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddClip {
     /// The sequence holding the track.
@@ -92,6 +93,8 @@ pub struct AddClip {
 
 impl Command for AddClip {
     const KIND: &'static str = "clip.add";
+    const DESCRIPTION: &'static str =
+        "Place a clip on a track at a timeline position, overwriting what is there.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         require_media(project, self.clip.media)?;
@@ -120,7 +123,7 @@ impl Command for AddClip {
 ///
 /// This is the non-rippling delete: the clips after it stay where they are.
 /// Use [`RippleDelete`] to close the hole.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoveClip {
     /// The sequence holding the track.
@@ -133,6 +136,7 @@ pub struct RemoveClip {
 
 impl Command for RemoveClip {
     const KIND: &'static str = "clip.remove";
+    const DESCRIPTION: &'static str = "Lift a clip off its track, leaving the hole behind.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         edit_track(project, self.sequence, self.track, |layout| {
@@ -149,7 +153,7 @@ impl Command for RemoveClip {
 /// Moves a clip to another position, and optionally to another track.
 ///
 /// The clip leaves a hole behind and overwrites what it lands on.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MoveClip {
     /// The sequence holding the tracks.
@@ -167,6 +171,8 @@ pub struct MoveClip {
 
 impl Command for MoveClip {
     const KIND: &'static str = "clip.move";
+    const DESCRIPTION: &'static str =
+        "Move a clip to another position or track, overwriting what is there.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let target = self.to_track.unwrap_or(self.track);
@@ -221,7 +227,7 @@ impl Command for MoveClip {
 ///
 /// A positive `delta` shortens the clip from the head and leaves a hole; a
 /// negative one lengthens it, overwriting whatever lies before it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrimClipIn {
     /// The sequence holding the track.
@@ -236,6 +242,8 @@ pub struct TrimClipIn {
 
 impl Command for TrimClipIn {
     const KIND: &'static str = "clip.trim_in";
+    const DESCRIPTION: &'static str =
+        "Move a clip's in point, changing where it starts on the timeline.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let limit = source_limit(project, clip_of(project, self)?.media);
@@ -260,7 +268,7 @@ impl Command for TrimClipIn {
 ///
 /// A positive `delta` lengthens the clip, overwriting whatever lies after it;
 /// a negative one shortens it and leaves a hole.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrimClipOut {
     /// The sequence holding the track.
@@ -275,6 +283,8 @@ pub struct TrimClipOut {
 
 impl Command for TrimClipOut {
     const KIND: &'static str = "clip.trim_out";
+    const DESCRIPTION: &'static str =
+        "Move a clip's out point, changing where it ends on the timeline.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let limit = source_limit(project, clip_of(project, self)?.media);
@@ -301,7 +311,7 @@ impl Command for TrimClipOut {
 /// the clip: splitting at either boundary, or outside the clip, returns
 /// `edit.invalid_split` rather than silently doing nothing, because it almost
 /// always means the caller aimed at the wrong clip or the wrong instant.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SplitClip {
     /// The sequence holding the track.
@@ -319,6 +329,7 @@ pub struct SplitClip {
 
 impl Command for SplitClip {
     const KIND: &'static str = "clip.split";
+    const DESCRIPTION: &'static str = "Split a clip in two at a timeline instant.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         edit_track(project, self.sequence, self.track, |layout| {
@@ -364,7 +375,7 @@ impl Command for SplitClip {
 /// Only the clip's own track ripples; other tracks keep their timing, so an
 /// edit that must ripple several tracks issues one command per track inside a
 /// history group.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RippleDelete {
     /// The sequence holding the track.
@@ -377,6 +388,8 @@ pub struct RippleDelete {
 
 impl Command for RippleDelete {
     const KIND: &'static str = "clip.ripple_delete";
+    const DESCRIPTION: &'static str =
+        "Remove a clip and close the hole by pulling later clips back.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         edit_track(project, self.sequence, self.track, |layout| {
@@ -394,7 +407,7 @@ impl Command for RippleDelete {
 }
 
 /// One track's items, as [`RestoreTrackItems`] carries them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrackItems {
     /// The track the items belong to.
@@ -410,7 +423,7 @@ pub struct TrackItems {
 /// affected tracks wholesale rather than trying to invert each side effect one
 /// by one. It is a command like any other: applying it returns the same command
 /// carrying the lists it replaced, which is what redo applies.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestoreTrackItems {
     /// The sequence holding the tracks.
@@ -421,6 +434,8 @@ pub struct RestoreTrackItems {
 
 impl Command for RestoreTrackItems {
     const KIND: &'static str = "edit.restore_track_items";
+    const DESCRIPTION: &'static str =
+        "Restore whole track item lists, the inverse the clip edits undo through.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let sequence = sequence_mut(project, self.sequence)?;

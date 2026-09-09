@@ -15,7 +15,7 @@ use sub_model::{
 use sub_time::{Rational, RationalTime, TimeRange};
 
 /// Inserts an item into a track at `index`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, schemars::JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InsertItem {
     sequence: SequenceId,
@@ -49,7 +49,7 @@ impl Command for InsertItem {
 }
 
 /// Removes the item at `index`; its inverse carries the item back.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, schemars::JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RemoveItem {
     sequence: SequenceId,
@@ -79,7 +79,7 @@ impl Command for RemoveItem {
 }
 
 /// Renames a clip.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, schemars::JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RenameClip {
     sequence: SequenceId,
