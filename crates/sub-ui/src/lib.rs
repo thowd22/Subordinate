@@ -18,6 +18,7 @@ pub mod timeline;
 pub mod timeline_panel;
 pub mod track_header;
 pub mod viewer;
+pub mod waveform;
 
 pub use app::{AppOptions, SubordinateApp, run};
 pub use diagnostics::DiagnosticsPanel;
@@ -51,6 +52,10 @@ pub use timeline_panel::{
 };
 pub use track_header::{HeaderLayout, MenuChoice, MenuEntry, TrackAction, TrackHeaderState};
 pub use viewer::{ViewerAction, ViewerFit, ViewerFrame, ViewerPanel, ViewerState};
+pub use waveform::{
+    CHANNEL_TEXELS, ClipWaveform, MAX_TEXTURE_TEXELS, WaveformCache, frames_per_pixel,
+    level_for_zoom, waveform_image,
+};
 
 /// The stable error codes this crate reports.
 pub mod codes {

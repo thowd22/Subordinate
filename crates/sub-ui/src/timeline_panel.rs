@@ -26,6 +26,7 @@ use sub_time::{Rational, RationalTime, Timecode, TimecodeRate};
 use crate::thumbnails::{ThumbnailCache, ZoomBucket, tile_time};
 use crate::timeline::{TimelineView, TrackLayout, ZoomLevel};
 use crate::track_header::{TrackAction, TrackHeaderState, empty_column_menu};
+use crate::waveform::WaveformCache;
 
 /// The narrowest a labelled ruler tick may be spaced, in points.
 ///
@@ -41,6 +42,16 @@ const MIN_NAME_WIDTH_PX: f32 = 26.0;
 
 /// How wide the bar marking a trimmed clip edge is, in points.
 const TRIM_BAR_WIDTH: f32 = 3.0;
+
+/// How far a waveform strip is inset from the top and bottom of its clip, in
+/// points, so the clip's name and outline stay readable over it.
+const WAVEFORM_INSET: f32 = 2.0;
+
+/// The narrowest clip rectangle worth drawing a waveform in.
+const MIN_WAVEFORM_WIDTH_PX: f32 = 3.0;
+
+/// How much of the clip's outline colour a waveform strip is drawn in.
+const WAVEFORM_ALPHA: u8 = 190;
 
 /// How much of its colour a clip on a locked track keeps.
 ///
@@ -438,6 +449,8 @@ pub struct TimelinePanel {
     lane_scroll_px: f32,
     /// The track header column's widgets: the inline rename, and nothing else.
     header_state: TrackHeaderState,
+    /// The waveform peaks and textures the audio clips are drawn with.
+    waveforms: WaveformCache,
     /// Where the panel's parts sat the last time it was painted.
     last_layout: Option<PanelLayout>,
     /// The thumbnail textures the clip strips are painted from.
@@ -467,6 +480,7 @@ impl TimelinePanel {
             synced_revision: None,
             lane_scroll_px: 0.0,
             header_state: TrackHeaderState::new(),
+            waveforms: WaveformCache::new(),
             last_layout: None,
             thumbnails: ThumbnailCache::default(),
         }
@@ -508,6 +522,23 @@ impl TimelinePanel {
             pos2(layout.headers.left(), top),
             Vec2::new(layout.headers.width(), self.metrics.track_height),
         ))
+    }
+
+    /// The waveform cache the audio clips are drawn from.
+    ///
+    /// The panel neither generates nor reads peaks: the application hands them
+    /// over with [`WaveformCache::insert`] as the waveform jobs finish, and the
+    /// panel turns whatever is there into textures the first time it draws the
+    /// media.
+    #[must_use]
+    pub const fn waveforms(&self) -> &WaveformCache {
+        &self.waveforms
+    }
+
+    /// The waveform cache, to hand it peaks or to forget them.
+    #[must_use]
+    pub const fn waveforms_mut(&mut self) -> &mut WaveformCache {
+        &mut self.waveforms
     }
 
     /// The view model behind the panel.
@@ -677,6 +708,7 @@ impl TimelinePanel {
             let input = wheel_input(ui, &layout);
             self.apply_wheel(input, layout.content.height(), tracks);
         }
+        self.prepare_waveforms(ui.ctx(), project, sequence, layout);
         let visuals = ui.visuals().clone();
         let painter = ui.painter().with_clip_rect(rect);
         paint_frame(&painter, &layout, &visuals);
@@ -695,6 +727,47 @@ impl TimelinePanel {
         self.thumbnails = thumbnails;
         let actions = self.header_controls(ui, &layout, sequence);
         TimelineResponse { response, actions }
+    }
+
+    /// Uploads the waveform textures the clips about to be painted need.
+    ///
+    /// Textures are built once per media item and reused for every frame and
+    /// every clip cut from it, so this is a no-op on all but the first frame
+    /// after a waveform job finishes. It runs before painting because building
+    /// a texture needs the context, and painting only reads it.
+    fn prepare_waveforms(
+        &mut self,
+        ctx: &Context,
+        project: &Project,
+        sequence: &Sequence,
+        layout: PanelLayout,
+    ) {
+        if self.waveforms.is_empty() {
+            return;
+        }
+        let tracks = self.visible_tracks(layout.content.height(), sequence.tracks.len());
+        let mut prepared: Vec<sub_model::MediaId> = Vec::new();
+        for index in tracks {
+            let (Some(track), Some(placements)) =
+                (sequence.tracks.get(index), self.layouts.get(index))
+            else {
+                continue;
+            };
+            for placement in self.view.visible_clips(placements) {
+                let Some(clip) = track
+                    .items
+                    .get(placement.item_index)
+                    .and_then(sub_model::TrackItem::as_clip)
+                else {
+                    continue;
+                };
+                if prepared.contains(&clip.media) || !draws_waveform(project, clip) {
+                    continue;
+                }
+                prepared.push(clip.media);
+                self.waveforms.prepare(ctx, clip.media);
+            }
+        }
     }
 
     /// Runs the header column's controls over the visible tracks.
@@ -869,6 +942,7 @@ impl TimelinePanel {
             let dimmed = !clip_edits_allowed(track);
             paint_clip_body(painter, rect, kind, dimmed);
             let strip = paint_clip_strip(painter, rect, clip, kind, dimmed, strips);
+            self.paint_waveform(painter, rect, clip, kind, dimmed);
             paint_clip_decoration(
                 painter,
                 rect,
@@ -880,6 +954,61 @@ impl TimelinePanel {
             );
         }
     }
+
+    /// Draws the waveform strip inside one clip's rectangle.
+    ///
+    /// The texture is a picture of the whole source, so the clip draws the
+    /// part of it its source range covers; nothing is rebuilt when a clip is
+    /// trimmed, split or scrolled.
+    fn paint_waveform(
+        &self,
+        painter: &eframe::egui::Painter,
+        rect: Rect,
+        clip: &Clip,
+        kind: ClipMediaKind,
+        dimmed: bool,
+    ) {
+        if rect.width() < MIN_WAVEFORM_WIDTH_PX {
+            return;
+        }
+        let Some(waveform) = self.waveforms.waveform(clip.media) else {
+            return;
+        };
+        let Some(texture) = self.waveforms.texture(clip.media) else {
+            return;
+        };
+        let strip = Rect::from_min_max(
+            pos2(rect.left() + TRIM_BAR_WIDTH, rect.top() + WAVEFORM_INSET),
+            pos2(
+                rect.right() - TRIM_BAR_WIDTH,
+                rect.bottom() - WAVEFORM_INSET,
+            ),
+        );
+        if strip.width() <= 0.0 || strip.height() <= 0.0 {
+            return;
+        }
+        painter.image(
+            texture.id(),
+            strip,
+            waveform.uv_of(clip.source_range),
+            dim(waveform_color(kind), dimmed),
+        );
+    }
+}
+
+/// Whether a clip's media has sound to draw.
+fn draws_waveform(project: &Project, clip: &Clip) -> bool {
+    project
+        .media_item(clip.media)
+        .and_then(|media| media.info.as_ref())
+        .is_some_and(sub_model::StreamInfo::has_audio)
+}
+
+/// The colour a waveform strip is tinted with: the clip's own outline, kept
+/// translucent so the clip body still reads as its kind.
+fn waveform_color(kind: ClipMediaKind) -> Color32 {
+    let outline = kind.outline();
+    Color32::from_rgba_unmultiplied(outline.r(), outline.g(), outline.b(), WAVEFORM_ALPHA)
 }
 
 /// What a painted frame needs to turn strips into pictures: the egui context
@@ -1506,6 +1635,88 @@ mod tests {
         output.textures_delta.clear();
     }
 
+    /// A project holding one audio media item lasting `source_duration`
+    /// frames, and a sequence whose one audio track carries one clip of it.
+    fn audio_project(source_duration: i64, clip_range: TimeRange) -> (Project, Sequence) {
+        let mut project = Project::new("test");
+        let item = media(ClipMediaKind::Audio, Some(source_duration));
+        let media_id = item.id;
+        project.media.push(item);
+        let mut track = Track::new("A1", TrackKind::Audio);
+        track
+            .items
+            .push(TrackItem::Clip(Clip::new("take", media_id, clip_range)));
+        let mut sequence = Sequence::new("seq", SequenceSettings::default());
+        sequence.tracks.push(track);
+        (project, sequence)
+    }
+
+    /// Stereo peaks at 48 kHz, 512 audio frames a peak.
+    fn peaks(buckets: usize) -> crate::waveform::ClipWaveform {
+        let peaks = (0..buckets)
+            .flat_map(|_| {
+                [
+                    sub_media::Peak {
+                        min: -20_000,
+                        max: 20_000,
+                    },
+                    sub_media::Peak {
+                        min: -10_000,
+                        max: 10_000,
+                    },
+                ]
+            })
+            .collect();
+        crate::waveform::ClipWaveform::new(48_000, 2, 512, buckets as u64 * 512, peaks)
+    }
+
+    /// Paints one frame of the panel headlessly and returns what it drew.
+    fn painted(
+        panel: &mut TimelinePanel,
+        project: &Project,
+        sequence: &Sequence,
+    ) -> Vec<eframe::egui::epaint::ClippedShape> {
+        let ctx = eframe::egui::Context::default();
+        paint_one_frame(&ctx, panel, project, sequence)
+    }
+
+    /// Paints one frame with a caller's context, so two frames can share one.
+    fn paint_one_frame(
+        ctx: &eframe::egui::Context,
+        panel: &mut TimelinePanel,
+        project: &Project,
+        sequence: &Sequence,
+    ) -> Vec<eframe::egui::epaint::ClippedShape> {
+        let input = eframe::egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(800.0, 400.0))),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            panel.ui(ui, project, sequence);
+        });
+        // Nothing here paints, so the textures the frame uploaded are dropped
+        // by hand rather than handed to a renderer.
+        output.textures_delta.clear();
+        output.shapes
+    }
+
+    /// The meshes drawn with one texture, which is how a waveform strip
+    /// reaches the screen.
+    fn meshes_with(
+        shapes: &[eframe::egui::epaint::ClippedShape],
+        texture: eframe::egui::TextureId,
+    ) -> Vec<Rect> {
+        shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                eframe::egui::Shape::Mesh(mesh) if mesh.texture_id == texture => {
+                    Some(mesh.calc_bounds())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn strip_tiles_keep_the_thumbnail_aspect_and_are_capped() {
         // A 16:9 thumbnail in a 48-point lane is 85 points wide, so a
@@ -1620,5 +1831,98 @@ mod tests {
             "a scrolled strip is re-used, not rebuilt"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_audio_clip_is_drawn_with_its_cached_waveform_texture() {
+        let (project, sequence) = audio_project(240, range(0, 240));
+        let media_id = project.media[0].id;
+        let mut panel = TimelinePanel::new(RATE);
+        panel.sync(&sequence, 1);
+        panel.waveforms_mut().insert(media_id, peaks(470));
+
+        let ctx = eframe::egui::Context::default();
+        let shapes = paint_one_frame(&ctx, &mut panel, &project, &sequence);
+        assert_eq!(
+            panel.waveforms().textures(),
+            1,
+            "the strip is uploaded once, on the frame that first draws it"
+        );
+        let texture = panel
+            .waveforms()
+            .texture(media_id)
+            .expect("a waveform texture")
+            .id();
+        let drawn = meshes_with(&shapes, texture);
+        assert_eq!(drawn.len(), 1, "the clip draws its waveform exactly once");
+
+        // The strip sits inside the clip rectangle, not over the lane beside
+        // it: the clip runs from sequence zero to frame 240.
+        let lane_left = panel.layout().expect("a layout").content.left();
+        let clip_right = lane_left + panel.view().pixel_of(frames(240));
+        assert!(drawn[0].left() >= lane_left);
+        assert!(drawn[0].right() <= clip_right + 1.0);
+
+        // A second frame reuses the texture rather than uploading another.
+        let again = paint_one_frame(&ctx, &mut panel, &project, &sequence);
+        assert_eq!(panel.waveforms().textures(), 1);
+        assert_eq!(
+            panel
+                .waveforms()
+                .texture(media_id)
+                .expect("a waveform texture")
+                .id(),
+            texture,
+            "the cached texture survives from frame to frame"
+        );
+        assert_eq!(meshes_with(&again, texture).len(), 1);
+    }
+
+    #[test]
+    fn a_clip_with_no_peaks_yet_is_painted_without_a_waveform() {
+        let (project, sequence) = audio_project(240, range(0, 240));
+        let mut panel = TimelinePanel::new(RATE);
+        panel.sync(&sequence, 1);
+        // Nothing was ever handed to the cache: the panel paints the clip and
+        // asks for no texture at all.
+        let shapes = painted(&mut panel, &project, &sequence);
+        assert!(panel.waveforms().is_empty());
+        assert_eq!(panel.waveforms().textures(), 0);
+        assert!(!shapes.is_empty(), "the clip itself is still painted");
+    }
+
+    #[test]
+    fn a_silent_media_item_is_never_uploaded_even_when_peaks_are_offered() {
+        // A still has no audio, so the panel must not ask for its waveform
+        // even when one has somehow been cached for it.
+        let mut project = Project::new("test");
+        let item = media(ClipMediaKind::Still, None);
+        let media_id = item.id;
+        project.media.push(item);
+        let mut track = Track::new("V1", TrackKind::Video);
+        track
+            .items
+            .push(TrackItem::Clip(Clip::new("still", media_id, range(0, 48))));
+        let mut sequence = Sequence::new("seq", SequenceSettings::default());
+        sequence.tracks.push(track);
+
+        let mut panel = TimelinePanel::new(RATE);
+        panel.sync(&sequence, 1);
+        panel.waveforms_mut().insert(media_id, peaks(10));
+        let _ = painted(&mut panel, &project, &sequence);
+        assert_eq!(
+            panel.waveforms().textures(),
+            0,
+            "a media item with no sound costs no texture"
+        );
+    }
+
+    #[test]
+    fn a_trimmed_clip_samples_only_its_own_part_of_the_texture() {
+        // The middle two seconds of a ten-second source.
+        let waveform = peaks(938);
+        let uv = waveform.uv_of(range(96, 48));
+        assert!((uv.left() - 0.4).abs() < 0.01, "{uv:?}");
+        assert!((uv.right() - 0.6).abs() < 0.01, "{uv:?}");
     }
 }
