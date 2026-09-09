@@ -9,6 +9,11 @@
 //! - [`dispatch`] — the [`Dispatcher`], which maps method names to engine
 //!   commands and queries and turns every failure into the standard JSON-RPC
 //!   error wrapping a [`sub_core::SubError`].
+//! - [`endpoint`] — where the server listens: the per-user Unix socket or
+//!   Windows named pipe, and the lock file that advertises it.
+//! - [`transport`] — the [`transport::Server`] that serves that endpoint with
+//!   newline-delimited JSON framing, and the [`transport::Client`] that speaks
+//!   to it from another process.
 //!
 //! ```
 //! use sub_command::Dispatcher;
@@ -26,13 +31,17 @@
 //! ```
 
 pub mod dispatch;
+pub mod endpoint;
 pub mod rpc;
+pub mod transport;
 
 pub use dispatch::{AppliedResult, Dispatcher, HistoryResult, MethodInfo};
+pub use endpoint::{Address, Endpoint, LockFile, Transport};
 pub use rpc::{
     Call, Incoming, Notification, Outgoing, Payload, Request, RequestId, Response, RpcError,
     Version, error_codes,
 };
+pub use transport::{Client, Server};
 
 /// The error codes this crate produces.
 ///
@@ -47,6 +56,19 @@ pub mod codes {
     pub const INVALID_PARAMS: ErrorCode = ErrorCode::from_static("command.invalid_params");
     /// Two handlers claim the same method name.
     pub const DUPLICATE_METHOD: ErrorCode = ErrorCode::from_static("command.duplicate_method");
+    /// An instance name is not usable in a socket path or a pipe name.
+    pub const INVALID_INSTANCE: ErrorCode = ErrorCode::from_static("command.invalid_instance");
+    /// This machine offers no usable per-user address for the Command API.
+    pub const ENDPOINT_UNAVAILABLE: ErrorCode =
+        ErrorCode::from_static("command.endpoint_unavailable");
+    /// Another live instance is already listening on the endpoint.
+    pub const ADDRESS_IN_USE: ErrorCode = ErrorCode::from_static("command.address_in_use");
+    /// A lock file exists but is not one this build understands.
+    pub const LOCK_FILE_INVALID: ErrorCode = ErrorCode::from_static("command.lock_file_invalid");
+    /// No server is listening on the endpoint a client asked for.
+    pub const NOT_RUNNING: ErrorCode = ErrorCode::from_static("command.not_running");
+    /// The socket or pipe itself failed.
+    pub const TRANSPORT_IO: ErrorCode = ErrorCode::from_static("command.transport_io");
 }
 
 #[cfg(test)]
@@ -59,6 +81,12 @@ mod tests {
             codes::UNKNOWN_METHOD,
             codes::INVALID_PARAMS,
             codes::DUPLICATE_METHOD,
+            codes::INVALID_INSTANCE,
+            codes::ENDPOINT_UNAVAILABLE,
+            codes::ADDRESS_IN_USE,
+            codes::LOCK_FILE_INVALID,
+            codes::NOT_RUNNING,
+            codes::TRANSPORT_IO,
         ] {
             assert_eq!(code.domain(), "command");
             assert_eq!(
