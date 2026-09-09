@@ -27,6 +27,20 @@ pub enum RenderError {
     /// This means the `wgpu` feature of eframe was disabled or the glow
     /// backend was selected; the compositor cannot then share the UI device.
     MissingRenderState,
+    /// A frame's dimensions or plane strides are not a usable NV12 layout.
+    BadGeometry {
+        /// What is wrong with the layout.
+        reason: String,
+    },
+    /// A frame's plane slice is too short for the geometry it claims.
+    ShortPlane {
+        /// Which plane fell short: `luma` or `chroma`.
+        plane: &'static str,
+        /// Bytes the caller supplied.
+        have: usize,
+        /// Bytes the geometry needs.
+        need: usize,
+    },
 }
 
 impl RenderError {
@@ -39,6 +53,8 @@ impl RenderError {
             Self::NoAdapter { .. } => "render.no_adapter",
             Self::DeviceRequestFailed { .. } => "render.device_request_failed",
             Self::MissingRenderState => "render.missing_render_state",
+            Self::BadGeometry { .. } => "render.bad_geometry",
+            Self::ShortPlane { .. } => "render.short_plane",
         }
     }
 }
@@ -54,6 +70,10 @@ impl fmt::Display for RenderError {
             }
             Self::MissingRenderState => {
                 f.write_str("the UI was started without a wgpu render state")
+            }
+            Self::BadGeometry { reason } => write!(f, "unusable frame geometry: {reason}"),
+            Self::ShortPlane { plane, have, need } => {
+                write!(f, "{plane} plane holds {have} bytes, {need} needed")
             }
         }
     }
@@ -85,6 +105,22 @@ mod tests {
         assert_eq!(
             RenderError::MissingRenderState.code(),
             "render.missing_render_state"
+        );
+        assert_eq!(
+            RenderError::BadGeometry {
+                reason: "0x1080 is not a picture".to_owned()
+            }
+            .code(),
+            "render.bad_geometry"
+        );
+        assert_eq!(
+            RenderError::ShortPlane {
+                plane: "luma",
+                have: 10,
+                need: 20,
+            }
+            .code(),
+            "render.short_plane"
         );
     }
 

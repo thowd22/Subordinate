@@ -10,6 +10,7 @@
 pub mod adapter;
 pub mod context;
 pub mod error;
+pub mod nv12;
 
 pub use adapter::{
     AdapterRank, adapter_rank, backend_label, best_adapter_index, describe_adapter,
@@ -17,3 +18,4 @@ pub use adapter::{
 };
 pub use context::RenderContext;
 pub use error::RenderError;
+pub use nv12::{Nv12Converter, Nv12Geometry, OUTPUT_FORMAT};
