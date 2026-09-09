@@ -10,6 +10,7 @@
 
 pub mod audio;
 pub mod decode;
+pub mod decode_ahead;
 pub mod diagnostics;
 pub mod probe;
 
@@ -20,6 +21,7 @@ pub use audio::{
 pub use decode::{
     Decoder, DecoderOptions, FrameFormat, HardwarePreference, StreamSelection, VideoFrame,
 };
+pub use decode_ahead::{DEFAULT_CAPACITY, DecodeAhead, DecodeAheadOptions, DecodeAheadStats};
 pub use diagnostics::{
     ElementKind, ElementStatus, HardwareDiagnostics, VENDORS, Vendor, VendorReport,
 };
