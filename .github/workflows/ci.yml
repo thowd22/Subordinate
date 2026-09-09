@@ -27,11 +27,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Toolchain version mirrors rust-toolchain.toml.
+      # Toolchain version mirrors rust-toolchain.toml. wasm32-wasip2 is what
+      # plugin components are built for; without it the WASM tests in
+      # spikes/wasm-command-world compile out silently (TASK-9).
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
           components: rustfmt, clippy
+          targets: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
         with:
