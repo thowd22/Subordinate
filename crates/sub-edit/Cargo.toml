@@ -8,6 +8,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+sub-core = { path = "../sub-core" }
+sub-model = { path = "../sub-model" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+sub-time = { path = "../sub-time" }
 
 [lints]
 workspace = true

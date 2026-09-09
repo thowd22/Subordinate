@@ -3151,6 +3151,13 @@ dependencies = [
 [[package]]
 name = "sub-edit"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sub-core",
+ "sub-model",
+ "sub-time",
+]
 
 [[package]]
 name = "sub-export"
