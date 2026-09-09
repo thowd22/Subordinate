@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-task-114'
 created_date: '2026-09-09 17:29'
-updated_date: '2026-09-09 18:15'
+updated_date: '2026-09-09 20:36'
 labels:
   - infra
   - gpu
@@ -28,7 +28,7 @@ Workflows should reference stable runner names rather than raw EC2 parameters. R
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 .github/runs-on.yml defines runners gpu-nvidia-linux (g4dn.xlarge, ubuntu24-gpu-x64, spot preferred), gpu-amd-linux (g4ad.xlarge), gpu-nvidia-windows and gpu-amd-windows (custom AMI placeholder), each with a cost cap
-- [ ] #2 A workflow_dispatch smoke job on gpu-nvidia-linux prints nvidia-smi and gst-inspect-1.0 --exists nvh264enc succeeds
+- [x] #2 A workflow_dispatch smoke job on gpu-nvidia-linux prints nvidia-smi and gst-inspect-1.0 --exists nvh264enc succeeds
 - [ ] #3 A workflow_dispatch smoke job on gpu-amd-linux prints the DRM device and vainfo, and gst-inspect-1.0 --exists vah264enc succeeds after installing the va plugin
 <!-- AC:END -->
 
@@ -60,4 +60,6 @@ Schema decisions taken from the RunsOn docs, not guessed:
 Validation: actionlint 1.7.12 clean on all three workflows (0 errors, no new labels needed in .github/actionlint.yaml since the runs-on values are expressions); .github/runs-on.yml parses as YAML.
 
 AC #2 and #3 left unchecked: they require the EC2 G-family vCPU quota increase (TASK-113, still pending, currently 0) and a 'gh workflow run gpu-smoke.yml' dispatch from main. This agent must not push, so no dispatch was possible.
+
+2026-09-09 20:20 UTC: gpu-smoke run 34400346107. NVIDIA job passed on an on-demand g4dn.xlarge (Tesla T4, driver 580.173.02, CUDA 13.0, RunsOn ubuntu24-gpu-x64 image): nvidia-smi printed and the 'NVENC element present' step (gst-inspect-1.0 --exists nvh264enc) succeeded, so criterion 2 is met. AMD job could not launch: RunsOn reports 'g4ad.xlarge: no such instance type exists in this region', and describe-instance-type-offerings finds NO g4ad instance type in ANY AWS region and no AMD-GPU instance type at all in us-east-1. AWS appears to have retired the G4ad (Radeon Pro V520) family. Criterion 3 cannot be met on AWS; the AMD Linux target needs another provider (Azure NVads V710 v5, AMD Radeon Pro V710, Linux and Windows) or a user-owned AMD machine as a self-hosted runner. Decision pending with the user.
 <!-- SECTION:NOTES:END -->

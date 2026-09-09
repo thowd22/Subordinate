@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-09 17:29'
+updated_date: '2026-09-09 20:36'
 labels:
   - infra
   - gpu
@@ -33,3 +34,9 @@ Turns the manual verify tasks into a repeatable, agent-triggerable workflow. Run
 - [ ] #3 Each Linux job measures 4K H.264 scrub rate with hardware decode using the benchmark harness and prints it in the summary
 - [ ] #4 Job cost stays under 0.25 USD per run on spot (documented in the workflow header)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-09-09: AWS no longer offers any AMD GPU instance type (g4ad retired; verified via describe-instance-type-offerings across all regions). AMD parts of this task need Azure NVads V710 v5 or a user-owned AMD box; NVIDIA parts proceed on RunsOn g4dn.
+<!-- SECTION:NOTES:END -->

@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-09 17:29'
+updated_date: '2026-09-09 20:36'
 labels:
   - infra
   - gpu
@@ -33,3 +34,9 @@ RunsOn ships Linux GPU images but Windows GPU jobs need an AMI with vendor drive
 - [ ] #2 runs-on.yml Windows GPU runners reference the AMI and a smoke job on each shows the GPU in dxdiag or nvidia-smi output
 - [ ] #3 gst-inspect-1.0 --exists nvh264enc passes on the NVIDIA runner and amfh264enc on the AMD runner
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-09-09: AWS no longer offers any AMD GPU instance type (g4ad retired; verified via describe-instance-type-offerings across all regions). AMD parts of this task need Azure NVads V710 v5 or a user-owned AMD box; NVIDIA parts proceed on RunsOn g4dn.
+<!-- SECTION:NOTES:END -->
