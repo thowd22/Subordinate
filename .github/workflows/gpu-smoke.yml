@@ -50,49 +50,43 @@ jobs:
           gst-inspect-1.0 nvh264enc | head -20
 
   amd-linux:
-    name: AMD Radeon Pro V520 (g4ad.xlarge, Ubuntu 26.04)
-    runs-on: runs-on=${{ github.run_id }}/runner=gpu-amd-linux
-    timeout-minutes: 30
+    # AWS no longer offers AMD GPU instances (g4ad retired), so the AMD Linux
+    # target runs on "box", a user-owned mini PC with an AMD Cezanne APU
+    # (Radeon Vega, VCN encode) registered as a self-hosted runner. Zero cost.
+    # Packages (GStreamer 1.28 from Ubuntu 26.04, mesa-va-drivers, vainfo) are
+    # preinstalled on the box; this job verifies rather than installs.
+    name: AMD APU (box, self-hosted, Ubuntu 26.04)
+    runs-on: [self-hosted, linux, box, amd-gpu]
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Instance and DRM facts
+      - name: Host and DRM facts
         run: |
           echo "runner=$RUNNER_NAME"
-          curl -fsS -m 3 http://169.254.169.254/latest/meta-data/instance-type || true; echo
           . /etc/os-release && echo "os=$PRETTY_NAME"
-          ls -l /dev/dri || { echo "::error::no /dev/dri - no DRM device on this instance"; exit 1; }
+          ls -l /dev/dri
           lspci -nn | grep -i -E 'vga|display' || true
+          id -nG
 
-      # Ubuntu does not ship a standalone "va" GStreamer package: the modern
-      # `va` plugin (vah264enc/vah264dec, built on libva) is part of
-      # gstreamer1.0-plugins-bad. The AMD side of the driver stack is
-      # mesa-va-drivers (radeonsi). Ubuntu 26.04 apt gives GStreamer 1.28.x, the
-      # version ci.yml pins, so this job does enforce the minor.
-      - name: Install GStreamer and the Mesa VA-API stack (apt)
+      - name: GStreamer and VA-API facts
         env:
           GST_MINOR: "1.28"
         run: |
-          sudo rm -f /etc/apt/sources.list.d/*google*.list \
-                     /etc/apt/sources.list.d/*google*.sources \
-                     /etc/apt/sources.list.d/*microsoft*.list \
-                     /etc/apt/sources.list.d/*microsoft*.sources || true
-          sudo apt-get update || sudo apt-get update
-          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
-            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-            gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x pkg-config \
-            libasound2-dev \
-            vainfo mesa-va-drivers libva-drm2
-          v=$(pkg-config --modversion gstreamer-1.0)
-          echo "gstreamer-1.0 = $v"
+          gst-inspect-1.0 --version
+          v=$(pkg-config --modversion gstreamer-1.0); echo "gstreamer-1.0 = $v"
           case "$v" in "$GST_MINOR".*) ;; *) echo "::error::expected GStreamer $GST_MINOR.x, got $v"; exit 1;; esac
+          vainfo --display drm --device /dev/dri/renderD128 | grep -E 'Driver version|EncSlice'
 
-      - name: vainfo
-        run: vainfo --display drm --device /dev/dri/renderD128
-
-      - name: VA-API element present
+      - name: VA-API encoder elements present
         run: |
-          gst-inspect-1.0 --exists vah264enc \
-            || { echo "::error::vah264enc missing"; gst-inspect-1.0 va || true; exit 1; }
-          gst-inspect-1.0 vah264enc | head -20
+          for e in vah264enc vah265enc vah264dec vapostproc; do
+            gst-inspect-1.0 --exists "$e" && echo "present  $e" || { echo "::error::$e missing"; exit 1; }
+          done
+
+      - name: Hardware H.264 encode round-trip
+        run: |
+          gst-launch-1.0 -q videotestsrc num-buffers=120 ! video/x-raw,width=1920,height=1080,framerate=30/1 \
+            ! vapostproc ! vah264enc ! h264parse ! mp4mux ! filesink location="$RUNNER_TEMP/va-test.mp4"
+          gst-discoverer-1.0 "$RUNNER_TEMP/va-test.mp4" | tee /dev/stderr | grep -q 'H.264'
+          ls -l "$RUNNER_TEMP/va-test.mp4"
