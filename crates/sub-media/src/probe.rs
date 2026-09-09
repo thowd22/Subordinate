@@ -16,7 +16,7 @@
 //! ```
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use gstreamer as gst;
@@ -498,10 +498,6 @@ fn collect_video_pts(path: &Path, budget: Duration) -> Result<Vec<u64>, SubError
         let Some(pipeline) = weak_pipeline.upgrade() else {
             return;
         };
-        let is_video = pad
-            .current_caps()
-            .and_then(|caps| media_type(Some(&caps)))
-            .is_some_and(|name| name.starts_with("video/"));
         // Every pad needs a consumer or the parser stalls, but only the video
         // pads are timed.
         let Ok(sink) = gst::ElementFactory::make("fakesink")
@@ -520,12 +516,13 @@ fn collect_video_pts(path: &Path, budget: Duration) -> Result<Vec<u64>, SubError
         if pad.link(&sink_pad).is_err() {
             return;
         }
-        if !is_video {
-            return;
-        }
         let collected = Arc::clone(&collected);
-        pad.add_probe(gst::PadProbeType::BUFFER, move |_, probe| {
-            if let Some(gst::PadProbeData::Buffer(buffer)) = &probe.data
+        // Whether this pad carries video is decided on its first buffer, not
+        // here: a pad can be added before its caps are negotiated.
+        let is_video = OnceLock::new();
+        pad.add_probe(gst::PadProbeType::BUFFER, move |pad, probe| {
+            if *is_video.get_or_init(|| pad_carries_video(pad))
+                && let Some(gst::PadProbeData::Buffer(buffer)) = &probe.data
                 && let Some(pts) = buffer.pts()
                 && let Ok(mut seen) = collected.lock()
                 && seen.len() < MAX_SCANNED_FRAMES
@@ -544,6 +541,16 @@ fn collect_video_pts(path: &Path, budget: Duration) -> Result<Vec<u64>, SubError
         .lock()
         .map_err(|_| SubError::new(codes::PROBE_FAILED, "frame timing scan panicked"))?;
     Ok(seen.clone())
+}
+
+/// Whether `pad` carries video, judged from its caps once data flows.
+///
+/// A parser pad can be added before its caps are negotiated, so the caps are
+/// read when the first buffer arrives rather than at `pad-added`; the pad's
+/// allowed caps are the fallback for the rare pad that reports none.
+fn pad_carries_video(pad: &gst::Pad) -> bool {
+    let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
+    media_type(Some(&caps)).is_some_and(|name| name.starts_with("video/"))
 }
 
 /// Upper bound on collected timestamps: ten hours at 60 fps, enough to classify

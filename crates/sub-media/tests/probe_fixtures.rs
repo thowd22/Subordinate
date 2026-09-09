@@ -11,8 +11,18 @@ use sub_media::{FrameTiming, ProbeOptions, probe, probe_with};
 use sub_test_support::{Fixture, FixtureError, FixtureKind, Manifest, fixture, load_manifest};
 use sub_time::Rational;
 
+/// Turns on the probe's own debug logging once per test binary, so a failure
+/// here reports why a scan gave up instead of only that it did.
+fn log_scan_decisions() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = sub_core::logging::init("sub_media=debug");
+    });
+}
+
 /// Loads the manifest, or `None` when the fixtures were never generated.
 fn manifest() -> Option<Manifest> {
+    log_scan_decisions();
     match load_manifest() {
         Ok(manifest) => Some(manifest),
         Err(FixtureError::ManifestMissing { .. }) => {
