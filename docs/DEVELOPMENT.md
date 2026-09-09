@@ -256,7 +256,8 @@ Nothing in the audio callback logs, allocates or locks.
 ## Project files
 
 A project is `name.sub` (JSON). Its sidecar directory `name.sub.d/` sits beside
-the project file and holds thumbnails, waveforms, proxies and autosave
+the project file and holds thumbnails, waveforms, proxies, PTS indexes
+(`<content-hash>.ptsindex.json`, written by `sub_media::PtsIndex`) and autosave
 snapshots. The naming is mechanical: append `.d` to the project file name, so
 `doc-cut.sub` owns `doc-cut.sub.d/`. Everything in it is derived data and can
 be deleted at the cost of regenerating it, so it is never committed: the
