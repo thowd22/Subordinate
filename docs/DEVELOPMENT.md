@@ -315,3 +315,31 @@ change is intended, regenerate the fixture and commit its diff:
 ```bash
 SUB_UPDATE_GOLDEN=1 cargo test -p sub-model --test golden
 ```
+
+## GPU CI (RunsOn)
+
+Hosted GitHub runners have no GPU, so hardware encode and decode criteria run
+on EC2 instances in the project's AWS account through
+[RunsOn](https://runs-on.com/) (self-hosted scheduler, installed 2026-09-09).
+
+- Stack: `runs-on` in **us-east-1**, RunsOn v3.3.0. Scheduler logs:
+  CloudWatch log group `/aws/ecs/runs-on/runs-on-worker`.
+- The RunsOn GitHub App is installed on `thowd22/Subordinate`; job webhooks go
+  to the stack's API Gateway entry point (see the stack outputs).
+- Smoke test: run the **RunsOn smoke** workflow (`workflow_dispatch`). It
+  starts a 2-CPU spot Linux instance, prints instance facts and exits. Use it
+  first whenever the stack or the App changes.
+- GPU runners (NVIDIA `g4dn`, AMD `g4ad`, Linux and Windows) are defined in
+  `.github/runs-on.yml` and need the EC2 G-family vCPU quotas
+  (`L-DB2E81BA` on-demand, `L-3819A6DF` spot) above zero in us-east-1.
+- Cost: instances are billed by AWS at spot price with no markup; every job
+  gets a fresh instance that is terminated when the job ends.
+
+Useful commands:
+
+```
+aws cloudformation describe-stacks --stack-name runs-on --region us-east-1
+aws logs tail /aws/ecs/runs-on/runs-on-worker --region us-east-1 --since 10m
+aws ec2 describe-instances --region us-east-1 \
+  --query "Reservations[].Instances[].[InstanceId,InstanceType,State.Name]" --output text
+```

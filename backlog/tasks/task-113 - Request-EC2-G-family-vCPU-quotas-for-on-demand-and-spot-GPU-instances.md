@@ -1,9 +1,11 @@
 ---
 id: TASK-113
 title: Request EC2 G-family vCPU quotas for on-demand and spot GPU instances
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-09-09 17:29'
+updated_date: '2026-09-09 17:59'
 labels:
   - infra
   - gpu
@@ -22,6 +24,18 @@ New AWS accounts have a zero or tiny quota for G-family instances, so g4dn and g
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Service quota requests filed for 'Running On-Demand G and VT instances' and 'All G and VT Spot Instance Requests' to at least 16 vCPUs each in the RunsOn region
+- [x] #1 Service quota requests filed for 'Running On-Demand G and VT instances' and 'All G and VT Spot Instance Requests' to at least 16 vCPUs each in the RunsOn region
 - [ ] #2 Approved values are confirmed with aws service-quotas get-service-quota and recorded in the task notes
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Read current quotas (both 0). 2. File requests for 16 vCPUs each via aws service-quotas in us-east-1. 3. Poll until approved, record values.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-09-09: both quotas were 0.0 in us-east-1. Filed increase requests to 16 vCPUs for L-DB2E81BA (Running On-Demand G and VT instances) and L-3819A6DF (All G and VT Spot Instance Requests); both PENDING. g4dn.xlarge and g4ad.xlarge are 4 vCPUs each, so 16 allows four concurrent GPU jobs.
+<!-- SECTION:NOTES:END -->
