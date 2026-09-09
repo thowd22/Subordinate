@@ -3364,6 +3364,13 @@ dependencies = [
 [[package]]
 name = "sub-command"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sub-core",
+ "sub-edit",
+ "sub-model",
+]
 
 [[package]]
 name = "sub-core"
