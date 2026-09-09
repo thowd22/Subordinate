@@ -8,7 +8,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+sub-core = { path = "../sub-core" }
+sub-model = { path = "../sub-model" }
+sub-time = { path = "../sub-time" }
 gstreamer = "0.25"
+gstreamer-pbutils = "0.25"
+gstreamer-video = { version = "0.25", features = ["v1_18"] }
+tracing = "0.1"
+
+[dev-dependencies]
+sub-test-support = { path = "../sub-test-support" }
 
 [lints]
 workspace = true
