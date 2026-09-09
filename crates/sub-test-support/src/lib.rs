@@ -75,6 +75,12 @@ pub struct Fixture {
     pub fps_den: u32,
     /// True when frame durations genuinely vary across the file.
     pub vfr: bool,
+    /// True when the codec is lossy, so decoding it cannot reproduce the
+    /// samples that went in and the encoder's priming and padding make the
+    /// file a little longer than [`Fixture::duration_ns`]. Absent from
+    /// manifests written before lossy fixtures existed, where it reads false.
+    #[serde(default)]
+    pub lossy: bool,
     /// False when the generator skipped this fixture, for example the
     /// ten-minute clip without `--long`.
     pub generated: bool,
@@ -352,6 +358,11 @@ mod tests {
           "name": "tone_48k_stereo.wav", "kind": "audio", "width": 0, "height": 0,
           "duration_ns": 5000000000, "fps_num": 0, "fps_den": 1,
           "vfr": false, "generated": true, "description": "tone"
+        },
+        {
+          "name": "tone_48k_stereo.mp3", "kind": "audio", "width": 0, "height": 0,
+          "duration_ns": 5000000000, "fps_num": 0, "fps_den": 1,
+          "vfr": false, "lossy": true, "generated": true, "description": "lossy tone"
         }
       ]
     }"#;
@@ -376,8 +387,8 @@ mod tests {
     fn manifest_parses_with_exact_integer_timing() {
         let manifest = Manifest::from_json(SAMPLE).expect("sample manifest parses");
         assert_eq!(manifest.version, super::MANIFEST_VERSION);
-        assert_eq!(manifest.fixtures.len(), 4);
-        assert_eq!(manifest.generated().count(), 3);
+        assert_eq!(manifest.fixtures.len(), 5);
+        assert_eq!(manifest.generated().count(), 4);
 
         let bars = manifest.get("bars_1080p_h264.mp4").expect("bars entry");
         assert_eq!(bars.kind, FixtureKind::Video);
@@ -388,6 +399,15 @@ mod tests {
         let tone = manifest.get("tone_48k_stereo.wav").expect("tone entry");
         assert_eq!(tone.kind, FixtureKind::Audio);
         assert_eq!(tone.width, 0);
+        // The flag is optional, so a manifest written before lossy fixtures
+        // existed still parses and reads as lossless.
+        assert!(!tone.lossy);
+        assert!(
+            manifest
+                .get("tone_48k_stereo.mp3")
+                .expect("mp3 entry")
+                .lossy
+        );
 
         assert!(manifest.get("vfr_60_30.mkv").expect("vfr entry").vfr);
         assert!(manifest.get("nope.mp4").is_none());

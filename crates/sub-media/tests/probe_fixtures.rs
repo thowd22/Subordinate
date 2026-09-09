@@ -77,9 +77,14 @@ fn every_fixture_probes_into_the_shape_the_manifest_promises() {
             entry.name
         );
         // Containers round the last frame's end to their own timescale, so a
-        // millisecond of slack is expected; a wrong duration is never that close.
+        // millisecond of slack is expected; a wrong duration is never that
+        // close. A lossy encoder also brackets the signal with priming and
+        // padding frames, which no container trims away here, so those files
+        // get a tenth of a second instead: still far tighter than a wrong
+        // duration, which would be out by seconds.
+        let tolerance_ns = if entry.lossy { 100_000_000 } else { 1_000_000 };
         assert!(
-            duration_gap(duration.value(), entry.duration_ns) < 1_000_000,
+            duration_gap(duration.value(), entry.duration_ns) < tolerance_ns,
             "{}: duration {} ns, manifest says {} ns",
             entry.name,
             duration.value(),

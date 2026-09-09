@@ -123,13 +123,22 @@ them with `gst-launch-1.0` into `fixtures/`, which is gitignored:
 
 The catalogue is 1080p and 4K H.264 colour bars with a burnt-in timecode, a
 29.97 drop-frame clip, a variable-frame-rate clip, a 10-minute long-GOP clip,
-and 48 kHz stereo WAV and FLAC audio-only files. Existing files are kept unless
-`--force` is given, so re-running the script is cheap.
+and 48 kHz stereo audio-only files in WAV, FLAC, MP3, AAC (in MP4) and Ogg
+Vorbis. Existing files are kept unless `--force` is given, so re-running the
+script is cheap.
+
+The lossy audio fixtures need `lamemp3enc` (plugins-ugly), `avenc_aac`
+(libav) and `vorbisenc` with `oggmux` (plugins-base). Where one of those is
+not installed the script skips that fixture and marks it ungenerated instead
+of failing, so a minimal install still produces a usable fixture set.
 
 Alongside them the script writes `fixtures/manifest.json`, recording each
 fixture's name, kind, dimensions, exact duration in nanoseconds, frame rate as
-an exact rational, and whether it is variable-frame-rate. Fixtures the run
-skipped stay in the manifest with `"generated": false`.
+an exact rational, whether it is variable-frame-rate, and whether its codec is
+lossy. `duration_ns` is the authored length: a lossy encoder adds priming and
+padding, so those files match it only to within a few tens of milliseconds, and
+tests give them a tolerance while holding the lossless ones exact. Fixtures the
+run skipped stay in the manifest with `"generated": false`.
 
 Tests locate fixtures through the `sub-test-support` crate rather than by path:
 

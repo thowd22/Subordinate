@@ -48,11 +48,17 @@ fn every_audio_only_fixture_decodes_with_the_shape_the_manifest_promises() {
             .unwrap_or_else(|| panic!("{}: no duration", entry.name));
         let expected_frames =
             i64::try_from(entry.duration_ns).expect("fits") * 48_000 / 1_000_000_000_i64;
-        assert_eq!(
-            duration.value(),
-            expected_frames,
-            "{}: duration in frames",
-            entry.name
+        // A lossless file holds exactly the frames that went in. A lossy
+        // encoder brackets them with priming and padding, so the file is a
+        // little longer than the authored length; a tenth of a second of slack
+        // covers that and still catches a wrong duration, which is out by
+        // seconds.
+        let tolerance = if entry.lossy { 4_800 } else { 0 };
+        assert!(
+            (duration.value() - expected_frames).abs() <= tolerance,
+            "{}: duration {} frames, manifest says {expected_frames}",
+            entry.name,
+            duration.value()
         );
         assert_eq!(
             duration.rate(),
@@ -63,10 +69,10 @@ fn every_audio_only_fixture_decodes_with_the_shape_the_manifest_promises() {
 
         let pcm = decode_file(&path)
             .unwrap_or_else(|e| panic!("[{}] decoding {}: {e}", e.code, entry.name));
-        assert_eq!(
-            i64::try_from(pcm.frames()).expect("fits"),
-            expected_frames,
-            "{}: decoded frame count",
+        let decoded = i64::try_from(pcm.frames()).expect("fits");
+        assert!(
+            (decoded - expected_frames).abs() <= tolerance,
+            "{}: decoded {decoded} frames, manifest says {expected_frames}",
             entry.name
         );
         assert!(
@@ -146,29 +152,89 @@ fn seeking_a_lossless_fixture_lands_on_the_exact_frame() {
     }
 }
 
+/// Root mean square of interleaved samples, as a measure of signal level.
+///
+/// Only used to compare what a lossy decode carries against the lossless
+/// reference; no timing value in these tests is ever a float.
+fn rms(samples: &[f32]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = samples.iter().map(|s| f64::from(*s) * f64::from(*s)).sum();
+    let count = f64::from(u32::try_from(samples.len()).expect("a fixture fits in u32 samples"));
+    (sum / count).sqrt()
+}
+
 #[test]
-fn a_lossy_fixture_decodes_when_the_generator_wrote_one() {
+fn every_lossy_fixture_decodes_to_the_same_tone_as_the_lossless_reference() {
     // MP3, AAC and Ogg Vorbis fixtures are only produced where the encoders
-    // are installed; where they are, they must decode to the same shape as the
-    // lossless ones (lossy codecs are never sample-identical, so only the
-    // shape and the signal level are checked).
+    // are installed, so the manifest, not a hard-coded list, says which ones
+    // to check. A lossy codec is never sample-identical, so the decode is
+    // compared against the WAV reference by signal level rather than by bits.
+    let Some(manifest) = manifest() else { return };
+    let Some(reference) = decode_fixture("tone_48k_stereo.wav") else {
+        eprintln!("skipping: audio fixtures not generated");
+        return;
+    };
+    let reference_rms = rms(&reference.samples);
+
     let mut seen = 0_usize;
-    for name in [
-        "tone_48k_stereo.mp3",
-        "tone_48k_stereo.m4a",
-        "tone_48k_stereo.aac",
-        "tone_48k_stereo.ogg",
-    ] {
-        let Some(pcm) = decode_fixture(name) else {
-            continue;
-        };
+    for entry in manifest.generated().filter(|f| f.lossy) {
+        let name = entry.name.as_str();
+        let path = sub_test_support::fixture(name).expect("a generated fixture exists");
+        let pcm =
+            decode_file(&path).unwrap_or_else(|e| panic!("[{}] decoding {name}: {e}", e.code));
+
         assert_eq!(pcm.channels, 2, "{name}: channel count");
         assert_eq!(pcm.sample_rate, 48_000, "{name}: sample rate");
-        assert!(pcm.frames() > 0, "{name}: decoded no frames");
         assert!(
             pcm.samples.iter().all(|s| s.is_finite() && s.abs() <= 1.0),
             "{name}: samples must be finite and normalised"
         );
+        let level = rms(&pcm.samples);
+        assert!(
+            (level - reference_rms).abs() < reference_rms / 10.0,
+            "{name}: decoded level {level} is not within 10% of the WAV's {reference_rms}"
+        );
+        seen += 1;
+    }
+    if seen == 0 {
+        eprintln!("skipping: no lossy audio fixtures in this fixture set");
+    }
+}
+
+#[test]
+fn seeking_a_lossy_fixture_lands_on_the_requested_frame() {
+    // A lossy decoder cannot be asked for the same samples a continuous decode
+    // produced, because its filter bank carries state across frames. What it
+    // must do is resume exactly at the requested frame and keep producing the
+    // tone, which is what a timeline playhead depends on.
+    let Some(manifest) = manifest() else { return };
+    let mut seen = 0_usize;
+    for entry in manifest.generated().filter(|f| f.lossy) {
+        let name = entry.name.as_str();
+        let path = sub_test_support::fixture(name).expect("a generated fixture exists");
+        let mut decoder =
+            FileDecoder::open(&path).unwrap_or_else(|e| panic!("[{}] opening {name}: {e}", e.code));
+        let rate = Rational::new(decoder.info().sample_rate, 1).expect("a positive sample rate");
+
+        for frame in [0_i64, 4_001, 96_000, 200_000] {
+            let target = RationalTime::new(frame, rate);
+            let landed = decoder
+                .seek(target)
+                .unwrap_or_else(|e| panic!("[{}] seeking {name} to {frame}: {e}", e.code));
+            assert_eq!(landed, target, "{name}: seek to frame {frame}");
+            assert_eq!(decoder.position(), target, "{name}: position after seeking");
+            let block = decoder
+                .next_block()
+                .unwrap_or_else(|e| panic!("[{}] decoding {name} after a seek: {e}", e.code))
+                .unwrap_or_else(|| panic!("{name}: no audio at frame {frame}"));
+            assert_eq!(block.start, target, "{name}: block start after the seek");
+            assert!(
+                block.samples.iter().any(|s| *s != 0.0),
+                "{name}: silence after seeking to frame {frame}"
+            );
+        }
         seen += 1;
     }
     if seen == 0 {
