@@ -1,11 +1,10 @@
 ---
 id: TASK-16
 title: PTS index for variable-frame-rate sources
-status: In Progress
-assignee:
-  - '@opus-task-16'
+status: To Do
+assignee: []
 created_date: '2026-09-08 21:04'
-updated_date: '2026-09-09 05:28'
+updated_date: '2026-09-09 15:09'
 labels:
   - media
 milestone: m-1
@@ -62,6 +61,8 @@ Verification (this machine, GStreamer from the scratchpad prefix, SUB_FIXTURES_D
 AC 1 (checked): index_fixtures::index_records_more_than_one_frame_duration_for_a_vfr_source and lookup_by_time_round_trips_through_every_frame prove the frame->PTS/keyframe mapping over vfr_60_30.mkv (270 entries, both a 30 fps and a 60 fps spacing present); the_index_is_built_lazily_and_cached_in_the_sidecar_dir proves nothing is parsed before the first access, that the built index is memoised, that <hash>.ptsindex.json appears in the cache dir, that a second lazy index reads it back identically, and that a corrupt cache is rebuilt.
 AC 3 (checked): an_index_build_is_a_cancellable_background_job proves a pre-set token fails the build with core.cancelled, that a spawned job stops promptly when cancelled, and that a job left to run yields the same index as a direct build.
 AC 2 (NOT checked): index-driven seek and stepping are implemented and proven by picture comparison — every frame reached is bit-identical to the picture a straight decode produces at that frame number — over the whole of bars_1080p_h264.mp4 (control) and over frames 0..89 of vfr_60_30.mkv, but they cannot be proven over the rest of the VFR fixture because that fixture is malformed. Evidence: parsed in storage order the file's second-segment IDR carries PTS 5.933 s while the pictures after it carry 3.033 s onward, and avdec_h264 consequently stamps every decoded picture after the frame-rate change 5.967 s (both software and default decoder, gstreamer 1.28 here). Any seek past frame 90 therefore stops on the first picture whose (wrong) timestamp is >= the target. The pictures decode in the right order; only their timestamps are wrong, so no index can name them by time. Root cause is the generator pipeline in scripts/gen-fixtures.sh, which lies to x264enc about the frame rate (capssetter replace=true framerate=60/1) while feeding it 30 fps timestamps; x264's output PTS assignment does not survive that. Fixing the fixture generator is TASK-10 territory and outside this task's scope, so AC 2 is left unchecked and needs a follow-up decision from the user.
+
+Requeued 2026-09-09 by supervisor: implementation is merged on main with criteria 1 and 3 checked. Remaining: criterion 2 (seek and frame stepping on the VFR fixture use the index and land on the correct frame). Use the stable GStreamer env: source /home/admin2/.cache/subordinate/env-gst.sh; fixtures come from scripts/gen-fixtures.sh which works with that env.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

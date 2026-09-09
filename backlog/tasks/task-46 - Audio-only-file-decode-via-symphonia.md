@@ -1,11 +1,10 @@
 ---
 id: TASK-46
 title: Audio-only file decode via symphonia
-status: In Progress
-assignee:
-  - '@opus-task-46'
+status: To Do
+assignee: []
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-09 03:04'
+updated_date: '2026-09-09 15:09'
 labels:
   - audio
 milestone: m-3
@@ -56,6 +55,8 @@ Verification (all run in this environment):
 - AC #2: probe_audio reports channels, sample rate and an exact frame-count duration; asserted against the manifest for every audio-only fixture and against synthesised WAV files in unit tests.
 
 AC #1 is left unchecked: WAV and FLAC decode to f32 with sample-accurate seek is proven against real files, but this machine has no MP3, AAC or Ogg fixture and no encoder to make one (GStreamer is only present as a headers-and-core-elements sysroot, with no lamemp3enc, voaacenc or vorbisenc, and no ffmpeg). The MP3, AAC and Ogg Vorbis decoders are compiled in and a unit test asserts they are registered in the codec registry, and tests/decode_fixtures.rs decodes tone_48k_stereo.mp3/.m4a/.aac/.ogg automatically if a fixture set ever contains them, but the criterion is not proven here. Adding those fixtures to scripts/gen-fixtures.sh would be a scope change (and risks the existing sub-media probe duration assertions, since lossy encoders add delay and padding), so it was not done.
+
+Requeued 2026-09-09 by supervisor: implementation merged on main, remaining criterion needs MP3, AAC and Ogg test media. The stable GStreamer env (source /home/admin2/.cache/subordinate/env-gst.sh) has gst-launch-1.0 with lamemp3enc, vorbisenc and avenc_aac available; extend scripts/gen-fixtures.sh (and the PowerShell mirror) to emit small tone files in those formats and test against them. CI generates fixtures on all three OSes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

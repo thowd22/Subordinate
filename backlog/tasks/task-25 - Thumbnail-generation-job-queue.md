@@ -1,11 +1,10 @@
 ---
 id: TASK-25
 title: Thumbnail generation job queue
-status: In Progress
-assignee:
-  - '@opus-task-25'
+status: To Do
+assignee: []
 created_date: '2026-09-08 21:04'
-updated_date: '2026-09-09 14:02'
+updated_date: '2026-09-09 15:09'
 labels:
   - media
 milestone: m-1
@@ -52,6 +51,8 @@ Cancellation is now one type: sub_media::CancelToken is a re-export of sub_core:
 AC 2 and 3 (implemented, NOT checked here): crates/sub-media/src/thumbnail.rs generates the strip. ThumbnailOptions{count, max_width, quality} is part of a strip's identity, so the sidecar files are <content-hash>.t<count>w<width>q<quality>.<nnn>.jpg beside a .thumbs.json manifest (schema version 1, source hash, options, per-frame pts/size); the sample times are exact integer nanoseconds, duration*(2i+1)/(2N), never a float; each picture is seeked with the existing Decoder (software decode, deliberately), box-downscaled from NV12/I420 to BT.709 RGB and JPEG-encoded with the pure-Rust jpeg-encoder crate, written to a .tmp and renamed so a reader never sees half a picture. Resume: generation loads the manifest first and returns without probing or decoding when it is complete, and otherwise skips every planned frame whose file is already on disk, so an interrupted run costs only its missing pictures. spawn_thumbnail_job() puts all of that on the JobService and reports (done, total) progress per picture.
 
 Why they stay unchecked: this environment has no GStreamer and no sudo (pkg-config finds no gstreamer-1.0), so sub-media cannot be compiled, let alone run against the fixtures — cargo clippy --workspace fails in gstreamer-sys's build script before reaching any code of mine. What was proven here: the whole GStreamer-free half of the module (strip time layout, thumbnail sizing, option validation, file naming, the NV12 box downscale and colour conversion, JPEG encoding, manifest round-trip and the rejection of a stale, foreign or corrupt manifest) was compiled and run out of tree against stub decode/probe modules with the same signatures — 10 tests passing, and clippy::pedantic plus missing_docs clean over that source. The end-to-end evidence for AC 2 and AC 3 is crates/sub-media/tests/thumbnail_fixtures.rs, which asserts a strip of four real JPEGs of the right size in the sidecar dir, that a second run leaves the files' mtimes untouched, that a run missing its manifest and last two pictures regenerates exactly those two, and that a cancelled job reports core.cancelled and leaves no complete strip. Those tests need a machine or CI runner with GStreamer and generated fixtures; they skip themselves without them.
+
+Requeued 2026-09-09 by supervisor: the earlier worker could not build against GStreamer because the scratch prefix was missing. A stable prefix now exists: source /home/admin2/.cache/subordinate/env-gst.sh before cargo. Continue from the merged partial implementation on main; only the unchecked criteria remain.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
