@@ -68,6 +68,20 @@ impl Project {
         self.sequences.iter().find(|sequence| sequence.id == id)
     }
 
+    /// The sequence with `id`, mutably.
+    pub fn sequence_mut(&mut self, id: SequenceId) -> Option<&mut Sequence> {
+        self.sequences.iter_mut().find(|sequence| sequence.id == id)
+    }
+
+    /// The position of the sequence with `id` in [`Project::sequences`].
+    ///
+    /// Sequence order is the tab order, so commands that create or restore a
+    /// sequence address it by index.
+    #[must_use]
+    pub fn sequence_index(&self, id: SequenceId) -> Option<usize> {
+        self.sequences.iter().position(|sequence| sequence.id == id)
+    }
+
     /// The absolute path of a media item's source file, given the folder
     /// holding the project file.
     ///

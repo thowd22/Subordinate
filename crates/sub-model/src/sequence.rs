@@ -365,6 +365,20 @@ impl Sequence {
         self.tracks.iter().find(|track| track.id == id)
     }
 
+    /// The track with `id`, mutably.
+    pub fn track_mut(&mut self, id: crate::ids::TrackId) -> Option<&mut Track> {
+        self.tracks.iter_mut().find(|track| track.id == id)
+    }
+
+    /// The position of the track with `id` in [`Sequence::tracks`].
+    ///
+    /// Track order is meaningful — video tracks composite top-down — so
+    /// commands that move or restore a track address it by index.
+    #[must_use]
+    pub fn track_index(&self, id: crate::ids::TrackId) -> Option<usize> {
+        self.tracks.iter().position(|track| track.id == id)
+    }
+
     /// The marker with `id`, if this sequence holds it.
     #[must_use]
     pub fn marker(&self, id: MarkerId) -> Option<&Marker> {

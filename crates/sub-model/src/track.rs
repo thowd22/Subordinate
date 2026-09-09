@@ -312,6 +312,19 @@ pub struct Track {
     pub name: String,
     /// Whether this lane carries picture or sound.
     pub kind: TrackKind,
+    /// Whether the lane is silenced: a muted audio track contributes nothing
+    /// to the mixer and a muted video track nothing to the composite.
+    ///
+    /// Defaults to false, and is defaulted on the way in so a project file
+    /// written before the flag existed still loads.
+    #[serde(default)]
+    pub muted: bool,
+    /// Whether the lane is locked against edits.
+    ///
+    /// Clip commands refuse to touch a locked track (`edit.track_locked`);
+    /// track header commands, including the one that unlocks it, still apply.
+    #[serde(default)]
+    pub locked: bool,
     /// The items, in playback order.
     pub items: Vec<TrackItem>,
 }
@@ -324,6 +337,8 @@ impl Track {
             id: TrackId::new(),
             name: name.into(),
             kind,
+            muted: false,
+            locked: false,
             items: Vec::new(),
         }
     }
@@ -403,6 +418,30 @@ mod tests {
     fn track_kinds_map_to_otio_strings() {
         assert_eq!(TrackKind::Video.as_otio_kind(), "Video");
         assert_eq!(TrackKind::Audio.as_otio_kind(), "Audio");
+    }
+
+    #[test]
+    fn a_new_track_is_neither_muted_nor_locked() {
+        let track = Track::new("V1", TrackKind::Video);
+        assert!(!track.muted);
+        assert!(!track.locked);
+    }
+
+    #[test]
+    fn a_track_written_before_the_flags_existed_still_loads() {
+        let id = TrackId::new();
+        let text = serde_json::json!({
+            "id": id.to_string(),
+            "name": "V1",
+            "kind": "video",
+            "items": [],
+        })
+        .to_string();
+
+        let track: Track = serde_json::from_str(&text).unwrap();
+        assert_eq!(track.id, id);
+        assert!(!track.muted);
+        assert!(!track.locked);
     }
 
     #[test]

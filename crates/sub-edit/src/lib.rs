@@ -17,10 +17,12 @@
 //!
 //! - [`clip`] — the primitive clip edits: add, remove, move, trim in and out,
 //!   split and ripple delete, with the overwrite overlap policy they share.
+//! - [`commands`] — the track and sequence command set, with
+//!   [`register_builtin`] to put every one of them on a registry.
 //!
-//! The remaining commands live in the tasks that follow: track and sequence
-//! commands, parameter, marker, media and bin commands. They all implement
-//! [`Command`] and register their [`Command::KIND`] here.
+//! The remaining commands live in the tasks that follow: parameter, marker,
+//! media and bin commands. They all implement [`Command`] and register their
+//! [`Command::KIND`] here.
 //!
 //! ```
 //! use serde::{Deserialize, Serialize};
@@ -64,6 +66,7 @@
 
 pub mod clip;
 pub mod command;
+pub mod commands;
 pub mod history;
 
 pub use clip::{
@@ -71,6 +74,7 @@ pub use clip::{
     TrimClipIn, TrimClipOut,
 };
 pub use command::{AnyCommand, BoxedCommand, Command, CommandEnvelope, CommandRegistry, Inverse};
+pub use commands::{builtin_registry, register_builtin};
 pub use history::{DEFAULT_DEPTH, History, HistoryEntry};
 
 /// The error codes this crate produces.
@@ -109,6 +113,17 @@ pub mod codes {
     /// A position or duration is negative, or cannot be combined exactly with
     /// the others involved.
     pub const INVALID_TIME: ErrorCode = ErrorCode::from_static("edit.invalid_time");
+    /// A clip command was aimed at a locked track.
+    pub const TRACK_LOCKED: ErrorCode = ErrorCode::from_static("edit.track_locked");
+    /// A track still holding clips was removed without `force`.
+    pub const TRACK_NOT_EMPTY: ErrorCode = ErrorCode::from_static("edit.track_not_empty");
+    /// A command names a position past the end of the list it inserts into.
+    pub const INVALID_INDEX: ErrorCode = ErrorCode::from_static("edit.invalid_index");
+    /// A track would be inserted with an identifier the sequence already uses.
+    pub const DUPLICATE_TRACK: ErrorCode = ErrorCode::from_static("edit.duplicate_track");
+    /// A sequence would be inserted with an identifier the project already
+    /// uses.
+    pub const DUPLICATE_SEQUENCE: ErrorCode = ErrorCode::from_static("edit.duplicate_sequence");
 }
 
 /// Small commands the unit tests apply to a project.
@@ -251,6 +266,11 @@ mod tests {
             codes::INVALID_SPLIT,
             codes::INVALID_TRIM,
             codes::INVALID_TIME,
+            codes::TRACK_LOCKED,
+            codes::TRACK_NOT_EMPTY,
+            codes::INVALID_INDEX,
+            codes::DUPLICATE_TRACK,
+            codes::DUPLICATE_SEQUENCE,
         ] {
             assert_eq!(code.domain(), "edit");
             assert!(sub_core::ErrorCode::parse(code.as_str()).is_ok());
