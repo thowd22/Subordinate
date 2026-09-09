@@ -316,6 +316,54 @@ change is intended, regenerate the fixture and commit its diff:
 SUB_UPDATE_GOLDEN=1 cargo test -p sub-model --test golden
 ```
 
+## UI tests (egui_kittest)
+
+`sub-ui` panels are tested headlessly with
+[`egui_kittest`](https://docs.rs/egui_kittest) 0.36 (features `eframe`,
+`snapshot`, `wgpu`). It runs a real egui pass, renders it through wgpu on a
+software adapter, and exposes the frame over `AccessKit`, which buys two kinds
+of test:
+
+- **Snapshot tests** render a panel and diff the PNG against a committed
+  reference in `crates/sub-ui/tests/snapshots/`.
+- **Interaction tests** click and type by accessibility label
+  (`harness.get_by_label("Add track").click()`) and then assert on the model.
+  These need no adapter and run everywhere.
+
+The shared harness is `crates/sub-ui/tests/support/mod.rs`; pull it into a test
+file with `mod support;`. It fixes the frame every panel is painted in
+(800x600 logical points, one pixel per point, dark theme, wgpu renderer),
+loads the committed sample project (`support::fixture_project()`), and reports
+and passes rather than failing when the machine enumerates no adapter
+(`if !support::can_render() { return; }`). Every task that touches a panel
+adds or updates a test here.
+
+```bash
+cargo test -p sub-ui                          # compare against the references
+UPDATE_SNAPSHOTS=1 cargo test -p sub-ui       # re-record them, then commit the diff
+```
+
+Re-record only when the change to the UI is intended, and look at the new PNGs
+before committing them. A failing comparison writes `<name>.new.png` and
+`<name>.diff.png` next to the reference; both are gitignored, and CI uploads
+them as the `ui-snapshot-diffs-<os>` artifact when the test job fails.
+
+Tolerances live in `kittest.toml` at the workspace root. `threshold = 0.6` is
+the per-pixel colour distance (egui's own default, enough to cover different
+wgpu backends), and `max_failed_pixels` is how many pixels may exceed it: 10 on
+Linux, where the references are recorded on lavapipe, and 300 on Windows (WARP)
+and macOS (Metal), whose blending rounds differently. Those numbers are far
+below what a genuine regression costs, so raise them only with a reason.
+
+Snapshot PNGs are committed, so keep them small: render at 800x600 or less, no
+LFS. A test in `crates/sub-ui/tests/ui_harness.rs` enforces the budget — 150 KB
+per snapshot and 5 MB for the directory.
+
+CI installs Mesa's lavapipe on Linux; Windows uses WARP through D3D12 and macOS
+has Metal, so the snapshot tests run in `cargo test --workspace` on all three
+hosted runners at no extra cost. GPU runners are reserved for checks that need
+real hardware.
+
 ## GPU CI (RunsOn)
 
 Hosted GitHub runners have no GPU, so hardware encode and decode criteria run

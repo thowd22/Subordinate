@@ -21,6 +21,7 @@ sub-time = { version = "0.1.0", path = "../sub-time" }
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 
 [dev-dependencies]
+egui_kittest = { version = "0.36.2", features = ["wgpu", "snapshot", "eframe"] }
 jpeg-encoder = "0.7"
 sub-test-support = { path = "../sub-test-support" }
 

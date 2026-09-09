@@ -1,0 +1,31 @@
+# egui_kittest snapshot settings for the whole workspace (TASK-119).
+#
+# Snapshots are rendered by the sub-ui tests through wgpu on whatever adapter
+# the machine offers: lavapipe on Linux CI, WARP on Windows, the paravirtual
+# Metal device on macOS. References are recorded on Linux and compared
+# everywhere, so the tolerances below absorb the small blending and rounding
+# differences between those backends and nothing else. See docs/DEVELOPMENT.md.
+
+# Committed references live under <crate>/tests/snapshots.
+output_path = "tests/snapshots"
+
+# Maximum weighted squared YIQ distance one pixel pair may differ by. This is
+# egui_kittest's own default and is what upstream egui compares backends with.
+threshold = 0.6
+
+# How many pixels may exceed that threshold. References are recorded on Linux
+# (lavapipe), so its allowance is only what a different Mesa build might round
+# differently; Windows (WARP) and macOS (Metal) blend and resolve slightly
+# differently and get more. Every value is far below what a real change costs:
+# a moved separator or a wrong clip colour is hundreds to thousands of pixels
+# in an 800x600 frame. Raise these only with a reason in the commit message.
+max_failed_pixels = 0
+
+[windows]
+max_failed_pixels = 300
+
+[mac]
+max_failed_pixels = 300
+
+[linux]
+max_failed_pixels = 10
