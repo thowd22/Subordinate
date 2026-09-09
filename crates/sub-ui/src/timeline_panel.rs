@@ -17,12 +17,13 @@
 //! `Painter` demands screen coordinates.
 
 use eframe::egui::{
-    Align2, Color32, CornerRadius, FontId, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2,
-    Visuals, pos2,
+    Align2, Color32, Context, CornerRadius, FontId, Painter, Rect, Response, Sense, Stroke,
+    StrokeKind, Ui, Vec2, Visuals, pos2,
 };
 use sub_model::{Clip, MediaItem, Project, Sequence, Track, TrackKind};
 use sub_time::{Rational, RationalTime, Timecode, TimecodeRate};
 
+use crate::thumbnails::{ThumbnailCache, ZoomBucket, tile_time};
 use crate::timeline::{TimelineView, TrackLayout, ZoomLevel};
 use crate::track_header::{TrackAction, TrackHeaderState, empty_column_menu};
 
@@ -46,6 +47,28 @@ const TRIM_BAR_WIDTH: f32 = 3.0;
 /// A locked track refuses clip edits (`edit.track_locked`), and the lane has
 /// to say so before the edit is attempted rather than after.
 const LOCKED_DIM: f32 = 0.45;
+
+/// The narrowest clip rectangle that is worth painting a thumbnail strip in.
+///
+/// Below this a tile would be a few pixels of a picture, which says less than
+/// the clip's own colour does.
+const MIN_STRIP_WIDTH_PX: f32 = 18.0;
+
+/// The shortest lane a thumbnail strip is painted in.
+const MIN_STRIP_HEIGHT_PX: f32 = 12.0;
+
+/// The narrowest one thumbnail tile may be, in points.
+const MIN_TILE_WIDTH_PX: f32 = 8.0;
+
+/// The most tiles one clip's strip is painted as.
+///
+/// A very long clip at a very close zoom would otherwise ask for a tile per
+/// few pixels across the whole viewport; past this the tiles are stretched
+/// instead, which costs a bounded number of textures per clip.
+pub const MAX_TILES_PER_CLIP: usize = 64;
+
+/// How dark the plate behind a clip name is when a strip is painted under it.
+const NAME_PLATE_ALPHA: u8 = 150;
 
 /// How far from 1.0 a zoom factor has to be before it counts as a gesture.
 const ZOOM_EPSILON: f32 = 0.001;
@@ -245,6 +268,57 @@ impl ClipMediaKind {
     }
 }
 
+/// How one clip's thumbnail strip is divided into tiles.
+///
+/// Tiles keep the thumbnail's own aspect, so a picture is never stretched,
+/// until a clip is long enough to want more than [`MAX_TILES_PER_CLIP`] of
+/// them; from there the tiles widen rather than multiply.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StripTiles {
+    /// How wide one tile is, in points.
+    pub tile_width: f32,
+    /// How many tiles cover the clip. The last one is usually cut short by
+    /// the clip's right edge.
+    pub count: usize,
+}
+
+/// The tiles a clip `width` by `height` points shows of a thumbnail written
+/// `thumb_width` by `thumb_height` pixels.
+///
+/// Returns no tiles for a clip too small to say anything with a picture.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "tile counts are clamped into 1..=MAX_TILES_PER_CLIP before they are narrowed"
+)]
+pub fn strip_tiles(width: f32, height: f32, thumb_width: u32, thumb_height: u32) -> StripTiles {
+    let none = StripTiles {
+        tile_width: 0.0,
+        count: 0,
+    };
+    if !width.is_finite()
+        || !height.is_finite()
+        || width < MIN_STRIP_WIDTH_PX
+        || height < MIN_STRIP_HEIGHT_PX
+    {
+        return none;
+    }
+    let aspect = if thumb_width == 0 || thumb_height == 0 {
+        16.0 / 9.0
+    } else {
+        thumb_width as f32 / thumb_height as f32
+    };
+    let mut tile_width = (height * aspect).max(MIN_TILE_WIDTH_PX);
+    let mut count = ((width / tile_width).ceil().max(1.0) as usize).min(MAX_TILES_PER_CLIP);
+    if count == MAX_TILES_PER_CLIP {
+        tile_width = width / count as f32;
+    }
+    count = count.max(1);
+    StripTiles { tile_width, count }
+}
+
 /// Which ends of a clip use less than the whole source.
 ///
 /// A trimmed edge can be dragged back out, an untrimmed one cannot, so the
@@ -366,6 +440,8 @@ pub struct TimelinePanel {
     header_state: TrackHeaderState,
     /// Where the panel's parts sat the last time it was painted.
     last_layout: Option<PanelLayout>,
+    /// The thumbnail textures the clip strips are painted from.
+    thumbnails: ThumbnailCache,
 }
 
 /// What one painted frame of the panel produced.
@@ -392,7 +468,25 @@ impl TimelinePanel {
             lane_scroll_px: 0.0,
             header_state: TrackHeaderState::new(),
             last_layout: None,
+            thumbnails: ThumbnailCache::default(),
         }
+    }
+
+    /// The thumbnail textures the clip strips are painted from.
+    #[must_use]
+    pub const fn thumbnails(&self) -> &ThumbnailCache {
+        &self.thumbnails
+    }
+
+    /// The thumbnail cache, mutably.
+    ///
+    /// This is where generated strips are handed in
+    /// ([`ThumbnailCache::insert_strip`]) and where the media the timeline
+    /// wants a strip for is read back
+    /// ([`ThumbnailCache::take_missing`]); the panel itself never queues a
+    /// thumbnail job.
+    pub const fn thumbnails_mut(&mut self) -> &mut ThumbnailCache {
+        &mut self.thumbnails
     }
 
     /// Where the panel's parts sat the last time it was painted.
@@ -587,7 +681,18 @@ impl TimelinePanel {
         let painter = ui.painter().with_clip_rect(rect);
         paint_frame(&painter, &layout, &visuals);
         self.paint_ruler(&painter, &layout, &visuals);
-        self.paint_lanes(&painter, &layout, &visuals, project, sequence);
+        // The thumbnail cache is lifted out for the duration of the paint so
+        // the clip loop can read the panel's indexes and fill the cache in the
+        // same pass; it goes straight back afterwards.
+        let mut thumbnails = std::mem::take(&mut self.thumbnails);
+        thumbnails.begin_frame();
+        let mut strips = StripPainter {
+            ctx: ui.ctx().clone(),
+            pixels_per_point: ui.pixels_per_point(),
+            cache: &mut thumbnails,
+        };
+        self.paint_lanes(&painter, &layout, &visuals, project, sequence, &mut strips);
+        self.thumbnails = thumbnails;
         let actions = self.header_controls(ui, &layout, sequence);
         TimelineResponse { response, actions }
     }
@@ -700,11 +805,12 @@ impl TimelinePanel {
     /// Paints the track headers and the clips in their lanes, top-down.
     fn paint_lanes(
         &self,
-        painter: &eframe::egui::Painter,
+        painter: &Painter,
         layout: &PanelLayout,
         visuals: &Visuals,
         project: &Project,
         sequence: &Sequence,
+        strips: &mut StripPainter<'_>,
     ) {
         let lanes = painter.with_clip_rect(layout.content);
         let headers = painter.with_clip_rect(layout.headers);
@@ -728,7 +834,7 @@ impl TimelinePanel {
                 visuals,
             );
             if let Some(index) = self.layouts.get(index) {
-                self.paint_clips(&lanes, lane, index, track, project);
+                self.paint_clips(&lanes, lane, index, track, project, strips);
             }
         }
     }
@@ -736,11 +842,12 @@ impl TimelinePanel {
     /// Paints the clips of one track that the viewport touches.
     fn paint_clips(
         &self,
-        painter: &eframe::egui::Painter,
+        painter: &Painter,
         lane: Rect,
         index: &TrackLayout,
         track: &Track,
         project: &Project,
+        strips: &mut StripPainter<'_>,
     ) {
         let body = lane.shrink2(Vec2::new(0.0, 3.0));
         for placement in self.view.visible_clips(index) {
@@ -758,32 +865,121 @@ impl TimelinePanel {
                 pos2(right.max(left + 1.0), body.bottom()),
             );
             let media = project.media_item(clip.media);
-            paint_clip(
+            let kind = ClipMediaKind::of(media);
+            let dimmed = !clip_edits_allowed(track);
+            paint_clip_body(painter, rect, kind, dimmed);
+            let strip = paint_clip_strip(painter, rect, clip, kind, dimmed, strips);
+            paint_clip_decoration(
                 painter,
                 rect,
                 clip,
-                ClipMediaKind::of(media),
+                kind,
                 TrimmedEdges::of(clip, media),
-                !clip_edits_allowed(track),
+                dimmed,
+                strip,
             );
         }
     }
 }
 
-/// Paints one clip rectangle: its body, its outline, its trimmed edges and its
-/// name.
-fn paint_clip(
-    painter: &eframe::egui::Painter,
+/// What a painted frame needs to turn strips into pictures: the egui context
+/// the textures live in, how many pixels one point is, and the cache itself.
+struct StripPainter<'a> {
+    ctx: Context,
+    pixels_per_point: f32,
+    cache: &'a mut ThumbnailCache,
+}
+
+/// Paints one clip's body colour.
+fn paint_clip_body(painter: &Painter, rect: Rect, kind: ClipMediaKind, dimmed: bool) {
+    painter.rect_filled(rect, CornerRadius::same(3), dim(kind.fill(), dimmed));
+}
+
+/// Paints the thumbnail strip inside one clip rectangle, and says whether it
+/// painted anything.
+///
+/// Only picture clips get a strip, and only when the clip is big enough for a
+/// tile to be worth looking at. A tile whose texture is not resident yet is
+/// left as body colour: the cache uploads a bounded number of textures per
+/// painted frame (see [`crate::thumbnails`]), so a scroll through a long
+/// sequence fills in over a frame or two instead of stalling on one.
+fn paint_clip_strip(
+    painter: &Painter,
+    rect: Rect,
+    clip: &Clip,
+    kind: ClipMediaKind,
+    dimmed: bool,
+    strips: &mut StripPainter<'_>,
+) -> bool {
+    if !matches!(kind, ClipMediaKind::Video | ClipMediaKind::Still) {
+        return false;
+    }
+    if rect.width() < MIN_STRIP_WIDTH_PX || rect.height() < MIN_STRIP_HEIGHT_PX {
+        return false;
+    }
+    strips.cache.want(clip.media);
+    // Which picture each tile shows is worked out first, so the strip is no
+    // longer borrowed when the textures are asked for.
+    let mut wanted = [0_usize; MAX_TILES_PER_CLIP];
+    let Some(strip) = strips.cache.strip(clip.media) else {
+        return false;
+    };
+    let Some(first) = strip.frames().first() else {
+        return false;
+    };
+    let tiles = strip_tiles(rect.width(), rect.height(), first.width, first.height);
+    if tiles.count == 0 {
+        return false;
+    }
+    for (index, slot) in wanted.iter_mut().enumerate().take(tiles.count) {
+        let time = tile_time(clip.source_range, index, tiles.count);
+        *slot = strip.frame_at(time).map_or(0, |frame| frame.index);
+    }
+    let bucket = ZoomBucket::for_tile(
+        tiles.tile_width * strips.pixels_per_point,
+        rect.height() * strips.pixels_per_point,
+    );
+
+    let ctx = strips.ctx.clone();
+    let tint = dim(Color32::WHITE, dimmed);
+    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    let clipped = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+    let mut drew_a_tile = false;
+    for (index, frame) in wanted.iter().enumerate().take(tiles.count) {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "the tile index is at most MAX_TILES_PER_CLIP"
+        )]
+        let left = rect.left() + index as f32 * tiles.tile_width;
+        if left >= rect.right() {
+            break;
+        }
+        let Some(texture) = strips.cache.texture(&ctx, clip.media, bucket, *frame) else {
+            continue;
+        };
+        let tile = Rect::from_min_max(
+            pos2(left, rect.top()),
+            pos2(left + tiles.tile_width, rect.bottom()),
+        );
+        clipped.image(texture.id(), tile, uv, tint);
+        drew_a_tile = true;
+    }
+    drew_a_tile
+}
+
+/// Paints what sits over one clip's body: its outline, its trimmed edges and
+/// its name.
+fn paint_clip_decoration(
+    painter: &Painter,
     rect: Rect,
     clip: &Clip,
     kind: ClipMediaKind,
     trimmed: TrimmedEdges,
     dimmed: bool,
+    over_strip: bool,
 ) {
     let radius = CornerRadius::same(3);
-    let fill = dim(kind.fill(), dimmed);
     let outline = dim(kind.outline(), dimmed);
-    painter.rect_filled(rect, radius, fill);
     painter.rect_stroke(rect, radius, Stroke::new(1.0, outline), StrokeKind::Inside);
     if trimmed.head {
         painter.rect_filled(
@@ -800,6 +996,15 @@ fn paint_clip(
         );
     }
     if rect.width() >= MIN_NAME_WIDTH_PX && !clip.name.is_empty() {
+        if over_strip {
+            // A name over a picture needs something to sit on, whatever the
+            // shot under it happens to be.
+            painter.rect_filled(
+                Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + 15.0)).intersect(rect),
+                CornerRadius::ZERO,
+                Color32::from_black_alpha(NAME_PLATE_ALPHA),
+            );
+        }
         painter.with_clip_rect(rect).text(
             pos2(rect.left() + TRIM_BAR_WIDTH + 3.0, rect.top() + 2.0),
             Align2::LEFT_TOP,
@@ -970,6 +1175,7 @@ fn nominal_fps(rate: Rational) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::thumbnails::DEFAULT_UPLOADS_PER_FRAME;
     use sub_model::media::{AudioStream, StreamInfo, VideoStream};
     use sub_model::sequence::SequenceSettings;
     use sub_model::{ColorTags, MediaPath, TrackItem};
@@ -1279,5 +1485,140 @@ mod tests {
         );
         panel.sync(&edited, 2);
         assert_eq!(panel.layouts()[0].len(), 3, "a new revision rebuilds it");
+    }
+
+    /// Paints one frame of `panel` into a headless egui context.
+    fn paint_once(
+        ctx: &eframe::egui::Context,
+        panel: &mut TimelinePanel,
+        project: &Project,
+        sequence: &Sequence,
+    ) {
+        let input = eframe::egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(900.0, 400.0))),
+            ..eframe::egui::RawInput::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            panel.ui(ui, project, sequence);
+        });
+        // There is no renderer behind this context to apply the deltas the
+        // thumbnail uploads produced.
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn strip_tiles_keep_the_thumbnail_aspect_and_are_capped() {
+        // A 16:9 thumbnail in a 48-point lane is 85 points wide, so a
+        // 200-point clip shows three tiles, the last one cut short.
+        let tiles = strip_tiles(200.0, 48.0, 320, 180);
+        assert!((tiles.tile_width - 48.0 * 16.0 / 9.0).abs() < 0.01);
+        assert_eq!(tiles.count, 3);
+
+        // A clip too small to say anything with a picture gets no tiles.
+        assert_eq!(strip_tiles(10.0, 48.0, 320, 180).count, 0);
+        assert_eq!(strip_tiles(200.0, 6.0, 320, 180).count, 0);
+        assert_eq!(strip_tiles(f32::NAN, 48.0, 320, 180).count, 0);
+
+        // Past the cap the tiles widen rather than multiply, and they still
+        // cover the clip exactly.
+        let long = strip_tiles(100_000.0, 48.0, 320, 180);
+        assert_eq!(long.count, MAX_TILES_PER_CLIP);
+        #[allow(clippy::cast_precision_loss, reason = "the cap is 64")]
+        let covered = long.tile_width * long.count as f32;
+        assert!((covered - 100_000.0).abs() < 1.0);
+
+        // A thumbnail with no size recorded falls back on 16:9 rather than
+        // dividing by zero.
+        assert_eq!(
+            strip_tiles(200.0, 48.0, 0, 0).count,
+            strip_tiles(200.0, 48.0, 16, 9).count
+        );
+    }
+
+    #[test]
+    fn a_video_clip_paints_its_strip_and_a_clip_too_narrow_for_one_does_not() {
+        let dir = crate::thumbnails::fixtures::temp_dir("panel-strip");
+        let (project, sequence) = project_with(3, 240);
+        let media = project.media[0].id;
+        let ctx = eframe::egui::Context::default();
+        let mut panel = TimelinePanel::new(RATE);
+        panel.sync(&sequence, 1);
+        panel.view_mut().set_zoom(zoom(2, 1));
+
+        // With no strip yet the clips still paint, and the media is reported
+        // for the caller to queue a thumbnail job against.
+        paint_once(&ctx, &mut panel, &project, &sequence);
+        assert_eq!(panel.thumbnails().stats().uploads, 0);
+        assert_eq!(panel.thumbnails_mut().take_missing(), vec![media]);
+
+        let strip = crate::thumbnails::fixtures::fixture_strip(&dir, 6, (64, 36));
+        panel.thumbnails_mut().insert_strip(media, strip);
+        paint_once(&ctx, &mut panel, &project, &sequence);
+        assert!(
+            panel.thumbnails().stats().uploads > 0,
+            "a video clip wide enough for a tile shows one"
+        );
+        assert!(panel.thumbnails().bytes() > 0);
+        assert!(
+            panel.thumbnails_mut().take_missing().is_empty(),
+            "media with a strip is not asked for again"
+        );
+
+        // Zoomed out until a clip is a few points wide, a picture would say
+        // less than the clip's own colour: no tiles, no textures.
+        let uploaded = panel.thumbnails().stats().uploads;
+        panel.view_mut().set_zoom(zoom(1, 16));
+        paint_once(&ctx, &mut panel, &project, &sequence);
+        assert_eq!(panel.thumbnails().stats().uploads, uploaded);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scrolling_a_two_hundred_clip_sequence_is_bounded_work_per_frame() {
+        let dir = crate::thumbnails::fixtures::temp_dir("panel-scroll");
+        let (project, sequence) = project_with(200, 240);
+        let media = project.media[0].id;
+        let ctx = eframe::egui::Context::default();
+        let mut panel = TimelinePanel::new(RATE);
+        panel.sync(&sequence, 1);
+        panel.view_mut().set_zoom(zoom(2, 1));
+        panel.thumbnails_mut().insert_strip(
+            media,
+            crate::thumbnails::fixtures::fixture_strip(&dir, 12, (64, 36)),
+        );
+        // A budget of a few tiles, so eviction runs throughout rather than
+        // only at the end.
+        let budget = panel.thumbnails().config().budget_bytes;
+        assert!(budget > 0);
+
+        let started = std::time::Instant::now();
+        let mut previous = 0;
+        for frame in 0..120 {
+            panel.view_mut().scroll_by(37);
+            paint_once(&ctx, &mut panel, &project, &sequence);
+            let uploads = panel.thumbnails().stats().uploads;
+            assert!(
+                uploads - previous <= DEFAULT_UPLOADS_PER_FRAME,
+                "frame {frame} uploaded {} textures",
+                uploads - previous
+            );
+            previous = uploads;
+            assert!(
+                panel.thumbnails().bytes() <= budget,
+                "frame {frame} is over the texture budget"
+            );
+        }
+        // Not a benchmark: a bound loose enough for a loaded machine, tight
+        // enough to catch a paint that decodes a strip per clip per frame.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "120 painted frames of 200 clips took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            panel.thumbnails().stats().hits > 0,
+            "a scrolled strip is re-used, not rebuilt"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

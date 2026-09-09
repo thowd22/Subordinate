@@ -37,8 +37,8 @@ pub use probe::{
 };
 pub use thumbnail::{
     MAX_THUMBNAIL_WIDTH, MAX_THUMBNAILS, THUMBNAIL_JOB_KIND, THUMBNAIL_MANIFEST_VERSION,
-    ThumbnailFrame, ThumbnailJob, ThumbnailOptions, ThumbnailStrip, spawn_thumbnail_job,
-    strip_times, thumbnail_size,
+    ThumbnailFrame, ThumbnailImage, ThumbnailJob, ThumbnailOptions, ThumbnailStrip,
+    spawn_thumbnail_job, strip_times, thumbnail_size,
 };
 
 /// Stable [`sub_core::ErrorCode`] constants this crate returns.

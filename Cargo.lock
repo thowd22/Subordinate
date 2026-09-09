@@ -3456,6 +3456,7 @@ dependencies = [
  "sub-time",
  "tracing",
  "tracing-subscriber",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -3509,6 +3510,7 @@ name = "sub-ui"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "jpeg-encoder",
  "log",
  "sub-core",
  "sub-edit",

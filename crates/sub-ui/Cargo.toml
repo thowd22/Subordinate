@@ -20,3 +20,6 @@ sub-time = { version = "0.1.0", path = "../sub-time" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+jpeg-encoder = "0.7"
