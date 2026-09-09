@@ -4,7 +4,7 @@ title: Verify VideoToolbox on macOS and Media Foundation fallback on Windows
 status: To Do
 assignee: []
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-09 17:29'
+updated_date: '2026-09-09 18:18'
 labels:
   - export
   - verify
@@ -38,4 +38,6 @@ Completes the cross-OS encoder matrix.
 2026-09-09: verify via the hardware workflow on RunsOn GPU runners (and the physical Mac runner for VideoToolbox) rather than by hand.
 
 2026-09-09: verify via the hardware workflow on RunsOn GPU runners (and the physical Mac runner for VideoToolbox) rather than by hand.
+
+2026-09-09: VideoToolbox hardware half is blocked on a user-owned Mac (TASK-117); no cloud Mac will be used. Media Foundation half proceeds on the Windows GPU AMI.
 <!-- SECTION:NOTES:END -->
