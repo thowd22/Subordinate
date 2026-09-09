@@ -20,7 +20,7 @@ pub use adapter::{
 pub use context::RenderContext;
 pub use error::RenderError;
 pub use graph::{
-    Compositor, FrameSource, FrameSummary, LetterboxFit, QuadTransform, ResolvedClip, SourceFrame,
-    resolve_clip_at,
+    Compositor, FrameSource, FrameSummary, LayerSummary, LetterboxFit, QuadTransform, ResolvedClip,
+    SourceFrame, resolve_clip_at, resolve_layers_at,
 };
 pub use nv12::{Nv12Converter, Nv12Geometry, OUTPUT_FORMAT};

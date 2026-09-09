@@ -1,11 +1,14 @@
-//! End-to-end tests for the v0 frame graph on a real (usually software) wgpu
+//! End-to-end tests for the frame graph on a real (usually software) wgpu
 //! device.
 //!
 //! A four-quadrant source picture is composited into a sequence canvas and
 //! read back, so orientation, letterboxing, opacity and the transform show up
 //! as pixel colours rather than as maths. Each quadrant is a different pure
 //! colour, which makes a flipped v axis, a rotation the wrong way round or a
-//! swapped basis column an obvious failure.
+//! swapped basis column an obvious failure. Stacked tracks are tested with
+//! solid-colour sources instead, one per track, so the composite of a stack
+//! is plain blend arithmetic; the colour-bar golden for that stack lives in
+//! `composite_golden.rs`.
 //!
 //! Where the machine has no wgpu adapter at all — a container with no ICD —
 //! the tests report that and pass rather than failing the build on an
@@ -15,12 +18,13 @@
 
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
+use sub_model::ClipId;
 use sub_model::params::{Fixed6, Point2, Scale2};
 use sub_model::{
     Clip, Gap, MediaId, Opacity, Resolution, Sequence, SequenceSettings, Track, TrackKind,
     Transform,
 };
-use sub_render::{Compositor, RenderContext, RenderError, ResolvedClip, SourceFrame};
+use sub_render::{Compositor, FrameSummary, RenderContext, RenderError, ResolvedClip, SourceFrame};
 use sub_time::{Rational, RationalTime, TimeRange};
 
 /// How far a read-back channel may sit from its reference value. Two codes
@@ -185,8 +189,9 @@ fn an_identity_clip_fills_the_canvas_in_source_orientation() {
 
     assert_eq!(pixels.len(), 64 * 64 * 4);
     assert!(!summary.is_blank());
+    assert_eq!(summary.drawn(), 1);
     assert_eq!(
-        summary.source_time,
+        summary.top().map(|layer| layer.source_time),
         Some(RationalTime::new(3, Rational::FPS_24))
     );
 
@@ -318,6 +323,234 @@ fn position_scale_and_rotation_place_the_picture() {
     assert_pixel(&pixels, 64, 4, 4, BLUE, "blue turned to the top left");
 }
 
+/// One video track of a stacked test sequence, listed bottom-up.
+struct LayerSpec {
+    /// The solid colour the track's clip decodes to.
+    colour: [u8; 4],
+    /// The clip's opacity.
+    opacity: Opacity,
+    /// Whether the track is muted, and so contributes nothing.
+    muted: bool,
+    /// Whether the track holds a clip under the playhead, or a gap.
+    covered: bool,
+}
+
+impl LayerSpec {
+    /// An opaque, unmuted, covered track of `colour`.
+    fn solid(colour: [u8; 4]) -> Self {
+        Self {
+            colour,
+            opacity: Opacity::OPAQUE,
+            muted: false,
+            covered: true,
+        }
+    }
+}
+
+/// A 1x1 source picture of one colour.
+///
+/// One texel means the linear sampler returns exactly that colour everywhere
+/// on the drawn quad, so a stack of these reads back as pure blend arithmetic.
+fn solid_source(context: &RenderContext, colour: [u8; 4]) -> wgpu::TextureView {
+    let texture = context.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("solid source"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    context.queue().write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &colour,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Composite `specs` as one video track each, bottom-up, on a 64x64 canvas
+/// at frame 0, with a `source_size` picture behind every clip.
+fn composite_stack(
+    context: &RenderContext,
+    specs: &[LayerSpec],
+    source_size: (u32, u32),
+) -> (Vec<u8>, FrameSummary) {
+    let settings = SequenceSettings::new(
+        Resolution::new(64, 64).expect("the test canvas is non-zero"),
+        Rational::FPS_24,
+        48_000,
+        sub_model::ColorTags::REC709,
+    )
+    .expect("48 kHz is a valid sample rate");
+    let source_range = TimeRange::new(
+        RationalTime::new(0, Rational::FPS_24),
+        RationalTime::new(10, Rational::FPS_24),
+    )
+    .expect("ten frames is a valid range");
+
+    let mut sequence = Sequence::new("Main", settings);
+    let mut pictures: Vec<(ClipId, wgpu::TextureView)> = Vec::new();
+    for (index, spec) in specs.iter().enumerate() {
+        let mut track = Track::new(format!("V{}", index + 1), TrackKind::Video);
+        track.muted = spec.muted;
+        if spec.covered {
+            let mut clip = Clip::new("shot", MediaId::new(), source_range);
+            clip.opacity = spec.opacity;
+            pictures.push((clip.id, solid_source(context, spec.colour)));
+            track.items.push(clip.into());
+        } else {
+            track
+                .items
+                .push(Gap::new(RationalTime::new(10, Rational::FPS_24)).into());
+        }
+        sequence.tracks.push(track);
+    }
+
+    let device = context.device();
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut compositor = Compositor::for_sequence(context.clone(), &sequence);
+    let mut source = |resolved: &ResolvedClip<'_>| {
+        pictures
+            .iter()
+            .find(|(id, _)| *id == resolved.clip_id())
+            .map(|(_, view)| SourceFrame::new(view.clone(), source_size.0, source_size.1))
+    };
+    let summary = compositor.render(
+        &sequence,
+        RationalTime::new(0, Rational::FPS_24),
+        &mut source,
+    );
+    let pixels = compositor.read_rgba();
+    let error = pollster::block_on(error_scope.pop());
+    assert!(error.is_none(), "compositing the stack raised {error:?}");
+    (pixels, summary)
+}
+
+#[test]
+fn an_opaque_top_track_covers_the_tracks_below_it() {
+    let Some((_driver, context)) = context_or_skip() else {
+        return;
+    };
+    let (pixels, summary) = composite_stack(
+        &context,
+        &[LayerSpec::solid(RED), LayerSpec::solid(GREEN)],
+        (64, 64),
+    );
+    assert_eq!(summary.layers.len(), 2, "both tracks resolved");
+    assert_eq!(summary.drawn(), 2, "both tracks drew");
+    assert_pixel(&pixels, 64, 32, 32, GREEN, "the top track wins");
+
+    // Muting the top track uncovers the one below it, and the muted track is
+    // not even asked for a picture.
+    let (pixels, summary) = composite_stack(
+        &context,
+        &[
+            LayerSpec::solid(RED),
+            LayerSpec {
+                muted: true,
+                ..LayerSpec::solid(GREEN)
+            },
+        ],
+        (64, 64),
+    );
+    assert_eq!(summary.layers.len(), 1, "a muted track is not a layer");
+    assert_pixel(&pixels, 64, 32, 32, RED, "the lower track shows through");
+}
+
+#[test]
+fn a_gap_above_is_transparent_and_the_bottom_of_the_stack_is_black() {
+    let Some((_driver, context)) = context_or_skip() else {
+        return;
+    };
+    // The bottom track's picture is twice as wide as it is tall, so it
+    // letterboxes: the canvas above and below it is the bottom of the stack.
+    let (pixels, summary) = composite_stack(
+        &context,
+        &[
+            LayerSpec::solid(RED),
+            LayerSpec {
+                covered: false,
+                ..LayerSpec::solid(GREEN)
+            },
+        ],
+        (64, 32),
+    );
+    assert_eq!(summary.layers.len(), 1, "a gap resolves to no layer");
+    assert_pixel(&pixels, 64, 32, 32, RED, "the gap above is transparent");
+    assert_pixel(
+        &pixels,
+        64,
+        32,
+        4,
+        BLACK,
+        "the bottom of the stack is black",
+    );
+    assert_pixel(&pixels, 64, 32, 59, BLACK, "and below the picture too");
+
+    // With nothing anywhere the whole canvas is that black.
+    let (pixels, summary) = composite_stack(
+        &context,
+        &[LayerSpec {
+            covered: false,
+            ..LayerSpec::solid(RED)
+        }],
+        (64, 64),
+    );
+    assert!(summary.is_blank());
+    assert_pixel(&pixels, 64, 32, 32, BLACK, "an empty stack is black");
+}
+
+#[test]
+fn a_translucent_upper_track_blends_over_the_one_below_it() {
+    let Some((_driver, context)) = context_or_skip() else {
+        return;
+    };
+    let half = Opacity::from_f64(0.5).expect("half opacity is valid");
+    let (pixels, summary) = composite_stack(
+        &context,
+        &[
+            LayerSpec::solid(RED),
+            LayerSpec {
+                opacity: half,
+                ..LayerSpec::solid(BLUE)
+            },
+        ],
+        (64, 64),
+    );
+    assert_eq!(summary.drawn(), 2);
+    assert_eq!(summary.top().map(|layer| layer.opacity), Some(0.5));
+    // Blending happens in linear light under the sRGB target: half of red and
+    // half of blue each encode back to about 188.
+    assert_pixel(
+        &pixels,
+        64,
+        32,
+        32,
+        [188, 0, 188, 255],
+        "half blue over red",
+    );
+}
+
 #[test]
 fn a_gap_under_the_playhead_composites_to_black() {
     let Some((_driver, context)) = context_or_skip() else {
@@ -330,8 +563,11 @@ fn a_gap_under_the_playhead_composites_to_black() {
 
     let (pixels, summary) = composite(&context, &sequence, 12, (64, 64));
     assert!(summary.is_blank());
-    assert_eq!(summary.clip, None);
-    assert_eq!(summary.source_time, None);
+    assert!(
+        summary.layers.is_empty(),
+        "a gap resolves to no layer at all"
+    );
+    assert_eq!(summary.top(), None);
     for (x, y) in [(0, 0), (32, 32), (63, 63)] {
         assert_pixel(&pixels, 64, x, y, BLACK, "a gap is black");
     }
