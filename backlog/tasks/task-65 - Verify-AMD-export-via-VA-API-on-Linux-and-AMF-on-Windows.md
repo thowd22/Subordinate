@@ -4,6 +4,7 @@ title: Verify AMD export via VA-API on Linux and AMF on Windows
 status: To Do
 assignee: []
 created_date: '2026-09-08 21:05'
+updated_date: '2026-09-09 17:28'
 labels:
   - export
   - verify
@@ -27,3 +28,9 @@ AMD hardware paths differ per OS and are less exercised than NVENC.
 - [ ] #1 cli-render with vah264enc on an AMD Linux machine and amfh264enc on an AMD Windows machine both produce valid files
 - [ ] #2 Findings and driver versions recorded in a backlog doc
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-09-09: verify via the hardware workflow on RunsOn GPU runners (and the physical Mac runner for VideoToolbox) rather than by hand.
+<!-- SECTION:NOTES:END -->

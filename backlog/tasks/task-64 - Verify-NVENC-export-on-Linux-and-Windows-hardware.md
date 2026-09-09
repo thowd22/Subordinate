@@ -4,6 +4,7 @@ title: Verify NVENC export on Linux and Windows hardware
 status: To Do
 assignee: []
 created_date: '2026-09-08 21:05'
+updated_date: '2026-09-09 17:28'
 labels:
   - export
   - verify
@@ -28,3 +29,9 @@ Phase 4 exit criterion requires real hardware verification; CI runners have no G
 - [ ] #2 Output validated with ffprobe or discoverer and visually checked
 - [ ] #3 Findings, driver versions and caveats recorded in a backlog doc
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-09-09: verify via the hardware workflow on RunsOn GPU runners (and the physical Mac runner for VideoToolbox) rather than by hand.
+<!-- SECTION:NOTES:END -->

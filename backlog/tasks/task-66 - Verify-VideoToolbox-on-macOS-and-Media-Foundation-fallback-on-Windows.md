@@ -32,4 +32,6 @@ Completes the cross-OS encoder matrix.
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-09-09: VideoToolbox half needs the physical Mac runner; Media Foundation half runs on the Windows GPU AMI.
+
+2026-09-09: verify via the hardware workflow on RunsOn GPU runners (and the physical Mac runner for VideoToolbox) rather than by hand.
 <!-- SECTION:NOTES:END -->
