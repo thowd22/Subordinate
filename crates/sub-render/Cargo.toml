@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+sub-model = { path = "../sub-model" }
+sub-time = { path = "../sub-time" }
 pollster = "1.0"
 wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan", "metal", "dx12", "webgpu"] }
 
