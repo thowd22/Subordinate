@@ -37,7 +37,7 @@ use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
 use gstreamer_video::{VideoFormat, VideoFrameExt, VideoInfo};
 use sub_core::{ResultExt, SubError, SubResult};
-use sub_time::RationalTime;
+use sub_time::{RationalTime, Rounding};
 
 use crate::codes;
 use crate::probe::NANOSECONDS;
@@ -111,6 +111,17 @@ pub struct DecoderOptions {
     /// `media.decode_timeout`. It bounds a stalled pipeline, not the whole
     /// decode: the budget applies to each frame.
     pub frame_timeout: Duration,
+    /// How far ahead of the current position [`Decoder::seek_to`] decodes
+    /// forward instead of issuing a new keyframe seek.
+    ///
+    /// A target just ahead of the playhead is almost always inside the GOP the
+    /// decoder is already in, where a keyframe seek would land back on the
+    /// keyframe the decoder has already passed and decode the same pictures
+    /// again. The window is that GOP budget, expressed in time because the GOP
+    /// length of a file is not known until it has been decoded: the default of
+    /// two seconds covers the one-second GOPs cameras and the fixtures use, and
+    /// a caller that knows its sources can widen or narrow it.
+    pub forward_decode_window: Duration,
 }
 
 impl Default for DecoderOptions {
@@ -119,6 +130,7 @@ impl Default for DecoderOptions {
             hardware: HardwarePreference::Prefer,
             format: FrameFormat::Nv12,
             frame_timeout: Duration::from_secs(10),
+            forward_decode_window: Duration::from_secs(2),
         }
     }
 }
@@ -197,9 +209,14 @@ pub struct Decoder {
     sink: AppSink,
     chosen: Arc<Mutex<Option<String>>>,
     frame_timeout: Duration,
+    forward_window: RationalTime,
     saw_video: Arc<AtomicBool>,
     delivered: u64,
     finished: bool,
+    position: Option<RationalTime>,
+    seeks: u64,
+    frames_since_seek: u64,
+    prerolled: bool,
 }
 
 impl Decoder {
@@ -296,9 +313,14 @@ impl Decoder {
             pipeline,
             chosen,
             frame_timeout: options.frame_timeout,
+            forward_window: duration_time(options.forward_decode_window),
             saw_video,
             delivered: 0,
             finished: false,
+            position: None,
+            seeks: 0,
+            frames_since_seek: 0,
+            prerolled: false,
         };
         decoder
             .pipeline
@@ -338,6 +360,9 @@ impl Decoder {
             if let Some(sample) = self.sink.try_pull_sample(clock_time(left.min(POLL_SLICE))) {
                 let frame = Self::frame_from_sample(&sample)?;
                 self.delivered += 1;
+                self.prerolled = true;
+                self.frames_since_seek += 1;
+                self.position = Some(frame.pts());
                 return Ok(Some(frame));
             }
             if let Some(err) = self.pipeline_error() {
@@ -357,6 +382,141 @@ impl Decoder {
                     "no decoded frame arrived within the frame budget",
                 )
                 .with_detail("timeout_ms", self.frame_timeout.as_millis().to_string()));
+            }
+        }
+    }
+
+    /// Seeks to `target` and returns the first frame at or after it, or `None`
+    /// when the stream ends before the target.
+    ///
+    /// This is the frame-accurate seek the scrub bar and split-at-playhead are
+    /// built on (docs/PLAN.md §5.2). A container seek lands on a keyframe, so
+    /// on a long-GOP source the frame it produces can be seconds away from the
+    /// one that was asked for. The two-step answer is the one every editor
+    /// uses: seek backwards to the keyframe at or before the target with a
+    /// flushing `KEY_UNIT` seek, then decode forward, discarding frames until
+    /// one carries a presentation timestamp at or after `target`. Every
+    /// comparison here is exact [`RationalTime`] arithmetic, so a target
+    /// expressed at a frame rate matches a nanosecond timestamp with no
+    /// tolerance and no float.
+    ///
+    /// A target that is ahead of the current position but within
+    /// [`DecoderOptions::forward_decode_window`] is reached by decoding forward
+    /// alone: no seek is issued, because the target is in the GOP the decoder
+    /// is already inside and re-seeking would decode the same pictures twice.
+    /// [`Decoder::seek_count`] reports how many seeks were actually issued.
+    ///
+    /// A negative target is treated as the start of the stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns `media.seek_failed` when the pipeline refuses the seek or never
+    /// reaches a seekable state, plus every error [`Decoder::next_frame`]
+    /// returns while the frames up to the target are decoded.
+    pub fn seek_to(&mut self, target: RationalTime) -> SubResult<Option<VideoFrame>> {
+        let target = if target.is_negative() {
+            RationalTime::zero(target.rate())
+        } else {
+            target
+        };
+        if plan_seek(self.position, target, self.forward_window) == SeekPlan::Reseek {
+            self.keyframe_seek(target)?;
+        }
+        let mut backoff = duration_time(SEEK_BACKOFF);
+        let mut aim = target;
+        loop {
+            let Some(frame) = self.next_frame()? else {
+                return Ok(None);
+            };
+            if frame.pts() < target {
+                // Between the keyframe and the target: decoded only to build
+                // the reference chain the target frame needs.
+                continue;
+            }
+            // The first frame after a seek can be *after* the target even
+            // though a keyframe sits before it: a container whose timestamps
+            // do not start at zero seeks in a stream time that is offset from
+            // the presentation timestamps, so the demuxer picks the keyframe
+            // before an instant that is not the one that was asked for. The
+            // answer is to aim further back and decode forward from there.
+            if self.frames_since_seek == 1
+                && frame.pts() > target
+                && let Some(earlier) = earlier_target(aim, backoff)
+            {
+                self.keyframe_seek(earlier)?;
+                aim = earlier;
+                backoff = backoff + backoff;
+                continue;
+            }
+            return Ok(Some(frame));
+        }
+    }
+
+    /// Presentation timestamp of the last frame this decoder delivered, or
+    /// `None` before the first one and immediately after a seek.
+    pub fn position(&self) -> Option<RationalTime> {
+        self.position
+    }
+
+    /// How many flushing seeks this decoder has issued.
+    ///
+    /// Forward seeks inside the GOP window do not add to it, which is what
+    /// makes scrubbing forward cheap.
+    pub fn seek_count(&self) -> u64 {
+        self.seeks
+    }
+
+    /// Issues the flushing keyframe-backward seek.
+    fn keyframe_seek(&mut self, target: RationalTime) -> SubResult<()> {
+        self.wait_until_seekable()?;
+        // Flooring keeps the seek at or before the requested instant: a target
+        // rounded up could skip past the very frame that was asked for.
+        let nanos = target
+            .checked_rescaled_to_rounding(NANOSECONDS, Rounding::Floor)
+            .and_then(|time| u64::try_from(time.value()).ok())
+            .ok_or_else(|| {
+                SubError::new(codes::SEEK_FAILED, "seek target is not a reachable instant")
+            })?;
+        self.pipeline
+            .seek_simple(
+                // FLUSH drops what is in flight so the frames that arrive next
+                // are the ones after the seek; KEY_UNIT with SNAP_BEFORE lands
+                // on the keyframe at or before the target, which is what makes
+                // decoding forward from there possible at all.
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT | gst::SeekFlags::SNAP_BEFORE,
+                gst::ClockTime::from_nseconds(nanos),
+            )
+            .map_err(|e| {
+                SubError::wrap(codes::SEEK_FAILED, "the pipeline refused the seek", &e)
+                    .with_detail("target_ns", nanos.to_string())
+            })?;
+        self.seeks += 1;
+        self.frames_since_seek = 0;
+        // A flushing seek also clears an end-of-stream, so a decoder that ran
+        // to the end is usable again.
+        self.finished = false;
+        self.position = None;
+        Ok(())
+    }
+
+    /// Waits for the pipeline to finish starting, once.
+    ///
+    /// A seek sent before the pipeline has pre-rolled is dropped by the
+    /// demuxer, so the first seek blocks until the state change completes.
+    fn wait_until_seekable(&mut self) -> SubResult<()> {
+        if self.prerolled {
+            return Ok(());
+        }
+        let (result, _, _) = self.pipeline.state(clock_time(self.frame_timeout));
+        match result {
+            Ok(gst::StateChangeSuccess::Success | gst::StateChangeSuccess::NoPreroll) => {
+                self.prerolled = true;
+                Ok(())
+            }
+            Ok(gst::StateChangeSuccess::Async) | Err(_) => {
+                Err(self.pipeline_error().unwrap_or_else(|| {
+                    SubError::new(codes::SEEK_FAILED, "the pipeline never became seekable")
+                }))
             }
         }
     }
@@ -434,6 +594,8 @@ impl std::fmt::Debug for Decoder {
         f.debug_struct("Decoder")
             .field("decoder_element", &self.decoder_element())
             .field("frames_delivered", &self.delivered)
+            .field("position_ns", &self.position.map(RationalTime::value))
+            .field("seeks", &self.seeks)
             .field("finished", &self.finished)
             .finish_non_exhaustive()
     }
@@ -478,6 +640,70 @@ const POLL_SLICE: Duration = Duration::from_millis(100);
 /// Converts a `Duration` to a `ClockTime`, saturating rather than overflowing.
 fn clock_time(duration: Duration) -> gst::ClockTime {
     u64::try_from(duration.as_nanos()).map_or(gst::ClockTime::MAX, gst::ClockTime::from_nseconds)
+}
+
+/// What [`Decoder::seek_to`] has to do to reach a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeekPlan {
+    /// Keep decoding from where the pipeline already is.
+    DecodeForward,
+    /// Issue a flushing keyframe-backward seek first.
+    Reseek,
+}
+
+/// Decides whether a target can be reached by decoding forward.
+///
+/// Only a target strictly ahead of the current position and no further than
+/// `window` from it is decoded forward: anything behind the position needs the
+/// pipeline rewound, and anything far ahead is cheaper to reach through a
+/// keyframe seek than by decoding every picture in between.
+fn plan_seek(
+    position: Option<RationalTime>,
+    target: RationalTime,
+    window: RationalTime,
+) -> SeekPlan {
+    let Some(position) = position else {
+        return SeekPlan::Reseek;
+    };
+    if target <= position {
+        return SeekPlan::Reseek;
+    }
+    match target.checked_sub(position) {
+        Some(ahead) if ahead <= window => SeekPlan::DecodeForward,
+        _ => SeekPlan::Reseek,
+    }
+}
+
+/// How far before its target a seek that overshot aims on its next attempt.
+/// It doubles with each attempt, and the retries stop once the attempt reaches
+/// the start of the stream or the backoff passes [`MAX_SEEK_BACKOFF`].
+const SEEK_BACKOFF: Duration = Duration::from_millis(250);
+
+/// The largest backoff a seek retries with. A container whose timestamps are
+/// offset from its stream time by more than this is not something decoding
+/// further forward can rescue.
+const MAX_SEEK_BACKOFF: Duration = Duration::from_secs(8);
+
+/// Where a seek that overshot should aim next, given where it last aimed, or
+/// `None` when aiming earlier is pointless: the last attempt already reached
+/// the start of the stream, or the backoff has grown past what any container
+/// justifies.
+fn earlier_target(aim: RationalTime, backoff: RationalTime) -> Option<RationalTime> {
+    if aim.is_zero() || backoff > duration_time(MAX_SEEK_BACKOFF) {
+        return None;
+    }
+    let earlier = aim.checked_sub(backoff)?;
+    Some(if earlier.is_negative() {
+        RationalTime::zero(NANOSECONDS)
+    } else {
+        earlier
+    })
+}
+
+/// Exact nanosecond length; a `Duration` is a whole number of nanoseconds, so
+/// nothing is rounded here.
+fn duration_time(duration: Duration) -> RationalTime {
+    nanoseconds(u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
 }
 
 /// Exact nanosecond instant; GStreamer counts in nanoseconds, so this is a
@@ -602,7 +828,8 @@ mod tests {
     use gstreamer::prelude::PluginFeatureExtManual;
 
     use super::{
-        DecoderOptions, FrameFormat, HardwarePreference, gst, is_hardware_decoder, nanoseconds,
+        DecoderOptions, FrameFormat, HardwarePreference, RationalTime, gst, is_hardware_decoder,
+        nanoseconds,
     };
     use std::path::PathBuf;
     use std::time::Duration;
@@ -744,6 +971,107 @@ mod tests {
         assert_eq!(FrameFormat::Nv12.plane_count(), 2);
         assert_eq!(FrameFormat::I420.as_str(), "I420");
         assert_eq!(FrameFormat::I420.plane_count(), 3);
+    }
+
+    #[test]
+    fn a_forward_target_inside_the_window_decodes_forward_instead_of_seeking() {
+        let window = super::duration_time(Duration::from_secs(2));
+        let position = nanoseconds(1_000_000_000);
+        // Just ahead, and exactly at the edge of the window: no seek needed.
+        for ahead in [1_i64, 40_000_000, 2_000_000_000] {
+            let target = nanoseconds(u64::try_from(1_000_000_000 + ahead).expect("positive"));
+            assert_eq!(
+                super::plan_seek(Some(position), target, window),
+                super::SeekPlan::DecodeForward,
+                "{ahead} ns ahead is inside the GOP window"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backward_or_distant_target_re_seeks() {
+        let window = super::duration_time(Duration::from_secs(2));
+        let position = nanoseconds(1_000_000_000);
+        for target in [
+            nanoseconds(0),
+            nanoseconds(999_999_999),
+            // The position itself: the frame there has already been handed out,
+            // so reaching it again means rewinding.
+            nanoseconds(1_000_000_000),
+            nanoseconds(3_000_000_001),
+            nanoseconds(600_000_000_000),
+        ] {
+            assert_eq!(
+                super::plan_seek(Some(position), target, window),
+                super::SeekPlan::Reseek,
+                "{} ns must re-seek",
+                target.value()
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_seek_of_a_fresh_decoder_always_seeks() {
+        let window = super::duration_time(Duration::from_secs(2));
+        assert_eq!(
+            super::plan_seek(None, nanoseconds(0), window),
+            super::SeekPlan::Reseek,
+            "nothing has been decoded, so there is nothing to decode forward from"
+        );
+    }
+
+    #[test]
+    fn a_target_at_a_frame_rate_is_compared_exactly_against_a_nanosecond_position() {
+        // 29.97: frame 300 is 300 * 1001 / 30000 s, which is not a whole number
+        // of nanoseconds. The comparison stays exact because it happens in
+        // RationalTime, never in nanoseconds and never in floats.
+        let rate = sub_time::Rational::new(30_000, 1001).expect("a valid rate");
+        let target = RationalTime::from_frames(300, rate);
+        let window = super::duration_time(Duration::from_secs(2));
+        let just_before = nanoseconds(10_009_999_999);
+        assert_eq!(
+            super::plan_seek(Some(just_before), target, window),
+            super::SeekPlan::DecodeForward,
+            "the target is 10.01 s, which is still ahead of 10.009999999 s"
+        );
+        let just_after = nanoseconds(10_010_000_001);
+        assert_eq!(
+            super::plan_seek(Some(just_after), target, window),
+            super::SeekPlan::Reseek
+        );
+    }
+
+    #[test]
+    fn a_seek_that_overshoots_aims_further_back_until_it_reaches_the_start() {
+        let backoff = super::duration_time(Duration::from_millis(250));
+        let aim = nanoseconds(3_040_000_000);
+        let earlier = super::earlier_target(aim, backoff).expect("a later attempt");
+        assert_eq!(earlier.value(), 2_790_000_000);
+        // A backoff past the start of the stream clamps to it, and once there
+        // no further attempt is made.
+        let at_start = super::earlier_target(nanoseconds(100), backoff).expect("clamped");
+        assert!(at_start.is_zero());
+        assert_eq!(super::earlier_target(at_start, backoff), None);
+    }
+
+    #[test]
+    fn the_seek_backoff_gives_up_rather_than_rewinding_for_ever() {
+        let aim = nanoseconds(600_000_000_000);
+        let too_far = super::duration_time(Duration::from_secs(9));
+        assert_eq!(super::earlier_target(aim, too_far), None);
+        let allowed = super::duration_time(Duration::from_secs(8));
+        assert!(super::earlier_target(aim, allowed).is_some());
+    }
+
+    #[test]
+    fn the_forward_window_is_an_exact_nanosecond_length() {
+        let window = super::duration_time(Duration::from_millis(1500));
+        assert_eq!(window.rate(), crate::probe::NANOSECONDS);
+        assert_eq!(window.value(), 1_500_000_000);
+        assert_eq!(
+            super::duration_time(DecoderOptions::default().forward_decode_window).value(),
+            2_000_000_000
+        );
     }
 
     #[test]
