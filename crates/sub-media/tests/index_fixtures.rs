@@ -9,14 +9,8 @@
 //! bit for bit the picture the same file decodes at that frame number when it
 //! is decoded from the start.
 //!
-//! **Known fixture defect.** The second segment of `vfr_60_30.mkv` carries
-//! misassigned presentation timestamps: parsed in storage order the file's
-//! second IDR is stamped 5.933 s while the pictures that follow it are stamped
-//! 3.033 s onwards, and `avdec_h264` consequently stamps every picture after
-//! the frame-rate change 5.967 s. Nothing downstream — this index included —
-//! can name those pictures by time, so the seek and stepping assertions here
-//! cover the fixture up to the frame-rate change and the whole of the
-//! constant-rate fixture. See the TASK-16 notes.
+//! The seek and stepping assertions cover the whole of both fixtures,
+//! including the frame-rate change in the middle of the variable one.
 //!
 //! Everything skips itself when the fixtures have not been generated, so
 //! `cargo test` works on a fresh checkout; CI runs `scripts/gen-fixtures.sh`
@@ -36,9 +30,9 @@ const VFR: &str = "vfr_60_30.mkv";
 /// The constant-rate fixture, used as the control: 125 frames at 25 fps.
 const CFR: &str = "bars_1080p_h264.mp4";
 
-/// The last frame of the VFR fixture whose decoded timestamp the environment
-/// gets right; see the module documentation.
-const VFR_LAST_SOUND_FRAME: usize = 89;
+/// The frame the VFR fixture changes rate at: 90 frames at 30 fps come before
+/// it, 180 frames at 60 fps from it onwards.
+const VFR_RATE_CHANGE: usize = 90;
 
 /// A fixture path, or `None` when the fixtures were never generated.
 fn fixture(name: &str) -> Option<PathBuf> {
@@ -149,21 +143,67 @@ fn rate() -> sub_time::Rational {
 }
 
 #[test]
+fn the_vfr_fixture_gives_every_picture_its_own_instant() {
+    // A guard on the fixture itself: seeking can only name a picture by time
+    // if no two pictures share an instant and none arrives before the one
+    // before it. An encoder that assumes a single frame duration across the
+    // rate change breaks exactly this, so the generator is checked here.
+    let Some(path) = fixture(VFR) else { return };
+    let index = index_of(&path);
+    assert_eq!(index.len(), 270, "90 frames at 30 fps then 180 at 60 fps");
+
+    for frame in 1..index.len() {
+        let previous = index.pts(frame - 1).expect("an earlier frame");
+        let current = index.pts(frame).expect("this frame");
+        assert!(
+            current > previous,
+            "frame {frame} at {current:?} must come after frame {} at {previous:?}",
+            frame - 1
+        );
+    }
+
+    // And the two halves really do run at the two rates, either side of the
+    // one frame where the spacing changes.
+    let spacing = |frame: usize| {
+        index
+            .duration_of(frame)
+            .map(sub_time::RationalTime::value)
+            .expect("a frame duration")
+    };
+    let near = |value: i64, wanted: i64| (value - wanted).abs() < 1_000_000;
+    assert!(near(spacing(0), 33_333_333), "{} ns", spacing(0));
+    assert!(
+        near(spacing(VFR_RATE_CHANGE - 2), 33_333_333),
+        "{} ns",
+        spacing(VFR_RATE_CHANGE - 2)
+    );
+    assert!(
+        near(spacing(VFR_RATE_CHANGE), 16_666_666),
+        "{} ns",
+        spacing(VFR_RATE_CHANGE)
+    );
+    assert!(
+        near(spacing(index.len() - 2), 16_666_666),
+        "{} ns",
+        spacing(index.len() - 2)
+    );
+}
+
+#[test]
 fn lookup_by_time_round_trips_through_every_frame() {
     for name in [VFR, CFR] {
         let Some(path) = fixture(name) else { continue };
         let index = index_of(&path);
         for frame in 0..index.len() {
             let pts = index.pts(frame).expect("a frame");
-            // A lookup answers with a frame that starts on that instant. Two
-            // pictures may share a timestamp in a damaged stream, so the
-            // round trip is judged by the timestamp, not by the number.
+            // Every picture has its own instant, so a lookup by that instant
+            // answers with that very frame number.
             let found = index
                 .frame_at(pts)
                 .unwrap_or_else(|| panic!("{name}: frame {frame} is not found by its own time"));
-            assert_eq!(index.pts(found), Some(pts), "{name}: frame {frame}");
+            assert_eq!(found, frame, "{name}: frame {frame} by its own time");
             let after = index.frame_at_or_after(pts).expect("a frame at or after");
-            assert_eq!(index.pts(after), Some(pts), "{name}: frame {frame}");
+            assert_eq!(after, frame, "{name}: frame {frame} at or after its time");
         }
         // Before the first picture there is nothing, and past the last one
         // there is nothing after.
@@ -194,12 +234,28 @@ fn index_driven_seek_and_stepping_land_on_the_correct_frame() {
         assert_seeks_land(&path, &reference, &targets, 50, 12);
     }
 
-    // The VFR fixture, over the frames whose timestamps this environment
-    // decodes correctly (see the module documentation).
+    // The VFR fixture, over the whole file: before the rate change, on the
+    // first frame of the faster half, and well past it, where a seek that
+    // assumed one frame duration would be a hundred frames out.
     let Some(path) = fixture(VFR) else { return };
     let reference = reference(&path);
-    let targets: Vec<usize> = vec![0, 1, 29, 45, 60, 88, VFR_LAST_SOUND_FRAME, 12];
-    assert_seeks_land(&path, &reference, &targets, 75, 12);
+    let last = reference.len() - 1;
+    let targets: Vec<usize> = vec![
+        0,
+        1,
+        29,
+        VFR_RATE_CHANGE - 1,
+        VFR_RATE_CHANGE,
+        VFR_RATE_CHANGE + 1,
+        150,
+        last,
+        12,
+        200,
+    ];
+    // Stepping starts one frame before the rate change, so the steps walk
+    // across it and every 16.6 ms frame after it is checked against the
+    // picture a straight decode produces.
+    assert_seeks_land(&path, &reference, &targets, VFR_RATE_CHANGE - 1, 12);
 }
 
 /// Seeks to each of `targets` and steps `steps` frames on from `step_start`,
