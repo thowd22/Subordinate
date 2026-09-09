@@ -4,8 +4,10 @@
 //! with rational PTS. Owns the frame cache and the PTS index used for
 //! variable-frame-rate sources. See docs/PLAN.md §5.2.
 
+pub mod decode;
 pub mod probe;
 
+pub use decode::{Decoder, DecoderOptions, FrameFormat, HardwarePreference, VideoFrame};
 pub use probe::{
     FrameTiming, MediaInfo, ProbeOptions, Rotation, VideoStreamInfo, probe, probe_with,
 };
@@ -29,6 +31,13 @@ pub mod codes {
     pub const UNSUPPORTED: ErrorCode = ErrorCode::from_static("media.unsupported");
     /// The probe ran out of its time budget.
     pub const PROBE_TIMEOUT: ErrorCode = ErrorCode::from_static("media.probe_timeout");
+    /// A decode pipeline could not be built, started, or ran into an error
+    /// while frames were being pulled from it.
+    pub const DECODE_FAILED: ErrorCode = ErrorCode::from_static("media.decode_failed");
+    /// A decode pipeline stalled: no frame arrived within the frame budget.
+    pub const DECODE_TIMEOUT: ErrorCode = ErrorCode::from_static("media.decode_timeout");
+    /// The file was opened for decoding but carries no video stream.
+    pub const NO_VIDEO_STREAM: ErrorCode = ErrorCode::from_static("media.no_video_stream");
 }
 
 /// Initialises GStreamer once and returns its runtime version.
@@ -63,6 +72,9 @@ mod tests {
             super::codes::PROBE_FAILED,
             super::codes::UNSUPPORTED,
             super::codes::PROBE_TIMEOUT,
+            super::codes::DECODE_FAILED,
+            super::codes::DECODE_TIMEOUT,
+            super::codes::NO_VIDEO_STREAM,
         ];
         for code in &codes {
             assert_eq!(code.domain(), "media", "wrong domain for {code}");
