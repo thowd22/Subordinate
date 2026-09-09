@@ -254,6 +254,14 @@ fn accept_loop(
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok(stream) => {
+                // On the BSDs an accepted socket inherits the listener's
+                // non-blocking flag, so a stream taken from an
+                // accept-non-blocking listener would answer `WouldBlock`
+                // instead of waiting for its client's next message. Asking for
+                // blocking explicitly costs nothing where it is already so.
+                if let Err(error) = stream.set_nonblocking(false) {
+                    warn!(%error, "a client stream could not be made blocking");
+                }
                 let dispatcher = Arc::clone(dispatcher);
                 let connections = Arc::clone(connections);
                 connections.fetch_add(1, Ordering::SeqCst);
@@ -439,6 +447,12 @@ fn answers(address: &Address) -> bool {
     let Ok(name) = address.to_name() else {
         return false;
     };
+    // A path that exists but is not a socket cannot have a server behind it.
+    // Linux refuses the connection, but the BSDs answer `ENOTSOCK`, which has
+    // no stable `ErrorKind`, so the file type settles it before connecting.
+    if !is_socket_or_absent(address) {
+        return false;
+    }
     match Stream::connect(name) {
         Ok(_) => true,
         Err(error) => !matches!(
@@ -446,6 +460,29 @@ fn answers(address: &Address) -> bool {
             ErrorKind::NotFound | ErrorKind::ConnectionRefused
         ),
     }
+}
+
+/// Whether `address`'s socket path is a socket, or is not a path at all.
+///
+/// A Windows named pipe has no path to inspect, and a path that is simply
+/// missing is settled by the connection attempt itself.
+#[cfg(unix)]
+fn is_socket_or_absent(address: &Address) -> bool {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let Some(path) = address.socket_path() else {
+        return true;
+    };
+    match std::fs::metadata(path) {
+        Ok(metadata) => metadata.file_type().is_socket(),
+        Err(_) => true,
+    }
+}
+
+/// Windows has no socket file to inspect.
+#[cfg(not(unix))]
+const fn is_socket_or_absent(_address: &Address) -> bool {
+    true
 }
 
 /// Removes a file, treating "it was not there" as success.
