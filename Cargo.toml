@@ -17,6 +17,7 @@ members = [
     "bins/subordinate-cli",
     "bins/subordinate-mcp",
     "sdk/subordinate-sdk",
+    "spikes/nv12-viewport",
 ]
 
 [workspace.package]
