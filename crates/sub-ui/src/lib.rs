@@ -9,10 +9,12 @@
 pub mod app;
 pub mod diagnostics;
 pub mod timeline;
+pub mod viewer;
 
 pub use app::{AppOptions, SubordinateApp, run};
 pub use diagnostics::DiagnosticsPanel;
 pub use timeline::{ClipPlacement, TimelineView, TrackLayout, ZoomLevel};
+pub use viewer::{ViewerAction, ViewerFit, ViewerFrame, ViewerPanel, ViewerState};
 
 /// The stable error codes this crate reports.
 pub mod codes {
