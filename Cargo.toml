@@ -18,6 +18,7 @@ members = [
     "bins/subordinate-mcp",
     "sdk/subordinate-sdk",
     "spikes/nv12-viewport",
+    "spikes/wasm-command-world",
 ]
 
 [workspace.package]

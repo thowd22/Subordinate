@@ -1,0 +1,104 @@
+// Subordinate plugin interfaces, version 0.1.0.
+//
+// Licensed under MIT OR Apache-2.0 so that plugins targeting these interfaces
+// may use any licence. See LICENSE-MIT and LICENSE-APACHE.
+//
+// Every editing operation in Subordinate goes through the one Command API
+// (docs/PLAN.md section 3). Plugins are no exception: `command-api` is a host
+// import, never a direct handle on the project model, so a plugin edit is an
+// ordinary undoable command that the GUI, the CLI and the MCP bridge all see
+// identically.
+
+package subordinate:plugin@0.1.0;
+
+/// The stable error shape shared by every host import and plugin export.
+///
+/// Mirrors `sub_core::SubError`: a machine-readable code such as
+/// `plugin.command_rejected`, a human message, and optional details for
+/// tooling. Codes are lowercase dot-separated segments of [a-z0-9_], at least
+/// two segments deep, and are never renamed or given a new meaning.
+interface types {
+    /// One `key`/`value` entry of an error's details map.
+    record detail {
+        key: string,
+        value: string,
+    }
+
+    /// A failure crossing the plugin boundary in either direction.
+    record error {
+        /// Stable machine-readable code, e.g. `plugin.command-rejected`.
+        code: string,
+        /// Human-readable, non-localised message.
+        message: string,
+        /// Structured context for tooling; empty when there is none.
+        details: list<detail>,
+    }
+
+    /// An exact timeline instant: `value` ticks at a rate of
+    /// `rate-numerator / rate-denominator` ticks per second.
+    ///
+    /// Timeline math is rational everywhere in Subordinate; floats never cross
+    /// this boundary. The rate is carried as a fraction rather than a single
+    /// integer because the rates that matter most are not integers: 23.976 fps
+    /// is exactly 24000/1001, and rounding it to a whole number of ticks per
+    /// second would drift. Both fields are non-zero.
+    record rational-time {
+        value: s64,
+        rate-numerator: u32,
+        rate-denominator: u32,
+    }
+}
+
+/// The host side of the Command API: the only way a plugin changes a project.
+///
+/// `invoke` takes the same JSON-RPC method name and `params` object that the
+/// local socket server takes, so a plugin and an external agent have exactly
+/// the same reach. Each successful call is one undoable command on the host's
+/// undo stack.
+interface command-api {
+    use types.{error, rational-time};
+
+    /// Identifies a project open in the host.
+    type project-id = string;
+
+    /// Severity of a `log` line; maps onto `tracing` levels.
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// Calls a Command API method that mutates the project.
+    ///
+    /// `params` and the returned value are JSON documents encoded as UTF-8
+    /// strings: the Command API schema is the source of truth for their shape,
+    /// and keeping it out of WIT means a new method needs no WIT revision.
+    invoke: func(project: project-id, method: string, params: string) -> result<string, error>;
+
+    /// Reads project state without mutating it. Same JSON encoding as `invoke`.
+    query: func(project: project-id, method: string, params: string) -> result<string, error>;
+
+    /// The playhead position in `project`, for commands that act relative to it.
+    playhead: func(project: project-id) -> result<rational-time, error>;
+
+    /// Emits a line to the host's tracing subscriber, tagged with the plugin id.
+    log: func(level: log-level, message: string);
+}
+
+/// The simplest plugin world: a plugin that registers nothing and just runs a
+/// command against a project when the host asks it to.
+///
+/// Later worlds (effect, audio-effect, importer, exporter, analyzer, mcp-tools,
+/// and the richer command world with menu and shortcut registration) build on
+/// this same `command-api` import.
+world command {
+    use types.{error};
+
+    import command-api;
+
+    /// Runs the plugin against `project`. `args` is a JSON object, the same
+    /// encoding the Command API uses for parameters; so is the returned value.
+    export run: func(project: string, args: string) -> result<string, error>;
+}
