@@ -1,6 +1,8 @@
 //! The project: the root of the model and the thing a `.sub` file holds.
 
-use crate::ids::{MediaId, ProjectId, SequenceId};
+use std::path::Path;
+
+use crate::ids::{BinId, MediaId, ProjectId, SequenceId};
 use crate::media::{Bin, MediaItem};
 use crate::sequence::Sequence;
 
@@ -45,16 +47,58 @@ impl Project {
         self.media.iter().find(|item| item.id == id)
     }
 
+    /// The media item with `id`, mutably.
+    pub fn media_item_mut(&mut self, id: MediaId) -> Option<&mut MediaItem> {
+        self.media.iter_mut().find(|item| item.id == id)
+    }
+
+    /// The bin holding `media`, anywhere in the bin tree.
+    #[must_use]
+    pub fn bin_of(&self, media: MediaId) -> Option<BinId> {
+        self.root_bin.bin_of(media).map(|bin| bin.id)
+    }
+
     /// The sequence with `id`, if the project holds it.
     #[must_use]
     pub fn sequence(&self, id: SequenceId) -> Option<&Sequence> {
         self.sequences.iter().find(|sequence| sequence.id == id)
+    }
+
+    /// The absolute path of a media item's source file, given the folder
+    /// holding the project file.
+    ///
+    /// Paths are stored project-relative (docs/PLAN.md §5.6), so this is the
+    /// only supported way to turn one back into something openable.
+    #[must_use]
+    pub fn absolute_path(&self, project_dir: &Path, media: MediaId) -> Option<std::path::PathBuf> {
+        self.media_item(media)
+            .map(|item| item.absolute_path(project_dir))
+    }
+
+    /// Looks for every source file and updates each item's offline flag.
+    ///
+    /// Returns the items that are missing, in project order. Call it after
+    /// loading a project or after the user points the app at a moved folder.
+    pub fn refresh_offline(&mut self, project_dir: &Path) -> Vec<MediaId> {
+        let mut offline = Vec::new();
+        for item in &mut self.media {
+            if !item.refresh_offline(project_dir) {
+                offline.push(item.id);
+            }
+        }
+        offline
+    }
+
+    /// The media items currently flagged offline, without touching the disk.
+    pub fn offline_media(&self) -> impl Iterator<Item = &MediaItem> {
+        self.media.iter().filter(|item| item.offline)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::content::MediaPath;
     use crate::sequence::SequenceSettings;
     use crate::track::{Clip, Gap, Track, TrackKind, Transition};
     use sub_time::{Rational, RationalTime, TimeRange};
@@ -73,7 +117,7 @@ mod tests {
         let rate = Rational::FPS_24;
         let mut project = Project::new("Doc cut");
 
-        let media = MediaItem::new("interview.mp4");
+        let media = MediaItem::new(MediaPath::new("interview.mp4").unwrap());
         let media_id = media.id;
         project.root_bin.media.push(media_id);
         project.media.push(media);
@@ -117,5 +161,67 @@ mod tests {
         }
         assert!(project.media_item(MediaId::new()).is_none());
         assert!(project.sequence(crate::ids::SequenceId::new()).is_none());
+    }
+
+    #[test]
+    fn media_is_filed_in_bins_by_id() {
+        let mut project = Project::new("Doc cut");
+        let item = MediaItem::new(MediaPath::new("footage/a.mp4").unwrap());
+        let media_id = item.id;
+        project.media.push(item);
+
+        let mut interviews = Bin::new("Interviews");
+        interviews.media.push(media_id);
+        let bin_id = interviews.id;
+        project.root_bin.children.push(interviews);
+
+        assert_eq!(project.bin_of(media_id), Some(bin_id));
+        assert_eq!(project.bin_of(MediaId::new()), None);
+        assert_eq!(
+            project.media_item_mut(media_id).map(|item| {
+                item.name = "Interview A".to_owned();
+                item.id
+            }),
+            Some(media_id)
+        );
+        assert_eq!(project.media_item(media_id).unwrap().name, "Interview A");
+        assert!(project.media_item_mut(MediaId::new()).is_none());
+    }
+
+    #[test]
+    fn offline_media_is_resolved_against_the_project_folder() {
+        let dir = std::env::temp_dir().join(format!(
+            "sub-model-project-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("footage")).unwrap();
+        std::fs::write(dir.join("footage/present.mp4"), b"bytes").unwrap();
+
+        let mut project = Project::new("Doc cut");
+        let present = MediaItem::new(MediaPath::new("footage/present.mp4").unwrap());
+        let present_id = present.id;
+        let missing = MediaItem::new(MediaPath::new("footage/missing.mp4").unwrap());
+        let missing_id = missing.id;
+        project.media.push(present);
+        project.media.push(missing);
+
+        assert_eq!(
+            project.absolute_path(&dir, present_id).unwrap(),
+            dir.join("footage/present.mp4")
+        );
+        assert!(project.absolute_path(&dir, MediaId::new()).is_none());
+        assert_eq!(project.offline_media().count(), 0);
+
+        assert_eq!(project.refresh_offline(&dir), vec![missing_id]);
+        let offline: Vec<MediaId> = project.offline_media().map(|item| item.id).collect();
+        assert_eq!(offline, vec![missing_id]);
+        assert!(!project.media_item(present_id).unwrap().offline);
+
+        std::fs::remove_file(dir.join("footage/present.mp4")).unwrap();
+        assert_eq!(project.refresh_offline(&dir).len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
