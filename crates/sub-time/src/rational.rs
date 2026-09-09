@@ -2,6 +2,9 @@
 
 use core::fmt;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 /// Greatest common divisor of two non-negative integers.
 pub(crate) const fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
     while b != 0 {
@@ -18,7 +21,11 @@ pub(crate) const fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
 /// [`RationalTime`](crate::RationalTime) at this rate lasts
 /// `denominator / numerator` seconds. NTSC rates are represented exactly:
 /// 23.976 fps is `24000/1001`, never a float.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(into = "RationalRepr", try_from = "RationalRepr")]
+#[schemars(with = "RationalRepr")]
 pub struct Rational {
     numerator: u32,
     denominator: u32,
@@ -133,6 +140,59 @@ impl Rational {
     }
 }
 
+/// The serde form of a [`Rational`]: the two parts, as written in the file.
+///
+/// Reading goes through [`Rational::new`], so a hand-edited or migrated file
+/// can never produce a rate of zero or an unreduced fraction.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+struct RationalRepr {
+    /// Units per `denominator` seconds; strictly positive.
+    numerator: u32,
+    /// Seconds per `numerator` units; strictly positive.
+    denominator: u32,
+}
+
+impl From<Rational> for RationalRepr {
+    fn from(rate: Rational) -> Self {
+        Self {
+            numerator: rate.numerator,
+            denominator: rate.denominator,
+        }
+    }
+}
+
+impl TryFrom<RationalRepr> for Rational {
+    type Error = InvalidRational;
+
+    fn try_from(repr: RationalRepr) -> Result<Self, Self::Error> {
+        Self::new(repr.numerator, repr.denominator).ok_or(InvalidRational {
+            numerator: repr.numerator,
+            denominator: repr.denominator,
+        })
+    }
+}
+
+/// A numerator/denominator pair that is not a valid [`Rational`] rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidRational {
+    /// The rejected numerator.
+    pub numerator: u32,
+    /// The rejected denominator.
+    pub denominator: u32,
+}
+
+impl fmt::Display for InvalidRational {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "rate {}/{} is not strictly positive",
+            self.numerator, self.denominator
+        )
+    }
+}
+
+impl core::error::Error for InvalidRational {}
+
 impl fmt::Display for Rational {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.denominator == 1 {
@@ -193,5 +253,28 @@ mod tests {
         let a = Rational::from_integer(4_000_000_007).unwrap();
         let b = Rational::from_integer(4_000_000_009).unwrap();
         assert!(a.common_rate(b).is_none());
+    }
+
+    #[test]
+    fn serde_carries_the_two_parts_and_reduces_on_the_way_in() {
+        let json = serde_json::to_string(&Rational::FPS_23_976).unwrap();
+        assert_eq!(json, r#"{"numerator":24000,"denominator":1001}"#);
+        assert_eq!(
+            serde_json::from_str::<Rational>(&json).unwrap(),
+            Rational::FPS_23_976
+        );
+        // An unreduced fraction read from a hand-edited file is reduced.
+        assert_eq!(
+            serde_json::from_str::<Rational>(r#"{"numerator":48,"denominator":2}"#).unwrap(),
+            Rational::FPS_24
+        );
+    }
+
+    #[test]
+    fn serde_rejects_a_rate_that_is_not_strictly_positive() {
+        let err =
+            serde_json::from_str::<Rational>(r#"{"numerator":0,"denominator":1}"#).unwrap_err();
+        assert!(err.to_string().contains("strictly positive"), "{err}");
+        assert!(serde_json::from_str::<Rational>(r#"{"numerator":24,"denominator":0}"#).is_err());
     }
 }

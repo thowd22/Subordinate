@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use sub_time::{Rational, RationalTime};
 
 use crate::content::{ContentHash, MediaPath};
@@ -11,7 +13,8 @@ use crate::sequence::ColorTags;
 /// One video stream reported by the probe.
 ///
 /// Frame rate and sample aspect are exact rationals; nothing here is a float.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VideoStream {
     /// Coded width in pixels.
     pub width: u32,
@@ -27,7 +30,8 @@ pub struct VideoStream {
 }
 
 /// One audio stream reported by the probe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AudioStream {
     /// Channel count.
     pub channels: u16,
@@ -40,7 +44,8 @@ pub struct AudioStream {
 /// Filled in by the GStreamer discoverer in `sub-media` (TASK-13); the model
 /// stores it so the bin, the timeline and an offline project can all show
 /// duration and format without touching the file.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StreamInfo {
     /// Total duration of the file, exact at its own rate.
     pub duration: Option<RationalTime>,
@@ -69,7 +74,8 @@ impl StreamInfo {
 ///
 /// The proxy path is project-relative like every other media path; proxies live
 /// in the `project.sub.d/` sidecar folder.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ProxyState {
     /// No proxy has been asked for.
     #[default]
@@ -103,7 +109,8 @@ impl ProxyState {
 /// The stored path is always project-relative and the [`ContentHash`] identifies
 /// the bytes, so a project folder copied to another machine relinks without
 /// user intervention (docs/PLAN.md §5.6).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MediaItem {
     /// Stable identity, preserved across save, load, undo and relink.
     pub id: MediaId,
@@ -173,7 +180,8 @@ impl MediaItem {
 /// OTIO has no counterpart; the closest is `SerializableCollection`, which
 /// carries no hierarchy. Bins nest, and hold media items by ID rather than by
 /// value so an item appears in exactly one place in the model.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Bin {
     /// Stable identity, preserved across save, load and undo.
     pub id: BinId,

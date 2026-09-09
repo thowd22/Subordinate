@@ -119,6 +119,24 @@ macro_rules! define_id {
                 Self::parse(text.as_ref()).map_err(D::Error::custom)
             }
         }
+
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed(stringify!($name))
+            }
+
+            fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                schemars::json_schema!({
+                    "type": "string",
+                    "format": "uuid",
+                    "description": concat!(
+                        "The canonical lowercase hyphenated UUIDv7 of a ",
+                        $entity,
+                        "."
+                    ),
+                })
+            }
+        }
     };
 }
 

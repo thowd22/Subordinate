@@ -5,6 +5,9 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::ops::{Add, Neg, Sub};
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 use crate::rational::{Rational, gcd_u128};
 
 /// How [`RationalTime::rescaled_to_rounding`] resolves a value that is not
@@ -33,9 +36,16 @@ pub enum Rounding {
 /// Equality and ordering compare the *duration in seconds*, not the raw
 /// representation: `1` frame at 24 fps equals `2` frames at 48 fps. [`Hash`]
 /// agrees with that equality.
-#[derive(Debug, Clone, Copy)]
+///
+/// The serde form is `{ "rate": { "numerator": …, "denominator": … },
+/// "value": … }`: exactly the two integers, so a saved time reloads as the
+/// same instant at the same rate rather than as a rounded one.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RationalTime {
+    /// The count of units.
     value: i64,
+    /// The rate the units are counted at.
     rate: Rational,
 }
 

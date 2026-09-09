@@ -37,6 +37,7 @@
 
 pub mod content;
 pub mod ids;
+pub mod json;
 pub mod marker;
 pub mod media;
 pub mod params;
@@ -46,6 +47,7 @@ pub mod track;
 
 pub use content::{ContentHash, MediaPath};
 pub use ids::{BinId, ClipId, MarkerId, MediaId, ProjectId, SequenceId, TrackId};
+pub use json::{ProjectFile, SCHEMA_VERSION};
 pub use marker::Marker;
 pub use media::{AudioStream, Bin, MediaItem, ProxyState, StreamInfo, VideoStream};
 pub use params::{Fixed6, GainDb, Opacity, Point2, Scale2, Transform};
@@ -77,6 +79,13 @@ pub mod codes {
     /// A clip breaks one of its own invariants (negative durations, fades
     /// longer than the clip).
     pub const INVALID_CLIP: ErrorCode = ErrorCode::from_static("model.invalid_clip");
+    /// A project file is not JSON, is not shaped like a project, or carries a
+    /// value the model rejects.
+    pub const INVALID_PROJECT_FILE: ErrorCode =
+        ErrorCode::from_static("model.invalid_project_file");
+    /// A project file declares a schema version this build cannot read.
+    pub const UNSUPPORTED_SCHEMA_VERSION: ErrorCode =
+        ErrorCode::from_static("model.unsupported_schema_version");
 }
 
 #[cfg(test)]
@@ -93,6 +102,8 @@ mod tests {
             codes::FILE_UNREADABLE,
             codes::INVALID_PARAMETER,
             codes::INVALID_CLIP,
+            codes::INVALID_PROJECT_FILE,
+            codes::UNSUPPORTED_SCHEMA_VERSION,
         ] {
             assert_eq!(code.domain(), "model");
             assert!(sub_core::ErrorCode::parse(code.as_str()).is_ok());

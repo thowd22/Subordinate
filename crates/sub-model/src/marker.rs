@@ -1,5 +1,7 @@
 //! Markers: named points or ranges on a sequence or a clip.
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use sub_time::TimeRange;
 
 use crate::ids::MarkerId;
@@ -8,7 +10,8 @@ use crate::ids::MarkerId;
 ///
 /// OTIO counterpart: `Marker`, with `marked_range` and `name`. A point marker
 /// is a marker whose range is empty.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Marker {
     /// Stable identity, preserved across save, load and undo.
     pub id: MarkerId,

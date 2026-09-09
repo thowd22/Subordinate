@@ -2,6 +2,9 @@
 
 use std::path::Path;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 use crate::ids::{BinId, MediaId, ProjectId, SequenceId};
 use crate::media::{Bin, MediaItem};
 use crate::sequence::Sequence;
@@ -11,7 +14,8 @@ use crate::sequence::Sequence;
 ///
 /// OTIO has no counterpart. An OTIO file is a single `Timeline`, so exporting
 /// a project means exporting one [`Sequence`] at a time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Project {
     /// Stable identity, preserved across save and load.
     pub id: ProjectId,

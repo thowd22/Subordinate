@@ -33,7 +33,7 @@ mod rational_time;
 mod time_range;
 pub mod timecode;
 
-pub use rational::Rational;
+pub use rational::{InvalidRational, Rational};
 pub use rational_time::{RationalTime, Rounding};
-pub use time_range::TimeRange;
+pub use time_range::{InvalidTimeRange, TimeRange};
 pub use timecode::{Timecode, TimecodeRate};

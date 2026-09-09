@@ -1,5 +1,7 @@
 //! Tracks and the items laid out along them: clips, gaps and transitions.
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
 use sub_time::{Rational, RationalTime, TimeRange};
 
@@ -11,7 +13,10 @@ use crate::params::{GainDb, Opacity, Transform};
 /// What a track carries.
 ///
 /// OTIO counterpart: `Track.kind`, the `"Video"` / `"Audio"` string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum TrackKind {
     /// Picture. Video tracks composite top-down.
     Video,
@@ -42,7 +47,8 @@ impl TrackKind {
 /// live on the clip itself: [`Clip::opacity`], [`Clip::transform`],
 /// [`Clip::gain`] and the two fades. Their invariants are checked by
 /// [`Clip::validate`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Clip {
     /// Stable identity, preserved across save, load and undo.
     pub id: ClipId,
@@ -164,7 +170,8 @@ impl Clip {
 /// Empty time on a track: black picture or silence.
 ///
 /// OTIO counterpart: `Gap`, whose `source_range` carries the duration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Gap {
     /// How long the gap lasts.
     pub duration: RationalTime,
@@ -185,7 +192,8 @@ impl Gap {
 /// `out_offset`, the amounts the transition reaches back into the outgoing
 /// item and forward into the incoming one. Crossfade is the only transition in
 /// the MVP (docs/PLAN.md §5.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Transition {
     /// A linear dissolve centred on the cut.
     Crossfade {
@@ -221,7 +229,8 @@ impl Transition {
 /// One entry in a track's ordered child list.
 ///
 /// OTIO counterpart: the `Composable` children of a `Track`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum TrackItem {
     /// A piece of media.
     Clip(Clip),
@@ -294,7 +303,8 @@ impl From<Transition> for TrackItem {
 ///
 /// OTIO counterpart: `Track`, a `Composition` whose children are laid end to
 /// end in order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Track {
     /// Stable identity, preserved across save, load and undo.
     pub id: TrackId,

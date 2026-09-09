@@ -13,6 +13,8 @@
 
 use core::fmt;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
 
 use crate::codes;
@@ -33,7 +35,24 @@ const MAX_UNITS: f64 = 9.0e12;
 /// This is the one numeric primitive for the non-time clip parameters. It is
 /// `Ord` and `Hash`, so clips compare and hash exactly, and it saves as an
 /// integer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+///
+/// The serde form is the raw micro-unit count: an integer, never a float.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(transparent)]
+#[schemars(transparent)]
 pub struct Fixed6(i64);
 
 impl Fixed6 {
@@ -132,8 +151,31 @@ impl fmt::Display for Fixed6 {
 ///
 /// The compositor multiplies the sampled clip by this factor before blending
 /// (docs/PLAN.md §5.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// The serde form is the factor as a [`Fixed6`], validated on the way in.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(into = "Fixed6", try_from = "Fixed6")]
+#[schemars(
+    with = "Fixed6",
+    description = "Opacity in micro-units, from 0 to 1000000."
+)]
 pub struct Opacity(Fixed6);
+
+impl From<Opacity> for Fixed6 {
+    fn from(opacity: Opacity) -> Self {
+        opacity.0
+    }
+}
+
+impl TryFrom<Fixed6> for Opacity {
+    type Error = SubError;
+
+    fn try_from(factor: Fixed6) -> SubResult<Self> {
+        Self::new(factor)
+    }
+}
 
 impl Opacity {
     /// Fully opaque, the default.
@@ -197,8 +239,31 @@ impl Default for Opacity {
 ///
 /// Decibels, not a linear factor, because that is what the mixer shows and
 /// what a fader interpolates in (docs/PLAN.md §5.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// The serde form is the level as a [`Fixed6`], validated on the way in.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(into = "Fixed6", try_from = "Fixed6")]
+#[schemars(
+    with = "Fixed6",
+    description = "Gain in micro-decibels, from -144000000 to 24000000."
+)]
 pub struct GainDb(Fixed6);
+
+impl From<GainDb> for Fixed6 {
+    fn from(gain: GainDb) -> Self {
+        gain.0
+    }
+}
+
+impl TryFrom<Fixed6> for GainDb {
+    type Error = SubError;
+
+    fn try_from(decibels: Fixed6) -> SubResult<Self> {
+        Self::new(decibels)
+    }
+}
 
 impl GainDb {
     /// The lowest accepted level, -144 dB, treated as silence.
@@ -267,7 +332,21 @@ impl Default for GainDb {
 ///
 /// The origin is the centre of the canvas: positive `x` moves right, positive
 /// `y` moves down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
 pub struct Point2 {
     /// Horizontal offset in pixels.
     pub x: Fixed6,
@@ -290,10 +369,42 @@ impl Point2 {
 }
 
 /// A per-axis scale factor. Neither axis may be zero; a negative axis mirrors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(into = "Scale2Repr", try_from = "Scale2Repr")]
+#[schemars(with = "Scale2Repr")]
 pub struct Scale2 {
     x: Fixed6,
     y: Fixed6,
+}
+
+/// The serde form of a [`Scale2`], validated on the way in by
+/// [`Scale2::new`] so a file can never collapse a clip to nothing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Scale2Repr {
+    /// The horizontal factor; never zero.
+    x: Fixed6,
+    /// The vertical factor; never zero.
+    y: Fixed6,
+}
+
+impl From<Scale2> for Scale2Repr {
+    fn from(scale: Scale2) -> Self {
+        Self {
+            x: scale.x,
+            y: scale.y,
+        }
+    }
+}
+
+impl TryFrom<Scale2Repr> for Scale2 {
+    type Error = SubError;
+
+    fn try_from(repr: Scale2Repr) -> SubResult<Self> {
+        Self::new(repr.x, repr.y)
+    }
 }
 
 impl Scale2 {
@@ -355,7 +466,21 @@ impl Default for Scale2 {
 /// The compositor applies scale, then rotation, then translation, all about
 /// the clip centre (docs/PLAN.md §5.2). OTIO has no counterpart; this would
 /// live in `metadata` on an OTIO export.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
 pub struct Transform {
     /// Offset of the clip centre from the canvas centre, in pixels.
     pub position: Point2,
