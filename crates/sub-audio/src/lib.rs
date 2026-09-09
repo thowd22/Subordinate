@@ -8,11 +8,17 @@
 
 pub mod decode;
 pub mod mixer;
+pub mod output;
 pub mod resample;
 
 pub use decode::{AudioInfo, Block, FileDecoder, Pcm, decode_file, probe_audio};
 pub use mixer::{
     ClipSpec, MixGraph, MixGraphBuilder, Mixer, MixerConfig, MixerControl, TrackSpec, mixer,
+};
+pub use output::{
+    AudioOutput, CpalBackend, NegotiatedFormat, OpenStream, OutputBackend, OutputDeviceInfo,
+    OutputDiagnostics, OutputMetrics, OutputOptions, OutputRenderer, OutputSampleFormat,
+    OutputStream, StreamHandle, SupportedFormat, negotiate,
 };
 pub use resample::{PcmReader, PcmWriter, ResampleStage, Resampler, pcm_ring};
 
@@ -44,6 +50,16 @@ pub mod codes {
     /// unrepresentable time, fades longer than their clip, or a shape the
     /// mixer it is published to does not have room for.
     pub const GRAPH_INVALID: ErrorCode = ErrorCode::from_static("audio.graph_invalid");
+    /// The system offers no audio output device at all.
+    pub const NO_OUTPUT_DEVICE: ErrorCode = ErrorCode::from_static("audio.no_output_device");
+    /// The chosen output device has gone away, or the host will not describe
+    /// it.
+    pub const DEVICE_UNAVAILABLE: ErrorCode = ErrorCode::from_static("audio.device_unavailable");
+    /// The device advertises no stream format this build can write, or a
+    /// format was applied to a mixer it does not describe.
+    pub const FORMAT_UNSUPPORTED: ErrorCode = ErrorCode::from_static("audio.format_unsupported");
+    /// The audio host refused to open, start or pause an output stream.
+    pub const STREAM_FAILED: ErrorCode = ErrorCode::from_static("audio.stream_failed");
 }
 
 #[cfg(test)]
@@ -60,6 +76,10 @@ mod tests {
             super::codes::RESAMPLE_FAILED,
             super::codes::INVALID_GAIN,
             super::codes::GRAPH_INVALID,
+            super::codes::NO_OUTPUT_DEVICE,
+            super::codes::DEVICE_UNAVAILABLE,
+            super::codes::FORMAT_UNSUPPORTED,
+            super::codes::STREAM_FAILED,
         ];
         for code in &codes {
             assert_eq!(code.domain(), "audio", "wrong domain for {code}");

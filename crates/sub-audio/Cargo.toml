@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+cpal = "0.18"
 ringbuf = "0.5"
 rubato = { version = "5", default-features = false }
 sub-core = { path = "../sub-core" }

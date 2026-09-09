@@ -16,6 +16,10 @@ use sub_render::{
     select_adapter,
 };
 
+use sub_audio::mixer::{MixGraphBuilder, MixerConfig, mixer};
+use sub_audio::{AudioOutput, CpalBackend, OutputOptions};
+
+use crate::audio_settings::{AudioSettingsAction, AudioSettingsPanel};
 use crate::diagnostics::DiagnosticsPanel;
 use crate::keymap::LoadedKeymap;
 use crate::shortcuts::{Action, ShortcutMap, ShortcutsWindow};
@@ -56,6 +60,12 @@ pub struct SubordinateApp {
     frames_painted: u32,
     closing: bool,
     diagnostics: DiagnosticsPanel,
+    /// The audio settings panel: which device plays, and how it is doing.
+    audio_settings: AudioSettingsPanel,
+    /// The output stage. It is closed until something plays; selecting a
+    /// device while it is closed only records the choice, and selecting one
+    /// while it is open reopens the stream there.
+    audio: AudioOutput<CpalBackend>,
     /// The sequence being previewed. Loading a project replaces it; until
     /// then it is an empty sequence, which composites to black.
     sequence: Sequence,
@@ -110,6 +120,7 @@ impl SubordinateApp {
         let sequence = Sequence::new("Sequence", SequenceSettings::default());
         let compositor = Compositor::for_sequence(render.clone(), &sequence);
         let viewer = ViewerPanel::for_sequence(&sequence);
+        let audio = audio_output(sequence.settings.sample_rate);
         Ok(Self {
             render,
             render_state: state.clone(),
@@ -117,6 +128,8 @@ impl SubordinateApp {
             frames_painted: 0,
             closing: false,
             diagnostics: DiagnosticsPanel::new(),
+            audio_settings: AudioSettingsPanel::new(),
+            audio,
             sequence,
             compositor,
             viewer,
@@ -135,6 +148,40 @@ impl SubordinateApp {
     /// The hardware diagnostics panel.
     pub fn diagnostics(&mut self) -> &mut DiagnosticsPanel {
         &mut self.diagnostics
+    }
+
+    /// The audio settings panel.
+    pub fn audio_settings(&mut self) -> &mut AudioSettingsPanel {
+        &mut self.audio_settings
+    }
+
+    /// The audio output stage.
+    pub fn audio(&mut self) -> &mut AudioOutput<CpalBackend> {
+        &mut self.audio
+    }
+
+    /// Feeds the audio settings panel and applies what it asks for.
+    ///
+    /// A failed switch is reported in the panel rather than propagated: the
+    /// output has already put the previous device back, so the editor carries
+    /// on playing.
+    fn apply_audio_settings(&mut self, ctx: &egui::Context) {
+        if self.audio_settings.needs_devices() {
+            let devices = self.audio.devices();
+            self.audio_settings.set_devices(devices);
+        }
+        self.audio_settings
+            .set_diagnostics(self.audio.diagnostics());
+        match self.audio_settings.show(ctx) {
+            AudioSettingsAction::None => {}
+            AudioSettingsAction::Rescan => self.audio_settings.refresh(),
+            AudioSettingsAction::SelectDevice(device_id) => {
+                let result = self.audio.select_device(device_id.as_deref());
+                self.audio_settings.set_error(result.err());
+                self.audio_settings
+                    .set_selected(self.audio.selected_device());
+            }
+        }
     }
 
     /// The viewer panel, which owns the playhead.
@@ -238,11 +285,15 @@ impl eframe::App for SubordinateApp {
             if ui.button("Hardware diagnostics").clicked() {
                 self.diagnostics.open = !self.diagnostics.open;
             }
+            if ui.button("Audio settings").clicked() {
+                self.audio_settings.open = !self.audio_settings.open;
+            }
             if ui.button("Keyboard shortcuts").clicked() {
                 self.shortcuts_window.toggle();
             }
         });
         self.diagnostics.show(ui.ctx());
+        self.apply_audio_settings(ui.ctx());
         self.shortcuts_window
             .show_with_problems(ui.ctx(), &self.keymap.map, &self.keymap.problems);
 
@@ -317,6 +368,24 @@ pub fn run(options: AppOptions) -> eframe::Result {
         "subordinate",
         native_options(),
         Box::new(move |cc| Ok(Box::new(SubordinateApp::new(cc, options)?))),
+    )
+}
+
+/// The output stage for a sequence at `sample_rate`, closed.
+///
+/// The factory it carries builds a fresh mixer every time a stream opens,
+/// because a reopened stream needs a mixer paired with a fresh control half.
+/// Until the transport is wired up (TASK-50) that mixer plays an empty graph,
+/// so the device the user picks here is remembered rather than opened.
+fn audio_output(sample_rate: u32) -> AudioOutput<CpalBackend> {
+    AudioOutput::new(
+        CpalBackend::new(),
+        OutputOptions::default(),
+        Box::new(move || {
+            let graph = MixGraphBuilder::new(sample_rate, 2).build()?;
+            let (_control, mixer) = mixer(graph, MixerConfig::default())?;
+            Ok(mixer)
+        }),
     )
 }
 

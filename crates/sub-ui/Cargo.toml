@@ -11,6 +11,7 @@ repository.workspace = true
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11", "accesskit"] }
 log = "0.4"
 rfd = "0.17"
+sub-audio = { version = "0.1.0", path = "../sub-audio" }
 sub-core = { version = "0.1.0", path = "../sub-core" }
 sub-edit = { version = "0.1.0", path = "../sub-edit" }
 sub-export = { version = "0.1.0", path = "../sub-export" }

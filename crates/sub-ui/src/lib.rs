@@ -7,6 +7,7 @@
 //! is the same device `sub-render` composites with; see [`app`].
 
 pub mod app;
+pub mod audio_settings;
 pub mod diagnostics;
 pub mod history_panel;
 pub mod keymap;
@@ -23,6 +24,7 @@ pub mod viewer;
 pub mod waveform;
 
 pub use app::{AppOptions, SubordinateApp, run};
+pub use audio_settings::{AudioSettingsAction, AudioSettingsPanel, device_label, status_line};
 pub use diagnostics::DiagnosticsPanel;
 pub use history_panel::{
     HistoryAction, HistoryList, HistoryPanel, ORIGINAL_STATE_LABEL, edit_menu_ui,
