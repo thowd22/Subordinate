@@ -1,0 +1,912 @@
+{
+  "$defs": {
+    "AudioStream": {
+      "additionalProperties": false,
+      "description": "One audio stream reported by the probe.",
+      "properties": {
+        "channels": {
+          "description": "Channel count.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sample_rate": {
+          "description": "Sample rate in hertz.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "channels",
+        "sample_rate"
+      ],
+      "type": "object"
+    },
+    "Bin": {
+      "additionalProperties": false,
+      "description": "A folder in the media bin.\n\nOTIO has no counterpart; the closest is `SerializableCollection`, which\ncarries no hierarchy. Bins nest, and hold media items by ID rather than by\nvalue so an item appears in exactly one place in the model.",
+      "properties": {
+        "children": {
+          "description": "Nested bins, in user order.",
+          "items": {
+            "$ref": "#/$defs/Bin"
+          },
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/BinId",
+          "description": "Stable identity, preserved across save, load and undo."
+        },
+        "media": {
+          "description": "Media items filed directly in this bin, in user order.",
+          "items": {
+            "$ref": "#/$defs/MediaId"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "Display name. The root bin conventionally carries the project name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "media",
+        "children"
+      ],
+      "type": "object"
+    },
+    "BinId": {
+      "description": "The canonical lowercase hyphenated UUIDv7 of a bin.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Clip": {
+      "additionalProperties": false,
+      "description": "A reference to a slice of a [`MediaItem`](crate::MediaItem) placed on a\ntrack.\n\nOTIO counterpart: `Clip`, whose `media_reference` is an\n`ExternalReference` and whose `source_range` selects the used portion of it.\nPlacement on the track is positional, exactly as in OTIO: a clip starts\nwhere the preceding items end.\n\nThe fixed set of per-clip parameters the MVP supports (docs/PLAN.md §5.1)\nlive on the clip itself: [`Clip::opacity`], [`Clip::transform`],\n[`Clip::gain`] and the two fades. Their invariants are checked by\n[`Clip::validate`].",
+      "properties": {
+        "fade_in": {
+          "$ref": "#/$defs/RationalTime",
+          "description": "How long the clip ramps up from nothing at its head. Zero by default."
+        },
+        "fade_out": {
+          "$ref": "#/$defs/RationalTime",
+          "description": "How long the clip ramps down to nothing at its tail. Zero by default."
+        },
+        "gain": {
+          "$ref": "#/$defs/GainDb",
+          "description": "Clip audio level in decibels. Unity by default."
+        },
+        "id": {
+          "$ref": "#/$defs/ClipId",
+          "description": "Stable identity, preserved across save, load and undo."
+        },
+        "markers": {
+          "description": "Markers anchored to this clip (OTIO `Clip.markers`).",
+          "items": {
+            "$ref": "#/$defs/Marker"
+          },
+          "type": "array"
+        },
+        "media": {
+          "$ref": "#/$defs/MediaId",
+          "description": "The media this clip plays."
+        },
+        "name": {
+          "description": "Display name, shown on the timeline rectangle.",
+          "type": "string"
+        },
+        "opacity": {
+          "$ref": "#/$defs/Opacity",
+          "description": "How opaque the picture is when composited. Fully opaque by default."
+        },
+        "source_range": {
+          "$ref": "#/$defs/TimeRange",
+          "description": "The portion of the source used, in source time."
+        },
+        "transform": {
+          "$ref": "#/$defs/Transform",
+          "description": "Position, scale and rotation on the sequence canvas. Identity by\ndefault."
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "media",
+        "source_range",
+        "opacity",
+        "transform",
+        "gain",
+        "fade_in",
+        "fade_out",
+        "markers"
+      ],
+      "type": "object"
+    },
+    "ClipId": {
+      "description": "The canonical lowercase hyphenated UUIDv7 of a clip.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ColorPrimaries": {
+      "description": "The chromaticities of the red, green and blue primaries.",
+      "oneOf": [
+        {
+          "const": "bt709",
+          "description": "BT.709 primaries.",
+          "type": "string"
+        },
+        {
+          "const": "bt601",
+          "description": "BT.601 primaries.",
+          "type": "string"
+        },
+        {
+          "const": "bt2020",
+          "description": "BT.2020 primaries.",
+          "type": "string"
+        },
+        {
+          "const": "dci_p3",
+          "description": "DCI-P3.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "Not known, or not reported by the source.",
+          "type": "string"
+        }
+      ]
+    },
+    "ColorSpace": {
+      "description": "The colour space a set of pixels is encoded in.\n\nPer decision-3 the MVP stores these tags and renders assuming Rec.709; the\ntags exist so adding colour management later is not a lossy migration.",
+      "oneOf": [
+        {
+          "const": "rec709",
+          "description": "Rec. ITU-R BT.709, the MVP working space.",
+          "type": "string"
+        },
+        {
+          "const": "rec601",
+          "description": "Rec. ITU-R BT.601 (standard definition).",
+          "type": "string"
+        },
+        {
+          "const": "rec2020",
+          "description": "Rec. ITU-R BT.2020.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "Not known, or not reported by the source.",
+          "type": "string"
+        }
+      ]
+    },
+    "ColorTags": {
+      "additionalProperties": false,
+      "description": "The colour tags carried by a sequence or a media item (decision-3).\n\nOTIO has no counterpart; this would live in `metadata` on an OTIO export.",
+      "properties": {
+        "primaries": {
+          "$ref": "#/$defs/ColorPrimaries",
+          "description": "The primaries."
+        },
+        "space": {
+          "$ref": "#/$defs/ColorSpace",
+          "description": "The encoding colour space."
+        },
+        "transfer": {
+          "$ref": "#/$defs/TransferFunction",
+          "description": "The transfer function."
+        }
+      },
+      "required": [
+        "space",
+        "transfer",
+        "primaries"
+      ],
+      "type": "object"
+    },
+    "ContentHash": {
+      "description": "A BLAKE3 content hash as 64 lowercase hex digits.",
+      "type": "string"
+    },
+    "Fixed6": {
+      "description": "An exact number with six decimal places, stored as a count of micro-units.\n\nThis is the one numeric primitive for the non-time clip parameters. It is\n`Ord` and `Hash`, so clips compare and hash exactly, and it saves as an\ninteger.\n\nThe serde form is the raw micro-unit count: an integer, never a float.",
+      "format": "int64",
+      "type": "integer"
+    },
+    "GainDb": {
+      "description": "Gain in micro-decibels, from -144000000 to 24000000.",
+      "format": "int64",
+      "type": "integer"
+    },
+    "Gap": {
+      "additionalProperties": false,
+      "description": "Empty time on a track: black picture or silence.\n\nOTIO counterpart: `Gap`, whose `source_range` carries the duration.",
+      "properties": {
+        "duration": {
+          "$ref": "#/$defs/RationalTime",
+          "description": "How long the gap lasts."
+        }
+      },
+      "required": [
+        "duration"
+      ],
+      "type": "object"
+    },
+    "Marker": {
+      "additionalProperties": false,
+      "description": "A named annotation over a span of time.\n\nOTIO counterpart: `Marker`, with `marked_range` and `name`. A point marker\nis a marker whose range is empty.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/MarkerId",
+          "description": "Stable identity, preserved across save, load and undo."
+        },
+        "marked_range": {
+          "$ref": "#/$defs/TimeRange",
+          "description": "The span the marker covers, in the time of whatever holds it: sequence\ntime for a sequence marker, source time for a clip marker."
+        },
+        "name": {
+          "description": "Display name, shown on the ruler.",
+          "type": "string"
+        },
+        "note": {
+          "description": "Free-form note, empty when the user has not written one.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "marked_range",
+        "note"
+      ],
+      "type": "object"
+    },
+    "MarkerId": {
+      "description": "The canonical lowercase hyphenated UUIDv7 of a marker.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "MediaId": {
+      "description": "The canonical lowercase hyphenated UUIDv7 of a media.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "MediaItem": {
+      "additionalProperties": false,
+      "description": "A source file the project references.\n\nOTIO counterpart: `ExternalReference`, the media reference a `Clip` points\nat. Subordinate hoists it out of the clip into a project-level list so many\nclips share one entry, and so relinking a moved file is a single edit.\n\nThe stored path is always project-relative and the [`ContentHash`] identifies\nthe bytes, so a project folder copied to another machine relinks without\nuser intervention (docs/PLAN.md §5.6).",
+      "properties": {
+        "color": {
+          "$ref": "#/$defs/ColorTags",
+          "description": "Colour tags read from the file, stored but not applied in the MVP\n(decision-3)."
+        },
+        "hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentHash"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Fingerprint of the file's bytes, when it has been hashed. `None` until\nthe file is first read, and on items restored from a project whose\nmedia was offline at save time."
+        },
+        "id": {
+          "$ref": "#/$defs/MediaId",
+          "description": "Stable identity, preserved across save, load, undo and relink."
+        },
+        "info": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StreamInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the probe found, when the file has been probed."
+        },
+        "name": {
+          "description": "Display name, usually the file name.",
+          "type": "string"
+        },
+        "offline": {
+          "description": "True when the file was missing the last time it was looked for. Set by\n[`MediaItem::refresh_offline`]; nothing else in the model reads the\nfilesystem.",
+          "type": "boolean"
+        },
+        "path": {
+          "$ref": "#/$defs/MediaPath",
+          "description": "Where the file lives, relative to the project folder."
+        },
+        "proxy": {
+          "$ref": "#/$defs/ProxyState",
+          "description": "Proxy availability."
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "path",
+        "proxy",
+        "offline",
+        "color"
+      ],
+      "type": "object"
+    },
+    "MediaPath": {
+      "description": "A slash-separated project-relative media path.",
+      "type": "string"
+    },
+    "Opacity": {
+      "description": "Opacity in micro-units, from 0 to 1000000.",
+      "format": "int64",
+      "type": "integer"
+    },
+    "Point2": {
+      "additionalProperties": false,
+      "description": "A point on the sequence canvas, in pixels, with sub-pixel precision.\n\nThe origin is the centre of the canvas: positive `x` moves right, positive\n`y` moves down.",
+      "properties": {
+        "x": {
+          "$ref": "#/$defs/Fixed6",
+          "description": "Horizontal offset in pixels."
+        },
+        "y": {
+          "$ref": "#/$defs/Fixed6",
+          "description": "Vertical offset in pixels."
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "Project": {
+      "additionalProperties": false,
+      "description": "Everything a `.sub` file holds: media, bins and sequences (docs/PLAN.md\n§5.6).\n\nOTIO has no counterpart. An OTIO file is a single `Timeline`, so exporting\na project means exporting one [`Sequence`] at a time.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ProjectId",
+          "description": "Stable identity, preserved across save and load."
+        },
+        "media": {
+          "description": "Every source the project references, in no particular order; the bin\ntree, not this list, carries the user's arrangement.",
+          "items": {
+            "$ref": "#/$defs/MediaItem"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "Display name, shown in the window title.",
+          "type": "string"
+        },
+        "root_bin": {
+          "$ref": "#/$defs/Bin",
+          "description": "The root of the bin tree."
+        },
+        "sequences": {
+          "description": "The sequences, in tab order.",
+          "items": {
+            "$ref": "#/$defs/Sequence"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "media",
+        "root_bin",
+        "sequences"
+      ],
+      "type": "object"
+    },
+    "ProjectId": {
+      "description": "The canonical lowercase hyphenated UUIDv7 of a project.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ProxyState": {
+      "description": "Whether a reduced-resolution proxy exists for a media item (TASK-69,\nTASK-70).\n\nThe proxy path is project-relative like every other media path; proxies live\nin the `project.sub.d/` sidecar folder.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "No proxy has been asked for.",
+          "type": "string"
+        },
+        {
+          "const": "pending",
+          "description": "A proxy job has been queued or is running.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A proxy exists at this project-relative path.",
+          "properties": {
+            "ready": {
+              "$ref": "#/$defs/MediaPath"
+            }
+          },
+          "required": [
+            "ready"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Proxy generation failed; the message is for the user, the code was\nreported when it happened.",
+          "properties": {
+            "failed": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "failed"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Rational": {
+      "description": "A strictly positive rational rate in units per second, held in lowest terms.\n\nA rate of `numerator / denominator` means that one unit of a\n[`RationalTime`](crate::RationalTime) at this rate lasts\n`denominator / numerator` seconds. NTSC rates are represented exactly:\n23.976 fps is `24000/1001`, never a float.",
+      "properties": {
+        "denominator": {
+          "description": "Seconds per `numerator` units; strictly positive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numerator": {
+          "description": "Units per `denominator` seconds; strictly positive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "numerator",
+        "denominator"
+      ],
+      "type": "object"
+    },
+    "RationalTime": {
+      "additionalProperties": false,
+      "description": "An exact instant or duration: an integer `value` of units at a rational\n`rate`.\n\nThe wall-clock length is `value * rate.denominator() / rate.numerator()`\nseconds. All arithmetic here is integer arithmetic; no operation on this\ntype uses a float, so edits never drift (see docs/PLAN.md §5.1).\n\nEquality and ordering compare the *duration in seconds*, not the raw\nrepresentation: `1` frame at 24 fps equals `2` frames at 48 fps. [`Hash`]\nagrees with that equality.\n\nThe serde form is `{ \"rate\": { \"numerator\": …, \"denominator\": … },\n\"value\": … }`: exactly the two integers, so a saved time reloads as the\nsame instant at the same rate rather than as a rounded one.",
+      "properties": {
+        "rate": {
+          "$ref": "#/$defs/Rational",
+          "description": "The rate the units are counted at."
+        },
+        "value": {
+          "description": "The count of units.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value",
+        "rate"
+      ],
+      "type": "object"
+    },
+    "Resolution": {
+      "additionalProperties": false,
+      "description": "A pixel canvas size. Both dimensions are non-zero.\n\nOTIO has no counterpart: it stores no rendering resolution.",
+      "properties": {
+        "height": {
+          "description": "Height in pixels; never zero.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "description": "Width in pixels; never zero.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "Scale2": {
+      "additionalProperties": false,
+      "description": "A per-axis scale factor. Neither axis may be zero; a negative axis mirrors.",
+      "properties": {
+        "x": {
+          "$ref": "#/$defs/Fixed6",
+          "description": "The horizontal factor; never zero."
+        },
+        "y": {
+          "$ref": "#/$defs/Fixed6",
+          "description": "The vertical factor; never zero."
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "Sequence": {
+      "additionalProperties": false,
+      "description": "One editable timeline: an ordered stack of [`Track`]s plus its settings.\n\nOTIO counterpart: `Timeline`, whose single `tracks` child is a `Stack` of\n`Track`s. Subordinate flattens that stack into [`Sequence::tracks`] because\nnested stacks are out of MVP scope. Video tracks composite top-down, so\nlater entries in `tracks` render over earlier ones.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/SequenceId",
+          "description": "Stable identity, preserved across save, load and undo."
+        },
+        "markers": {
+          "description": "Timeline-wide markers (OTIO `Timeline.tracks.markers`).",
+          "items": {
+            "$ref": "#/$defs/Marker"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "Display name, shown on the sequence tab.",
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/$defs/SequenceSettings",
+          "description": "Canvas, timebase, audio rate and colour tags."
+        },
+        "tracks": {
+          "description": "Tracks, bottom-most first.",
+          "items": {
+            "$ref": "#/$defs/Track"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "settings",
+        "tracks",
+        "markers"
+      ],
+      "type": "object"
+    },
+    "SequenceId": {
+      "description": "The canonical lowercase hyphenated UUIDv7 of a sequence.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "SequenceSettings": {
+      "additionalProperties": false,
+      "description": "The canvas, timebase, audio rate and colour tags of a [`Sequence`].\n\nOTIO stores only the rate, implicitly, on each item's `RationalTime`.",
+      "properties": {
+        "color": {
+          "$ref": "#/$defs/ColorTags",
+          "description": "Colour tags."
+        },
+        "frame_rate": {
+          "$ref": "#/$defs/Rational",
+          "description": "Editing timebase."
+        },
+        "resolution": {
+          "$ref": "#/$defs/Resolution",
+          "description": "Render canvas size in pixels."
+        },
+        "sample_rate": {
+          "description": "Audio sample rate in hertz; never zero.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "resolution",
+        "frame_rate",
+        "sample_rate",
+        "color"
+      ],
+      "type": "object"
+    },
+    "StreamInfo": {
+      "additionalProperties": false,
+      "description": "What the probe found in a media file (docs/PLAN.md §5.2).\n\nFilled in by the GStreamer discoverer in `sub-media` (TASK-13); the model\nstores it so the bin, the timeline and an offline project can all show\nduration and format without touching the file.",
+      "properties": {
+        "audio": {
+          "description": "Audio streams, in file order.",
+          "items": {
+            "$ref": "#/$defs/AudioStream"
+          },
+          "type": "array"
+        },
+        "duration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RationalTime"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Total duration of the file, exact at its own rate."
+        },
+        "video": {
+          "description": "Video streams, in file order.",
+          "items": {
+            "$ref": "#/$defs/VideoStream"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "video",
+        "audio"
+      ],
+      "type": "object"
+    },
+    "TimeRange": {
+      "additionalProperties": false,
+      "description": "A half-open range `[start, start + duration)` with a non-negative duration.\n\nRanges are half-open so that adjacent clips neither overlap nor leave a gap:\na range ending at `t` and one starting at `t` are butt-joined. `start` and\n`duration` may be expressed at different rates; comparisons are exact\nregardless (see [`RationalTime`]).",
+      "properties": {
+        "duration": {
+          "$ref": "#/$defs/RationalTime",
+          "description": "The length; never negative."
+        },
+        "start": {
+          "$ref": "#/$defs/RationalTime",
+          "description": "The inclusive start."
+        }
+      },
+      "required": [
+        "start",
+        "duration"
+      ],
+      "type": "object"
+    },
+    "Track": {
+      "additionalProperties": false,
+      "description": "One lane of a sequence: an ordered list of clips, gaps and transitions.\n\nOTIO counterpart: `Track`, a `Composition` whose children are laid end to\nend in order.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/TrackId",
+          "description": "Stable identity, preserved across save, load and undo."
+        },
+        "items": {
+          "description": "The items, in playback order.",
+          "items": {
+            "$ref": "#/$defs/TrackItem"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/TrackKind",
+          "description": "Whether this lane carries picture or sound."
+        },
+        "name": {
+          "description": "Display name, shown in the track header (\"V1\", \"Dialogue\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "items"
+      ],
+      "type": "object"
+    },
+    "TrackId": {
+      "description": "The canonical lowercase hyphenated UUIDv7 of a track.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "TrackItem": {
+      "description": "One entry in a track's ordered child list.\n\nOTIO counterpart: the `Composable` children of a `Track`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A piece of media.",
+          "properties": {
+            "clip": {
+              "$ref": "#/$defs/Clip"
+            }
+          },
+          "required": [
+            "clip"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Empty time.",
+          "properties": {
+            "gap": {
+              "$ref": "#/$defs/Gap"
+            }
+          },
+          "required": [
+            "gap"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A blend across the neighbouring cut. Unlike clips and gaps, a\ntransition consumes no track time of its own; it overlaps its\nneighbours.",
+          "properties": {
+            "transition": {
+              "$ref": "#/$defs/Transition"
+            }
+          },
+          "required": [
+            "transition"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TrackKind": {
+      "description": "What a track carries.\n\nOTIO counterpart: `Track.kind`, the `\"Video\"` / `\"Audio\"` string.",
+      "oneOf": [
+        {
+          "const": "video",
+          "description": "Picture. Video tracks composite top-down.",
+          "type": "string"
+        },
+        {
+          "const": "audio",
+          "description": "Sound. Audio tracks sum in the mixer.",
+          "type": "string"
+        }
+      ]
+    },
+    "TransferFunction": {
+      "description": "The transfer function (gamma curve) pixel values are encoded with.",
+      "oneOf": [
+        {
+          "const": "bt709",
+          "description": "BT.709 / BT.1886 display gamma.",
+          "type": "string"
+        },
+        {
+          "const": "srgb",
+          "description": "sRGB.",
+          "type": "string"
+        },
+        {
+          "const": "pq",
+          "description": "SMPTE ST 2084 perceptual quantizer (HDR10).",
+          "type": "string"
+        },
+        {
+          "const": "hlg",
+          "description": "Hybrid log-gamma.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "Not known, or not reported by the source.",
+          "type": "string"
+        }
+      ]
+    },
+    "Transform": {
+      "additionalProperties": false,
+      "description": "The 2D placement of a clip on the sequence canvas.\n\nThe compositor applies scale, then rotation, then translation, all about\nthe clip centre (docs/PLAN.md §5.2). OTIO has no counterpart; this would\nlive in `metadata` on an OTIO export.",
+      "properties": {
+        "position": {
+          "$ref": "#/$defs/Point2",
+          "description": "Offset of the clip centre from the canvas centre, in pixels."
+        },
+        "rotation_degrees": {
+          "$ref": "#/$defs/Fixed6",
+          "description": "Clockwise rotation about the clip centre, in degrees."
+        },
+        "scale": {
+          "$ref": "#/$defs/Scale2",
+          "description": "Per-axis scale factor."
+        }
+      },
+      "required": [
+        "position",
+        "scale",
+        "rotation_degrees"
+      ],
+      "type": "object"
+    },
+    "Transition": {
+      "description": "A blend across the cut between the two items either side of it.\n\nOTIO counterpart: `Transition`. `Crossfade` maps to\n`transition_type: \"SMPTE_Dissolve\"`; the offsets are OTIO's `in_offset` and\n`out_offset`, the amounts the transition reaches back into the outgoing\nitem and forward into the incoming one. Crossfade is the only transition in\nthe MVP (docs/PLAN.md §5.3).",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A linear dissolve centred on the cut.",
+          "properties": {
+            "crossfade": {
+              "properties": {
+                "in_offset": {
+                  "$ref": "#/$defs/RationalTime",
+                  "description": "How far the transition reaches back into the outgoing item."
+                },
+                "out_offset": {
+                  "$ref": "#/$defs/RationalTime",
+                  "description": "How far it reaches forward into the incoming item."
+                }
+              },
+              "required": [
+                "in_offset",
+                "out_offset"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "crossfade"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "VideoStream": {
+      "additionalProperties": false,
+      "description": "One video stream reported by the probe.\n\nFrame rate and sample aspect are exact rationals; nothing here is a float.",
+      "properties": {
+        "color": {
+          "$ref": "#/$defs/ColorTags",
+          "description": "Colour tags read from the container or bitstream (decision-3)."
+        },
+        "frame_rate": {
+          "$ref": "#/$defs/Rational",
+          "description": "Nominal frame rate. Variable-rate sources report their average here and\ncarry a PTS index instead (TASK-16)."
+        },
+        "height": {
+          "description": "Coded height in pixels.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sample_aspect": {
+          "$ref": "#/$defs/Rational",
+          "description": "Pixel (sample) aspect ratio; `1/1` for square pixels."
+        },
+        "width": {
+          "description": "Coded width in pixels.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "frame_rate",
+        "sample_aspect",
+        "color"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A project file: the model plus the schema version it was written at.",
+  "properties": {
+    "project": {
+      "$ref": "#/$defs/Project",
+      "description": "The project itself."
+    },
+    "schema_version": {
+      "description": "The version of the on-disk schema these fields follow.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "project"
+  ],
+  "title": "ProjectFile",
+  "type": "object"
+}

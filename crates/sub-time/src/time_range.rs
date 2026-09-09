@@ -2,6 +2,9 @@
 
 use core::fmt;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 use crate::rational_time::RationalTime;
 
 /// A half-open range `[start, start + duration)` with a non-negative duration.
@@ -10,11 +13,55 @@ use crate::rational_time::RationalTime;
 /// a range ending at `t` and one starting at `t` are butt-joined. `start` and
 /// `duration` may be expressed at different rates; comparisons are exact
 /// regardless (see [`RationalTime`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(into = "TimeRangeRepr", try_from = "TimeRangeRepr")]
+#[schemars(with = "TimeRangeRepr")]
 pub struct TimeRange {
     start: RationalTime,
     duration: RationalTime,
 }
+
+/// The serde form of a [`TimeRange`].
+///
+/// Reading goes through [`TimeRange::new`], so a file can never yield a range
+/// with a negative duration or an end that is not representable.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TimeRangeRepr {
+    /// The inclusive start.
+    start: RationalTime,
+    /// The length; never negative.
+    duration: RationalTime,
+}
+
+impl From<TimeRange> for TimeRangeRepr {
+    fn from(range: TimeRange) -> Self {
+        Self {
+            start: range.start,
+            duration: range.duration,
+        }
+    }
+}
+
+impl TryFrom<TimeRangeRepr> for TimeRange {
+    type Error = InvalidTimeRange;
+
+    fn try_from(repr: TimeRangeRepr) -> Result<Self, Self::Error> {
+        Self::new(repr.start, repr.duration).ok_or(InvalidTimeRange)
+    }
+}
+
+/// A start and duration that do not form a valid [`TimeRange`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidTimeRange;
+
+impl fmt::Display for InvalidTimeRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("time range duration must be non-negative and its end representable")
+    }
+}
+
+impl core::error::Error for InvalidTimeRange {}
 
 impl TimeRange {
     /// Creates a range starting at `start` and lasting `duration`.
@@ -269,5 +316,20 @@ mod tests {
         let b =
             TimeRange::new(RationalTime::from_seconds(1), RationalTime::from_seconds(1)).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn serde_round_trips_and_rejects_a_negative_duration() {
+        let range = TimeRange::new(frames(12), frames(48)).unwrap();
+        let json = serde_json::to_string(&range).unwrap();
+        assert_eq!(serde_json::from_str::<TimeRange>(&json).unwrap(), range);
+
+        let negative = serde_json::to_string(&super::TimeRangeRepr {
+            start: frames(12),
+            duration: frames(-1),
+        })
+        .unwrap();
+        let err = serde_json::from_str::<TimeRange>(&negative).unwrap_err();
+        assert!(err.to_string().contains("non-negative"), "{err}");
     }
 }

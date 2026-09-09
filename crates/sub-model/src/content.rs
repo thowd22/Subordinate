@@ -26,6 +26,8 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
 
 use crate::codes;
@@ -37,8 +39,32 @@ use crate::codes;
 /// construction: it is non-empty, is not absolute, carries no drive letter, and
 /// has no `.` or `..` component, so resolving it can never escape the project
 /// folder.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// The serde form is the path string itself, validated on the way in by
+/// [`MediaPath::new`].
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(into = "String", try_from = "String")]
+#[schemars(
+    with = "String",
+    description = "A slash-separated project-relative media path."
+)]
 pub struct MediaPath(String);
+
+impl From<MediaPath> for String {
+    fn from(path: MediaPath) -> Self {
+        path.0
+    }
+}
+
+impl TryFrom<String> for MediaPath {
+    type Error = SubError;
+
+    fn try_from(text: String) -> SubResult<Self> {
+        Self::new(text)
+    }
+}
 
 impl MediaPath {
     /// Validates and normalises a relative path.
@@ -168,8 +194,31 @@ const CHUNK_BYTES: u64 = 1 << 20;
 ///
 /// This is a relink hint, not a security primitive: it does not prove two files
 /// are identical, only that they are very likely the same source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// The serde form is the 64-character lowercase hex string.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(into = "String", try_from = "String")]
+#[schemars(
+    with = "String",
+    description = "A BLAKE3 content hash as 64 lowercase hex digits."
+)]
 pub struct ContentHash([u8; 32]);
+
+impl From<ContentHash> for String {
+    fn from(hash: ContentHash) -> Self {
+        hash.to_string()
+    }
+}
+
+impl TryFrom<String> for ContentHash {
+    type Error = SubError;
+
+    fn try_from(text: String) -> SubResult<Self> {
+        Self::parse(&text)
+    }
+}
 
 impl ContentHash {
     /// Hashes the file at `path`.

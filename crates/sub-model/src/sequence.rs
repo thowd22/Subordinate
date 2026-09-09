@@ -1,5 +1,7 @@
 //! Sequences and the settings that define their canvas, timebase and colour.
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
 use sub_time::Rational;
 
@@ -11,10 +13,42 @@ use crate::track::Track;
 /// A pixel canvas size. Both dimensions are non-zero.
 ///
 /// OTIO has no counterpart: it stores no rendering resolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(into = "ResolutionRepr", try_from = "ResolutionRepr")]
+#[schemars(with = "ResolutionRepr")]
 pub struct Resolution {
     width: u32,
     height: u32,
+}
+
+/// The serde form of a [`Resolution`], validated on the way in by
+/// [`Resolution::new`] so a file can never carry a zero dimension.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ResolutionRepr {
+    /// Width in pixels; never zero.
+    width: u32,
+    /// Height in pixels; never zero.
+    height: u32,
+}
+
+impl From<Resolution> for ResolutionRepr {
+    fn from(resolution: Resolution) -> Self {
+        Self {
+            width: resolution.width,
+            height: resolution.height,
+        }
+    }
+}
+
+impl TryFrom<ResolutionRepr> for Resolution {
+    type Error = SubError;
+
+    fn try_from(repr: ResolutionRepr) -> SubResult<Self> {
+        Self::new(repr.width, repr.height)
+    }
 }
 
 impl Resolution {
@@ -69,7 +103,21 @@ impl Default for Resolution {
 ///
 /// Per decision-3 the MVP stores these tags and renders assuming Rec.709; the
 /// tags exist so adding colour management later is not a lossy migration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum ColorSpace {
     /// Rec. ITU-R BT.709, the MVP working space.
     #[default]
@@ -83,7 +131,21 @@ pub enum ColorSpace {
 }
 
 /// The transfer function (gamma curve) pixel values are encoded with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum TransferFunction {
     /// BT.709 / BT.1886 display gamma.
     #[default]
@@ -99,7 +161,21 @@ pub enum TransferFunction {
 }
 
 /// The chromaticities of the red, green and blue primaries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum ColorPrimaries {
     /// BT.709 primaries.
     #[default]
@@ -117,7 +193,21 @@ pub enum ColorPrimaries {
 /// The colour tags carried by a sequence or a media item (decision-3).
 ///
 /// OTIO has no counterpart; this would live in `metadata` on an OTIO export.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
 pub struct ColorTags {
     /// The encoding colour space.
     pub space: ColorSpace,
@@ -139,7 +229,9 @@ impl ColorTags {
 /// The canvas, timebase, audio rate and colour tags of a [`Sequence`].
 ///
 /// OTIO stores only the rate, implicitly, on each item's `RationalTime`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(into = "SequenceSettingsRepr", try_from = "SequenceSettingsRepr")]
+#[schemars(with = "SequenceSettingsRepr")]
 pub struct SequenceSettings {
     /// Render canvas size in pixels.
     pub resolution: Resolution,
@@ -182,6 +274,45 @@ impl SequenceSettings {
     }
 }
 
+/// The serde form of [`SequenceSettings`], validated on the way in by
+/// [`SequenceSettings::new`] so a file can never carry a zero sample rate.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SequenceSettingsRepr {
+    /// Render canvas size in pixels.
+    resolution: Resolution,
+    /// Editing timebase.
+    frame_rate: Rational,
+    /// Audio sample rate in hertz; never zero.
+    sample_rate: u32,
+    /// Colour tags.
+    color: ColorTags,
+}
+
+impl From<SequenceSettings> for SequenceSettingsRepr {
+    fn from(settings: SequenceSettings) -> Self {
+        Self {
+            resolution: settings.resolution,
+            frame_rate: settings.frame_rate,
+            sample_rate: settings.sample_rate,
+            color: settings.color,
+        }
+    }
+}
+
+impl TryFrom<SequenceSettingsRepr> for SequenceSettings {
+    type Error = SubError;
+
+    fn try_from(repr: SequenceSettingsRepr) -> SubResult<Self> {
+        Self::new(
+            repr.resolution,
+            repr.frame_rate,
+            repr.sample_rate,
+            repr.color,
+        )
+    }
+}
+
 impl Default for SequenceSettings {
     /// 1920x1080 at 24 fps, 48 kHz audio, Rec.709.
     fn default() -> Self {
@@ -200,7 +331,8 @@ impl Default for SequenceSettings {
 /// `Track`s. Subordinate flattens that stack into [`Sequence::tracks`] because
 /// nested stacks are out of MVP scope. Video tracks composite top-down, so
 /// later entries in `tracks` render over earlier ones.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Sequence {
     /// Stable identity, preserved across save, load and undo.
     pub id: SequenceId,
