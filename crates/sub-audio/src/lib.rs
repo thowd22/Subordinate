@@ -7,8 +7,10 @@
 //! GStreamer pipeline (decision-4): see [`decode`].
 
 pub mod decode;
+pub mod resample;
 
 pub use decode::{AudioInfo, Block, FileDecoder, Pcm, decode_file, probe_audio};
+pub use resample::{PcmReader, PcmWriter, ResampleStage, Resampler, pcm_ring};
 
 /// Stable [`sub_core::ErrorCode`] constants this crate returns.
 ///
@@ -30,6 +32,8 @@ pub mod codes {
     /// The track declares a shape this decoder cannot represent: no sample
     /// rate, no channels, or more channels than a mixer bus can hold.
     pub const UNSUPPORTED_LAYOUT: ErrorCode = ErrorCode::from_static("audio.unsupported_layout");
+    /// A sample rate conversion could not be built or could not run.
+    pub const RESAMPLE_FAILED: ErrorCode = ErrorCode::from_static("audio.resample_failed");
 }
 
 #[cfg(test)]
@@ -43,6 +47,7 @@ mod tests {
             super::codes::SEEK_FAILED,
             super::codes::NO_AUDIO_TRACK,
             super::codes::UNSUPPORTED_LAYOUT,
+            super::codes::RESAMPLE_FAILED,
         ];
         for code in &codes {
             assert_eq!(code.domain(), "audio", "wrong domain for {code}");

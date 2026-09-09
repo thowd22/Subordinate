@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ringbuf = "0.5"
+rubato = { version = "5", default-features = false }
 sub-core = { path = "../sub-core" }
 sub-time = { path = "../sub-time" }
 symphonia = { version = "0.6", features = ["aac", "isomp4", "mp3"] }
