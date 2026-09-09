@@ -7,9 +7,16 @@
 //! crate sees.
 
 use eframe::egui;
-use sub_render::{RenderContext, RenderError, describe_adapter, select_adapter};
+use eframe::egui_wgpu::RenderState;
+use eframe::wgpu;
+use sub_model::sequence::{Resolution, Sequence, SequenceSettings};
+use sub_render::{
+    Compositor, RenderContext, RenderError, ResolvedClip, SourceFrame, describe_adapter,
+    select_adapter,
+};
 
 use crate::diagnostics::DiagnosticsPanel;
+use crate::viewer::{ViewerFrame, ViewerPanel};
 
 /// Options for launching the application.
 #[derive(Debug, Clone, Default)]
@@ -39,10 +46,26 @@ impl AppOptions {
 /// The Subordinate editor window.
 pub struct SubordinateApp {
     render: RenderContext,
+    /// eframe's own render state, kept for its egui renderer: registering the
+    /// compositor output as an egui texture goes through it.
+    render_state: RenderState,
     options: AppOptions,
     frames_painted: u32,
     closing: bool,
     diagnostics: DiagnosticsPanel,
+    /// The sequence being previewed. Loading a project replaces it; until
+    /// then it is an empty sequence, which composites to black.
+    sequence: Sequence,
+    /// The compositor drawing that sequence at the playhead.
+    compositor: Compositor,
+    /// The viewer panel: picture, scrub bar and timecode.
+    viewer: ViewerPanel,
+    /// The compositor output as egui knows it, and the canvas it was
+    /// registered at, so a resolution change re-registers rather than
+    /// stretching a texture that no longer exists.
+    preview: Option<(egui::TextureId, Resolution)>,
+    /// Whether the playhead has moved since the last composite.
+    needs_composite: bool,
 }
 
 impl SubordinateApp {
@@ -70,12 +93,21 @@ impl SubordinateApp {
         if render.is_software() {
             log::warn!("no GPU adapter available; falling back to software rendering");
         }
+        let sequence = Sequence::new("Sequence", SequenceSettings::default());
+        let compositor = Compositor::for_sequence(render.clone(), &sequence);
+        let viewer = ViewerPanel::for_sequence(&sequence);
         Ok(Self {
             render,
+            render_state: state.clone(),
             options,
             frames_painted: 0,
             closing: false,
             diagnostics: DiagnosticsPanel::new(),
+            sequence,
+            compositor,
+            viewer,
+            preview: None,
+            needs_composite: true,
         })
     }
 
@@ -87,6 +119,50 @@ impl SubordinateApp {
     /// The hardware diagnostics panel.
     pub fn diagnostics(&mut self) -> &mut DiagnosticsPanel {
         &mut self.diagnostics
+    }
+
+    /// The viewer panel, which owns the playhead.
+    pub fn viewer(&mut self) -> &mut ViewerPanel {
+        &mut self.viewer
+    }
+
+    /// Composites the sequence at the playhead, if the playhead has moved,
+    /// and returns the picture the viewer should sample.
+    ///
+    /// The frame source is empty until the playback scheduler (TASK-23)
+    /// supplies decoded pictures, so today every clip resolves to "no picture
+    /// ready" and the composite is the bare black canvas. The output texture
+    /// is registered with egui once and re-registered only when the canvas
+    /// size changes, because [`Compositor::render`] otherwise keeps drawing
+    /// into the same texture.
+    fn composite(&mut self) -> ViewerFrame {
+        if self.needs_composite {
+            let mut empty = |_: &ResolvedClip<'_>| -> Option<SourceFrame> { None };
+            self.compositor
+                .render(&self.sequence, self.viewer.state.playhead(), &mut empty);
+            self.needs_composite = false;
+        }
+        let resolution = self.compositor.resolution();
+        if self.preview.is_none_or(|(_, known)| known != resolution) {
+            let mut renderer = self.render_state.renderer.write();
+            if let Some((stale, _)) = self.preview.take() {
+                renderer.free_texture(&stale);
+            }
+            let view = self
+                .compositor
+                .output()
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let texture = renderer.register_native_texture(
+                self.render.device(),
+                &view,
+                wgpu::FilterMode::Linear,
+            );
+            self.preview = Some((texture, resolution));
+        }
+        let (texture, resolution) = self
+            .preview
+            .unwrap_or((egui::TextureId::default(), resolution));
+        ViewerFrame::new(texture, resolution.width(), resolution.height())
     }
 
     /// How many frames have been painted since startup.
@@ -104,19 +180,26 @@ impl SubordinateApp {
 
 impl eframe::App for SubordinateApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Panels land here in TASK-22 and later; for now the window is empty
-        // apart from the adapter line, which is what makes a startup problem
+        // The timeline, bin and inspector panels land here in later tasks;
+        // the adapter line stays because it is what makes a startup problem
         // obvious at a glance.
-        ui.heading("Subordinate");
-        ui.label(format!(
-            "{} - {}",
-            self.render.backend_label(),
-            self.render.describe()
-        ));
-        if ui.button("Hardware diagnostics").clicked() {
-            self.diagnostics.open = !self.diagnostics.open;
-        }
+        ui.horizontal(|ui| {
+            ui.heading("Subordinate");
+            ui.label(format!(
+                "{} - {}",
+                self.render.backend_label(),
+                self.render.describe()
+            ));
+            if ui.button("Hardware diagnostics").clicked() {
+                self.diagnostics.open = !self.diagnostics.open;
+            }
+        });
         self.diagnostics.show(ui.ctx());
+
+        let preview = self.composite();
+        if self.viewer.ui(ui, Some(preview)) {
+            self.needs_composite = true;
+        }
 
         self.frames_painted = self.frames_painted.saturating_add(1);
 
