@@ -40,6 +40,7 @@ pub mod ids;
 pub mod json;
 pub mod marker;
 pub mod media;
+pub mod migrate;
 pub mod params;
 pub mod project;
 pub mod sequence;
@@ -50,6 +51,7 @@ pub use ids::{BinId, ClipId, MarkerId, MediaId, ProjectId, SequenceId, TrackId};
 pub use json::{ProjectFile, SCHEMA_VERSION};
 pub use marker::Marker;
 pub use media::{AudioStream, Bin, MediaItem, ProxyState, StreamInfo, VideoStream};
+pub use migrate::{AppliedMigration, LoadReport, Migration, MigrationRegistry};
 pub use params::{Fixed6, GainDb, Opacity, Point2, Scale2, Transform};
 pub use project::Project;
 pub use sequence::{
@@ -86,6 +88,8 @@ pub mod codes {
     /// A project file declares a schema version this build cannot read.
     pub const UNSUPPORTED_SCHEMA_VERSION: ErrorCode =
         ErrorCode::from_static("model.unsupported_schema_version");
+    /// A migration from an older schema version could not be applied.
+    pub const MIGRATION_FAILED: ErrorCode = ErrorCode::from_static("model.migration_failed");
 }
 
 #[cfg(test)]
@@ -104,6 +108,7 @@ mod tests {
             codes::INVALID_CLIP,
             codes::INVALID_PROJECT_FILE,
             codes::UNSUPPORTED_SCHEMA_VERSION,
+            codes::MIGRATION_FAILED,
         ] {
             assert_eq!(code.domain(), "model");
             assert!(sub_core::ErrorCode::parse(code.as_str()).is_ok());

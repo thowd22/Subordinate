@@ -18,8 +18,10 @@
 //!
 //! [`SCHEMA_VERSION`] is the version this build writes. A file from a newer
 //! build is refused with `model.unsupported_schema_version` rather than being
-//! read as if its fields still meant the same thing; older versions are the
-//! migration registry's job (TASK-3.5).
+//! read as if its fields still meant the same thing. An older file is brought
+//! up to date first by the [`crate::migrate`] registry, so loading always goes
+//! JSON text -> `serde_json::Value` -> migrations -> model, never text ->
+//! model directly.
 //!
 //! ```
 //! use sub_model::{Project, json};
@@ -36,12 +38,14 @@ use serde_json::{Map, Value};
 use sub_core::{SubError, SubResult};
 
 use crate::codes;
+use crate::migrate::{LoadReport, MigrationRegistry};
 use crate::project::Project;
 
 /// The project schema version this build writes.
 ///
 /// Bump it whenever the on-disk shape changes in a way an older build would
-/// misread, and add the matching migration (TASK-3.5).
+/// misread, and register the matching migration in
+/// [`MigrationRegistry::current`].
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// A project file: the model plus the schema version it was written at.
@@ -93,16 +97,46 @@ pub fn to_json(project: &Project) -> SubResult<String> {
     Ok(text)
 }
 
-/// Parses the text of a `.sub` file.
+/// Parses the text of a `.sub` file, migrating an older schema version on the
+/// way in.
 ///
 /// # Errors
 ///
 /// - `model.unsupported_schema_version` when the file was written by a newer
 ///   build, or by an older one this build has no migration for.
+/// - `model.migration_failed` when a migration could not be applied.
 /// - `model.invalid_project_file` when the text is not JSON, is not a project
 ///   file, or carries a value the model rejects (a zero frame rate, a negative
 ///   duration, an absolute media path).
 pub fn from_json(text: &str) -> SubResult<Project> {
+    from_json_with_report(text).map(|(project, _)| project)
+}
+
+/// Parses the text of a `.sub` file and reports what the load did: the version
+/// the file declared and the migrations that ran.
+///
+/// # Errors
+///
+/// The same as [`from_json`].
+pub fn from_json_with_report(text: &str) -> SubResult<(Project, LoadReport)> {
+    from_json_with_registry(text, &MigrationRegistry::current())
+}
+
+/// Parses the text of a `.sub` file against a specific migration chain.
+///
+/// Production loads use [`from_json`]; this is for tests and for tools that
+/// need to migrate to a version other than [`SCHEMA_VERSION`].
+///
+/// # Errors
+///
+/// The same as [`from_json`]. Note that a file is only deserialised into the
+/// model once the registry has brought it to its target version, so a registry
+/// targeting a version this build does not model will fail with
+/// `model.invalid_project_file`.
+pub fn from_json_with_registry(
+    text: &str,
+    registry: &MigrationRegistry,
+) -> SubResult<(Project, LoadReport)> {
     let value: Value = serde_json::from_str(text).map_err(|err| {
         SubError::wrap(
             codes::INVALID_PROJECT_FILE,
@@ -113,7 +147,7 @@ pub fn from_json(text: &str) -> SubResult<Project> {
         .with_detail("column", err.column())
     })?;
 
-    check_schema_version(schema_version_of(&value)?)?;
+    let (value, report) = registry.migrate(value)?;
 
     let file: ProjectFile = serde_json::from_value(value).map_err(|err| {
         SubError::wrap(
@@ -121,38 +155,9 @@ pub fn from_json(text: &str) -> SubResult<Project> {
             "project file does not match the project schema",
             &err,
         )
+        .with_detail("schema_version", report.final_version)
     })?;
-    Ok(file.project)
-}
-
-/// The `schema_version` a parsed project file declares.
-fn schema_version_of(value: &Value) -> SubResult<u32> {
-    value
-        .get("schema_version")
-        .and_then(Value::as_u64)
-        .and_then(|version| u32::try_from(version).ok())
-        .ok_or_else(|| {
-            SubError::new(
-                codes::INVALID_PROJECT_FILE,
-                "project file has no top-level schema_version integer",
-            )
-        })
-}
-
-/// Rejects a version this build cannot read.
-fn check_schema_version(version: u32) -> SubResult<()> {
-    if version == SCHEMA_VERSION {
-        return Ok(());
-    }
-    let message = if version > SCHEMA_VERSION {
-        "project file was written by a newer version of Subordinate"
-    } else {
-        // TASK-3.5 replaces this arm with the migration registry.
-        "project file uses an older schema version this build cannot migrate"
-    };
-    Err(SubError::new(codes::UNSUPPORTED_SCHEMA_VERSION, message)
-        .with_detail("schema_version", version)
-        .with_detail("supported_schema_version", SCHEMA_VERSION))
+    Ok((file.project, report))
 }
 
 /// Rebuilds `value` with every object's keys in sorted order.
@@ -381,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn an_older_schema_version_is_refused_until_migrations_exist() {
+    fn an_older_schema_version_without_a_migration_is_refused() {
         let text = to_json(&Project::new("Doc cut"))
             .unwrap()
             .replace("\"schema_version\": 1", "\"schema_version\": 0");
