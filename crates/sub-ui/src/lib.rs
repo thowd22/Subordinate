@@ -9,6 +9,7 @@
 pub mod app;
 pub mod diagnostics;
 pub mod history_panel;
+pub mod keymap;
 pub mod media_bin;
 pub mod media_import;
 pub mod sequence_tabs;
@@ -25,6 +26,7 @@ pub use diagnostics::DiagnosticsPanel;
 pub use history_panel::{
     HistoryAction, HistoryList, HistoryPanel, ORIGINAL_STATE_LABEL, edit_menu_ui,
 };
+pub use keymap::{LoadedKeymap, chord_spec, config_dir, keymap_path, parse_chord};
 pub use media_bin::{
     BinSelection, BinSort, BinViewMode, MediaBinAction, MediaBinPanel, SortColumn, bin_path,
     dropped_paths, duration_text, folder_name, frame_rate_text, pick_media_files, resolution_text,
@@ -72,4 +74,16 @@ pub mod codes {
 
     /// One keyboard chord is claimed by more than one action.
     pub const SHORTCUT_CONFLICT: ErrorCode = ErrorCode::from_static("ui.shortcut_conflict");
+
+    /// A keymap file is not valid TOML, or an entry has the wrong shape.
+    pub const KEYMAP_PARSE: ErrorCode = ErrorCode::from_static("ui.keymap_parse");
+
+    /// A keymap entry names an action this editor does not have.
+    pub const KEYMAP_UNKNOWN_ACTION: ErrorCode = ErrorCode::from_static("ui.keymap_unknown_action");
+
+    /// A keymap entry's value is not a keyboard chord.
+    pub const KEYMAP_INVALID_CHORD: ErrorCode = ErrorCode::from_static("ui.keymap_invalid_chord");
+
+    /// A keymap file exists but could not be read.
+    pub const KEYMAP_UNREADABLE: ErrorCode = ErrorCode::from_static("ui.keymap_unreadable");
 }

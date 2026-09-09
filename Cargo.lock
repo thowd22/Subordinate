@@ -3619,6 +3619,7 @@ dependencies = [
  "sub-render",
  "sub-test-support",
  "sub-time",
+ "toml",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
+use sub_core::SubError;
 use sub_model::sequence::{Resolution, Sequence, SequenceSettings};
 use sub_render::{
     Compositor, RenderContext, RenderError, ResolvedClip, SourceFrame, describe_adapter,
@@ -16,6 +17,7 @@ use sub_render::{
 };
 
 use crate::diagnostics::DiagnosticsPanel;
+use crate::keymap::LoadedKeymap;
 use crate::shortcuts::{Action, ShortcutMap, ShortcutsWindow};
 use crate::viewer::{ViewerAction, ViewerFrame, ViewerPanel};
 
@@ -67,8 +69,9 @@ pub struct SubordinateApp {
     preview: Option<(egui::TextureId, Resolution)>,
     /// Whether the playhead has moved since the last composite.
     needs_composite: bool,
-    /// The keyboard map every panel's shortcuts come from.
-    shortcuts: ShortcutMap,
+    /// The keyboard map every panel's shortcuts come from, and whatever the
+    /// user's `keymap.toml` got wrong.
+    keymap: LoadedKeymap,
     /// The window listing every binding.
     shortcuts_window: ShortcutsWindow,
 }
@@ -98,10 +101,12 @@ impl SubordinateApp {
         if render.is_software() {
             log::warn!("no GPU adapter available; falling back to software rendering");
         }
-        let shortcuts = ShortcutMap::default_map();
-        // Conflicts are a configuration problem, not a reason to refuse to
-        // start, so they are logged once here rather than returned.
-        shortcuts.log_conflicts();
+        // The user's keymap.toml overrides the shipped map. A rejected entry,
+        // like a double-bound chord, is a configuration problem rather than a
+        // reason to refuse to start, so both are logged once here.
+        let keymap = LoadedKeymap::load();
+        keymap.log_problems();
+        keymap.map.log_conflicts();
         let sequence = Sequence::new("Sequence", SequenceSettings::default());
         let compositor = Compositor::for_sequence(render.clone(), &sequence);
         let viewer = ViewerPanel::for_sequence(&sequence);
@@ -117,7 +122,7 @@ impl SubordinateApp {
             viewer,
             preview: None,
             needs_composite: true,
-            shortcuts,
+            keymap,
             shortcuts_window: ShortcutsWindow::new(),
         })
     }
@@ -137,9 +142,14 @@ impl SubordinateApp {
         &mut self.viewer
     }
 
-    /// The keyboard map in force.
+    /// The keyboard map in force, after any `keymap.toml` overrides.
     pub fn shortcuts(&self) -> &ShortcutMap {
-        &self.shortcuts
+        &self.keymap.map
+    }
+
+    /// Everything the user's `keymap.toml` got wrong, as loaded at startup.
+    pub fn keymap_problems(&self) -> &[SubError] {
+        &self.keymap.problems
     }
 
     /// Runs the keyboard map for this frame and applies what it fired.
@@ -149,7 +159,7 @@ impl SubordinateApp {
     /// logged and dropped; they are wired up by the tasks that add them.
     fn apply_shortcuts(&mut self, ctx: &egui::Context) -> bool {
         let mut moved = false;
-        for action in self.shortcuts.poll(ctx) {
+        for action in self.keymap.map.poll(ctx) {
             if let Some(viewer_action) = ViewerAction::for_action(action) {
                 moved |= self.viewer.state.apply(viewer_action);
             } else if action == Action::ShowShortcutHelp {
@@ -233,7 +243,8 @@ impl eframe::App for SubordinateApp {
             }
         });
         self.diagnostics.show(ui.ctx());
-        self.shortcuts_window.show(ui.ctx(), &self.shortcuts);
+        self.shortcuts_window
+            .show_with_problems(ui.ctx(), &self.keymap.map, &self.keymap.problems);
 
         // The map runs before any panel reads the keyboard, so a bound chord
         // is handled once, here, and never again by a panel further down.

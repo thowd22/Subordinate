@@ -357,10 +357,19 @@ impl ShortcutMap {
 
     /// Points `action` at `chord`, dropping every chord it had before.
     ///
-    /// This is what a user's remapping file (phase 5) will call.
+    /// This is what a user's `keymap.toml` calls; see [`crate::keymap`].
     pub fn rebind(&mut self, action: Action, chord: KeyboardShortcut) {
         self.bindings.retain(|binding| binding.action != action);
         self.bindings.push(Binding { action, chord });
+    }
+
+    /// Removes every chord bound to `action`, leaving it unreachable from the
+    /// keyboard.
+    ///
+    /// A keymap file writes `none` for an action it wants out of the way.
+    /// The action still exists, so the help window can show it as unbound.
+    pub fn unbind(&mut self, action: Action) {
+        self.bindings.retain(|binding| binding.action != action);
     }
 
     /// The action `key` with exactly `modifiers` asks for, if any.
@@ -567,19 +576,45 @@ impl ShortcutsWindow {
         if !self.open {
             return;
         }
+        self.show_with_problems(ctx, map, &[]);
+    }
+
+    /// Draws the window with the keymap file's problems listed under the
+    /// bindings.
+    ///
+    /// The window is the one place a user looks to find out what their keys
+    /// do, so it is also where a rejected `keymap.toml` entry is reported.
+    pub fn show_with_problems(
+        &mut self,
+        ctx: &egui::Context,
+        map: &ShortcutMap,
+        problems: &[SubError],
+    ) {
+        if !self.open {
+            return;
+        }
         let mut open = self.open;
         egui::Window::new("Keyboard shortcuts")
             .open(&mut open)
             .resizable(true)
             .default_width(360.0)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| Self::ui(ui, map));
+                egui::ScrollArea::vertical()
+                    .show(ui, |ui| Self::ui_with_problems(ui, map, problems));
             });
         self.open = open;
     }
 
     /// Draws the list into an existing layout.
     pub fn ui(ui: &mut egui::Ui, map: &ShortcutMap) {
+        Self::ui_with_problems(ui, map, &[]);
+    }
+
+    /// Draws the list, then any keymap problems, into an existing layout.
+    ///
+    /// Every row comes from `map`, so the window shows the bindings actually
+    /// in force rather than the shipped defaults.
+    pub fn ui_with_problems(ui: &mut egui::Ui, map: &ShortcutMap, problems: &[SubError]) {
         let mut current: Option<Category> = None;
         for row in help_rows(map) {
             if current != Some(row.category) {
@@ -593,6 +628,16 @@ impl ShortcutsWindow {
                 ui.monospace(&row.chord);
                 ui.label(row.label);
             });
+        }
+        if problems.is_empty() {
+            return;
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.strong("Keymap problems");
+        ui.label("These keymap.toml entries were ignored; the rest of the map is in force.");
+        for problem in problems {
+            ui.label(format!("[{}] {}", problem.code, problem.message));
         }
     }
 }
