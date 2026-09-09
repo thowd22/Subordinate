@@ -473,6 +473,16 @@ impl TimelinePanel {
         }
     }
 
+    /// Puts the lane scroll back to a remembered value, without clamping.
+    ///
+    /// Restoring a sequence tab happens before egui has told the panel how
+    /// tall the lane viewport is this frame, so there is nothing to clamp
+    /// against; the next gesture through [`TimelinePanel::set_lane_scroll`]
+    /// pulls it back into range. Negative values are pinned to the top.
+    pub const fn restore_lane_scroll(&mut self, scroll_px: f32) {
+        self.lane_scroll_px = if scroll_px > 0.0 { scroll_px } else { 0.0 };
+    }
+
     /// Scrolls the lanes to `scroll_px`, clamped so at least one lane stays
     /// on screen.
     pub fn set_lane_scroll(&mut self, scroll_px: f32, viewport_height: f32, tracks: usize) {

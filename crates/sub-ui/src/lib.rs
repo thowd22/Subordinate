@@ -8,12 +8,16 @@
 
 pub mod app;
 pub mod diagnostics;
+pub mod sequence_tabs;
 pub mod timeline;
 pub mod timeline_panel;
 pub mod viewer;
 
 pub use app::{AppOptions, SubordinateApp, run};
 pub use diagnostics::DiagnosticsPanel;
+pub use sequence_tabs::{
+    NewSequenceDialog, SequenceTabAction, SequenceTabs, SequenceViewState, default_sequence_name,
+};
 pub use timeline::{ClipPlacement, TimelineView, TrackLayout, ZoomLevel};
 pub use timeline_panel::{
     ClipMediaKind, PanelLayout, TimelineMetrics, TimelinePanel, TrimmedEdges, WheelInput,
@@ -26,4 +30,10 @@ pub mod codes {
 
     /// A zoom level falls outside the timeline's zoom ladder.
     pub const INVALID_ZOOM: ErrorCode = ErrorCode::from_static("ui.invalid_zoom");
+
+    /// A sequence id does not name a sequence in this project.
+    pub const UNKNOWN_SEQUENCE: ErrorCode = ErrorCode::from_static("ui.unknown_sequence");
+
+    /// The only sequence left cannot be deleted.
+    pub const LAST_SEQUENCE: ErrorCode = ErrorCode::from_static("ui.last_sequence");
 }
