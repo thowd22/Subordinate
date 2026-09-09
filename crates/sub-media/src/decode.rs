@@ -321,7 +321,7 @@ struct AudioBranch {
 ///
 /// Returns `media.file_unreadable` when the path cannot be read, is not a
 /// file, or cannot be expressed as a URI.
-fn readable_file_uri(path: &Path) -> SubResult<gst::glib::GString> {
+pub(crate) fn readable_file_uri(path: &Path) -> SubResult<gst::glib::GString> {
     let metadata = std::fs::metadata(path)
         .sub_context_with(codes::FILE_UNREADABLE, || "media file cannot be read")
         .map_err(|e| e.with_detail("path", path.display().to_string()))?;
@@ -1346,7 +1346,7 @@ fn is_hardware_decoder(name: &str) -> bool {
 /// raising the rank of the hardware families is what actually forces them
 /// first. Software decoders keep their ranks and are still used when no
 /// hardware decoder claims the stream.
-fn prefer_hardware_decoders() {
+pub(crate) fn prefer_hardware_decoders() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
         let promoted = promote_decoders(HARDWARE_DECODER_PREFIXES);
