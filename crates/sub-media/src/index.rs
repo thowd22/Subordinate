@@ -603,10 +603,17 @@ fn collect_entries(path: &Path, cancel: &CancelToken) -> SubResult<Vec<IndexEntr
 }
 
 /// Whether `pad` carries video, judged from its caps once data flows.
+///
+/// A frame sequence is not always tagged `video/`: an MJPEG track — which is
+/// what the proxies of §5.2 are written as — comes off a parser as
+/// `image/jpeg`, one buffer per picture, and must be indexed like any other
+/// video stream.
 fn pad_carries_video(pad: &gst::Pad) -> bool {
     let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
-    caps.structure(0)
-        .is_some_and(|structure| structure.name().starts_with("video/"))
+    caps.structure(0).is_some_and(|structure| {
+        let name = structure.name();
+        name.starts_with("video/") || name.starts_with("image/")
+    })
 }
 
 /// Plays `pipeline` until end of stream, an error, or cancellation.

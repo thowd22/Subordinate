@@ -15,6 +15,7 @@ pub mod diagnostics;
 pub mod frame_cache;
 pub mod index;
 pub mod probe;
+pub mod proxy;
 pub mod thumbnail;
 pub mod waveform;
 
@@ -35,6 +36,11 @@ pub use index::{
 };
 pub use probe::{
     FrameTiming, MediaInfo, ProbeOptions, Rotation, VideoStreamInfo, probe, probe_with,
+};
+pub use proxy::{
+    DEFAULT_PROXY_MIN_HEIGHT, DEFAULT_PROXY_MIN_WIDTH, MAX_PROXY_PTS_DRIFT_NS, PROXY_CODECS,
+    PROXY_JOB_KIND, PROXY_MANIFEST_VERSION, Proxy, ProxyCodec, ProxyJob, ProxyOptions, ProxyPolicy,
+    ProxyScale, is_long_gop, proxy_size, spawn_proxy_job,
 };
 pub use thumbnail::{
     MAX_THUMBNAIL_WIDTH, MAX_THUMBNAILS, THUMBNAIL_JOB_KIND, THUMBNAIL_MANIFEST_VERSION,
@@ -86,6 +92,10 @@ pub mod codes {
     /// decoded, or its peaks could not be written to or read back from the
     /// sidecar directory.
     pub const WAVEFORM_FAILED: ErrorCode = ErrorCode::from_static("media.waveform_failed");
+    /// A proxy could not be generated: the source could not be probed or
+    /// transcoded, this installation could not write the file, or the
+    /// generated proxy's frames did not line up with the source's.
+    pub const PROXY_FAILED: ErrorCode = ErrorCode::from_static("media.proxy_failed");
     /// A PTS index could not be built, cached or read back: the parse pipeline
     /// failed, the file exposes no timed pictures, or the sidecar cache could
     /// not be written or understood.
@@ -132,6 +142,7 @@ mod tests {
             super::codes::INDEX_FAILED,
             super::codes::THUMBNAIL_FAILED,
             super::codes::WAVEFORM_FAILED,
+            super::codes::PROXY_FAILED,
         ];
         for code in &codes {
             assert_eq!(code.domain(), "media", "wrong domain for {code}");
