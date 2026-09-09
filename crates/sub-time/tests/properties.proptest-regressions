@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e0eaba9266767795707fcbdba18d3e6df8ffba5aadc0a071258a401ddc2d5a13 # shrinks to a = RationalTime { value: 0, rate: Rational { numerator: 88217, denominator: 1 } }, b = RationalTime { value: 0, rate: Rational { numerator: 1, denominator: 1 } }, rate = Rational { numerator: 60000, denominator: 1001 }
+cc 8b29fd8da8b37275b383977e00228d50a5c8e3f523f15f61027896cc8d5a3589 # shrinks to a = TimeRange { start: RationalTime { value: 0, rate: Rational { numerator: 12552, denominator: 1 } }, duration: RationalTime { value: 14846, rate: Rational { numerator: 1, denominator: 1 } } }, b = TimeRange { start: RationalTime { value: -1240384, rate: Rational { numerator: 2564, denominator: 1 } }, duration: RationalTime { value: 23220918, rate: Rational { numerator: 48000, denominator: 1 } } }
