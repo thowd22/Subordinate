@@ -152,6 +152,74 @@ impl ThumbnailFrame {
     pub fn path(&self, cache_dir: &Path) -> PathBuf {
         cache_dir.join(&self.file)
     }
+
+    /// Reads this picture back and decodes it to packed RGBA.
+    ///
+    /// The size returned is the size the picture was written at, which is the
+    /// size this frame records; a caller that wants it smaller scales it
+    /// itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns `media.thumbnail_failed` when the file is missing, unreadable
+    /// or not a JPEG this decoder understands — every one of which means the
+    /// strip should be generated again rather than drawn.
+    pub fn load_rgba(&self, cache_dir: &Path) -> SubResult<ThumbnailImage> {
+        let path = self.path(cache_dir);
+        let bytes = std::fs::read(&path).map_err(|err| {
+            SubError::wrap(codes::THUMBNAIL_FAILED, "thumbnail cannot be read", &err)
+                .with_detail("path", path.display().to_string())
+        })?;
+        ThumbnailImage::decode(&bytes).map_err(|message| {
+            SubError::new(codes::THUMBNAIL_FAILED, message)
+                .with_detail("path", path.display().to_string())
+        })
+    }
+}
+
+/// One thumbnail picture decoded back into memory, packed RGBA.
+///
+/// The pictures a strip writes are JPEGs, which is what makes a strip cheap to
+/// keep on disk; a caller that wants to *show* one — the timeline, the media
+/// bin — needs pixels. RGBA rather than RGB because that is what a texture
+/// upload takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThumbnailImage {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// `width * height * 4` bytes of non-premultiplied RGBA, top row first.
+    pub rgba: Vec<u8>,
+}
+
+impl ThumbnailImage {
+    /// Decodes one thumbnail JPEG, or says why it could not be decoded.
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let mut decoder =
+            zune_jpeg::JpegDecoder::new(zune_jpeg::zune_core::bytestream::ZCursor::new(bytes));
+        let rgb = decoder.decode().map_err(|err| err.to_string())?;
+        let info = decoder
+            .info()
+            .ok_or_else(|| "thumbnail carries no JPEG header".to_owned())?;
+        if decoder.output_colorspace() != Some(zune_jpeg::zune_core::colorspace::ColorSpace::RGB) {
+            return Err("thumbnail did not decode to RGB".to_owned());
+        }
+        let (width, height) = (u32::from(info.width), u32::from(info.height));
+        let pixels = width as usize * height as usize;
+        if rgb.len() < pixels * 3 {
+            return Err("thumbnail decoded to fewer pixels than it declares".to_owned());
+        }
+        let mut rgba = vec![0xff_u8; pixels * 4];
+        for (target, source) in rgba.chunks_exact_mut(4).zip(rgb.chunks_exact(3)) {
+            target[..3].copy_from_slice(source);
+        }
+        Ok(Self {
+            width,
+            height,
+            rgba,
+        })
+    }
 }
 
 /// The on-disk manifest of a strip, and what [`ThumbnailStrip`] round-trips.
@@ -195,6 +263,63 @@ impl ThumbnailStrip {
     #[must_use]
     pub fn frames(&self) -> &[ThumbnailFrame] {
         &self.frames
+    }
+
+    /// Assembles a strip from pictures that are already on disk.
+    ///
+    /// This is the seam a caller holding the parts of a strip — a restored
+    /// session, a test fixture — rebuilds one through, without decoding
+    /// anything. It checks only that the frames match the options; whether
+    /// the files are there is [`ThumbnailStrip::load`]'s question.
+    ///
+    /// # Errors
+    ///
+    /// Returns `core.invalid_argument` for options no strip could be made
+    /// from, or when `frames` is not exactly `options.count` pictures indexed
+    /// `0..count` in order.
+    pub fn from_frames(
+        cache_dir: &Path,
+        source_hash: ContentHash,
+        options: ThumbnailOptions,
+        frames: Vec<ThumbnailFrame>,
+    ) -> SubResult<Self> {
+        options.validate()?;
+        let indexed_in_order = frames
+            .iter()
+            .enumerate()
+            .all(|(position, frame)| frame.index == position);
+        if frames.len() != options.count || !indexed_in_order {
+            return Err(SubError::new(
+                sub_core::codes::INVALID_ARGUMENT,
+                "a strip holds exactly one picture per option count, indexed in order",
+            )
+            .with_detail("count", options.count)
+            .with_detail("frames", frames.len()));
+        }
+        Ok(Self {
+            cache_dir: cache_dir.to_path_buf(),
+            source_hash,
+            options,
+            frames,
+        })
+    }
+
+    /// Decodes picture `index` of the strip to packed RGBA.
+    ///
+    /// # Errors
+    ///
+    /// Returns `core.invalid_argument` when the strip holds no such picture,
+    /// and `media.thumbnail_failed` when the file cannot be read or decoded.
+    pub fn load_image(&self, index: usize) -> SubResult<ThumbnailImage> {
+        let frame = self.frames.get(index).ok_or_else(|| {
+            SubError::new(
+                sub_core::codes::INVALID_ARGUMENT,
+                "strip holds no picture at that index",
+            )
+            .with_detail("index", index)
+            .with_detail("frames", self.frames.len())
+        })?;
+        frame.load_rgba(&self.cache_dir)
     }
 
     /// The picture closest to `time`, for a timeline strip drawing a clip.
@@ -993,5 +1118,113 @@ mod tests {
         assert!(is_written(&path));
         assert!(!is_written(&dir.join("missing.jpg")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_written_thumbnail_decodes_back_to_the_pixels_it_was_written_from() {
+        let dir = std::env::temp_dir().join(format!("sub-thumbs-rgba-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (width, height) = (16_u32, 8_u32);
+        let hash = ContentHash::from_bytes([4_u8; 32]);
+        let options = ThumbnailOptions {
+            count: 1,
+            ..ThumbnailOptions::default()
+        };
+        // A flat colour survives JPEG's chroma subsampling exactly enough to
+        // assert on; a ramp would not.
+        let rgb: Vec<u8> = (0..width * height)
+            .flat_map(|_| [40_u8, 160, 220])
+            .collect();
+        let file = ThumbnailStrip::frame_file_name(hash, options, 0);
+        write_jpeg(&dir.join(&file), &rgb, width, height, 95).expect("a written jpeg");
+
+        let strip = ThumbnailStrip::from_frames(
+            &dir,
+            hash,
+            options,
+            vec![ThumbnailFrame {
+                index: 0,
+                pts_ns: 0,
+                file,
+                width,
+                height,
+            }],
+        )
+        .expect("a strip over one written picture");
+        let image = strip.load_image(0).expect("a decoded picture");
+        assert_eq!((image.width, image.height), (width, height));
+        assert_eq!(image.rgba.len(), (width * height * 4) as usize);
+        let near = |value: u8, wanted: i32| (i32::from(value) - wanted).abs() < 12;
+        for pixel in image.rgba.chunks_exact(4) {
+            assert!(near(pixel[0], 40), "red near 40: {}", pixel[0]);
+            assert!(near(pixel[1], 160), "green near 160: {}", pixel[1]);
+            assert!(near(pixel[2], 220), "blue near 220: {}", pixel[2]);
+            assert_eq!(pixel[3], 0xff, "opaque");
+        }
+
+        assert_eq!(
+            strip.load_image(1).unwrap_err().code,
+            sub_core::codes::INVALID_ARGUMENT
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_or_corrupt_picture_fails_rather_than_draws() {
+        let dir = std::env::temp_dir().join(format!("sub-thumbs-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the directory");
+        let frame = ThumbnailFrame {
+            index: 0,
+            pts_ns: 0,
+            file: "missing.jpg".to_owned(),
+            width: 4,
+            height: 4,
+        };
+        assert_eq!(
+            frame.load_rgba(&dir).unwrap_err().code,
+            codes::THUMBNAIL_FAILED
+        );
+        std::fs::write(dir.join("corrupt.jpg"), b"not really a jpeg").expect("the file");
+        let corrupt = ThumbnailFrame {
+            file: "corrupt.jpg".to_owned(),
+            ..frame
+        };
+        assert_eq!(
+            corrupt.load_rgba(&dir).unwrap_err().code,
+            codes::THUMBNAIL_FAILED
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_strip_is_only_assembled_from_frames_that_match_its_options() {
+        let dir = std::env::temp_dir().join("sub-thumbs-from-frames");
+        let hash = ContentHash::from_bytes([7_u8; 32]);
+        let options = ThumbnailOptions {
+            count: 2,
+            ..ThumbnailOptions::default()
+        };
+        let frame = |index: usize| ThumbnailFrame {
+            index,
+            pts_ns: 0,
+            file: ThumbnailStrip::frame_file_name(hash, options, index),
+            width: 8,
+            height: 4,
+        };
+        let strip = ThumbnailStrip::from_frames(&dir, hash, options, vec![frame(0), frame(1)])
+            .expect("two frames for a count of two");
+        assert_eq!(strip.frames().len(), 2);
+        assert_eq!(strip.source_hash(), hash);
+        assert_eq!(strip.cache_dir(), dir.as_path());
+
+        for frames in [vec![frame(0)], vec![frame(1), frame(0)]] {
+            assert_eq!(
+                ThumbnailStrip::from_frames(&dir, hash, options, frames)
+                    .unwrap_err()
+                    .code,
+                sub_core::codes::INVALID_ARGUMENT
+            );
+        }
     }
 }

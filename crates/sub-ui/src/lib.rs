@@ -12,6 +12,7 @@ pub mod media_bin;
 pub mod media_import;
 pub mod sequence_tabs;
 pub mod shortcuts;
+pub mod thumbnails;
 pub mod timeline;
 pub mod timeline_panel;
 pub mod track_header;
@@ -35,10 +36,14 @@ pub use shortcuts::{
     Action, Binding, Category, Conflict, DEFAULT_BINDINGS, HelpRow, ShortcutMap, ShortcutsWindow,
     help_rows,
 };
+pub use thumbnails::{
+    BUCKET_SIZES, DEFAULT_BUDGET_BYTES, DEFAULT_UPLOADS_PER_FRAME, ThumbnailCache,
+    ThumbnailCacheConfig, ThumbnailCacheStats, ZoomBucket, fitted_size, scale_to_bucket, tile_time,
+};
 pub use timeline::{ClipPlacement, TimelineView, TrackLayout, ZoomLevel};
 pub use timeline_panel::{
-    ClipMediaKind, PanelLayout, TimelineMetrics, TimelinePanel, TimelineResponse, TrimmedEdges,
-    WheelInput, clip_edits_allowed,
+    ClipMediaKind, PanelLayout, StripTiles, TimelineMetrics, TimelinePanel, TimelineResponse,
+    TrimmedEdges, WheelInput, clip_edits_allowed, strip_tiles,
 };
 pub use track_header::{HeaderLayout, MenuChoice, MenuEntry, TrackAction, TrackHeaderState};
 pub use viewer::{ViewerAction, ViewerFit, ViewerFrame, ViewerPanel, ViewerState};
