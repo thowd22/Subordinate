@@ -8,6 +8,8 @@
 
 pub mod app;
 pub mod diagnostics;
+pub mod media_bin;
+pub mod media_import;
 pub mod sequence_tabs;
 pub mod shortcuts;
 pub mod timeline;
@@ -17,6 +19,15 @@ pub mod viewer;
 
 pub use app::{AppOptions, SubordinateApp, run};
 pub use diagnostics::DiagnosticsPanel;
+pub use media_bin::{
+    BinSelection, BinSort, BinViewMode, MediaBinAction, MediaBinPanel, SortColumn, bin_path,
+    dropped_paths, duration_text, folder_name, frame_rate_text, pick_media_files, resolution_text,
+    sorted_media,
+};
+pub use media_import::{
+    IMPORT_JOB_KIND, ImportJob, ImportOptions, ImportOutcome, ImportQueue, imported_item,
+    spawn_import_job, stream_info,
+};
 pub use sequence_tabs::{
     NewSequenceDialog, SequenceTabAction, SequenceTabs, SequenceViewState, default_sequence_name,
 };

@@ -9,9 +9,9 @@
 //! an edit/undo cycle with an empty git diff (docs/PLAN.md §5.6).
 
 use sub_edit::commands::{
-    AddMarker, CreateBin, Filing, ImportMedia, InsertBin, InsertMedia, MarkerTarget, MoveMarker,
-    MoveToBin, RelinkMedia, RemoveBin, RemoveMarker, RemoveMedia, RenameBin, SetClipParams,
-    SetTrackLocked, builtin_registry,
+    AddMarker, CreateBin, Filing, ImportMedia, InsertBin, InsertMedia, MarkerTarget, MoveBin,
+    MoveMarker, MoveToBin, RelinkMedia, RemoveBin, RemoveMarker, RemoveMedia, RenameBin,
+    SetClipParams, SetTrackLocked, builtin_registry,
 };
 use sub_edit::{AnyCommand, Command, CommandEnvelope, History, codes};
 use sub_model::{
@@ -577,6 +577,59 @@ fn an_unfiled_media_item_cannot_be_moved() {
     assert_eq!(err.code, codes::BIN_NOT_FOUND);
 }
 
+#[test]
+fn a_bin_is_reparented_with_everything_inside_it_and_put_back_exactly() {
+    let (mut project, at) = fixture();
+    let mut history = History::new();
+    history
+        .apply(&mut project, CreateBin::new("B-roll"))
+        .unwrap();
+    let broll = project.root_bin.children[1].id;
+
+    // The `Interviews` bin, media and all, moves inside `B-roll`.
+    round_trip(&mut project, MoveBin::new(at.bin, broll));
+    let moved = project.root_bin.find(at.bin).unwrap();
+    assert_eq!(moved.media, vec![at.spare]);
+    assert_eq!(project.bin_of(at.spare), Some(at.bin));
+    assert_eq!(project.root_bin.children.len(), 1);
+    assert_eq!(project.root_bin.children[0].id, broll);
+
+    // And back out to a chosen position in the root.
+    let root = project.root_bin.id;
+    round_trip(&mut project, MoveBin::new(at.bin, root).at(0));
+    assert_eq!(project.root_bin.children[0].id, at.bin);
+    assert_eq!(project.root_bin.children[1].id, broll);
+}
+
+#[test]
+fn a_bin_cannot_be_moved_into_its_own_subtree_or_out_of_the_root() {
+    let (mut project, at) = fixture();
+    let root = project.root_bin.id;
+    let mut history = History::new();
+    history
+        .apply(&mut project, CreateBin::new("Takes").inside(at.bin))
+        .unwrap();
+    let takes = project.root_bin.find(at.bin).unwrap().children[0].id;
+
+    let err = refused(&mut project, MoveBin::new(root, at.bin));
+    assert_eq!(err.code, codes::ROOT_BIN);
+
+    let err = refused(&mut project, MoveBin::new(at.bin, at.bin));
+    assert_eq!(err.code, codes::INVALID_INDEX);
+
+    let err = refused(&mut project, MoveBin::new(at.bin, takes));
+    assert_eq!(err.code, codes::INVALID_INDEX);
+
+    let err = refused(&mut project, MoveBin::new(BinId::new(), root));
+    assert_eq!(err.code, codes::BIN_NOT_FOUND);
+
+    let err = refused(&mut project, MoveBin::new(at.bin, BinId::new()));
+    assert_eq!(err.code, codes::BIN_NOT_FOUND);
+
+    let err = refused(&mut project, MoveBin::new(at.bin, root).at(4));
+    assert_eq!(err.code, codes::INVALID_INDEX);
+}
+
 // -- the wire -------------------------------------------------------------
 
 #[test]
@@ -586,6 +639,7 @@ fn every_new_kind_decodes_from_its_envelope() {
     for kind in [
         "bin.create",
         "bin.insert",
+        "bin.move",
         "bin.move_media",
         "bin.remove",
         "bin.rename",

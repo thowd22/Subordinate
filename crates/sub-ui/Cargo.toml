@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11", "accesskit"] }
 log = "0.4"
+rfd = "0.17"
 sub-core = { version = "0.1.0", path = "../sub-core" }
 sub-edit = { version = "0.1.0", path = "../sub-edit" }
 sub-export = { version = "0.1.0", path = "../sub-export" }
@@ -17,6 +18,9 @@ sub-media = { version = "0.1.0", path = "../sub-media" }
 sub-model = { version = "0.1.0", path = "../sub-model" }
 sub-render = { version = "0.1.0", path = "../sub-render" }
 sub-time = { version = "0.1.0", path = "../sub-time" }
+
+[dev-dependencies]
+sub-test-support = { path = "../sub-test-support" }
 
 [lints]
 workspace = true
