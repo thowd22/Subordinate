@@ -1,0 +1,94 @@
+# RunsOn runner definitions (TASK-114).
+#
+# Workflows reference the stable names below instead of raw EC2 parameters:
+#
+#   runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-linux
+#
+# Schema: https://runs-on.com/configuration/repo-config/
+# GPU images: https://runs-on.com/runners/gpu/
+# Built-in images: https://runs-on.com/docs/runners/platforms/
+#
+# Cost: RunsOn has no per-runner cost-cap field in this schema (v3.3.0), so the
+# us-east-1 list prices are recorded in the comments on each runner. Instances
+# are billed by AWS with no markup and are terminated when the job ends; keep
+# `timeout-minutes` set on every GPU job so a hung job cannot burn a day of GPU
+# time. `spot: price-capacity-optimized` picks the cheapest pool with capacity;
+# `retry: when-interrupted` re-runs a job whose spot instance was reclaimed. If
+# spot capacity is unavailable, re-dispatch the job with `/spot=false` appended
+# to the runs-on label to force on-demand.
+#
+# All four runners need the EC2 G-family vCPU quotas in us-east-1 above zero
+# (L-DB2E81BA on-demand, L-3819A6DF spot) - see TASK-113.
+
+images:
+  # PLACEHOLDER - not yet usable. TASK-115 builds the Windows GPU AMI (NVIDIA
+  # and AMD drivers, GStreamer 1.28, the RunsOn agent) and replaces the `ami`
+  # values below with the real IDs. Until then any job that asks for
+  # gpu-nvidia-windows or gpu-amd-windows will fail to launch.
+  windows-gpu-nvidia-placeholder:
+    platform: "windows"
+    arch: "x64"
+    ami: "ami-00000000000000000"
+
+  windows-gpu-amd-placeholder:
+    platform: "windows"
+    arch: "x64"
+    ami: "ami-00000000000000000"
+
+runners:
+  # NVIDIA T4 (16 GB), 4 vCPU / 16 GB RAM.
+  # us-east-1 on-demand $0.526/h, spot typically $0.16-0.25/h.
+  # ubuntu24-gpu-x64 ships the NVIDIA driver, CUDA toolkit and container
+  # toolkit. It is Ubuntu 24.04, whose apt GStreamer is 1.24 - one minor below
+  # the 1.28 pin in ci.yml - so jobs that need 1.28 on this runner must bring
+  # their own build (TASK-116).
+  gpu-nvidia-linux:
+    family: ["g4dn.xlarge"]
+    cpu: [4, 4]
+    ram: [16, 16]
+    image: ubuntu24-gpu-x64
+    spot: price-capacity-optimized
+    retry: when-interrupted
+    volume: 80gb:gp3:125mbs:3000iops
+    ssh: false
+
+  # AMD Radeon Pro V520 (8 GB), 4 vCPU / 16 GB RAM.
+  # us-east-1 on-demand $0.37853/h, spot typically $0.11-0.16/h.
+  # RunsOn's *-gpu-* images are NVIDIA-only (driver + CUDA), so this runner uses
+  # the plain Ubuntu 26.04 image and the job installs the Mesa VA-API stack
+  # (mesa-va-drivers, vainfo). 26.04 also matches ci.yml's GStreamer 1.28 apt
+  # packages, where the `va` plugin (vah264enc) lives in
+  # gstreamer1.0-plugins-bad - there is no separate `va` package.
+  gpu-amd-linux:
+    family: ["g4ad.xlarge"]
+    cpu: [4, 4]
+    ram: [16, 16]
+    image: ubuntu26-full-x64
+    spot: price-capacity-optimized
+    retry: when-interrupted
+    volume: 80gb:gp3:125mbs:3000iops
+    ssh: false
+
+  # NOT YET USABLE - points at the TASK-115 AMI placeholder above.
+  # g4dn.xlarge, us-east-1 on-demand $0.526/h.
+  gpu-nvidia-windows:
+    family: ["g4dn.xlarge"]
+    cpu: [4, 4]
+    ram: [16, 16]
+    image: windows-gpu-nvidia-placeholder
+    spot: price-capacity-optimized
+    retry: when-interrupted
+    volume: 120gb:gp3:125mbs:3000iops
+    ssh: false
+
+  # NOT YET USABLE - points at the TASK-115 AMI placeholder above.
+  # g4ad.xlarge, us-east-1 on-demand $0.37853/h.
+  gpu-amd-windows:
+    family: ["g4ad.xlarge"]
+    cpu: [4, 4]
+    ram: [16, 16]
+    image: windows-gpu-amd-placeholder
+    spot: price-capacity-optimized
+    retry: when-interrupted
+    volume: 120gb:gp3:125mbs:3000iops
+    ssh: false

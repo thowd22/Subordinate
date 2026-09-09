@@ -1,0 +1,96 @@
+name: GPU smoke
+
+# Proves the GPU runners defined in .github/runs-on.yml actually boot with a
+# working GPU and a GStreamer hardware encoder element (TASK-114). Trigger by
+# hand. Needs the EC2 G-family vCPU quotas in us-east-1 above zero (TASK-113);
+# until those are approved the jobs fail to launch. See docs/DEVELOPMENT.md
+# "GPU CI". TASK-116 turns these checks into the real hardware verification.
+on:
+  workflow_dispatch:
+
+jobs:
+  nvidia-linux:
+    name: NVIDIA T4 (g4dn.xlarge, Ubuntu 24.04)
+    runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-linux
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instance and GPU facts
+        run: |
+          echo "runner=$RUNNER_NAME"
+          curl -fsS -m 3 http://169.254.169.254/latest/meta-data/instance-type || true; echo
+          . /etc/os-release && echo "os=$PRETTY_NAME"
+          nvidia-smi
+
+      # ubuntu24-gpu-x64 is Ubuntu 24.04, whose apt GStreamer is 1.24 - one
+      # minor below the 1.28 pin shared by ci.yml and docs/DEVELOPMENT.md. That
+      # is fine for an element-presence smoke test (the nvcodec plugin in
+      # gstreamer1.0-plugins-bad has shipped nvh264enc since well before 1.24),
+      # so this job reports the version instead of enforcing it. TASK-116 must
+      # either build 1.28 here or move to a custom 26.04 GPU image.
+      - name: Install GStreamer (apt)
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*google*.list \
+                     /etc/apt/sources.list.d/*google*.sources \
+                     /etc/apt/sources.list.d/*microsoft*.list \
+                     /etc/apt/sources.list.d/*microsoft*.sources || true
+          sudo apt-get update || sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x pkg-config
+          echo "gstreamer-1.0 = $(pkg-config --modversion gstreamer-1.0)"
+
+      - name: NVENC element present
+        run: |
+          gst-inspect-1.0 --exists nvh264enc \
+            || { echo "::error::nvh264enc missing"; gst-inspect-1.0 nvcodec || true; exit 1; }
+          gst-inspect-1.0 nvh264enc | head -20
+
+  amd-linux:
+    name: AMD Radeon Pro V520 (g4ad.xlarge, Ubuntu 26.04)
+    runs-on: runs-on=${{ github.run_id }}/runner=gpu-amd-linux
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instance and DRM facts
+        run: |
+          echo "runner=$RUNNER_NAME"
+          curl -fsS -m 3 http://169.254.169.254/latest/meta-data/instance-type || true; echo
+          . /etc/os-release && echo "os=$PRETTY_NAME"
+          ls -l /dev/dri || { echo "::error::no /dev/dri - no DRM device on this instance"; exit 1; }
+          lspci -nn | grep -i -E 'vga|display' || true
+
+      # Ubuntu does not ship a standalone "va" GStreamer package: the modern
+      # `va` plugin (vah264enc/vah264dec, built on libva) is part of
+      # gstreamer1.0-plugins-bad. The AMD side of the driver stack is
+      # mesa-va-drivers (radeonsi). Ubuntu 26.04 apt gives GStreamer 1.28.x, the
+      # version ci.yml pins, so this job does enforce the minor.
+      - name: Install GStreamer and the Mesa VA-API stack (apt)
+        env:
+          GST_MINOR: "1.28"
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*google*.list \
+                     /etc/apt/sources.list.d/*google*.sources \
+                     /etc/apt/sources.list.d/*microsoft*.list \
+                     /etc/apt/sources.list.d/*microsoft*.sources || true
+          sudo apt-get update || sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x pkg-config \
+            vainfo mesa-va-drivers libva-drm2
+          v=$(pkg-config --modversion gstreamer-1.0)
+          echo "gstreamer-1.0 = $v"
+          case "$v" in "$GST_MINOR".*) ;; *) echo "::error::expected GStreamer $GST_MINOR.x, got $v"; exit 1;; esac
+
+      - name: vainfo
+        run: vainfo --display drm --device /dev/dri/renderD128
+
+      - name: VA-API element present
+        run: |
+          gst-inspect-1.0 --exists vah264enc \
+            || { echo "::error::vah264enc missing"; gst-inspect-1.0 va || true; exit 1; }
+          gst-inspect-1.0 vah264enc | head -20
