@@ -56,6 +56,10 @@ pub mod codes {
     pub const INVALID_PARAMS: ErrorCode = ErrorCode::from_static("plugin.invalid_params");
     /// A plugin named a project the host does not have open.
     pub const NO_SUCH_PROJECT: ErrorCode = ErrorCode::from_static("plugin.no_such_project");
+    /// A plugin called an accessor the fixture project cannot answer: it has
+    /// no sequences, tracks or clips. The real host (TASK-84) answers all of
+    /// them out of `sub-model`; `sub-plugin` already carries the conversions.
+    pub const UNSUPPORTED: ErrorCode = ErrorCode::from_static("plugin.unsupported");
 }
 
 /// A marker on the fixture project's timeline.
@@ -324,9 +328,9 @@ impl WasiView for HostState {
 impl bindings::subordinate::plugin::types::Host for HostState {}
 
 impl command_api::Host for HostState {
-    fn invoke(
+    fn run_command(
         &mut self,
-        project: String,
+        project: command_api::ProjectId,
         method: String,
         params: String,
     ) -> Result<String, WitError> {
@@ -339,7 +343,7 @@ impl command_api::Host for HostState {
 
     fn query(
         &mut self,
-        project: String,
+        project: command_api::ProjectId,
         method: String,
         params: String,
     ) -> Result<String, WitError> {
@@ -350,13 +354,74 @@ impl command_api::Host for HostState {
             .map_err(wit_error)
     }
 
-    fn playhead(&mut self, project: String) -> Result<command_api::RationalTime, WitError> {
+    fn open_projects(&mut self) -> Vec<command_api::ProjectId> {
+        vec![command_api::ProjectId {
+            value: self.project.id().to_owned(),
+        }]
+    }
+
+    fn project_info(
+        &mut self,
+        project: command_api::ProjectId,
+    ) -> Result<command_api::ProjectMetadata, WitError> {
+        self.check_project(&project)?;
+        Ok(command_api::ProjectMetadata {
+            id: project,
+            name: "fixture".to_owned(),
+            revision: self.project.applied().len() as u64,
+            sequences: Vec::new(),
+            media_count: 0,
+        })
+    }
+
+    fn sequences(
+        &mut self,
+        project: command_api::ProjectId,
+    ) -> Result<Vec<command_api::SequenceMetadata>, WitError> {
+        self.check_project(&project)?;
+        Err(unsupported("sequences"))
+    }
+
+    fn tracks(
+        &mut self,
+        project: command_api::ProjectId,
+        _sequence: command_api::SequenceId,
+    ) -> Result<Vec<command_api::TrackMetadata>, WitError> {
+        self.check_project(&project)?;
+        Err(unsupported("tracks"))
+    }
+
+    fn clips(
+        &mut self,
+        project: command_api::ProjectId,
+        _sequence: command_api::SequenceId,
+        _track: command_api::TrackId,
+    ) -> Result<Vec<command_api::ClipMetadata>, WitError> {
+        self.check_project(&project)?;
+        Err(unsupported("clips"))
+    }
+
+    fn markers(
+        &mut self,
+        project: command_api::ProjectId,
+        _sequence: command_api::SequenceId,
+    ) -> Result<Vec<command_api::MarkerMetadata>, WitError> {
+        self.check_project(&project)?;
+        Err(unsupported("markers"))
+    }
+
+    fn playhead(
+        &mut self,
+        project: command_api::ProjectId,
+    ) -> Result<command_api::RationalTime, WitError> {
         self.check_project(&project)?;
         let playhead = self.project.playhead();
         Ok(command_api::RationalTime {
             value: playhead.value(),
-            rate_numerator: playhead.rate().numerator(),
-            rate_denominator: playhead.rate().denominator(),
+            rate: command_api::Rational {
+                numerator: playhead.rate().numerator(),
+                denominator: playhead.rate().denominator(),
+            },
         })
     }
 
@@ -389,15 +454,26 @@ impl command_api::Host for HostState {
 
 impl HostState {
     /// Rejects a call naming a project this host does not have open.
-    fn check_project(&self, project: &str) -> Result<(), WitError> {
-        if project == self.project.id() {
+    fn check_project(&self, project: &command_api::ProjectId) -> Result<(), WitError> {
+        if project.value == self.project.id() {
             return Ok(());
         }
         Err(wit_error(
             SubError::new(codes::NO_SUCH_PROJECT, "no such project")
-                .with_detail("project", project),
+                .with_detail("project", project.value.clone()),
         ))
     }
+}
+
+/// The error a metadata accessor the fixture cannot answer returns.
+fn unsupported(accessor: &str) -> WitError {
+    wit_error(
+        SubError::new(
+            codes::UNSUPPORTED,
+            "the fixture project has no sequences, tracks or clips",
+        )
+        .with_detail("accessor", accessor),
+    )
 }
 
 /// Converts a [`SubError`] into the WIT error record.
@@ -574,7 +650,9 @@ impl PluginHost {
             })?;
         let instantiated = started.elapsed();
 
-        let project_id = store.data().project.id().to_owned();
+        let project_id = command_api::ProjectId {
+            value: store.data().project.id().to_owned(),
+        };
         let called = instance.call_run(&mut store, &project_id, args);
         drop(ticker);
 

@@ -11,22 +11,28 @@
 
 package subordinate:plugin@0.1.0;
 
-/// The stable error shape shared by every host import and plugin export.
+/// The value types shared by every host import and plugin export.
 ///
-/// Mirrors `sub_core::SubError`: a machine-readable code such as
-/// `plugin.command_rejected`, a human message, and optional details for
-/// tooling. Codes are lowercase dot-separated segments of [a-z0-9_], at least
-/// two segments deep, and are never renamed or given a new meaning.
+/// Identifiers are records rather than bare strings so that a `clip-id` cannot
+/// be passed where a `track-id` is expected: the generated bindings give each
+/// one its own type on both sides of the boundary.
 interface types {
     /// One `key`/`value` entry of an error's details map.
     record detail {
+        /// The detail's key, unique within one error.
         key: string,
+        /// The detail's value, a JSON fragment: WIT has no dynamic JSON type.
         value: string,
     }
 
     /// A failure crossing the plugin boundary in either direction.
+    ///
+    /// Mirrors `sub_core::SubError`: a machine-readable code such as
+    /// `plugin.command_rejected`, a human message, and optional details for
+    /// tooling. Codes are lowercase dot-separated segments of [a-z0-9_], at
+    /// least two segments deep, and are never renamed or given a new meaning.
     record error {
-        /// Stable machine-readable code, e.g. `plugin.command-rejected`.
+        /// Stable machine-readable code, e.g. `plugin.invalid_argument`.
         code: string,
         /// Human-readable, non-localised message.
         message: string,
@@ -34,40 +40,209 @@ interface types {
         details: list<detail>,
     }
 
-    /// An exact timeline instant: `value` ticks at a rate of
-    /// `rate-numerator / rate-denominator` ticks per second.
+    /// An exact non-zero ratio, `numerator / denominator`.
+    ///
+    /// Used for tick rates and frame rates. Both fields are non-zero, and the
+    /// fraction is not necessarily reduced: 30000/1001 and 60000/2002 are the
+    /// same rate but are not the same value.
+    record rational {
+        /// The numerator; never zero.
+        numerator: u32,
+        /// The denominator; never zero.
+        denominator: u32,
+    }
+
+    /// An exact timeline instant: `value` ticks at `rate` ticks per second.
     ///
     /// Timeline math is rational everywhere in Subordinate; floats never cross
-    /// this boundary. The rate is carried as a fraction rather than a single
-    /// integer because the rates that matter most are not integers: 23.976 fps
-    /// is exactly 24000/1001, and rounding it to a whole number of ticks per
-    /// second would drift. Both fields are non-zero.
+    /// this boundary. The rate is a fraction rather than a single integer
+    /// because the rates that matter most are not integers: 23.976 fps is
+    /// exactly 24000/1001, and rounding it to a whole number of ticks per
+    /// second would drift.
     record rational-time {
+        /// The instant, counted in ticks of `rate`. May be negative.
         value: s64,
-        rate-numerator: u32,
-        rate-denominator: u32,
+        /// Ticks per second.
+        rate: rational,
+    }
+
+    /// A half-open span of the timeline: `[start, start + duration)`.
+    record time-range {
+        /// The first instant in the span.
+        start: rational-time,
+        /// The length of the span; never negative.
+        duration: rational-time,
+    }
+
+    /// Identifies a project open in the host.
+    ///
+    /// Every identifier below wraps the canonical lowercase hyphenated text of
+    /// a UUIDv7, the same form the project file and the Command API use.
+    record project-id {
+        /// The UUID text, e.g. `018f3c2e-...`.
+        value: string,
+    }
+
+    /// Identifies a sequence within a project.
+    record sequence-id {
+        /// The UUID text.
+        value: string,
+    }
+
+    /// Identifies a track within a sequence.
+    record track-id {
+        /// The UUID text.
+        value: string,
+    }
+
+    /// Identifies a clip on a track.
+    record clip-id {
+        /// The UUID text.
+        value: string,
+    }
+
+    /// Identifies a marker on a sequence or a clip.
+    record marker-id {
+        /// The UUID text.
+        value: string,
+    }
+
+    /// Identifies a media item in a project's bins.
+    record media-id {
+        /// The UUID text.
+        value: string,
     }
 }
 
-/// The host side of the Command API: the only way a plugin changes a project.
+/// The host side of the Command API: the only way a plugin changes a project,
+/// plus the read-only accessors and the logging channel it needs to be useful.
 ///
-/// `invoke` takes the same JSON-RPC method name and `params` object that the
-/// local socket server takes, so a plugin and an external agent have exactly
-/// the same reach. Each successful call is one undoable command on the host's
-/// undo stack.
+/// `run-command` takes the same JSON-RPC method name and `params` object that
+/// the local socket server takes, so a plugin and an external agent have
+/// exactly the same reach. Each successful call is one undoable command on the
+/// host's undo stack.
 interface command-api {
-    use types.{error, rational-time};
-
-    /// Identifies a project open in the host.
-    type project-id = string;
+    use types.{
+        error,
+        rational,
+        rational-time,
+        time-range,
+        project-id,
+        sequence-id,
+        track-id,
+        clip-id,
+        marker-id,
+        media-id,
+    };
 
     /// Severity of a `log` line; maps onto `tracing` levels.
     enum log-level {
+        /// Very fine-grained tracing, off by default.
         trace,
+        /// Diagnostics useful while developing a plugin.
         debug,
+        /// Normal progress a user might want to see.
         info,
+        /// Something recoverable that deserves attention.
         warn,
+        /// A failure the plugin could not handle.
         error,
+    }
+
+    /// What a track carries.
+    enum track-kind {
+        /// Picture. Video tracks composite top-down.
+        video,
+        /// Sound. Audio tracks sum in the mixer.
+        audio,
+    }
+
+    /// A picture size in whole pixels.
+    record resolution {
+        /// Width in pixels; never zero.
+        width: u32,
+        /// Height in pixels; never zero.
+        height: u32,
+    }
+
+    /// Project-level metadata: what is open, and what it contains.
+    record project-metadata {
+        /// The project's identifier.
+        id: project-id,
+        /// The project's display name.
+        name: string,
+        /// The engine revision this metadata was read at. A plugin that
+        /// reads, decides and then writes can compare revisions to see
+        /// whether the project moved underneath it.
+        revision: u64,
+        /// Every sequence in the project, in project order.
+        sequences: list<sequence-id>,
+        /// How many media items the project's bins hold.
+        media-count: u32,
+    }
+
+    /// Sequence-level metadata; the timebase a plugin must respect.
+    record sequence-metadata {
+        /// The sequence's identifier.
+        id: sequence-id,
+        /// The sequence's display name.
+        name: string,
+        /// Frames per second, exact.
+        frame-rate: rational,
+        /// The picture size the sequence composites at.
+        resolution: resolution,
+        /// The audio sample rate in hertz.
+        sample-rate: u32,
+        /// The end of the last item on the longest track.
+        duration: rational-time,
+        /// How many tracks the sequence has.
+        track-count: u32,
+    }
+
+    /// Track-level metadata.
+    record track-metadata {
+        /// The track's identifier.
+        id: track-id,
+        /// The track's display name.
+        name: string,
+        /// Whether the track carries picture or sound.
+        kind: track-kind,
+        /// Whether the track is excluded from playback and render.
+        muted: bool,
+        /// Whether the track rejects edits.
+        locked: bool,
+        /// How many clips sit on the track; gaps and transitions are not
+        /// counted.
+        clip-count: u32,
+        /// The end of the last item on the track.
+        duration: rational-time,
+    }
+
+    /// One clip on a track, with both of the spans that describe it.
+    record clip-metadata {
+        /// The clip's identifier.
+        id: clip-id,
+        /// The clip's display name.
+        name: string,
+        /// The media item the clip references.
+        media: media-id,
+        /// The portion of the media the clip uses, in media time.
+        source-range: time-range,
+        /// Where the clip sits on the track, in sequence time. Placement is
+        /// positional: a clip starts where the preceding items end.
+        timeline-range: time-range,
+    }
+
+    /// One marker on a sequence.
+    record marker-metadata {
+        /// The marker's identifier.
+        id: marker-id,
+        /// The marker's display name.
+        name: string,
+        /// Free-form note; empty when there is none.
+        note: string,
+        /// The span the marker covers; a point marker has a zero duration.
+        marked-range: time-range,
     }
 
     /// Calls a Command API method that mutates the project.
@@ -75,10 +250,31 @@ interface command-api {
     /// `params` and the returned value are JSON documents encoded as UTF-8
     /// strings: the Command API schema is the source of truth for their shape,
     /// and keeping it out of WIT means a new method needs no WIT revision.
-    invoke: func(project: project-id, method: string, params: string) -> result<string, error>;
+    run-command: func(project: project-id, method: string, params: string) -> result<string, error>;
 
-    /// Reads project state without mutating it. Same JSON encoding as `invoke`.
+    /// Reads project state without mutating it. Same JSON encoding as
+    /// `run-command`, and the same method namespace: only the methods the host
+    /// registered as queries are accepted here.
     query: func(project: project-id, method: string, params: string) -> result<string, error>;
+
+    /// Every project currently open in the host, in the order it opened them.
+    open-projects: func() -> list<project-id>;
+
+    /// Metadata for one open project.
+    project-info: func(project: project-id) -> result<project-metadata, error>;
+
+    /// Metadata for every sequence in `project`, in project order.
+    sequences: func(project: project-id) -> result<list<sequence-metadata>, error>;
+
+    /// Metadata for every track of `sequence`, bottom to top.
+    tracks: func(project: project-id, sequence: sequence-id) -> result<list<track-metadata>, error>;
+
+    /// Every clip on `track`, in track order. Gaps and transitions are not
+    /// listed; `timeline-range` is where each clip actually lands.
+    clips: func(project: project-id, sequence: sequence-id, track: track-id) -> result<list<clip-metadata>, error>;
+
+    /// Every marker on `sequence`, in the order the sequence holds them.
+    markers: func(project: project-id, sequence: sequence-id) -> result<list<marker-metadata>, error>;
 
     /// The playhead position in `project`, for commands that act relative to it.
     playhead: func(project: project-id) -> result<rational-time, error>;
@@ -94,11 +290,11 @@ interface command-api {
 /// and the richer command world with menu and shortcut registration) build on
 /// this same `command-api` import.
 world command {
-    use types.{error};
+    use types.{error, project-id};
 
     import command-api;
 
     /// Runs the plugin against `project`. `args` is a JSON object, the same
     /// encoding the Command API uses for parameters; so is the returned value.
-    export run: func(project: string, args: string) -> result<string, error>;
+    export run: func(project: project-id, args: string) -> result<string, error>;
 }
