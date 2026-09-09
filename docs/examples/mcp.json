@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "subordinate": {
+      "type": "stdio",
+      "command": "target/release/subordinate-mcp",
+      "args": [],
+      "env": {
+        "SUBORDINATE_INSTANCE": "default",
+        "SUBORDINATE_LOG": "info"
+      }
+    }
+  }
+}
