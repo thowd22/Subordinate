@@ -15,6 +15,7 @@ pub mod diagnostics;
 pub mod frame_cache;
 pub mod index;
 pub mod probe;
+pub mod thumbnail;
 
 pub use audio::{
     AudioBlock, AudioChannels, AudioFormat, CENTER_DOWNMIX_GAIN, ChannelLayout, ChannelRole,
@@ -33,6 +34,11 @@ pub use index::{
 };
 pub use probe::{
     FrameTiming, MediaInfo, ProbeOptions, Rotation, VideoStreamInfo, probe, probe_with,
+};
+pub use thumbnail::{
+    MAX_THUMBNAIL_WIDTH, MAX_THUMBNAILS, THUMBNAIL_JOB_KIND, THUMBNAIL_MANIFEST_VERSION,
+    ThumbnailFrame, ThumbnailJob, ThumbnailOptions, ThumbnailStrip, spawn_thumbnail_job,
+    strip_times, thumbnail_size,
 };
 
 /// Stable [`sub_core::ErrorCode`] constants this crate returns.
@@ -66,6 +72,10 @@ pub mod codes {
     pub const SEEK_FAILED: ErrorCode = ErrorCode::from_static("media.seek_failed");
     /// The file was opened for audio decoding but carries no audio stream.
     pub const NO_AUDIO_STREAM: ErrorCode = ErrorCode::from_static("media.no_audio_stream");
+    /// A thumbnail strip could not be produced: the source could not be
+    /// probed, seeked or decoded, a picture could not be encoded, or the
+    /// sidecar directory could not be written.
+    pub const THUMBNAIL_FAILED: ErrorCode = ErrorCode::from_static("media.thumbnail_failed");
     /// A PTS index could not be built, cached or read back: the parse pipeline
     /// failed, the file exposes no timed pictures, or the sidecar cache could
     /// not be written or understood.
@@ -110,6 +120,7 @@ mod tests {
             super::codes::SEEK_FAILED,
             super::codes::NO_AUDIO_STREAM,
             super::codes::INDEX_FAILED,
+            super::codes::THUMBNAIL_FAILED,
         ];
         for code in &codes {
             assert_eq!(code.domain(), "media", "wrong domain for {code}");

@@ -29,7 +29,6 @@
 //! ```
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
@@ -60,36 +59,18 @@ const MAX_INDEXED_FRAMES: usize = 2_160_000;
 
 /// A cooperative cancel flag shared with a running index build.
 ///
-/// Cloning shares the flag, so a caller can hold one while the build thread
-/// holds another. Setting it is one relaxed store; the build checks it between
-/// bus polls and on every buffer, so a cancelled build stops within about
-/// fifty milliseconds.
-#[derive(Debug, Clone, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
+/// Every long-running piece of work in Subordinate is cancelled the same way,
+/// so this is [`sub_core::CancelToken`] itself rather than another flag with
+/// the same shape: a token taken from a job context stops an index build, and
+/// the token of an index build can be handed to anything else.
+pub use sub_core::CancelToken;
 
-impl CancelToken {
-    /// A token that has not been cancelled.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Asks the work this token was handed to to stop.
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-
-    /// Whether cancellation has been asked for.
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-
-    /// The error a cancelled build reports.
-    fn cancelled_error() -> SubError {
-        SubError::new(
-            sub_core::codes::CANCELLED,
-            "the PTS index build was cancelled",
-        )
-    }
+/// The error a cancelled index build reports.
+fn cancelled_error() -> SubError {
+    SubError::new(
+        sub_core::codes::CANCELLED,
+        "the PTS index build was cancelled",
+    )
 }
 
 /// One indexed picture.
@@ -638,7 +619,7 @@ fn run_until_eos(pipeline: &gst::Pipeline, cancel: &CancelToken) -> SubResult<()
         .ok_or_else(|| SubError::new(codes::INDEX_FAILED, "the index pipeline has no bus"))?;
     loop {
         if cancel.is_cancelled() {
-            return Err(CancelToken::cancelled_error());
+            return Err(cancelled_error());
         }
         // The wait is sliced so the cancel flag is looked at often; waiting for
         // the whole parse in one call could not be interrupted at all.
