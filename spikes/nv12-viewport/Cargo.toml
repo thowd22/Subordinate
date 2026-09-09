@@ -1,0 +1,23 @@
+[package]
+name = "spike-nv12-viewport"
+description = "TASK-7 spike: H.264 decode through GStreamer, NV12 upload to wgpu, egui preview with a pop-out viewport"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+gstreamer-video = { version = "0.25", features = ["v1_18"] }
+sub-core = { version = "0.1.0", path = "../../crates/sub-core" }
+sub-render = { version = "0.1.0", path = "../../crates/sub-render" }
+sub-time = { version = "0.1.0", path = "../../crates/sub-time" }
+tracing = "0.1"
+wgpu = { version = "30", default-features = false, features = ["wgsl"] }
+
+[lints]
+workspace = true
