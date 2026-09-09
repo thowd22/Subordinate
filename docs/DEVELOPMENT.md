@@ -108,6 +108,31 @@ present on the current platform but is missing elements carries a `hint`
 naming the install step from this file. The GUI shows the same report in its
 "Hardware diagnostics" panel.
 
+## Working on a project headlessly
+
+`subordinate-cli` loads, saves and inspects a project without a GUI, and
+serves the Command API for anything that wants to drive one (PLAN.md §7):
+
+```
+cargo run -p subordinate-cli -- new cut.sub --name "Doc cut"  # one Main sequence, V1 and A1
+cargo run -p subordinate-cli -- open cut.sub                  # schema version, migrations, offline media
+cargo run -p subordinate-cli -- inspect cut.sub               # sequences, tracks, clips, exact times
+cargo run -p subordinate-cli -- save cut.sub --output copy.sub
+cargo run -p subordinate-cli -- serve --instance default      # the Command API socket, no window
+```
+
+Every subcommand prints JSON, indented by default and on one line with
+`--compact`; a failure prints a JSON `SubError` on stderr and exits non-zero.
+`new` builds its starter sequence through the same undoable commands the GUI
+uses, and the file it writes is deterministic text, so a project diffs in git.
+Times are reported as an exact unit count and rate with a timecode alongside,
+never as a float.
+
+`serve` prints one readiness line naming the transport, the address and the
+lock file as soon as the endpoint is bound, then serves until its stdin
+reaches end of file (Ctrl-D in a terminal). That is how `subordinate-mcp`
+launches an editor when no GUI is running and knows when to connect.
+
 ## Test media fixtures
 
 Media tests need deterministic sample files, and binaries are never committed.

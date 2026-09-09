@@ -4,7 +4,11 @@
 //! Command API for out-of-process clients, and scaffolds and tests plugins.
 //! It is also the CI smoke test.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
+
+mod project;
+mod serve;
 
 /// What the arguments asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,8 +21,51 @@ enum Command {
     Diag { pretty: bool },
     /// Print the JSON Schema of the Command API.
     Schema { pretty: bool },
+    /// Write a new project file.
+    New {
+        /// Where the file goes.
+        path: PathBuf,
+        /// The project name, defaulting to the file stem.
+        name: Option<String>,
+        /// Whether an existing file may be replaced.
+        force: bool,
+        /// Whether the report is indented.
+        pretty: bool,
+    },
+    /// Load a project file and report what came back.
+    Open {
+        /// The file to load.
+        path: PathBuf,
+        /// Whether the report is indented.
+        pretty: bool,
+    },
+    /// Load a project file and write it out again, here or elsewhere.
+    Save {
+        /// The file to load.
+        path: PathBuf,
+        /// Where to write it, defaulting to `path` itself.
+        output: Option<PathBuf>,
+        /// Whether the report is indented.
+        pretty: bool,
+    },
+    /// Report the whole structure of a project file.
+    Inspect {
+        /// The file to load.
+        path: PathBuf,
+        /// Whether the report is indented.
+        pretty: bool,
+    },
+    /// Serve the Command API without a GUI.
+    Serve {
+        /// The project, the instance and where the endpoint lives.
+        options: serve::Options,
+        /// Whether the readiness line and the report are indented.
+        pretty: bool,
+    },
     /// Anything unrecognised, reported with the offending argument.
     Unknown(String),
+    /// A subcommand missing an argument it needs.
+    Incomplete(String),
 }
 
 /// The usage text, kept next to the parser so the two cannot drift.
@@ -33,7 +80,20 @@ Usage:
   subordinate-cli schema       print the Command API JSON Schema
   subordinate-cli schema --compact
                                the same JSON on one line
+  subordinate-cli new <file> [--name <name>] [--force]
+                               write a new project file
+  subordinate-cli open <file>  load a project and report its version and media
+  subordinate-cli save <file> [--output <file>]
+                               load a project and write it out again
+  subordinate-cli inspect <file>
+                               print the whole project structure as JSON
+  subordinate-cli serve [--project <file>] [--instance <name>]
+                        [--directory <dir>]
+                               serve the Command API until stdin closes
   subordinate-cli --help       print this text
+
+Every subcommand prints JSON, indented by default and on one line with
+--compact. A failure prints a JSON SubError on stderr.
 ";
 
 /// Parses the arguments after the program name.
@@ -50,6 +110,14 @@ fn parse(args: &[String]) -> Command {
             Ok(pretty) => Command::Schema { pretty },
             Err(unknown) => unknown,
         },
+        Some("new") => parse_new(args),
+        Some("open") => parse_file(args, "open", |path, pretty| Command::Open { path, pretty }),
+        Some("save") => parse_save(args),
+        Some("inspect") => parse_file(args, "inspect", |path, pretty| Command::Inspect {
+            path,
+            pretty,
+        }),
+        Some("serve") => parse_serve(args),
         Some(other) => Command::Unknown(other.to_owned()),
     }
 }
@@ -68,6 +136,119 @@ fn json_flags<'a>(args: impl Iterator<Item = &'a str>) -> Result<bool, Command> 
     Ok(pretty)
 }
 
+/// Reads a subcommand that takes one project file and the JSON flags.
+fn parse_file<'a>(
+    args: impl Iterator<Item = &'a str>,
+    subcommand: &str,
+    build: impl FnOnce(PathBuf, bool) -> Command,
+) -> Command {
+    let mut path = None;
+    let mut pretty = true;
+    for arg in args {
+        match arg {
+            "--compact" => pretty = false,
+            "--pretty" | "--json" => pretty = true,
+            other if path.is_none() && !other.starts_with('-') => {
+                path = Some(PathBuf::from(other));
+            }
+            other => return Command::Unknown(other.to_owned()),
+        }
+    }
+    path.map_or_else(
+        || Command::Incomplete(format!("{subcommand} needs the path of a project file")),
+        |path| build(path, pretty),
+    )
+}
+
+/// Reads `new <file> [--name <name>] [--force]`.
+fn parse_new<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
+    let mut path = None;
+    let mut name = None;
+    let mut force = false;
+    let mut pretty = true;
+    while let Some(arg) = args.next() {
+        match arg {
+            "--compact" => pretty = false,
+            "--pretty" | "--json" => pretty = true,
+            "--force" => force = true,
+            "--name" => match args.next() {
+                Some(value) => name = Some(value.to_owned()),
+                None => return Command::Incomplete("--name needs a project name".to_owned()),
+            },
+            other if path.is_none() && !other.starts_with('-') => {
+                path = Some(PathBuf::from(other));
+            }
+            other => return Command::Unknown(other.to_owned()),
+        }
+    }
+    path.map_or_else(
+        || Command::Incomplete("new needs the path of the project file to write".to_owned()),
+        |path| Command::New {
+            path,
+            name,
+            force,
+            pretty,
+        },
+    )
+}
+
+/// Reads `save <file> [--output <file>]`.
+fn parse_save<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
+    let mut path = None;
+    let mut output = None;
+    let mut pretty = true;
+    while let Some(arg) = args.next() {
+        match arg {
+            "--compact" => pretty = false,
+            "--pretty" | "--json" => pretty = true,
+            "--output" | "-o" => match args.next() {
+                Some(value) => output = Some(PathBuf::from(value)),
+                None => return Command::Incomplete("--output needs a path".to_owned()),
+            },
+            other if path.is_none() && !other.starts_with('-') => {
+                path = Some(PathBuf::from(other));
+            }
+            other => return Command::Unknown(other.to_owned()),
+        }
+    }
+    path.map_or_else(
+        || Command::Incomplete("save needs the path of a project file".to_owned()),
+        |path| Command::Save {
+            path,
+            output,
+            pretty,
+        },
+    )
+}
+
+/// Reads `serve [--project <file>] [--instance <name>] [--directory <dir>]`.
+fn parse_serve<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
+    let mut options = serve::Options::default();
+    let mut pretty = true;
+    while let Some(arg) = args.next() {
+        match arg {
+            "--compact" => pretty = false,
+            "--pretty" | "--json" => pretty = true,
+            "--project" => match args.next() {
+                Some(value) => options.project = Some(PathBuf::from(value)),
+                None => {
+                    return Command::Incomplete("--project needs the path of a project".to_owned());
+                }
+            },
+            "--instance" => match args.next() {
+                Some(value) => value.clone_into(&mut options.instance),
+                None => return Command::Incomplete("--instance needs a name".to_owned()),
+            },
+            "--directory" => match args.next() {
+                Some(value) => options.directory = Some(PathBuf::from(value)),
+                None => return Command::Incomplete("--directory needs a path".to_owned()),
+            },
+            other => return Command::Unknown(other.to_owned()),
+        }
+    }
+    Command::Serve { options, pretty }
+}
+
 /// Prints `value` as JSON, one line when `pretty` is false.
 fn print_json(value: &serde_json::Value, pretty: bool) -> ExitCode {
     let text = if pretty {
@@ -82,6 +263,18 @@ fn print_json(value: &serde_json::Value, pretty: bool) -> ExitCode {
         }
         Err(err) => {
             eprintln!("{err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Prints what a project subcommand answered, or its error as a JSON
+/// `SubError` on stderr.
+fn report(result: sub_core::SubResult<serde_json::Value>, pretty: bool) -> ExitCode {
+    match result {
+        Ok(value) => print_json(&value, pretty),
+        Err(err) => {
+            eprintln!("{}", err.to_json());
             ExitCode::FAILURE
         }
     }
@@ -161,8 +354,34 @@ fn main() -> ExitCode {
         }
         Command::Diag { pretty } => diag(pretty),
         Command::Schema { pretty } => schema(pretty),
+        Command::New {
+            path,
+            name,
+            force,
+            pretty,
+        } => report(project::new(&path, name.as_deref(), force), pretty),
+        Command::Open { path, pretty } => report(project::open(&path), pretty),
+        Command::Save {
+            path,
+            output,
+            pretty,
+        } => report(project::save(&path, output.as_deref()), pretty),
+        Command::Inspect { path, pretty } => report(project::inspect(&path), pretty),
+        Command::Serve { options, pretty } => {
+            // The readiness line goes out before the wait begins, so whoever
+            // launched this knows the endpoint is bound without polling for a
+            // socket to appear.
+            let result = serve::serve(&options, |ready| {
+                print_json(ready, pretty);
+            });
+            report(result, pretty)
+        }
         Command::Unknown(arg) => {
             eprintln!("unknown argument: {arg}\n\n{USAGE}");
+            ExitCode::FAILURE
+        }
+        Command::Incomplete(what) => {
+            eprintln!("{what}\n\n{USAGE}");
             ExitCode::FAILURE
         }
     }
@@ -171,6 +390,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{Command, parse};
+    use std::path::Path;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -208,6 +428,90 @@ mod tests {
     }
 
     #[test]
+    fn the_project_subcommands_take_a_path() {
+        assert_eq!(
+            parse(&args(&["inspect", "cut.sub"])),
+            Command::Inspect {
+                path: "cut.sub".into(),
+                pretty: true,
+            }
+        );
+        assert_eq!(
+            parse(&args(&["open", "cut.sub", "--compact"])),
+            Command::Open {
+                path: "cut.sub".into(),
+                pretty: false,
+            }
+        );
+        assert_eq!(
+            parse(&args(&["new", "cut.sub", "--name", "Doc cut", "--force"])),
+            Command::New {
+                path: "cut.sub".into(),
+                name: Some("Doc cut".to_owned()),
+                force: true,
+                pretty: true,
+            }
+        );
+        assert_eq!(
+            parse(&args(&["save", "cut.sub", "--output", "copy.sub"])),
+            Command::Save {
+                path: "cut.sub".into(),
+                output: Some("copy.sub".into()),
+                pretty: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_subcommand_without_its_path_is_reported_rather_than_guessed_at() {
+        for subcommand in ["new", "open", "save", "inspect"] {
+            assert!(
+                matches!(parse(&args(&[subcommand])), Command::Incomplete(_)),
+                "{subcommand} accepted no path",
+            );
+        }
+        for incomplete in [
+            vec!["new", "cut.sub", "--name"],
+            vec!["save", "cut.sub", "--output"],
+            vec!["serve", "--project"],
+            vec!["serve", "--instance"],
+            vec!["serve", "--directory"],
+        ] {
+            assert!(
+                matches!(parse(&args(&incomplete)), Command::Incomplete(_)),
+                "{incomplete:?} was accepted",
+            );
+        }
+    }
+
+    #[test]
+    fn serve_defaults_to_the_per_user_endpoint_and_no_project() {
+        assert_eq!(
+            parse(&args(&["serve"])),
+            Command::Serve {
+                options: super::serve::Options::default(),
+                pretty: true,
+            }
+        );
+        let Command::Serve { options, pretty } = parse(&args(&[
+            "serve",
+            "--project",
+            "cut.sub",
+            "--instance",
+            "ci",
+            "--directory",
+            "/tmp/run",
+            "--compact",
+        ])) else {
+            panic!("serve did not parse");
+        };
+        assert_eq!(options.project.as_deref(), Some(Path::new("cut.sub")));
+        assert_eq!(options.instance, "ci");
+        assert_eq!(options.directory.as_deref(), Some(Path::new("/tmp/run")));
+        assert!(!pretty);
+    }
+
+    #[test]
     fn unknown_arguments_are_reported_rather_than_ignored() {
         assert_eq!(
             parse(&args(&["render"])),
@@ -217,6 +521,10 @@ mod tests {
             parse(&args(&["diag", "--verbose"])),
             Command::Unknown("--verbose".to_owned())
         );
+        assert_eq!(
+            parse(&args(&["inspect", "cut.sub", "second.sub"])),
+            Command::Unknown("second.sub".to_owned())
+        );
     }
 
     #[test]
@@ -224,7 +532,11 @@ mod tests {
         for spelling in ["--help", "-h", "help"] {
             assert_eq!(parse(&args(&[spelling])), Command::Help);
         }
-        assert!(super::USAGE.contains("diag"));
-        assert!(super::USAGE.contains("schema"));
+        for subcommand in ["diag", "schema", "new", "open", "save", "inspect", "serve"] {
+            assert!(
+                super::USAGE.contains(subcommand),
+                "{subcommand} is undocumented",
+            );
+        }
     }
 }
