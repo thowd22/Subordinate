@@ -270,6 +270,32 @@ repository `.gitignore` carries
 Add the same line to any repository that keeps `.sub` projects under version
 control. See docs/PLAN.md §5.6.
 
+### Autosave and snapshot history
+
+`sub_edit::autosave` keeps `name.sub.d/autosave/`, one complete `.sub` file per
+snapshot named `autosave-<unix millis>-r<revision>.sub`, so a plain name sort is
+a time sort and every entry can be opened by the ordinary loader. Snapshots are
+written to a `.tmp` and renamed into place, and the newest K (`AutosaveConfig`,
+ten by default) are kept.
+
+`Autosave::spawn(engine.handle(), store, config)` starts the worker: it
+subscribes to the engine's change events and, at most once per interval and only
+when the revision moved, writes an `EngineHandle::snapshot` `Arc` on its own
+thread — never on the UI or engine thread. Stopping it flushes whatever the last
+interval did not reach. A write that fails (a read-only or full sidecar) is
+reported in `AutosaveStatus::last_error` and retried, never raised, because it
+must not stop an edit.
+
+Opening a project asks `autosave::check_for_recovery(path)` first. A snapshot
+more than `RECOVERY_TOLERANCE` newer than the project file means the last
+session ended without saving; the returned `Recovery` carries the prompt text
+and the two answers, `recover()` (load the snapshot instead of the file) and
+`discard()` (drop the history and open the file). `SnapshotStore::list()` is the
+restore menu: newest first, each entry a `Snapshot::label()` and a `load()` that
+returns the project it holds. Restoring is not a `Command` — a snapshot is a
+whole project, so the caller opens it with a fresh engine and history, exactly
+as opening a file does.
+
 `crates/sub-model/tests/fixtures/sample-project.sub` is a committed sample
 project (two sequences, three tracks each, clips, a crossfade, markers and two
 bins). `crates/sub-model/tests/golden.rs` checks that it loads and saves

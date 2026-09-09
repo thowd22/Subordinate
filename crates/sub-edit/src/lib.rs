@@ -23,6 +23,8 @@
 //! - [`Engine`] — the thread that owns the project: commands go in on a queue,
 //!   readers take immutable [`ChangeEvent`]-announced snapshots out, and the
 //!   [`EventBus`] broadcasts what changed.
+//! - [`autosave`] — the background snapshot history in the project's sidecar
+//!   directory, and the recovery check an open makes against it.
 //!
 //! ```
 //! use serde::{Deserialize, Serialize};
@@ -64,6 +66,7 @@
 //! assert_eq!(json::to_json(&project).unwrap(), after);
 //! ```
 
+pub mod autosave;
 pub mod bus;
 pub mod clip;
 pub mod command;
@@ -72,6 +75,9 @@ pub mod engine;
 pub mod event;
 pub mod history;
 
+pub use autosave::{
+    Autosave, AutosaveConfig, AutosaveStatus, Recovery, Snapshot, SnapshotStore, check_for_recovery,
+};
 pub use bus::{DEFAULT_EVENT_CAPACITY, EventBus, EventReceiver};
 pub use clip::{
     AddClip, MoveClip, RemoveClip, RestoreTrackItems, RippleDelete, SplitClip, TrackItems,
@@ -149,6 +155,10 @@ pub mod codes {
     pub const ROOT_BIN: ErrorCode = ErrorCode::from_static("edit.root_bin");
     /// A command was submitted to an engine whose thread has stopped.
     pub const ENGINE_STOPPED: ErrorCode = ErrorCode::from_static("edit.engine_stopped");
+    /// An autosave snapshot could not be written, listed, read or removed.
+    pub const AUTOSAVE_FAILED: ErrorCode = ErrorCode::from_static("edit.autosave_failed");
+    /// A snapshot named for restoring is no longer on disk.
+    pub const SNAPSHOT_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.snapshot_not_found");
 }
 
 /// Small commands the unit tests apply to a project.
