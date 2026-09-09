@@ -389,6 +389,49 @@ has Metal, so the snapshot tests run in `cargo test --workspace` on all three
 hosted runners at no extra cost. GPU runners are reserved for checks that need
 real hardware.
 
+## CI build speed
+
+`windows-latest` used to dominate every wave of merges: run 34407960264 on
+`main` spent 23 minutes in Build and 7 in Clippy, against 5 minutes for the
+whole Linux job. Three things caused it, and all three are handled inside
+`.github/workflows/ci.yml` only — **nothing here changes a local build**.
+`cargo build`, `cargo test` and `cargo clippy` on a developer machine still use
+the profiles in `Cargo.toml` exactly as written (`opt-level = 1` for workspace
+crates, `3` for dependencies, full debuginfo).
+
+- **Debuginfo.** The workflow sets `CARGO_PROFILE_DEV_DEBUG` and
+  `CARGO_PROFILE_TEST_DEBUG` to `line-tables-only` as job-level environment
+  variables. Full debuginfo is what makes the MSVC linker and the `.pdb`
+  writes the bulk of the Windows job; line tables still give file and line
+  numbers in the `RUST_BACKTRACE=1` output the tests print on failure. Because
+  these are environment variables and not a profile in `Cargo.toml`, they apply
+  to CI and to nothing else.
+- **sccache.** `Mozilla-Actions/sccache-action` runs before any cargo step and
+  `RUSTC_WRAPPER=sccache` with `SCCACHE_GHA_ENABLED=true` is set for the whole
+  job, backed by the Actions cache. `Swatinem/rust-cache` is keyed on
+  `Cargo.lock`, which changes on nearly every merge, so it misses constantly;
+  sccache is keyed on the individual compilation, so an unrelated lockfile edit
+  no longer forces a cold dependency build. Both are kept: rust-cache is the
+  fast path when the lockfile is untouched, sccache covers the misses.
+  `CARGO_INCREMENTAL=0` was already set, which sccache requires.
+  The wrapper deliberately stays set for the Clippy step too — cargo folds the
+  wrapper into its compiler fingerprint, so clearing it for one step would
+  invalidate every dependency and make clippy rebuild the world.
+- **Windows Defender.** A Windows-only step adds the workspace, `~/.cargo`,
+  `~/.rustup` and the sccache directory to the Defender exclusion list, plus
+  `sccache.exe`, `rustc.exe` and `link.exe` as processes. Hosted runners run as
+  administrator, so this succeeds; it is wrapped in `try`/`catch` and never
+  fails the job if Microsoft changes that.
+
+The last step of each job runs `sccache --show-stats` (with `if: always()`), so
+the cache hit rate for that run is in the job log. That is the quickest way to
+tell a genuinely cold run from a regression in caching.
+
+With this in place the job timeout is back to 40 minutes; it had been raised to
+60 as a stopgap. If a Windows run ever approaches that again, read the sccache
+stats first — a near-zero hit rate means the cache backend, not the code, is
+the problem.
+
 ## GPU CI (RunsOn)
 
 Hosted GitHub runners have no GPU, so hardware encode and decode criteria run

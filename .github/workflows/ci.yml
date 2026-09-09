@@ -17,6 +17,18 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
+  # ---- CI-only build tuning (TASK-125) ----
+  # None of this lives in Cargo.toml or .cargo/config.toml, so a local
+  # `cargo build` behaves exactly as before; see docs/DEVELOPMENT.md,
+  # "CI build speed". Full debuginfo is what makes the MSVC link step and the
+  # .pdb writes dominate the Windows job; line tables keep the file and line
+  # numbers in RUST_BACKTRACE output at a fraction of the size.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # sccache hits survive the Cargo.lock churn that invalidates the rust-cache
+  # key on nearly every merge.
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
   # Pinned GStreamer release. All three OSes must stay on the same minor (1.28).
   # Linux comes from Ubuntu 26.04 apt (1.28.x); Windows and macOS use the
   # official binaries at this exact version. Keep docs/DEVELOPMENT.md in sync.
@@ -27,7 +39,7 @@ jobs:
   check:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +59,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-${{ matrix.os }}
+
+      # rust-cache only hits when Cargo.lock is unchanged, which it rarely is
+      # between merges. sccache is keyed on the compilation itself, so an
+      # unrelated lockfile edit no longer costs a full cold dependency build.
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      # Defender scans every object file cargo and the MSVC linker write under
+      # target\, which is the other half of the Windows penalty. The hosted
+      # runner user is an administrator, so the job can set the exclusions
+      # itself. Best effort only: never fail the build over it.
+      - name: Exclude build directories from Windows Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $paths = @("${{ github.workspace }}", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", $env:SCCACHE_PATH)
+          foreach ($p in $paths) {
+            if (-not $p) { continue }
+            try { Add-MpPreference -ExclusionPath $p -ErrorAction Stop; Write-Host "excluded $p" }
+            catch { Write-Host "could not exclude ${p}: $($_.Exception.Message)" }
+          }
+          try { Add-MpPreference -ExclusionProcess "sccache.exe","rustc.exe","link.exe" -ErrorAction Stop }
+          catch { Write-Host "could not exclude processes: $($_.Exception.Message)" }
 
       # ---------------- GStreamer (TASK-1.3) ----------------
       # The 26.04 mirror can be slow (300 MB at ~350 kB/s was observed), so the
@@ -184,6 +219,12 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # RUSTC_WRAPPER stays set here on purpose. Cargo folds the wrapper into
+      # its compiler fingerprint, so clearing it for this step alone would
+      # invalidate every dependency and make clippy rebuild the world -- the
+      # opposite of what TASK-125 is for. Under `cargo clippy` the wrapper
+      # chain becomes `sccache clippy-driver`; sccache caches or passes it
+      # through, and either way the dependency artifacts are reused.
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -200,3 +241,11 @@ jobs:
         env:
           RUST_LOG: info
         run: cargo run -p subordinate -- --smoke-test
+
+      # Prints "Cache hits"/"Cache misses" and the hit rate for this job, which
+      # is how a warm run is told apart from a cold one (TASK-125). Runs even
+      # when an earlier step failed so the numbers are never lost.
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: sccache --show-stats
