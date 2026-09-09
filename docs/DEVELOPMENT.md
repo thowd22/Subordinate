@@ -357,6 +357,11 @@ on EC2 instances in the project's AWS account through
   `/spot=false` appended to the label to force on-demand. Instances are billed
   by AWS with no markup; every job gets a fresh instance that is terminated
   when the job ends.
+- Idle cost: the stack runs in public mode (`Private: false`, changed
+  2026-09-09) so there is no NAT gateway; the only idle cost is the small
+  Fargate scheduler (about 9 USD/month). Do not enable private mode: the
+  NAT gateway alone costs about 33 USD/month idle. Every job's instance and
+  its root EBS volume are deleted when the job ends.
 
 Useful commands:
 
