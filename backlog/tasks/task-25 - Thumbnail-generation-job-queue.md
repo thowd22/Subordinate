@@ -1,10 +1,11 @@
 ---
 id: TASK-25
 title: Thumbnail generation job queue
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@opus-task-25'
 created_date: '2026-09-08 21:04'
-updated_date: '2026-09-09 15:09'
+updated_date: '2026-09-09 15:42'
 labels:
   - media
 milestone: m-1
@@ -26,8 +27,8 @@ Bins and timeline strips need thumbnails without blocking editing (§5.2).
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 A background job service with priorities, cancellation and progress events
-- [ ] #2 Thumbnail job produces a strip of N frames per media item into the sidecar dir as compressed images
-- [ ] #3 Jobs resume after restart and skip already-generated files
+- [x] #2 Thumbnail job produces a strip of N frames per media item into the sidecar dir as compressed images
+- [x] #3 Jobs resume after restart and skip already-generated files
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -53,10 +54,24 @@ AC 2 and 3 (implemented, NOT checked here): crates/sub-media/src/thumbnail.rs ge
 Why they stay unchecked: this environment has no GStreamer and no sudo (pkg-config finds no gstreamer-1.0), so sub-media cannot be compiled, let alone run against the fixtures — cargo clippy --workspace fails in gstreamer-sys's build script before reaching any code of mine. What was proven here: the whole GStreamer-free half of the module (strip time layout, thumbnail sizing, option validation, file naming, the NV12 box downscale and colour conversion, JPEG encoding, manifest round-trip and the rejection of a stale, foreign or corrupt manifest) was compiled and run out of tree against stub decode/probe modules with the same signatures — 10 tests passing, and clippy::pedantic plus missing_docs clean over that source. The end-to-end evidence for AC 2 and AC 3 is crates/sub-media/tests/thumbnail_fixtures.rs, which asserts a strip of four real JPEGs of the right size in the sidecar dir, that a second run leaves the files' mtimes untouched, that a run missing its manifest and last two pictures regenerates exactly those two, and that a cancelled job reports core.cancelled and leaves no complete strip. Those tests need a machine or CI runner with GStreamer and generated fixtures; they skip themselves without them.
 
 Requeued 2026-09-09 by supervisor: the earlier worker could not build against GStreamer because the scratch prefix was missing. A stable prefix now exists: source /home/admin2/.cache/subordinate/env-gst.sh before cargo. Continue from the merged partial implementation on main; only the unchecked criteria remain.
+
+Verification pass 2026-09-09 (worker on branch task/task-25), with the stable local GStreamer prefix (/home/admin2/.cache/subordinate/env-gst.sh) that the earlier run lacked. sub-media now compiles and runs here, so AC 2 and AC 3 have real evidence and are checked.
+
+- cargo build -p sub-media --tests: clean (gstreamer 0.25 stack + jpeg-encoder link against the local prefix).
+- cargo test -p sub-media --test thumbnail_fixtures against the generated fixtures (SUB_FIXTURES_DIR=/home/admin2/Subordinate/fixtures): 4 passed, 0 skipped (checked --nocapture for the 'skipping: no fixture' line; it is absent, so the assertions really ran against bars_1080p_h264.mp4).
+  - AC 2: a_strip_of_n_compressed_pictures_lands_in_the_sidecar_directory — four complete JPEGs (SOI..EOI) of 160x90 in the sidecar dir, strictly increasing pts inside the clip, and the strip reloads from the manifest alone equal to the generated one.
+  - AC 3: a_second_run_reuses_the_pictures_and_an_interrupted_one_finishes_the_rest — a repeat run leaves the first picture's mtime untouched (nothing decoded); after deleting the manifest and the last two pictures, generation reproduces exactly those two byte-for-byte and still does not rewrite the first two. That is the resume-after-restart and skip-already-generated behaviour.
+  - AC 1 (already checked): the_job_service_runs_a_strip_off_the_calling_thread_and_reports_progress asserts the exact (1,4)..(4,4) progress sequence, and a_cancelled_thumbnail_job_stops_and_reports_cancellation cancels mid-strip and gets core.cancelled with no complete strip left behind.
+- cargo test -p sub-core: 27 passed. cargo test -p sub-media: 79 unit + all integration suites pass except one PRE-EXISTING, unrelated failure — probe_fixtures::every_fixture_probes_into_the_shape_the_manifest_promises fails with 'vfr_60_30.mkv: duration 5983333333 ns, manifest says 6000000000 ns'. That is TASK-13 probe/fixture-manifest tolerance on the VFR clip, untouched by this task; no thumbnail code is involved.
+- cargo fmt --all --check: clean. cargo clippy --workspace --all-targets -- -D warnings: clean across the whole workspace (it now gets past gstreamer-sys).
+
+No code changes were needed in this pass: the implementation merged from the earlier attempt is correct as written; what was missing was only the ability to build and run it.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added the background job service (sub_core::jobs: priority queue, worker pool, cooperative cancellation, progress and lifecycle events) and the thumbnail strip built on it (sub_media::thumbnail: N exactly spaced pictures per media item, JPEG-encoded into the project sidecar dir beside a manifest, keyed by content hash and options so an interrupted or repeated run only produces what is missing). Verified with cargo fmt --all --check, cargo clippy -p sub-core --all-targets -- -D warnings and cargo test -p sub-core (27 tests + 3 doc-tests, all green), plus an out-of-tree compile and run of the GStreamer-free half of the thumbnail module (10 tests, clippy pedantic clean). AC 1 is proven; AC 2 and 3 are implemented with fixture-backed tests in crates/sub-media/tests/thumbnail_fixtures.rs but stay unchecked because this machine has no GStreamer, so sub-media cannot be built or run here — they need CI or a machine with the runtime.
+Background job service plus thumbnail strip generation. sub_core::jobs is a JobService with a priority queue (Interactive > Normal > Background, FIFO within a priority), a worker pool, cooperative CancelToken cancellation shared with sub-media, and Queued/Started/Progress/Finished events fanned out to subscribers. sub_media::thumbnail generates N exactly spaced pictures per media item — sample times are integer RationalTime, duration*(2i+1)/(2N), never floats — seeking with the existing Decoder, box-downscaling NV12/I420 to BT.709 RGB and JPEG-encoding into the sidecar dir under names keyed by content hash and options, beside a versioned manifest; generation loads the manifest first and otherwise skips every picture already on disk, so a repeated run decodes nothing and an interrupted one costs only its missing frames.
+
+Verified on a machine with the GStreamer runtime: cargo fmt --all --check and cargo clippy --workspace --all-targets -- -D warnings clean; cargo test -p sub-core 27 passed; cargo test -p sub-media --test thumbnail_fixtures 4 passed against the real fixtures with no skips, covering the strip of JPEGs and its manifest round-trip (AC 2), the untouched-mtime repeat run and the resume that regenerates exactly the two deleted pictures (AC 3), and the off-thread job's exact progress sequence and mid-strip cancellation to core.cancelled (AC 1). All three acceptance criteria checked. One unrelated pre-existing failure remains in probe_fixtures (vfr_60_30.mkv duration tolerance, TASK-13 territory), not touched here.
 <!-- SECTION:FINAL_SUMMARY:END -->
