@@ -329,11 +329,34 @@ on EC2 instances in the project's AWS account through
 - Smoke test: run the **RunsOn smoke** workflow (`workflow_dispatch`). It
   starts a 2-CPU spot Linux instance, prints instance facts and exits. Use it
   first whenever the stack or the App changes.
-- GPU runners (NVIDIA `g4dn`, AMD `g4ad`, Linux and Windows) are defined in
-  `.github/runs-on.yml` and need the EC2 G-family vCPU quotas
-  (`L-DB2E81BA` on-demand, `L-3819A6DF` spot) above zero in us-east-1.
-- Cost: instances are billed by AWS at spot price with no markup; every job
-  gets a fresh instance that is terminated when the job ends.
+- GPU runners are defined by name in `.github/runs-on.yml`. Reference them as
+  `runs-on: runs-on=${{ github.run_id }}/runner=<name>`:
+
+  | Runner | Instance | Image | On-demand $/h | Status |
+  | --- | --- | --- | --- | --- |
+  | `gpu-nvidia-linux` | `g4dn.xlarge` (T4) | `ubuntu24-gpu-x64` | 0.526 | ready |
+  | `gpu-amd-linux` | `g4ad.xlarge` (Radeon Pro V520) | `ubuntu26-full-x64` | 0.379 | ready |
+  | `gpu-nvidia-windows` | `g4dn.xlarge` | custom AMI placeholder | 0.526 | not usable until TASK-115 |
+  | `gpu-amd-windows` | `g4ad.xlarge` | custom AMI placeholder | 0.379 | not usable until TASK-115 |
+
+  All four need the EC2 G-family vCPU quotas (`L-DB2E81BA` on-demand,
+  `L-3819A6DF` spot) above zero in us-east-1.
+- RunsOn's `*-gpu-*` images carry the NVIDIA driver and CUDA only, so the AMD
+  runner uses the plain Ubuntu 26.04 image and jobs install the Mesa VA-API
+  stack (`mesa-va-drivers`, `vainfo`) themselves. The GStreamer `va` plugin
+  (`vah264enc`) is not a separate Ubuntu package - it ships in
+  `gstreamer1.0-plugins-bad`. Note the NVIDIA GPU image is Ubuntu 24.04, whose
+  apt GStreamer is 1.24, not the 1.28 pinned everywhere else.
+- GPU smoke test: run the **GPU smoke** workflow (`workflow_dispatch`). It
+  checks `nvidia-smi` plus `gst-inspect-1.0 --exists nvh264enc` on the NVIDIA
+  runner, and `/dev/dri` + `vainfo` plus `vah264enc` on the AMD one.
+- Cost: the RunsOn config schema has no per-runner price cap, so hourly prices
+  are recorded in comments there and every GPU job must set `timeout-minutes`.
+  Runners request spot (`price-capacity-optimized`) with
+  `retry: when-interrupted`; if spot capacity is unavailable, re-dispatch with
+  `/spot=false` appended to the label to force on-demand. Instances are billed
+  by AWS with no markup; every job gets a fresh instance that is terminated
+  when the job ends.
 
 Useful commands:
 
