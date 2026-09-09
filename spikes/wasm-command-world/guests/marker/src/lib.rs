@@ -17,7 +17,7 @@ struct Plugin;
 export!(Plugin);
 
 impl Guest for Plugin {
-    fn run(project: String, args: String) -> Result<String, Error> {
+    fn run(project: ProjectId, args: String) -> Result<String, Error> {
         command_api::log(command_api::LogLevel::Info, "marker plugin starting");
 
         let label = label_from(&args)?;
@@ -27,10 +27,10 @@ impl Guest for Plugin {
             r#"{{"name":{},"at":{{"value":{},"rate_numerator":{},"rate_denominator":{}}}}}"#,
             json_string(&label),
             at.value,
-            at.rate_numerator,
-            at.rate_denominator
+            at.rate.numerator,
+            at.rate.denominator
         );
-        let response = command_api::invoke(&project, "sequence.add_marker", &params)?;
+        let response = command_api::run_command(&project, "sequence.add_marker", &params)?;
 
         command_api::log(command_api::LogLevel::Info, "marker plugin done");
         Ok(response)

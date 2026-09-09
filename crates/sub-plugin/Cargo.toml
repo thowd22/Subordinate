@@ -8,6 +8,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+serde_json = { workspace = true }
+sub-core = { version = "0.1.0", path = "../sub-core" }
+sub-model = { version = "0.1.0", path = "../sub-model" }
+sub-time = { version = "0.1.0", path = "../sub-time" }
+wasmtime = { version = "48", default-features = false, features = [
+    "component-model",
+    "runtime",
+    "std",
+] }
 
 [lints]
 workspace = true
