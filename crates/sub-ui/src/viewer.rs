@@ -36,6 +36,8 @@ use eframe::egui;
 use sub_model::sequence::Sequence;
 use sub_time::{Rational, RationalTime, Rounding, Timecode, TimecodeRate};
 
+use crate::shortcuts::{Action, default_action_for};
+
 /// Height of the scrub bar, in points.
 const SCRUB_HEIGHT: f32 = 18.0;
 
@@ -166,22 +168,32 @@ pub enum ViewerAction {
     GoToEnd,
 }
 
+impl ViewerAction {
+    /// The playhead move `action` asks for, if it asks for one at all.
+    ///
+    /// The playback and editing actions are somebody else's; the viewer only
+    /// answers the four that move the playhead.
+    #[must_use]
+    pub const fn for_action(action: Action) -> Option<Self> {
+        match action {
+            Action::StepBack => Some(Self::StepFrames(-1)),
+            Action::StepForward => Some(Self::StepFrames(1)),
+            Action::GoToStart => Some(Self::GoToStart),
+            Action::GoToEnd => Some(Self::GoToEnd),
+            _ => None,
+        }
+    }
+}
+
 /// The action a key press asks for, if any.
 ///
-/// Only unmodified presses are claimed, so a shortcut that happens to use an
-/// arrow key elsewhere in the app keeps working.
+/// The binding itself lives in [`crate::shortcuts`], so the viewer, the help
+/// window and any future remapping all read one table. Modifiers are matched
+/// exactly there, so a shortcut that happens to use an arrow key elsewhere in
+/// the app keeps working.
 #[must_use]
 pub fn action_for_key(key: egui::Key, modifiers: egui::Modifiers) -> Option<ViewerAction> {
-    if modifiers.any() {
-        return None;
-    }
-    match key {
-        egui::Key::ArrowLeft => Some(ViewerAction::StepFrames(-1)),
-        egui::Key::ArrowRight => Some(ViewerAction::StepFrames(1)),
-        egui::Key::Home => Some(ViewerAction::GoToStart),
-        egui::Key::End => Some(ViewerAction::GoToEnd),
-        _ => None,
-    }
+    ViewerAction::for_action(default_action_for(key, modifiers)?)
 }
 
 /// The keys the viewer claims, in the order they are polled.

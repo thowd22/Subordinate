@@ -16,7 +16,8 @@ use sub_render::{
 };
 
 use crate::diagnostics::DiagnosticsPanel;
-use crate::viewer::{ViewerFrame, ViewerPanel};
+use crate::shortcuts::{Action, ShortcutMap, ShortcutsWindow};
+use crate::viewer::{ViewerAction, ViewerFrame, ViewerPanel};
 
 /// Options for launching the application.
 #[derive(Debug, Clone, Default)]
@@ -66,6 +67,10 @@ pub struct SubordinateApp {
     preview: Option<(egui::TextureId, Resolution)>,
     /// Whether the playhead has moved since the last composite.
     needs_composite: bool,
+    /// The keyboard map every panel's shortcuts come from.
+    shortcuts: ShortcutMap,
+    /// The window listing every binding.
+    shortcuts_window: ShortcutsWindow,
 }
 
 impl SubordinateApp {
@@ -93,6 +98,10 @@ impl SubordinateApp {
         if render.is_software() {
             log::warn!("no GPU adapter available; falling back to software rendering");
         }
+        let shortcuts = ShortcutMap::default_map();
+        // Conflicts are a configuration problem, not a reason to refuse to
+        // start, so they are logged once here rather than returned.
+        shortcuts.log_conflicts();
         let sequence = Sequence::new("Sequence", SequenceSettings::default());
         let compositor = Compositor::for_sequence(render.clone(), &sequence);
         let viewer = ViewerPanel::for_sequence(&sequence);
@@ -108,6 +117,8 @@ impl SubordinateApp {
             viewer,
             preview: None,
             needs_composite: true,
+            shortcuts,
+            shortcuts_window: ShortcutsWindow::new(),
         })
     }
 
@@ -124,6 +135,30 @@ impl SubordinateApp {
     /// The viewer panel, which owns the playhead.
     pub fn viewer(&mut self) -> &mut ViewerPanel {
         &mut self.viewer
+    }
+
+    /// The keyboard map in force.
+    pub fn shortcuts(&self) -> &ShortcutMap {
+        &self.shortcuts
+    }
+
+    /// Runs the keyboard map for this frame and applies what it fired.
+    ///
+    /// Returns true when the playhead moved, so the caller composites again.
+    /// Actions whose panels do not exist yet (playback, marking, editing) are
+    /// logged and dropped; they are wired up by the tasks that add them.
+    fn apply_shortcuts(&mut self, ctx: &egui::Context) -> bool {
+        let mut moved = false;
+        for action in self.shortcuts.poll(ctx) {
+            if let Some(viewer_action) = ViewerAction::for_action(action) {
+                moved |= self.viewer.state.apply(viewer_action);
+            } else if action == Action::ShowShortcutHelp {
+                self.shortcuts_window.toggle();
+            } else {
+                log::debug!("shortcut {} is not wired up yet", action.id());
+            }
+        }
+        moved
     }
 
     /// Composites the sequence at the playhead, if the playhead has moved,
@@ -193,8 +228,18 @@ impl eframe::App for SubordinateApp {
             if ui.button("Hardware diagnostics").clicked() {
                 self.diagnostics.open = !self.diagnostics.open;
             }
+            if ui.button("Keyboard shortcuts").clicked() {
+                self.shortcuts_window.toggle();
+            }
         });
         self.diagnostics.show(ui.ctx());
+        self.shortcuts_window.show(ui.ctx(), &self.shortcuts);
+
+        // The map runs before any panel reads the keyboard, so a bound chord
+        // is handled once, here, and never again by a panel further down.
+        if self.apply_shortcuts(ui.ctx()) {
+            self.needs_composite = true;
+        }
 
         let preview = self.composite();
         if self.viewer.ui(ui, Some(preview)) {

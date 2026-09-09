@@ -8,12 +8,17 @@
 
 pub mod app;
 pub mod diagnostics;
+pub mod shortcuts;
 pub mod timeline;
 pub mod timeline_panel;
 pub mod viewer;
 
 pub use app::{AppOptions, SubordinateApp, run};
 pub use diagnostics::DiagnosticsPanel;
+pub use shortcuts::{
+    Action, Binding, Category, Conflict, DEFAULT_BINDINGS, HelpRow, ShortcutMap, ShortcutsWindow,
+    help_rows,
+};
 pub use timeline::{ClipPlacement, TimelineView, TrackLayout, ZoomLevel};
 pub use timeline_panel::{
     ClipMediaKind, PanelLayout, TimelineMetrics, TimelinePanel, TrimmedEdges, WheelInput,
@@ -26,4 +31,7 @@ pub mod codes {
 
     /// A zoom level falls outside the timeline's zoom ladder.
     pub const INVALID_ZOOM: ErrorCode = ErrorCode::from_static("ui.invalid_zoom");
+
+    /// One keyboard chord is claimed by more than one action.
+    pub const SHORTCUT_CONFLICT: ErrorCode = ErrorCode::from_static("ui.shortcut_conflict");
 }
