@@ -3,11 +3,22 @@
 //! Prefers hardware decoders (nvdec, va, vtdec, d3d12) and yields NV12 frames
 //! with rational PTS. Owns the frame cache and the PTS index used for
 //! variable-frame-rate sources. See docs/PLAN.md §5.2.
+//!
+//! A video file is demuxed once, so the audio inside one is decoded here too,
+//! off the same pipeline, as interleaved `f32` PCM (decision-4): see
+//! [`audio`]. Audio-only files are read by `sub-audio` instead.
 
+pub mod audio;
 pub mod decode;
 pub mod probe;
 
-pub use decode::{Decoder, DecoderOptions, FrameFormat, HardwarePreference, VideoFrame};
+pub use audio::{
+    AudioBlock, AudioChannels, AudioFormat, CENTER_DOWNMIX_GAIN, ChannelLayout, ChannelRole,
+    LFE_DOWNMIX_GAIN, MAX_CHANNELS, SURROUND_DOWNMIX_GAIN,
+};
+pub use decode::{
+    Decoder, DecoderOptions, FrameFormat, HardwarePreference, StreamSelection, VideoFrame,
+};
 pub use probe::{
     FrameTiming, MediaInfo, ProbeOptions, Rotation, VideoStreamInfo, probe, probe_with,
 };
@@ -38,6 +49,8 @@ pub mod codes {
     pub const DECODE_TIMEOUT: ErrorCode = ErrorCode::from_static("media.decode_timeout");
     /// The file was opened for decoding but carries no video stream.
     pub const NO_VIDEO_STREAM: ErrorCode = ErrorCode::from_static("media.no_video_stream");
+    /// The file was opened for audio decoding but carries no audio stream.
+    pub const NO_AUDIO_STREAM: ErrorCode = ErrorCode::from_static("media.no_audio_stream");
 }
 
 /// Initialises GStreamer once and returns its runtime version.
@@ -75,6 +88,7 @@ mod tests {
             super::codes::DECODE_FAILED,
             super::codes::DECODE_TIMEOUT,
             super::codes::NO_VIDEO_STREAM,
+            super::codes::NO_AUDIO_STREAM,
         ];
         for code in &codes {
             assert_eq!(code.domain(), "media", "wrong domain for {code}");
