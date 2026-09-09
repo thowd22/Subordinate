@@ -12,6 +12,7 @@ pub mod history_panel;
 pub mod keymap;
 pub mod media_bin;
 pub mod media_import;
+pub mod relink_dialog;
 pub mod sequence_tabs;
 pub mod shortcuts;
 pub mod thumbnails;
@@ -35,6 +36,9 @@ pub use media_bin::{
 pub use media_import::{
     IMPORT_JOB_KIND, ImportJob, ImportOptions, ImportOutcome, ImportQueue, imported_item,
     spawn_import_job, stream_info,
+};
+pub use relink_dialog::{
+    RELINK_JOB_KIND, RelinkDialog, is_certain, pick_replacement_file, pick_search_folder,
 };
 pub use sequence_tabs::{
     NewSequenceDialog, SequenceTabAction, SequenceTabs, SequenceViewState, default_sequence_name,
