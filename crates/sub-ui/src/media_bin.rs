@@ -224,10 +224,15 @@ pub enum MediaBinAction {
     },
     /// Point this offline item at another file.
     ///
-    /// Phase 5 (TASK-72) completes relinking by searching a folder for the
-    /// item's content hash; until then the host asks for the replacement file
-    /// and applies `RelinkMedia`.
+    /// The host opens the [`RelinkDialog`](crate::relink_dialog::RelinkDialog)
+    /// for it: either the user picks the file, or a folder search finds it by
+    /// content hash.
     Relink(MediaId),
+    /// Relink every offline item at once.
+    ///
+    /// The host opens the same dialog for all of them; what it finds is
+    /// applied as a single undo step.
+    RelinkAll,
 }
 
 /// What the bin has selected: a folder, or an item inside one.
@@ -403,6 +408,22 @@ impl MediaBinPanel {
         ui.horizontal(|ui| {
             let path = bin_path(project, open);
             ui.label(RichText::new(path).weak());
+
+            // Bulk relink is only worth offering when something is offline,
+            // and it says how much is, because that is the number the one
+            // undo step will cover.
+            let offline = project.offline_media().count();
+            if offline > 0 {
+                ui.separator();
+                ui.label(
+                    RichText::new(format!("{offline} offline"))
+                        .small()
+                        .color(Color32::from_rgb(220, 120, 90)),
+                );
+                if ui.small_button("Relink all").clicked() {
+                    actions.push(MediaBinAction::RelinkAll);
+                }
+            }
         });
     }
 

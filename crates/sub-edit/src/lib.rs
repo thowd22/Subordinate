@@ -25,6 +25,8 @@
 //!   [`EventBus`] broadcasts what changed.
 //! - [`autosave`] — the background snapshot history in the project's sidecar
 //!   directory, and the recovery check an open makes against it.
+//! - [`relink`] — finding a moved source file by content hash, then by name,
+//!   and relinking every offline item it accounts for as one undo step.
 //!
 //! ```
 //! use schemars::JsonSchema;
@@ -76,6 +78,7 @@ pub mod commands;
 pub mod engine;
 pub mod event;
 pub mod history;
+pub mod relink;
 
 pub use autosave::{
     Autosave, AutosaveConfig, AutosaveStatus, Recovery, Snapshot, SnapshotStore, check_for_recovery,
@@ -90,6 +93,10 @@ pub use commands::{builtin_registry, register_builtin};
 pub use engine::{Applied, Engine, EngineConfig, EngineHandle, HistorySummary};
 pub use event::{ChangeEvent, ChangeOrigin, ChangeType, EntityKind};
 pub use history::{DEFAULT_DEPTH, History, HistoryEntry};
+pub use relink::{
+    MatchKind, RelinkMatch, RelinkPlan, RelinkTarget, SearchOptions, match_chosen, match_offline,
+    match_targets, scan_folder,
+};
 
 /// The error codes this crate produces.
 ///
