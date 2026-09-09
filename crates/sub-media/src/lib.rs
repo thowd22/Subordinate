@@ -16,6 +16,7 @@ pub mod frame_cache;
 pub mod index;
 pub mod probe;
 pub mod thumbnail;
+pub mod waveform;
 
 pub use audio::{
     AudioBlock, AudioChannels, AudioFormat, CENTER_DOWNMIX_GAIN, ChannelLayout, ChannelRole,
@@ -39,6 +40,11 @@ pub use thumbnail::{
     MAX_THUMBNAIL_WIDTH, MAX_THUMBNAILS, THUMBNAIL_JOB_KIND, THUMBNAIL_MANIFEST_VERSION,
     ThumbnailFrame, ThumbnailJob, ThumbnailOptions, ThumbnailStrip, spawn_thumbnail_job,
     strip_times, thumbnail_size,
+};
+pub use waveform::{
+    MAX_FRAMES_PER_PEAK, MAX_WAVEFORM_DECIMATION, MAX_WAVEFORM_LEVELS, MIN_FRAMES_PER_PEAK, Peak,
+    WAVEFORM_JOB_KIND, WAVEFORM_MANIFEST_VERSION, Waveform, WaveformJob, WaveformLevel,
+    WaveformOptions, spawn_waveform_job,
 };
 
 /// Stable [`sub_core::ErrorCode`] constants this crate returns.
@@ -76,6 +82,10 @@ pub mod codes {
     /// probed, seeked or decoded, a picture could not be encoded, or the
     /// sidecar directory could not be written.
     pub const THUMBNAIL_FAILED: ErrorCode = ErrorCode::from_static("media.thumbnail_failed");
+    /// A waveform could not be produced: the source could not be read or
+    /// decoded, or its peaks could not be written to or read back from the
+    /// sidecar directory.
+    pub const WAVEFORM_FAILED: ErrorCode = ErrorCode::from_static("media.waveform_failed");
     /// A PTS index could not be built, cached or read back: the parse pipeline
     /// failed, the file exposes no timed pictures, or the sidecar cache could
     /// not be written or understood.
@@ -121,6 +131,7 @@ mod tests {
             super::codes::NO_AUDIO_STREAM,
             super::codes::INDEX_FAILED,
             super::codes::THUMBNAIL_FAILED,
+            super::codes::WAVEFORM_FAILED,
         ];
         for code in &codes {
             assert_eq!(code.domain(), "media", "wrong domain for {code}");
