@@ -20,6 +20,9 @@
 //! - [`commands`] — the rest of the set: track and sequence commands, clip
 //!   parameters, markers, media items and bins, with [`register_builtin`] to
 //!   put every one of them on a registry.
+//! - [`Engine`] — the thread that owns the project: commands go in on a queue,
+//!   readers take immutable [`ChangeEvent`]-announced snapshots out, and the
+//!   [`EventBus`] broadcasts what changed.
 //!
 //! ```
 //! use serde::{Deserialize, Serialize};
@@ -61,17 +64,23 @@
 //! assert_eq!(json::to_json(&project).unwrap(), after);
 //! ```
 
+pub mod bus;
 pub mod clip;
 pub mod command;
 pub mod commands;
+pub mod engine;
+pub mod event;
 pub mod history;
 
+pub use bus::{DEFAULT_EVENT_CAPACITY, EventBus, EventReceiver};
 pub use clip::{
     AddClip, MoveClip, RemoveClip, RestoreTrackItems, RippleDelete, SplitClip, TrackItems,
     TrimClipIn, TrimClipOut,
 };
 pub use command::{AnyCommand, BoxedCommand, Command, CommandEnvelope, CommandRegistry, Inverse};
 pub use commands::{builtin_registry, register_builtin};
+pub use engine::{Applied, Engine, EngineConfig, EngineHandle, HistorySummary};
+pub use event::{ChangeEvent, ChangeOrigin, ChangeType, EntityKind};
 pub use history::{DEFAULT_DEPTH, History, HistoryEntry};
 
 /// The error codes this crate produces.
@@ -138,6 +147,8 @@ pub mod codes {
     pub const BIN_NOT_EMPTY: ErrorCode = ErrorCode::from_static("edit.bin_not_empty");
     /// The root bin was removed, moved or made a child of itself.
     pub const ROOT_BIN: ErrorCode = ErrorCode::from_static("edit.root_bin");
+    /// A command was submitted to an engine whose thread has stopped.
+    pub const ENGINE_STOPPED: ErrorCode = ErrorCode::from_static("edit.engine_stopped");
 }
 
 /// Small commands the unit tests apply to a project.
@@ -285,6 +296,7 @@ mod tests {
             codes::INVALID_INDEX,
             codes::DUPLICATE_TRACK,
             codes::DUPLICATE_SEQUENCE,
+            codes::ENGINE_STOPPED,
         ] {
             assert_eq!(code.domain(), "edit");
             assert!(sub_core::ErrorCode::parse(code.as_str()).is_ok());
