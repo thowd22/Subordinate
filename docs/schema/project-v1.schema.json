@@ -686,6 +686,16 @@
           "$ref": "#/$defs/TrackKind",
           "description": "Whether this lane carries picture or sound."
         },
+        "locked": {
+          "default": false,
+          "description": "Whether the lane is locked against edits.\n\nClip commands refuse to touch a locked track (`edit.track_locked`);\ntrack header commands, including the one that unlocks it, still apply.",
+          "type": "boolean"
+        },
+        "muted": {
+          "default": false,
+          "description": "Whether the lane is silenced: a muted audio track contributes nothing\nto the mixer and a muted video track nothing to the composite.\n\nDefaults to false, and is defaulted on the way in so a project file\nwritten before the flag existed still loads.",
+          "type": "boolean"
+        },
         "name": {
           "description": "Display name, shown in the track header (\"V1\", \"Dialogue\").",
           "type": "string"

@@ -301,6 +301,8 @@
               }
             ],
             "kind": "video",
+            "locked": false,
+            "muted": false,
             "name": "V1"
           },
           {
@@ -370,6 +372,8 @@
               }
             ],
             "kind": "video",
+            "locked": false,
+            "muted": false,
             "name": "V2"
           },
           {
@@ -428,6 +432,8 @@
               }
             ],
             "kind": "audio",
+            "locked": false,
+            "muted": false,
             "name": "A1"
           }
         ]
@@ -531,6 +537,8 @@
               }
             ],
             "kind": "video",
+            "locked": false,
+            "muted": false,
             "name": "V1"
           },
           {
@@ -549,6 +557,8 @@
               }
             ],
             "kind": "video",
+            "locked": false,
+            "muted": false,
             "name": "V2"
           },
           {
@@ -607,6 +617,8 @@
               }
             ],
             "kind": "audio",
+            "locked": false,
+            "muted": false,
             "name": "A1"
           }
         ]

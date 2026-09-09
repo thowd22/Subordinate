@@ -15,9 +15,10 @@
 //! - [`History`] — the undo/redo stack, with a configurable depth and a
 //!   grouping API so a drag that moves twelve clips undoes in one step.
 //!
-//! The concrete commands live in the tasks that follow: clip commands, track
-//! and sequence commands, parameter, marker, media and bin commands. They all
-//! implement [`Command`] and register their [`Command::KIND`] here.
+//! - [`commands`] — the concrete command set. Track and sequence commands are
+//!   here now; clip, parameter, marker, media and bin commands join them in
+//!   the tasks that follow. [`register_builtin`] puts every one of them on a
+//!   registry.
 //!
 //! ```
 //! use serde::{Deserialize, Serialize};
@@ -60,9 +61,11 @@
 //! ```
 
 pub mod command;
+pub mod commands;
 pub mod history;
 
 pub use command::{AnyCommand, BoxedCommand, Command, CommandEnvelope, CommandRegistry, Inverse};
+pub use commands::{builtin_registry, register_builtin};
 pub use history::{DEFAULT_DEPTH, History, HistoryEntry};
 
 /// The error codes this crate produces.
@@ -84,6 +87,21 @@ pub mod codes {
     pub const GROUP_OPEN: ErrorCode = ErrorCode::from_static("edit.group_open");
     /// A group was committed or aborted while none was open.
     pub const NO_GROUP: ErrorCode = ErrorCode::from_static("edit.no_group");
+    /// A command names a sequence the project does not hold.
+    pub const SEQUENCE_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.sequence_not_found");
+    /// A command names a track the sequence does not hold.
+    pub const TRACK_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.track_not_found");
+    /// A clip command was aimed at a locked track.
+    pub const TRACK_LOCKED: ErrorCode = ErrorCode::from_static("edit.track_locked");
+    /// A track still holding clips was removed without `force`.
+    pub const TRACK_NOT_EMPTY: ErrorCode = ErrorCode::from_static("edit.track_not_empty");
+    /// A command names a position past the end of the list it inserts into.
+    pub const INVALID_INDEX: ErrorCode = ErrorCode::from_static("edit.invalid_index");
+    /// A track would be inserted with an identifier the sequence already uses.
+    pub const DUPLICATE_TRACK: ErrorCode = ErrorCode::from_static("edit.duplicate_track");
+    /// A sequence would be inserted with an identifier the project already
+    /// uses.
+    pub const DUPLICATE_SEQUENCE: ErrorCode = ErrorCode::from_static("edit.duplicate_sequence");
 }
 
 /// Small commands the unit tests apply to a project.
@@ -218,6 +236,13 @@ mod tests {
             codes::DUPLICATE_COMMAND,
             codes::GROUP_OPEN,
             codes::NO_GROUP,
+            codes::SEQUENCE_NOT_FOUND,
+            codes::TRACK_NOT_FOUND,
+            codes::TRACK_LOCKED,
+            codes::TRACK_NOT_EMPTY,
+            codes::INVALID_INDEX,
+            codes::DUPLICATE_TRACK,
+            codes::DUPLICATE_SEQUENCE,
         ] {
             assert_eq!(code.domain(), "edit");
             assert!(sub_core::ErrorCode::parse(code.as_str()).is_ok());
