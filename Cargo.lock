@@ -3390,6 +3390,13 @@ dependencies = [
 [[package]]
 name = "sub-export"
 version = "0.1.0"
+dependencies = [
+ "gstreamer",
+ "serde",
+ "serde_json",
+ "sub-core",
+ "tracing",
+]
 
 [[package]]
 name = "sub-media"
@@ -3460,6 +3467,7 @@ dependencies = [
  "eframe",
  "log",
  "sub-core",
+ "sub-export",
  "sub-media",
  "sub-render",
 ]
@@ -3479,6 +3487,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "sub-core",
+ "sub-export",
  "sub-media",
  "tracing",
 ]

@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 sub-core = { version = "0.1.0", path = "../../crates/sub-core" }
+sub-export = { version = "0.1.0", path = "../../crates/sub-export" }
 sub-media = { version = "0.1.0", path = "../../crates/sub-media" }
 serde_json = "1"
 tracing = "0.1"

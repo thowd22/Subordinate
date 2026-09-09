@@ -52,6 +52,49 @@ fn diag_prints_a_parseable_report_of_every_vendor() {
 }
 
 #[test]
+fn diag_reports_the_encoder_probe_in_selection_order() {
+    let (ok, stdout, stderr) = run(&["diag"]);
+    assert!(ok, "diag failed: {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("diag prints JSON");
+    let probe = &report["encoder_probe"];
+    assert_eq!(probe["platform"], std::env::consts::OS);
+    let encoders = probe["encoders"].as_array().expect("encoders are an array");
+    let names: Vec<&str> = encoders
+        .iter()
+        .map(|encoder| encoder["element"].as_str().expect("an element name"))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "nvh264enc",
+            "nvh265enc",
+            "nvav1enc",
+            "vah264enc",
+            "vah265enc",
+            "amfh264enc",
+            "amfh265enc",
+            "vtenc_h264",
+            "vtenc_h265",
+            "mfh264enc",
+            "x264enc",
+            "x265enc",
+        ]
+    );
+    for encoder in encoders {
+        assert!(matches!(
+            encoder["codec"].as_str(),
+            Some("h264" | "h265" | "av1")
+        ));
+        assert!(encoder["present"].is_boolean());
+        assert!(encoder["ready"].is_boolean());
+        assert!(
+            encoder["present"] == true || encoder["ready"] == false,
+            "an absent encoder cannot be ready: {encoder}"
+        );
+    }
+}
+
+#[test]
 fn a_missing_expected_vendor_carries_an_install_hint() {
     let (ok, stdout, _) = run(&["diag", "--compact"]);
     assert!(ok, "diag failed");
