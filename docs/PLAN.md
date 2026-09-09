@@ -126,7 +126,9 @@ compositor -> wgpu texture -> egui Image (main viewport or pop-out viewport)`.
 
 ### 5.6 Project files
 - `project.sub` (JSON): schema version, media items (relative paths + content hash for relinking), sequences, bins, settings.
-- Sidecar `project.sub.d/`: thumbnails, waveforms, proxies, autosave snapshots. Gitignored by default.
+- Sidecar directory: a project file `name.sub` owns `name.sub.d/` beside it, holding thumbnails, waveforms,
+  proxies and autosave snapshots. It is derived data: deleting it costs only regeneration time. The repository
+  `.gitignore` carries `*.sub.d/` so no sidecar is ever committed, and project templates ship the same entry.
 - Migrations keyed by schema version; never break old files.
 
 ### 5.7 UI

@@ -1,0 +1,617 @@
+{
+  "project": {
+    "id": "0192f3a0-0000-7000-8000-000000000001",
+    "media": [
+      {
+        "color": {
+          "primaries": "bt709",
+          "space": "rec709",
+          "transfer": "bt709"
+        },
+        "hash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "id": "0192f3a0-0001-7000-8000-000000000001",
+        "info": {
+          "audio": [
+            {
+              "channels": 2,
+              "sample_rate": 48000
+            }
+          ],
+          "duration": {
+            "rate": {
+              "denominator": 1001,
+              "numerator": 24000
+            },
+            "value": 24024
+          },
+          "video": [
+            {
+              "color": {
+                "primaries": "bt709",
+                "space": "rec709",
+                "transfer": "bt709"
+              },
+              "frame_rate": {
+                "denominator": 1001,
+                "numerator": 24000
+              },
+              "height": 2160,
+              "sample_aspect": {
+                "denominator": 1,
+                "numerator": 1
+              },
+              "width": 3840
+            }
+          ]
+        },
+        "name": "Interview A",
+        "offline": false,
+        "path": "footage/interview.mp4",
+        "proxy": {
+          "ready": "project.sub.d/proxy/interview.mov"
+        }
+      },
+      {
+        "color": {
+          "primaries": "bt709",
+          "space": "rec709",
+          "transfer": "bt709"
+        },
+        "hash": "2222222222222222222222222222222222222222222222222222222222222222",
+        "id": "0192f3a0-0001-7000-8000-000000000002",
+        "info": null,
+        "name": "City b-roll",
+        "offline": false,
+        "path": "footage/broll-city.mov",
+        "proxy": "pending"
+      },
+      {
+        "color": {
+          "primaries": "bt709",
+          "space": "rec709",
+          "transfer": "bt709"
+        },
+        "hash": null,
+        "id": "0192f3a0-0001-7000-8000-000000000003",
+        "info": null,
+        "name": "Room tone",
+        "offline": true,
+        "path": "audio/room-tone.wav",
+        "proxy": {
+          "failed": "no audio proxy encoder"
+        }
+      }
+    ],
+    "name": "Doc cut",
+    "root_bin": {
+      "children": [
+        {
+          "children": [],
+          "id": "0192f3a0-0002-7000-8000-000000000001",
+          "media": [
+            "0192f3a0-0001-7000-8000-000000000001"
+          ],
+          "name": "Interviews"
+        },
+        {
+          "children": [],
+          "id": "0192f3a0-0002-7000-8000-000000000002",
+          "media": [
+            "0192f3a0-0001-7000-8000-000000000002"
+          ],
+          "name": "B-roll"
+        }
+      ],
+      "id": "0192f3a0-0000-7000-8000-000000000002",
+      "media": [
+        "0192f3a0-0001-7000-8000-000000000003"
+      ],
+      "name": "Doc cut"
+    },
+    "sequences": [
+      {
+        "id": "0192f3a0-0006-7000-8000-000000000001",
+        "markers": [
+          {
+            "id": "0192f3a0-0004-7000-8000-000000000002",
+            "marked_range": {
+              "duration": {
+                "rate": {
+                  "denominator": 1001,
+                  "numerator": 24000
+                },
+                "value": 24
+              },
+              "start": {
+                "rate": {
+                  "denominator": 1001,
+                  "numerator": 24000
+                },
+                "value": 96
+              }
+            },
+            "name": "act two",
+            "note": ""
+          }
+        ],
+        "name": "Main",
+        "settings": {
+          "color": {
+            "primaries": "bt709",
+            "space": "rec709",
+            "transfer": "bt709"
+          },
+          "frame_rate": {
+            "denominator": 1001,
+            "numerator": 24000
+          },
+          "resolution": {
+            "height": 2160,
+            "width": 3840
+          },
+          "sample_rate": 48000
+        },
+        "tracks": [
+          {
+            "id": "0192f3a0-0005-7000-8000-000000000001",
+            "items": [
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1001,
+                      "numerator": 24000
+                    },
+                    "value": 6
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1001,
+                      "numerator": 24000
+                    },
+                    "value": 0
+                  },
+                  "gain": -3000000,
+                  "id": "0192f3a0-0003-7000-8000-000000000001",
+                  "markers": [
+                    {
+                      "id": "0192f3a0-0004-7000-8000-000000000001",
+                      "marked_range": {
+                        "duration": {
+                          "rate": {
+                            "denominator": 1001,
+                            "numerator": 24000
+                          },
+                          "value": 0
+                        },
+                        "start": {
+                          "rate": {
+                            "denominator": 1001,
+                            "numerator": 24000
+                          },
+                          "value": 30
+                        }
+                      },
+                      "name": "look here",
+                      "note": "cut on the nod"
+                    }
+                  ],
+                  "media": "0192f3a0-0001-7000-8000-000000000001",
+                  "name": "shot 1",
+                  "opacity": 900000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1001,
+                        "numerator": 24000
+                      },
+                      "value": 96
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1001,
+                        "numerator": 24000
+                      },
+                      "value": 24
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              },
+              {
+                "transition": {
+                  "crossfade": {
+                    "in_offset": {
+                      "rate": {
+                        "denominator": 1001,
+                        "numerator": 24000
+                      },
+                      "value": 6
+                    },
+                    "out_offset": {
+                      "rate": {
+                        "denominator": 1001,
+                        "numerator": 24000
+                      },
+                      "value": 6
+                    }
+                  }
+                }
+              },
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1001,
+                      "numerator": 24000
+                    },
+                    "value": 0
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1001,
+                      "numerator": 24000
+                    },
+                    "value": 12
+                  },
+                  "gain": 0,
+                  "id": "0192f3a0-0003-7000-8000-000000000002",
+                  "markers": [],
+                  "media": "0192f3a0-0001-7000-8000-000000000002",
+                  "name": "shot 2",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1001,
+                        "numerator": 24000
+                      },
+                      "value": 72
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1001,
+                        "numerator": 24000
+                      },
+                      "value": 0
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 12000000,
+                      "y": -8000000
+                    },
+                    "rotation_degrees": 2500000,
+                    "scale": {
+                      "x": 1100000,
+                      "y": 1100000
+                    }
+                  }
+                }
+              }
+            ],
+            "kind": "video",
+            "name": "V1"
+          },
+          {
+            "id": "0192f3a0-0005-7000-8000-000000000002",
+            "items": [
+              {
+                "gap": {
+                  "duration": {
+                    "rate": {
+                      "denominator": 1001,
+                      "numerator": 24000
+                    },
+                    "value": 24
+                  }
+                }
+              },
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1001,
+                      "numerator": 24000
+                    },
+                    "value": 0
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1001,
+                      "numerator": 24000
+                    },
+                    "value": 0
+                  },
+                  "gain": 0,
+                  "id": "0192f3a0-0003-7000-8000-000000000003",
+                  "markers": [],
+                  "media": "0192f3a0-0001-7000-8000-000000000002",
+                  "name": "lower third",
+                  "opacity": 750000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1001,
+                        "numerator": 24000
+                      },
+                      "value": 48
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1001,
+                        "numerator": 24000
+                      },
+                      "value": 120
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              }
+            ],
+            "kind": "video",
+            "name": "V2"
+          },
+          {
+            "id": "0192f3a0-0005-7000-8000-000000000003",
+            "items": [
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1001,
+                      "numerator": 24000
+                    },
+                    "value": 12
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1001,
+                      "numerator": 24000
+                    },
+                    "value": 12
+                  },
+                  "gain": -12000000,
+                  "id": "0192f3a0-0003-7000-8000-000000000004",
+                  "markers": [],
+                  "media": "0192f3a0-0001-7000-8000-000000000003",
+                  "name": "room tone",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1001,
+                        "numerator": 24000
+                      },
+                      "value": 168
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1001,
+                        "numerator": 24000
+                      },
+                      "value": 0
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              }
+            ],
+            "kind": "audio",
+            "name": "A1"
+          }
+        ]
+      },
+      {
+        "id": "0192f3a0-0006-7000-8000-000000000002",
+        "markers": [
+          {
+            "id": "0192f3a0-0004-7000-8000-000000000003",
+            "marked_range": {
+              "duration": {
+                "rate": {
+                  "denominator": 1,
+                  "numerator": 25
+                },
+                "value": 0
+              },
+              "start": {
+                "rate": {
+                  "denominator": 1,
+                  "numerator": 25
+                },
+                "value": 45
+              }
+            },
+            "name": "logo out",
+            "note": ""
+          }
+        ],
+        "name": "Titles",
+        "settings": {
+          "color": {
+            "primaries": "bt709",
+            "space": "rec709",
+            "transfer": "bt709"
+          },
+          "frame_rate": {
+            "denominator": 1,
+            "numerator": 25
+          },
+          "resolution": {
+            "height": 1080,
+            "width": 1920
+          },
+          "sample_rate": 48000
+        },
+        "tracks": [
+          {
+            "id": "0192f3a0-0005-7000-8000-000000000004",
+            "items": [
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 10
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "gain": 0,
+                  "id": "0192f3a0-0003-7000-8000-000000000005",
+                  "markers": [],
+                  "media": "0192f3a0-0001-7000-8000-000000000002",
+                  "name": "title card",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 50
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 0
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              }
+            ],
+            "kind": "video",
+            "name": "V1"
+          },
+          {
+            "id": "0192f3a0-0005-7000-8000-000000000005",
+            "items": [
+              {
+                "gap": {
+                  "duration": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 50
+                  }
+                }
+              }
+            ],
+            "kind": "video",
+            "name": "V2"
+          },
+          {
+            "id": "0192f3a0-0005-7000-8000-000000000006",
+            "items": [
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "gain": 0,
+                  "id": "0192f3a0-0003-7000-8000-000000000006",
+                  "markers": [],
+                  "media": "0192f3a0-0001-7000-8000-000000000003",
+                  "name": "sting",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 25
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 25
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              }
+            ],
+            "kind": "audio",
+            "name": "A1"
+          }
+        ]
+      }
+    ]
+  },
+  "schema_version": 1
+}
