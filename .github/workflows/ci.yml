@@ -3,7 +3,15 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'backlog/**'
+      - 'docs/**'
+      - '**.md'
   pull_request:
+    paths-ignore:
+      - 'backlog/**'
+      - 'docs/**'
+      - '**.md'
 
 env:
   CARGO_TERM_COLOR: always
