@@ -39,7 +39,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-            gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x pkg-config
+            gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x pkg-config \
+            libasound2-dev
           echo "gstreamer-1.0 = $(pkg-config --modversion gstreamer-1.0)"
 
       - name: NVENC element present
@@ -81,6 +82,7 @@ jobs:
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
             gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x pkg-config \
+            libasound2-dev \
             vainfo mesa-va-drivers libva-drm2
           v=$(pkg-config --modversion gstreamer-1.0)
           echo "gstreamer-1.0 = $v"
