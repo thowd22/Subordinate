@@ -241,6 +241,15 @@ impl VideoFrame {
         self.frame.height()
     }
 
+    /// Resident size of the picture in bytes, every plane and its padding
+    /// included.
+    ///
+    /// This is what the frame costs the process, so it is what
+    /// [`FrameCache`](crate::FrameCache) charges against its budget.
+    pub fn byte_size(&self) -> usize {
+        self.frame.size()
+    }
+
     /// Bytes of one plane, or `None` when the index is past the last plane.
     pub fn plane_data(&self, plane: u32) -> Option<&[u8]> {
         self.frame.plane_data(plane).ok()

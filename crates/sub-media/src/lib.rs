@@ -12,6 +12,7 @@ pub mod audio;
 pub mod decode;
 pub mod decode_ahead;
 pub mod diagnostics;
+pub mod frame_cache;
 pub mod index;
 pub mod probe;
 
@@ -26,6 +27,7 @@ pub use decode_ahead::{DEFAULT_CAPACITY, DecodeAhead, DecodeAheadOptions, Decode
 pub use diagnostics::{
     ElementKind, ElementStatus, HardwareDiagnostics, VENDORS, Vendor, VendorReport,
 };
+pub use frame_cache::{Cacheable, DEFAULT_BUDGET_BYTES, FrameCache, FrameCacheStats, FrameKey};
 pub use index::{
     CancelToken, INDEX_CACHE_VERSION, IndexEntry, IndexJob, IndexedDecoder, LazyPtsIndex, PtsIndex,
 };
