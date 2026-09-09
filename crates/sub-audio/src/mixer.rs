@@ -114,7 +114,7 @@ fn sample_rate_of(sample_rate: u32) -> SubResult<Rational> {
 /// This is the only place a timeline value meets the sample clock: exact where
 /// the rates divide, rounded to the nearest frame where they do not, since a
 /// 1001-denominator rate never lands on a whole sample.
-fn frames_at(time: RationalTime, rate: Rational, what: &'static str) -> SubResult<u64> {
+pub(crate) fn frames_at(time: RationalTime, rate: Rational, what: &'static str) -> SubResult<u64> {
     if time.is_negative() {
         return Err(graph_invalid(what, "must not be negative", time));
     }
@@ -127,7 +127,7 @@ fn frames_at(time: RationalTime, rate: Rational, what: &'static str) -> SubResul
 
 /// A [`codes::GRAPH_INVALID`] error naming the offending field and value.
 fn graph_invalid(what: &'static str, why: &str, time: RationalTime) -> SubError {
-    SubError::new(codes::GRAPH_INVALID, format!("clip {what} {why}"))
+    SubError::new(codes::GRAPH_INVALID, format!("{what} {why}"))
         .with_detail("field", what)
         .with_detail("value", time.to_string())
 }
@@ -379,6 +379,18 @@ impl MixGraph {
         self.tracks.get(index).map(|track| track.audible)
     }
 
+    /// The first frame and length in frames of the clip that reads `slot`.
+    ///
+    /// Slots are one per clip, so the first clip found using `slot` is the
+    /// only one; `None` means no clip reads that slot.
+    pub fn slot_span(&self, slot: usize) -> Option<(u64, u64)> {
+        self.tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .find(|clip| clip.slot == slot)
+            .map(|clip| (clip.start, clip.frames))
+    }
+
     /// The length of the graph in frames: one past the last clip's last frame.
     pub fn duration_frames(&self) -> u64 {
         self.tracks
@@ -502,10 +514,10 @@ impl MixGraphBuilder {
 
 /// Validates one clip and converts its times to frames at `rate`.
 fn compile_clip(clip: &ClipSpec, rate: Rational) -> SubResult<ClipNode> {
-    let start = frames_at(clip.start, rate, "start")?;
-    let frames = frames_at(clip.duration, rate, "duration")?;
-    let fade_in = frames_at(clip.fade_in, rate, "fade_in")?;
-    let fade_out = frames_at(clip.fade_out, rate, "fade_out")?;
+    let start = frames_at(clip.start, rate, "clip start")?;
+    let frames = frames_at(clip.duration, rate, "clip duration")?;
+    let fade_in = frames_at(clip.fade_in, rate, "clip fade_in")?;
+    let fade_out = frames_at(clip.fade_out, rate, "clip fade_out")?;
     if fade_in.saturating_add(fade_out) > frames {
         return Err(SubError::new(
             codes::GRAPH_INVALID,
@@ -745,7 +757,7 @@ impl MixerControl {
     /// the queue is full.
     pub fn seek(&mut self, position: RationalTime) -> SubResult<()> {
         let rate = sample_rate_of(self.sample_rate)?;
-        let frames = frames_at(position, rate, "position")?;
+        let frames = frames_at(position, rate, "transport position")?;
         self.send(MixerUpdate::Position(frames))
     }
 
