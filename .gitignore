@@ -1,3 +1,7 @@
 /target
 *.sub.d/
 /fixtures/
+# egui_kittest writes these next to the committed references when a snapshot
+# fails; CI uploads them as artifacts, they are never committed.
+*.new.png
+*.diff.png
