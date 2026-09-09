@@ -5,9 +5,13 @@
 //! variable-frame-rate sources. See docs/PLAN.md §5.2.
 
 pub mod decode;
+pub mod diagnostics;
 pub mod probe;
 
 pub use decode::{Decoder, DecoderOptions, FrameFormat, HardwarePreference, VideoFrame};
+pub use diagnostics::{
+    ElementKind, ElementStatus, HardwareDiagnostics, VENDORS, Vendor, VendorReport,
+};
 pub use probe::{
     FrameTiming, MediaInfo, ProbeOptions, Rotation, VideoStreamInfo, probe, probe_with,
 };

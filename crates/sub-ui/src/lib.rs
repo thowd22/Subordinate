@@ -7,5 +7,7 @@
 //! is the same device `sub-render` composites with; see [`app`].
 
 pub mod app;
+pub mod diagnostics;
 
 pub use app::{AppOptions, SubordinateApp, run};
+pub use diagnostics::DiagnosticsPanel;
