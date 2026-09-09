@@ -9,6 +9,10 @@
 //!   bridge and plugins (docs/PLAN.md §6.4).
 //! - [`logging`], the `tracing` setup used by all three binaries, with an
 //!   env-filter and a JSON output option.
+//! - [`jobs`], the background job service every long-running piece of work
+//!   (thumbnails, waveforms, proxies, PTS indexes, plugin analyzers) is run
+//!   through: priorities, cooperative cancellation and progress events
+//!   (docs/PLAN.md §5.2).
 //!
 //! The convention itself — when to add a code, how to wrap lower-level errors —
 //! is documented in `docs/DEVELOPMENT.md`.
@@ -27,7 +31,11 @@
 //! ```
 
 pub mod error;
+pub mod jobs;
 pub mod logging;
 
 pub use error::{ErrorCode, InvalidErrorCode, ResultExt, SubError, SubResult, codes};
+pub use jobs::{
+    CancelToken, JobContext, JobEvent, JobHandle, JobId, JobOutcome, JobService, JobState, Priority,
+};
 pub use logging::{LogConfig, LogFormat};
