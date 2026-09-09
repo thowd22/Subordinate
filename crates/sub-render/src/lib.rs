@@ -12,6 +12,7 @@ pub mod context;
 pub mod error;
 pub mod graph;
 pub mod nv12;
+pub mod readback;
 
 pub use adapter::{
     AdapterRank, adapter_rank, backend_label, best_adapter_index, describe_adapter,
@@ -24,3 +25,6 @@ pub use graph::{
     SourceFrame, resolve_clip_at, resolve_layers_at,
 };
 pub use nv12::{Nv12Converter, Nv12Geometry, OUTPUT_FORMAT};
+pub use readback::{
+    BYTES_PER_PIXEL, DEFAULT_DEPTH, FrameBuffer, FrameReadback, StagingRing, padded_row_bytes,
+};
