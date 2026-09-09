@@ -17,12 +17,9 @@
 //!
 //! - [`clip`] — the primitive clip edits: add, remove, move, trim in and out,
 //!   split and ripple delete, with the overwrite overlap policy they share.
-//! - [`commands`] — the track and sequence command set, with
-//!   [`register_builtin`] to put every one of them on a registry.
-//!
-//! The remaining commands live in the tasks that follow: parameter, marker,
-//! media and bin commands. They all implement [`Command`] and register their
-//! [`Command::KIND`] here.
+//! - [`commands`] — the rest of the set: track and sequence commands, clip
+//!   parameters, markers, media items and bins, with [`register_builtin`] to
+//!   put every one of them on a registry.
 //!
 //! ```
 //! use serde::{Deserialize, Serialize};
@@ -124,6 +121,23 @@ pub mod codes {
     /// A sequence would be inserted with an identifier the project already
     /// uses.
     pub const DUPLICATE_SEQUENCE: ErrorCode = ErrorCode::from_static("edit.duplicate_sequence");
+    /// A command names a marker the sequence or clip does not hold.
+    pub const MARKER_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.marker_not_found");
+    /// A marker would be added with an identifier its holder already uses.
+    pub const DUPLICATE_MARKER: ErrorCode = ErrorCode::from_static("edit.duplicate_marker");
+    /// A media item would be imported with an identifier the project already
+    /// uses.
+    pub const DUPLICATE_MEDIA: ErrorCode = ErrorCode::from_static("edit.duplicate_media");
+    /// A media item still used by clips was removed without `force`.
+    pub const MEDIA_IN_USE: ErrorCode = ErrorCode::from_static("edit.media_in_use");
+    /// A command names a bin the project does not hold.
+    pub const BIN_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.bin_not_found");
+    /// A bin would be inserted with an identifier the bin tree already uses.
+    pub const DUPLICATE_BIN: ErrorCode = ErrorCode::from_static("edit.duplicate_bin");
+    /// A bin still holding media or child bins was removed without `force`.
+    pub const BIN_NOT_EMPTY: ErrorCode = ErrorCode::from_static("edit.bin_not_empty");
+    /// The root bin was removed, moved or made a child of itself.
+    pub const ROOT_BIN: ErrorCode = ErrorCode::from_static("edit.root_bin");
 }
 
 /// Small commands the unit tests apply to a project.

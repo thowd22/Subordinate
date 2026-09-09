@@ -2,7 +2,10 @@
 //!
 //! Every mutation the Command API, the MCP bridge and plugins can perform is
 //! one of these types. They are grouped by what they touch: [`track`] for the
-//! lanes of a sequence, [`sequence`] for the sequences of a project.
+//! lanes of a sequence, [`sequence`] for the sequences of a project,
+//! [`params`] for a clip's inspector parameters, [`marker`] for annotations on
+//! sequences and clips, [`media`] for the sources a project references and
+//! [`bin`] for the folders they are filed in.
 //!
 //! Two conventions run through the whole set.
 //!
@@ -16,12 +19,23 @@
 //!   commands validate through them before mutating anything, which is what
 //!   keeps them atomic.
 
+pub mod bin;
+pub mod marker;
+pub mod media;
+pub mod params;
 pub mod sequence;
 pub mod track;
 
 use sub_core::{SubError, SubResult};
-use sub_model::{Project, Sequence, SequenceId, Track, TrackId};
+use sub_model::{
+    Bin, BinId, Clip, ClipId, MediaId, MediaItem, Project, Sequence, SequenceId, Track, TrackId,
+    TrackItem,
+};
 
+pub use bin::{CreateBin, InsertBin, MoveToBin, RemoveBin, RenameBin};
+pub use marker::{AddMarker, MarkerTarget, MoveMarker, RemoveMarker};
+pub use media::{Filing, ImportMedia, InsertMedia, RelinkMedia, RemoveMedia};
+pub use params::SetClipParams;
 pub use sequence::{
     CreateSequence, DeleteSequence, InsertSequence, RenameSequence, SetSequenceSettings,
 };
@@ -62,6 +76,19 @@ pub fn register_builtin(registry: &mut CommandRegistry) -> SubResult<()> {
     registry.register::<DeleteSequence>()?;
     registry.register::<RenameSequence>()?;
     registry.register::<SetSequenceSettings>()?;
+    registry.register::<SetClipParams>()?;
+    registry.register::<AddMarker>()?;
+    registry.register::<MoveMarker>()?;
+    registry.register::<RemoveMarker>()?;
+    registry.register::<ImportMedia>()?;
+    registry.register::<InsertMedia>()?;
+    registry.register::<RemoveMedia>()?;
+    registry.register::<RelinkMedia>()?;
+    registry.register::<CreateBin>()?;
+    registry.register::<InsertBin>()?;
+    registry.register::<RemoveBin>()?;
+    registry.register::<RenameBin>()?;
+    registry.register::<MoveToBin>()?;
     Ok(())
 }
 
@@ -141,6 +168,78 @@ pub fn track_for_clip_edit(
         .with_detail("track_name", found.name.clone()));
     }
     Ok(found)
+}
+
+/// The clip with `clip`, mutably, on a track that is open to clip edits.
+///
+/// # Errors
+///
+/// - `edit.sequence_not_found`, `edit.track_not_found` or `edit.track_locked`
+///   as [`track_for_clip_edit`].
+/// - `edit.clip_not_found` when the track holds no such clip.
+pub fn clip_mut(
+    project: &mut Project,
+    sequence: SequenceId,
+    track: TrackId,
+    clip: ClipId,
+) -> SubResult<&mut Clip> {
+    let found = track_for_clip_edit(project, sequence, track)?;
+    found
+        .items
+        .iter_mut()
+        .filter_map(|item| match item {
+            TrackItem::Clip(on_track) => Some(on_track),
+            _ => None,
+        })
+        .find(|on_track| on_track.id == clip)
+        .ok_or_else(|| {
+            SubError::new(crate::codes::CLIP_NOT_FOUND, "no such clip on the track")
+                .with_detail("sequence_id", sequence)
+                .with_detail("track_id", track)
+                .with_detail("clip_id", clip)
+        })
+}
+
+/// The bin with `id`, mutably, searching the whole bin tree from the root.
+///
+/// # Errors
+///
+/// Returns `edit.bin_not_found` when the project holds no such bin.
+pub fn bin_mut(project: &mut Project, id: BinId) -> SubResult<&mut Bin> {
+    project.root_bin.find_mut(id).ok_or_else(|| {
+        SubError::new(crate::codes::BIN_NOT_FOUND, "no such bin").with_detail("bin_id", id)
+    })
+}
+
+/// The media item with `id`, mutably.
+///
+/// # Errors
+///
+/// Returns `edit.media_not_found` when the project references no such item.
+pub fn media_item_mut(project: &mut Project, id: MediaId) -> SubResult<&mut MediaItem> {
+    project.media_item_mut(id).ok_or_else(|| {
+        SubError::new(
+            crate::codes::MEDIA_NOT_FOUND,
+            "no such media item in the project",
+        )
+        .with_detail("media", id)
+    })
+}
+
+/// Checks that the project references the media item `media`.
+///
+/// # Errors
+///
+/// Returns `edit.media_not_found` when it does not.
+pub fn require_media(project: &Project, media: MediaId) -> SubResult<()> {
+    if project.media_item(media).is_none() {
+        return Err(SubError::new(
+            crate::codes::MEDIA_NOT_FOUND,
+            "no such media item in the project",
+        )
+        .with_detail("media", media));
+    }
+    Ok(())
 }
 
 /// Checks that `index` is a valid insertion point into a list of `len` items.
@@ -236,6 +335,19 @@ mod tests {
         assert_eq!(
             registry.kinds().collect::<Vec<_>>(),
             [
+                "bin.create",
+                "bin.insert",
+                "bin.move_media",
+                "bin.remove",
+                "bin.rename",
+                "clip.set_params",
+                "marker.add",
+                "marker.move",
+                "marker.remove",
+                "media.import",
+                "media.insert",
+                "media.relink",
+                "media.remove",
                 "sequence.create",
                 "sequence.delete",
                 "sequence.insert",
