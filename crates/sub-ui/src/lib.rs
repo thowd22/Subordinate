@@ -11,6 +11,7 @@ pub mod diagnostics;
 pub mod sequence_tabs;
 pub mod timeline;
 pub mod timeline_panel;
+pub mod track_header;
 pub mod viewer;
 
 pub use app::{AppOptions, SubordinateApp, run};
@@ -20,8 +21,10 @@ pub use sequence_tabs::{
 };
 pub use timeline::{ClipPlacement, TimelineView, TrackLayout, ZoomLevel};
 pub use timeline_panel::{
-    ClipMediaKind, PanelLayout, TimelineMetrics, TimelinePanel, TrimmedEdges, WheelInput,
+    ClipMediaKind, PanelLayout, TimelineMetrics, TimelinePanel, TimelineResponse, TrimmedEdges,
+    WheelInput, clip_edits_allowed,
 };
+pub use track_header::{HeaderLayout, MenuChoice, MenuEntry, TrackAction, TrackHeaderState};
 pub use viewer::{ViewerAction, ViewerFit, ViewerFrame, ViewerPanel, ViewerState};
 
 /// The stable error codes this crate reports.

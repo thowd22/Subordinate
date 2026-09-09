@@ -11,6 +11,7 @@ repository.workspace = true
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11", "accesskit"] }
 log = "0.4"
 sub-core = { version = "0.1.0", path = "../sub-core" }
+sub-edit = { version = "0.1.0", path = "../sub-edit" }
 sub-export = { version = "0.1.0", path = "../sub-export" }
 sub-media = { version = "0.1.0", path = "../sub-media" }
 sub-model = { version = "0.1.0", path = "../sub-model" }
