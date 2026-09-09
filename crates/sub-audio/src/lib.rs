@@ -8,12 +8,14 @@
 
 pub mod decode;
 pub mod mixer;
+pub mod offline;
 pub mod resample;
 
 pub use decode::{AudioInfo, Block, FileDecoder, Pcm, decode_file, probe_audio};
 pub use mixer::{
     ClipSpec, MixGraph, MixGraphBuilder, Mixer, MixerConfig, MixerControl, TrackSpec, mixer,
 };
+pub use offline::{ClipSource, OfflineSequence, PcmSource, render_audio};
 pub use resample::{PcmReader, PcmWriter, ResampleStage, Resampler, pcm_ring};
 
 /// Stable [`sub_core::ErrorCode`] constants this crate returns.
