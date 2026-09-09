@@ -27,7 +27,9 @@
 //! let loaded = LoadedKeymap::from_toml(
 //!     "[bindings]\n\"editing.undo\" = \"Ctrl+U\"\n\"nope.nope\" = \"X\"\n",
 //! );
-//! assert_eq!(loaded.map.chord_label_for(Action::Undo), "Ctrl+U");
+//! // The label follows the platform: "Ctrl+U" everywhere, "Cmd+U" on macOS.
+//! let label = loaded.map.chord_label_for(Action::Undo);
+//! assert!(label.ends_with("+U"), "label: {label}");
 //! assert_eq!(loaded.problems.len(), 1, "the unknown action is reported");
 //! ```
 

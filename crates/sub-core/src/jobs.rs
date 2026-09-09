@@ -1041,7 +1041,16 @@ mod tests {
         assert!(handle.wait().is_completed());
 
         for events in [first, second] {
-            let seen: Vec<JobEvent> = events.try_iter().collect();
+            // `wait` returns as soon as the outcome is stored, which can be
+            // just before the worker publishes `Finished`; drain until that
+            // event arrives rather than snapshotting whatever is there.
+            let mut seen: Vec<JobEvent> = Vec::new();
+            while !matches!(seen.last(), Some(JobEvent::Finished { .. })) {
+                let event = events
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("the finished event never arrived");
+                seen.push(event);
+            }
             assert_eq!(
                 seen,
                 vec![
