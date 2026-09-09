@@ -8,6 +8,7 @@
 
 pub mod app;
 pub mod diagnostics;
+pub mod history_panel;
 pub mod media_bin;
 pub mod media_import;
 pub mod sequence_tabs;
@@ -20,6 +21,9 @@ pub mod viewer;
 
 pub use app::{AppOptions, SubordinateApp, run};
 pub use diagnostics::DiagnosticsPanel;
+pub use history_panel::{
+    HistoryAction, HistoryList, HistoryPanel, ORIGINAL_STATE_LABEL, edit_menu_ui,
+};
 pub use media_bin::{
     BinSelection, BinSort, BinViewMode, MediaBinAction, MediaBinPanel, SortColumn, bin_path,
     dropped_paths, duration_text, folder_name, frame_rate_text, pick_media_files, resolution_text,
