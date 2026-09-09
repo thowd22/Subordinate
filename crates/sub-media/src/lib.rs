@@ -12,6 +12,7 @@ pub mod audio;
 pub mod decode;
 pub mod decode_ahead;
 pub mod diagnostics;
+pub mod index;
 pub mod probe;
 
 pub use audio::{
@@ -24,6 +25,9 @@ pub use decode::{
 pub use decode_ahead::{DEFAULT_CAPACITY, DecodeAhead, DecodeAheadOptions, DecodeAheadStats};
 pub use diagnostics::{
     ElementKind, ElementStatus, HardwareDiagnostics, VENDORS, Vendor, VendorReport,
+};
+pub use index::{
+    CancelToken, INDEX_CACHE_VERSION, IndexEntry, IndexJob, IndexedDecoder, LazyPtsIndex, PtsIndex,
 };
 pub use probe::{
     FrameTiming, MediaInfo, ProbeOptions, Rotation, VideoStreamInfo, probe, probe_with,
@@ -60,6 +64,10 @@ pub mod codes {
     pub const SEEK_FAILED: ErrorCode = ErrorCode::from_static("media.seek_failed");
     /// The file was opened for audio decoding but carries no audio stream.
     pub const NO_AUDIO_STREAM: ErrorCode = ErrorCode::from_static("media.no_audio_stream");
+    /// A PTS index could not be built, cached or read back: the parse pipeline
+    /// failed, the file exposes no timed pictures, or the sidecar cache could
+    /// not be written or understood.
+    pub const INDEX_FAILED: ErrorCode = ErrorCode::from_static("media.index_failed");
 }
 
 /// Initialises GStreamer once and returns its runtime version.
@@ -99,6 +107,7 @@ mod tests {
             super::codes::NO_VIDEO_STREAM,
             super::codes::SEEK_FAILED,
             super::codes::NO_AUDIO_STREAM,
+            super::codes::INDEX_FAILED,
         ];
         for code in &codes {
             assert_eq!(code.domain(), "media", "wrong domain for {code}");
