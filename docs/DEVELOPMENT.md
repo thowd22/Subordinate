@@ -444,3 +444,22 @@ aws logs tail /aws/ecs/runs-on/runs-on-worker --region us-east-1 --since 10m
 aws ec2 describe-instances --region us-east-1 \
   --query "Reservations[].Instances[].[InstanceId,InstanceType,State.Name]" --output text
 ```
+
+## Self-hosted AMD runner ("box")
+
+AWS no longer offers AMD GPU instances, so AMD Linux verification runs on
+`box`, a user-owned mini PC (Ubuntu 26.04, AMD Cezanne APU with VCN encode)
+registered as a GitHub self-hosted runner. Labels:
+`self-hosted, linux, x64, box, amd-gpu, vaapi`. Zero cost.
+
+- Runner lives in `~/actions-runner` on box as a systemd service
+  (`sudo ./svc.sh status|start|stop`). Re-register with a fresh token from
+  `gh api -X POST /repos/thowd22/Subordinate/actions/runners/registration-token`.
+- The runner user must be in the `render` and `video` groups or the GStreamer
+  `va` plugin registers no elements.
+- Installed: GStreamer 1.28 dev and plugins from apt, `mesa-va-drivers`,
+  `vainfo`, Rust 1.93.1, `xvfb`, `xdotool`, ImageMagick.
+- Security: the repository requires approval before workflows from any external
+  contributor's fork run, so pull requests from strangers cannot execute code on
+  box. Keep hardware workflows on `workflow_dispatch`, `schedule` and pushes
+  to `main`.

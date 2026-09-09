@@ -4,7 +4,7 @@ title: Pop-out and second-display verification on a GPU runner with a virtual de
 status: To Do
 assignee: []
 created_date: '2026-09-09 17:29'
-updated_date: '2026-09-09 18:22'
+updated_date: '2026-09-09 21:35'
 labels:
   - infra
   - gpu
@@ -33,4 +33,6 @@ The decode spike and the pop-out viewer have criteria that need a real GPU and a
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-09-09: scoped to GPU-only checks; free-tier UI tests live in the m-2 UI testing tasks.
+
+2026-09-09: box (self-hosted, AMD APU, 16 cores, no desktop session, xvfb and xdotool installed) is a zero-cost place for the two-output virtual desktop test; prefer it over the NVIDIA spot runner for everything except NVDEC-specific checks.
 <!-- SECTION:NOTES:END -->

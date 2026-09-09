@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-09 17:29'
-updated_date: '2026-09-09 20:36'
+updated_date: '2026-09-09 21:35'
 labels:
   - infra
   - gpu
@@ -39,4 +39,6 @@ Turns the manual verify tasks into a repeatable, agent-triggerable workflow. Run
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-09-09: AWS no longer offers any AMD GPU instance type (g4ad retired; verified via describe-instance-type-offerings across all regions). AMD parts of this task need Azure NVads V710 v5 or a user-owned AMD box; NVIDIA parts proceed on RunsOn g4dn.
+
+2026-09-09: AMD Linux job runs on the self-hosted box runner (labels self-hosted, linux, box, amd-gpu), not RunsOn; it is free, so it may also run on every push to main if kept under a few minutes. NVIDIA jobs stay on RunsOn gpu-nvidia-linux (workflow_dispatch + nightly). AMD Windows job dropped until hardware exists.
 <!-- SECTION:NOTES:END -->

@@ -1,12 +1,10 @@
 ---
 id: TASK-115
-title: >-
-  Windows GPU AMI with NVIDIA and AMD drivers, GStreamer 1.28 and the RunsOn
-  agent
+title: 'Windows GPU AMI with NVIDIA drivers, GStreamer 1.28 and the RunsOn agent'
 status: To Do
 assignee: []
 created_date: '2026-09-09 17:29'
-updated_date: '2026-09-09 20:36'
+updated_date: '2026-09-09 21:35'
 labels:
   - infra
   - gpu
@@ -39,4 +37,6 @@ RunsOn ships Linux GPU images but Windows GPU jobs need an AMI with vendor drive
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-09-09: AWS no longer offers any AMD GPU instance type (g4ad retired; verified via describe-instance-type-offerings across all regions). AMD parts of this task need Azure NVads V710 v5 or a user-owned AMD box; NVIDIA parts proceed on RunsOn g4dn.
+
+2026-09-09: scope reduced to NVIDIA only. AMD Windows (AMF) has no cloud host: AWS retired g4ad and box runs Linux. AMF verification stays manual until an AMD Windows machine is available.
 <!-- SECTION:NOTES:END -->
