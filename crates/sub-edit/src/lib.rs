@@ -15,9 +15,12 @@
 //! - [`History`] — the undo/redo stack, with a configurable depth and a
 //!   grouping API so a drag that moves twelve clips undoes in one step.
 //!
-//! The concrete commands live in the tasks that follow: clip commands, track
-//! and sequence commands, parameter, marker, media and bin commands. They all
-//! implement [`Command`] and register their [`Command::KIND`] here.
+//! - [`clip`] — the primitive clip edits: add, remove, move, trim in and out,
+//!   split and ripple delete, with the overwrite overlap policy they share.
+//!
+//! The remaining commands live in the tasks that follow: track and sequence
+//! commands, parameter, marker, media and bin commands. They all implement
+//! [`Command`] and register their [`Command::KIND`] here.
 //!
 //! ```
 //! use serde::{Deserialize, Serialize};
@@ -59,9 +62,14 @@
 //! assert_eq!(json::to_json(&project).unwrap(), after);
 //! ```
 
+pub mod clip;
 pub mod command;
 pub mod history;
 
+pub use clip::{
+    AddClip, MoveClip, RemoveClip, RestoreTrackItems, RippleDelete, SplitClip, TrackItems,
+    TrimClipIn, TrimClipOut,
+};
 pub use command::{AnyCommand, BoxedCommand, Command, CommandEnvelope, CommandRegistry, Inverse};
 pub use history::{DEFAULT_DEPTH, History, HistoryEntry};
 
@@ -84,12 +92,29 @@ pub mod codes {
     pub const GROUP_OPEN: ErrorCode = ErrorCode::from_static("edit.group_open");
     /// A group was committed or aborted while none was open.
     pub const NO_GROUP: ErrorCode = ErrorCode::from_static("edit.no_group");
+    /// A command names a sequence the project does not hold.
+    pub const SEQUENCE_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.sequence_not_found");
+    /// A command names a track the sequence does not hold.
+    pub const TRACK_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.track_not_found");
+    /// A command names a clip the track does not hold.
+    pub const CLIP_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.clip_not_found");
+    /// A command names a media item the project does not hold.
+    pub const MEDIA_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.media_not_found");
+    /// A clip identity would appear twice on the same track.
+    pub const DUPLICATE_CLIP: ErrorCode = ErrorCode::from_static("edit.duplicate_clip");
+    /// A split point falls on a clip boundary or outside the clip.
+    pub const INVALID_SPLIT: ErrorCode = ErrorCode::from_static("edit.invalid_split");
+    /// A trim would empty a clip, or reach outside its source media.
+    pub const INVALID_TRIM: ErrorCode = ErrorCode::from_static("edit.invalid_trim");
+    /// A position or duration is negative, or cannot be combined exactly with
+    /// the others involved.
+    pub const INVALID_TIME: ErrorCode = ErrorCode::from_static("edit.invalid_time");
 }
 
 /// Small commands the unit tests apply to a project.
 ///
-/// Real commands arrive in TASK-4.2 onwards; these exist so the trait, the
-/// registry and the history can be tested on their own.
+/// These exist so the trait, the registry and the history can be tested
+/// without the real command set.
 #[cfg(test)]
 mod test_commands {
     use serde::{Deserialize, Serialize};
@@ -218,6 +243,14 @@ mod tests {
             codes::DUPLICATE_COMMAND,
             codes::GROUP_OPEN,
             codes::NO_GROUP,
+            codes::SEQUENCE_NOT_FOUND,
+            codes::TRACK_NOT_FOUND,
+            codes::CLIP_NOT_FOUND,
+            codes::MEDIA_NOT_FOUND,
+            codes::DUPLICATE_CLIP,
+            codes::INVALID_SPLIT,
+            codes::INVALID_TRIM,
+            codes::INVALID_TIME,
         ] {
             assert_eq!(code.domain(), "edit");
             assert!(sub_core::ErrorCode::parse(code.as_str()).is_ok());
