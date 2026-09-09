@@ -54,6 +54,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
 use sub_edit::{ChangeEvent, EngineHandle};
@@ -85,7 +86,9 @@ const PUMP_POLL: Duration = Duration::from_millis(20);
 ///
 /// It is unique within one connection, which is all a client needs: it can
 /// only unsubscribe its own subscriptions.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct SubscriptionId(String);
 
@@ -104,21 +107,21 @@ impl std::fmt::Display for SubscriptionId {
 }
 
 /// The result of [`EVENTS_SUBSCRIBE`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct SubscribeResult {
     /// The identifier to pass to [`EVENTS_UNSUBSCRIBE`].
     pub subscription: SubscriptionId,
 }
 
 /// The result of [`EVENTS_UNSUBSCRIBE`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct UnsubscribeResult {
     /// The subscription that was stopped.
     pub subscription: SubscriptionId,
 }
 
 /// The parameters of [`EVENTS_UNSUBSCRIBE`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnsubscribeParams {
     /// The subscription to stop.
@@ -126,7 +129,7 @@ pub struct UnsubscribeParams {
 }
 
 /// The parameters of an [`EVENTS_CHANGED`] notification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct ChangedParams {
     /// The subscription this event belongs to.
     pub subscription: SubscriptionId,

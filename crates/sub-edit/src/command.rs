@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,18 +34,20 @@ use crate::codes;
 /// documentation for the atomicity and exactness rules.
 ///
 /// ```
+/// use schemars::JsonSchema;
 /// use serde::{Deserialize, Serialize};
 /// use sub_core::SubResult;
 /// use sub_edit::{Command, Inverse};
 /// use sub_model::Project;
 ///
-/// #[derive(Debug, Serialize, Deserialize)]
+/// #[derive(Debug, Serialize, JsonSchema, Deserialize)]
 /// struct RenameProject {
 ///     name: String,
 /// }
 ///
 /// impl Command for RenameProject {
 ///     const KIND: &'static str = "project.rename";
+///     const DESCRIPTION: &'static str = "Rename the project.";
 ///
 ///     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
 ///         let previous = std::mem::replace(&mut project.name, self.name.clone());
@@ -60,12 +63,23 @@ use crate::codes;
 /// inverse.command().apply_erased(&mut project).unwrap();
 /// assert_eq!(project.name, "Untitled");
 /// ```
-pub trait Command: Serialize + DeserializeOwned + fmt::Debug + Send + Sync + 'static {
+pub trait Command:
+    Serialize + DeserializeOwned + JsonSchema + fmt::Debug + Send + Sync + 'static
+{
     /// The stable wire name of this command, such as `clip.trim_in`.
     ///
     /// It is part of the public contract with agents and plugins: an existing
     /// kind is never renamed or given a new meaning.
     const KIND: &'static str;
+
+    /// One sentence saying what the command does, in the imperative.
+    ///
+    /// It is exported in the Command API schema and used verbatim as the MCP
+    /// tool description, so it is written for an agent reading a tool list:
+    /// one sentence, ending in a full stop. Test doubles may leave it empty;
+    /// every kind reachable over the Command API must set it, which the
+    /// `sub-command` schema tests enforce.
+    const DESCRIPTION: &'static str = "";
 
     /// Applies the command and returns the command that undoes it.
     ///
@@ -94,6 +108,9 @@ pub trait AnyCommand: fmt::Debug + Send + Sync + 'static {
 
     /// The command's human label, [`Command::label`].
     fn label_erased(&self) -> String;
+
+    /// The command's one-sentence description, [`Command::DESCRIPTION`].
+    fn description_erased(&self) -> &'static str;
 
     /// Applies the command, as [`Command::apply`].
     ///
@@ -131,6 +148,10 @@ impl<C: Command> AnyCommand for C {
 
     fn label_erased(&self) -> String {
         Command::label(self)
+    }
+
+    fn description_erased(&self) -> &'static str {
+        C::DESCRIPTION
     }
 
     fn apply_erased(&self, project: &mut Project) -> SubResult<Inverse> {
@@ -215,6 +236,18 @@ impl CommandEnvelope {
 
 type Decoder = fn(Value) -> SubResult<BoxedCommand>;
 
+/// How a command kind's parameter schema is produced, deferred so every kind
+/// in one document can share a single [`SchemaGenerator`] and its `$defs`.
+type Schemer = fn(&mut SchemaGenerator) -> Schema;
+
+/// What the registry knows about one command kind besides how to apply it.
+#[derive(Debug, Clone, Copy)]
+struct Entry {
+    decode: Decoder,
+    description: &'static str,
+    schema: Schemer,
+}
+
 /// The set of command kinds this build can decode.
 ///
 /// The Command API, the MCP bridge and the plugin host all receive commands as
@@ -226,10 +259,11 @@ type Decoder = fn(Value) -> SubResult<BoxedCommand>;
 /// # use sub_core::SubResult;
 /// # use sub_edit::{Command, CommandEnvelope, CommandRegistry, Inverse};
 /// # use sub_model::Project;
-/// # #[derive(Debug, Serialize, Deserialize)]
+/// # #[derive(Debug, Serialize, schemars::JsonSchema, Deserialize)]
 /// # struct RenameProject { name: String }
 /// # impl Command for RenameProject {
 /// #     const KIND: &'static str = "project.rename";
+/// #     const DESCRIPTION: &'static str = "Rename the project.";
 /// #     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
 /// #         let previous = std::mem::replace(&mut project.name, self.name.clone());
 /// #         Ok(Inverse::new(RenameProject { name: previous }))
@@ -250,7 +284,7 @@ type Decoder = fn(Value) -> SubResult<BoxedCommand>;
 /// ```
 #[derive(Clone, Default)]
 pub struct CommandRegistry {
-    decoders: BTreeMap<&'static str, Decoder>,
+    entries: BTreeMap<&'static str, Entry>,
 }
 
 impl CommandRegistry {
@@ -267,38 +301,62 @@ impl CommandRegistry {
     /// Returns `edit.duplicate_command` if the kind is already registered:
     /// two commands sharing a wire name would make decoding ambiguous.
     pub fn register<C: Command>(&mut self) -> SubResult<()> {
-        if self.decoders.contains_key(C::KIND) {
+        if self.entries.contains_key(C::KIND) {
             return Err(SubError::new(
                 codes::DUPLICATE_COMMAND,
                 "command kind is already registered",
             )
             .with_detail("kind", C::KIND));
         }
-        self.decoders.insert(C::KIND, decode_as::<C>);
+        self.entries.insert(
+            C::KIND,
+            Entry {
+                decode: decode_as::<C>,
+                description: C::DESCRIPTION,
+                schema: schema_of::<C>,
+            },
+        );
         Ok(())
     }
 
     /// Every registered kind, in lexicographic order.
     pub fn kinds(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.decoders.keys().copied()
+        self.entries.keys().copied()
     }
 
     /// Whether `kind` is registered.
     #[must_use]
     pub fn contains(&self, kind: &str) -> bool {
-        self.decoders.contains_key(kind)
+        self.entries.contains_key(kind)
     }
 
     /// The number of registered kinds.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.decoders.len()
+        self.entries.len()
     }
 
     /// Whether nothing is registered.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.decoders.is_empty()
+        self.entries.is_empty()
+    }
+
+    /// The one-sentence description of `kind`, [`Command::DESCRIPTION`].
+    ///
+    /// This is what the Command API schema exports and the MCP bridge uses
+    /// verbatim as a tool description.
+    #[must_use]
+    pub fn description(&self, kind: &str) -> Option<&'static str> {
+        self.entries.get(kind).map(|entry| entry.description)
+    }
+
+    /// The JSON Schema of `kind`'s parameters, drawn from `generator` so that
+    /// every kind in one document shares its `$defs`.
+    #[must_use]
+    pub fn params_schema(&self, kind: &str, generator: &mut SchemaGenerator) -> Option<Schema> {
+        let entry = self.entries.get(kind)?;
+        Some((entry.schema)(generator))
     }
 
     /// Decodes an envelope into an applicable command.
@@ -308,11 +366,11 @@ impl CommandRegistry {
     /// - `edit.unknown_command` when the kind is not registered.
     /// - `edit.invalid_command` when the parameters do not match the command.
     pub fn decode(&self, envelope: &CommandEnvelope) -> SubResult<BoxedCommand> {
-        let decoder = self.decoders.get(envelope.kind.as_str()).ok_or_else(|| {
+        let entry = self.entries.get(envelope.kind.as_str()).ok_or_else(|| {
             SubError::new(codes::UNKNOWN_COMMAND, "no such command kind")
                 .with_detail("kind", &envelope.kind)
         })?;
-        decoder(envelope.params.clone())
+        (entry.decode)(envelope.params.clone())
     }
 
     /// Decodes a whole sequence of envelopes, such as one history entry.
@@ -336,7 +394,7 @@ impl CommandRegistry {
 impl fmt::Debug for CommandRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CommandRegistry")
-            .field("kinds", &self.decoders.keys().collect::<Vec<_>>())
+            .field("kinds", &self.entries.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -352,6 +410,11 @@ fn decode_as<C: Command>(params: Value) -> SubResult<BoxedCommand> {
         .with_detail("kind", C::KIND)
     })?;
     Ok(Box::new(command))
+}
+
+/// The schema generator stored for one command kind.
+fn schema_of<C: Command>(generator: &mut SchemaGenerator) -> Schema {
+    generator.subschema_for::<C>()
 }
 
 #[cfg(test)]

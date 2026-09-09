@@ -84,10 +84,11 @@ struct OpenGroup {
 /// # use sub_core::SubResult;
 /// # use sub_edit::{Command, History, Inverse};
 /// # use sub_model::Project;
-/// # #[derive(Debug, Serialize, Deserialize)]
+/// # #[derive(Debug, Serialize, schemars::JsonSchema, Deserialize)]
 /// # struct RenameProject { name: String }
 /// # impl Command for RenameProject {
 /// #     const KIND: &'static str = "project.rename";
+/// #     const DESCRIPTION: &'static str = "Rename the project.";
 /// #     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
 /// #         let previous = std::mem::replace(&mut project.name, self.name.clone());
 /// #         Ok(Inverse::new(RenameProject { name: previous }))

@@ -14,6 +14,8 @@
 //!   receives.
 //! - [`endpoint`] — where the server listens: the per-user Unix socket or
 //!   Windows named pipe, and the lock file that advertises it.
+//! - [`schema`] — the exported JSON Schema of every method, generated from
+//!   the command set and committed at `docs/schema/command-api.json`.
 //! - [`transport`] — the [`transport::Server`] that serves that endpoint with
 //!   newline-delimited JSON framing, and the [`transport::Client`] that speaks
 //!   to it from another process.
@@ -37,9 +39,10 @@ pub mod dispatch;
 pub mod endpoint;
 pub mod events;
 pub mod rpc;
+pub mod schema;
 pub mod transport;
 
-pub use dispatch::{AppliedResult, Dispatcher, HistoryResult, MethodInfo};
+pub use dispatch::{AppliedResult, Dispatcher, HistoryResult, MethodInfo, MethodSchema};
 pub use endpoint::{Address, Endpoint, LockFile, Transport};
 pub use events::{ChangedParams, Outbox, Session, SubscriptionId};
 pub use rpc::{

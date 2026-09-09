@@ -7,6 +7,7 @@
 //! A fade longer than the clip is therefore an error rather than a project
 //! that fails to save.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sub_core::SubResult;
 use sub_model::{Clip, ClipId, GainDb, Opacity, Project, SequenceId, TrackId, Transform};
@@ -59,7 +60,7 @@ use crate::{Command, Inverse};
 /// history.undo(&mut project).unwrap();
 /// assert_eq!(clip_of(&project), Opacity::OPAQUE);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetClipParams {
     /// The sequence holding the track.
@@ -164,6 +165,8 @@ impl SetClipParams {
 
 impl Command for SetClipParams {
     const KIND: &'static str = "clip.set_params";
+    const DESCRIPTION: &'static str =
+        "Set a clip's inspector parameters: opacity, gain, transform and fades.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let clip = clip_mut(project, self.sequence, self.track, self.clip)?;

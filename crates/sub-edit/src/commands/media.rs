@@ -10,6 +10,7 @@
 //! item at another path, which is what keeps the clips cut from it intact when
 //! a project folder moves (docs/PLAN.md §5.6).
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
 use sub_model::{BinId, ContentHash, MediaId, MediaItem, MediaPath, Project};
@@ -41,7 +42,7 @@ use crate::{Command, Inverse, codes};
 /// history.undo(&mut project).unwrap();
 /// assert!(project.media.is_empty());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImportMedia {
     /// The item itself.
@@ -68,6 +69,7 @@ impl ImportMedia {
 
 impl Command for ImportMedia {
     const KIND: &'static str = "media.import";
+    const DESCRIPTION: &'static str = "Import a media file into the project and file it in a bin.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let id = self.item.id;
@@ -91,7 +93,7 @@ impl Command for ImportMedia {
 /// an [`ImportMedia`] is undone. Unlike [`ImportMedia`] it restores the item's
 /// position in [`Project::media`] and in its bin, so the project file comes
 /// back byte for byte.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InsertMedia {
     /// Where in [`Project::media`] the item goes.
@@ -105,7 +107,7 @@ pub struct InsertMedia {
 }
 
 /// Where a media item sits in the bin tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Filing {
     /// The bin holding the item.
@@ -132,6 +134,8 @@ impl InsertMedia {
 
 impl Command for InsertMedia {
     const KIND: &'static str = "media.insert";
+    const DESCRIPTION: &'static str =
+        "Insert an existing media item into the project at a given index.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let id = self.item.id;
@@ -158,7 +162,7 @@ impl Command for InsertMedia {
 /// `force` is set: dropping the source out from under an edit must be
 /// something the caller asked for, not something a mis-click does. A forced
 /// removal is undoable like any other command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoveMedia {
     /// The item to remove.
@@ -187,6 +191,8 @@ impl RemoveMedia {
 
 impl Command for RemoveMedia {
     const KIND: &'static str = "media.remove";
+    const DESCRIPTION: &'static str =
+        "Remove a media item from the project, provided no clip uses it.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let index = project
@@ -229,7 +235,7 @@ impl Command for RemoveMedia {
 /// relink. The command carries the new hash and offline flag as well as the
 /// path, because relinking is what a successful search for a moved file
 /// concludes with, and the inverse carries the three values the item had.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelinkMedia {
     /// The item to relink.
@@ -273,6 +279,7 @@ impl RelinkMedia {
 
 impl Command for RelinkMedia {
     const KIND: &'static str = "media.relink";
+    const DESCRIPTION: &'static str = "Point a media item at a different file on disk.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let item = media_item_mut(project, self.media)?;

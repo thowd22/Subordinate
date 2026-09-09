@@ -27,18 +27,20 @@
 //!   directory, and the recovery check an open makes against it.
 //!
 //! ```
+//! use schemars::JsonSchema;
 //! use serde::{Deserialize, Serialize};
 //! use sub_core::SubResult;
 //! use sub_edit::{Command, History, Inverse};
 //! use sub_model::{Project, json};
 //!
-//! #[derive(Debug, Serialize, Deserialize)]
+//! #[derive(Debug, JsonSchema, Serialize, Deserialize)]
 //! struct RenameProject {
 //!     name: String,
 //! }
 //!
 //! impl Command for RenameProject {
 //!     const KIND: &'static str = "project.rename";
+//!     const DESCRIPTION: &'static str = "Rename the project.";
 //!
 //!     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
 //!         let previous = std::mem::replace(&mut project.name, self.name.clone());
@@ -167,6 +169,7 @@ pub mod codes {
 /// without the real command set.
 #[cfg(test)]
 mod test_commands {
+    use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use sub_core::{ErrorCode, SubError, SubResult};
     use sub_model::{Project, Sequence, SequenceSettings};
@@ -177,7 +180,7 @@ mod test_commands {
     pub const FAILED: ErrorCode = ErrorCode::from_static("test.failed");
 
     /// Sets the project name.
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub struct SetName {
         pub name: String,
@@ -199,7 +202,7 @@ mod test_commands {
     }
 
     /// The same mutation with a human label, to prove labels reach the menu.
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
     pub struct Rename {
         pub name: String,
     }
@@ -224,7 +227,7 @@ mod test_commands {
     }
 
     /// Appends a sequence; its inverse removes the last one.
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
     pub struct AddSequence {
         pub name: String,
     }
@@ -248,7 +251,7 @@ mod test_commands {
     }
 
     /// The inverse of [`AddSequence`].
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
     pub struct RemoveLastSequence {}
 
     impl Command for RemoveLastSequence {
@@ -263,7 +266,7 @@ mod test_commands {
     }
 
     /// A command that always fails without touching the project.
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
     pub struct Failing {}
 
     impl Failing {

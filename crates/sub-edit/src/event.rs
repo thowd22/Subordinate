@@ -38,6 +38,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -49,7 +50,9 @@ use crate::command::CommandEnvelope;
 /// kinds carry entity names this build does not know; the constants cover the
 /// built-in model. Like an error code, an existing name is never given a new
 /// meaning.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct EntityKind(Cow<'static, str>);
 
@@ -99,7 +102,9 @@ impl fmt::Display for EntityKind {
 }
 
 /// What happened to the entity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeType {
     /// The entity now exists and did not before.
@@ -124,7 +129,9 @@ impl ChangeType {
 }
 
 /// Why the engine applied the command that produced the event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeOrigin {
     /// A command submitted by a client.
@@ -139,7 +146,7 @@ pub enum ChangeOrigin {
 ///
 /// The JSON shape is stable: it is what the Command API's event subscriptions
 /// send.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct ChangeEvent {
     /// The revision the project reached; every event of one engine operation
     /// carries the same revision, and revisions only ever increase.

@@ -20,3 +20,29 @@ ones; earlier versions stay committed so a migration can be checked against the
 shape it reads. Each bump also registers one `Migration` from the previous
 version in `MigrationRegistry::current` (`crates/sub-model/src/migrate.rs`), so
 an old file is upgraded before it is deserialised and never fails to open.
+
+# Command API JSON Schema
+
+`command-api.json` describes every method of the Command API: its name, its
+kind (`command`, `query` or `session`), a one-sentence description, and the
+JSON Schema of its `params` and its `result`. The MCP bridge turns these into
+tools — the description is used verbatim as the MCP tool description — and the
+plugin SDK generates its bindings from the same document.
+
+It is generated, not hand-edited. Every command's parameter schema comes from
+the serde type the engine decodes and its description from that command's
+`Command::DESCRIPTION`, so the document cannot describe a method the build does
+not serve. Print it with:
+
+```sh
+cargo run -p subordinate-cli -- schema            # pretty
+cargo run -p subordinate-cli -- schema --compact  # one line
+```
+
+The `committed_schema_is_up_to_date` test in `crates/sub-command/src/schema.rs`
+fails when the committed copy drifts from the generated one, which is the check
+CI runs. Regenerate it with:
+
+```sh
+SUB_UPDATE_SCHEMA=1 cargo test -p sub-command committed_schema_is_up_to_date
+```
