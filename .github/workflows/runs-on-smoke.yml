@@ -1,0 +1,19 @@
+name: RunsOn smoke
+
+# Proves the RunsOn loop (GitHub App -> scheduler in AWS -> EC2 runner) works.
+# Trigger by hand; no GPU quota needed. See docs/DEVELOPMENT.md "GPU CI".
+on:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: RunsOn Linux 2cpu
+    runs-on: runs-on=${{ github.run_id }}/runner=2cpu-linux-x64/spot=price-capacity-optimized
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instance facts
+        run: |
+          echo "runner=$RUNNER_NAME"
+          curl -fsS -m 3 http://169.254.169.254/latest/meta-data/instance-type || true; echo
+          nproc; free -g | head -2; uname -a
