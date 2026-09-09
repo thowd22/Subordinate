@@ -13,7 +13,9 @@ log = "0.4"
 sub-core = { version = "0.1.0", path = "../sub-core" }
 sub-export = { version = "0.1.0", path = "../sub-export" }
 sub-media = { version = "0.1.0", path = "../sub-media" }
+sub-model = { version = "0.1.0", path = "../sub-model" }
 sub-render = { version = "0.1.0", path = "../sub-render" }
+sub-time = { version = "0.1.0", path = "../sub-time" }
 
 [lints]
 workspace = true

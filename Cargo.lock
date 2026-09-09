@@ -3470,7 +3470,9 @@ dependencies = [
  "sub-core",
  "sub-export",
  "sub-media",
+ "sub-model",
  "sub-render",
+ "sub-time",
 ]
 
 [[package]]
