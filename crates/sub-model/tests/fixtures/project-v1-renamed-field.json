@@ -1,0 +1,114 @@
+{
+  "project": {
+    "id": "01a083bc-80ea-77c1-a19d-47a0b13db129",
+    "media": [
+      {
+        "color": {
+          "primaries": "bt709",
+          "space": "rec709",
+          "transfer": "bt709"
+        },
+        "hash": null,
+        "id": "01a083bc-80ea-77c1-a19d-47c42c3dc270",
+        "info": null,
+        "name": "interview.mp4",
+        "offline": false,
+        "path": "footage/interview.mp4",
+        "proxy": "none"
+      }
+    ],
+    "root_bin": {
+      "children": [],
+      "id": "01a083bc-80ea-77c1-a19d-47b21ecf8527",
+      "media": [
+        "01a083bc-80ea-77c1-a19d-47c42c3dc270"
+      ],
+      "name": "Doc cut"
+    },
+    "sequences": [
+      {
+        "id": "01a083bc-80ea-77c1-a19d-47f114fee154",
+        "markers": [],
+        "name": "Main",
+        "settings": {
+          "color": {
+            "primaries": "bt709",
+            "space": "rec709",
+            "transfer": "bt709"
+          },
+          "frame_rate": {
+            "denominator": 1,
+            "numerator": 24
+          },
+          "resolution": {
+            "height": 1080,
+            "width": 1920
+          },
+          "sample_rate": 48000
+        },
+        "tracks": [
+          {
+            "id": "01a083bc-80ea-77c1-a19d-47d0cf4d7b64",
+            "items": [
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 24
+                    },
+                    "value": 0
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 24
+                    },
+                    "value": 0
+                  },
+                  "gain": 0,
+                  "id": "01a083bc-80ea-77c1-a19d-47e3bb3166b1",
+                  "markers": [],
+                  "media": "01a083bc-80ea-77c1-a19d-47c42c3dc270",
+                  "name": "shot 1",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 24
+                      },
+                      "value": 48
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 24
+                      },
+                      "value": 0
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              }
+            ],
+            "kind": "video",
+            "name": "V1"
+          }
+        ]
+      }
+    ],
+    "title": "Doc cut"
+  },
+  "schema_version": 1
+}
