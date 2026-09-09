@@ -3397,6 +3397,7 @@ version = "0.1.0"
 dependencies = [
  "gstreamer",
  "gstreamer-app",
+ "gstreamer-audio",
  "gstreamer-pbutils",
  "gstreamer-video",
  "serde",

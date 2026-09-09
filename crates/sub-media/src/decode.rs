@@ -24,6 +24,30 @@
 //! planar I420 asks for it through [`DecoderOptions::format`]. Zero-copy import
 //! is a post-MVP optimisation.
 //!
+//! A video file's audio comes off this same pipeline (decision-4): asking for
+//! [`StreamSelection::VideoAndAudio`] or [`StreamSelection::AudioOnly`] adds an
+//! `audioconvert` and a second `appsink`, and [`Decoder::next_audio_block`]
+//! hands out interleaved `f32` PCM with sample-accurate positions. See the
+//! [`audio`](crate::audio) module for the shape of those blocks and for the
+//! gains a mono or 5.1 source is folded to stereo with.
+//!
+//! ```no_run
+//! # fn main() -> sub_core::SubResult<()> {
+//! use sub_media::{DecoderOptions, StreamSelection};
+//!
+//! let options = DecoderOptions {
+//!     streams: StreamSelection::AudioOnly,
+//!     ..DecoderOptions::default()
+//! };
+//! let mut decoder = sub_media::Decoder::open_with(std::path::Path::new("/media/a.mp4"), options)?;
+//! let rate = decoder.audio_format().expect("audio only").sample_rate;
+//! while let Some(block) = decoder.next_audio_block()? {
+//!     println!("{} frames at {rate} Hz", block.frames());
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! Dropping a [`Decoder`] sets its pipeline to `Null`, which stops the
 //! streaming threads and releases the decoder and the file handle.
 
@@ -39,6 +63,10 @@ use gstreamer_video::{VideoFormat, VideoFrameExt, VideoInfo};
 use sub_core::{ResultExt, SubError, SubResult};
 use sub_time::{RationalTime, Rounding};
 
+use crate::audio::{
+    AudioBlock, AudioChannels, AudioFormat, MAX_CHANNELS, StereoDownmix, frames_at,
+    layout_from_roles, roles_from_positions,
+};
 use crate::codes;
 use crate::probe::NANOSECONDS;
 
@@ -84,6 +112,37 @@ impl FrameFormat {
     }
 }
 
+/// Which streams of a file a [`Decoder`] pulls out of it.
+///
+/// A video file is demuxed once (decision-4): the audio a caller needs comes
+/// off the same `uridecodebin` as the pictures rather than out of a second
+/// pipeline, so nothing has to be parsed or seeked twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum StreamSelection {
+    /// Decode the video stream only. Any audio is dropped by decodebin.
+    #[default]
+    Video,
+    /// Decode both, from one demux. The caller must pull from both branches:
+    /// each `appsink` holds a bounded queue, so a caller that only ever pulls
+    /// frames eventually stalls the audio branch and with it the pipeline.
+    VideoAndAudio,
+    /// Decode the audio stream only; video pads are discarded. This is what
+    /// the waveform job and an audio-led scrub use.
+    AudioOnly,
+}
+
+impl StreamSelection {
+    /// Whether a video branch is built.
+    fn wants_video(self) -> bool {
+        matches!(self, Self::Video | Self::VideoAndAudio)
+    }
+
+    /// Whether an audio branch is built.
+    fn wants_audio(self) -> bool {
+        matches!(self, Self::VideoAndAudio | Self::AudioOnly)
+    }
+}
+
 /// Whether a decoder handle should try to use a hardware decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum HardwarePreference {
@@ -101,15 +160,21 @@ pub enum HardwarePreference {
 /// How a [`Decoder`] should be opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecoderOptions {
+    /// Which streams are decoded.
+    pub streams: StreamSelection,
+    /// How many channels each [`AudioBlock`] carries. Ignored when no audio is
+    /// decoded.
+    pub audio_channels: AudioChannels,
     /// Whether hardware decoders are preferred.
     pub hardware: HardwarePreference,
     /// Pixel format frames are delivered in. NV12 is what the compositor
     /// uploads; I420 is the documented fallback for a caller that would rather
     /// take a software decoder's own planar output than have it converted.
     pub format: FrameFormat,
-    /// How long [`Decoder::next_frame`] waits for a frame before giving up with
-    /// `media.decode_timeout`. It bounds a stalled pipeline, not the whole
-    /// decode: the budget applies to each frame.
+    /// How long [`Decoder::next_frame`] or [`Decoder::next_audio_block`] waits
+    /// before giving up with `media.decode_timeout`. It bounds a stalled
+    /// pipeline, not the whole decode: the budget applies to each frame, to
+    /// each audio block, and to the wait for the audio format at open.
     pub frame_timeout: Duration,
     /// How far ahead of the current position [`Decoder::seek_to`] decodes
     /// forward instead of issuing a new keyframe seek.
@@ -127,6 +192,8 @@ pub struct DecoderOptions {
 impl Default for DecoderOptions {
     fn default() -> Self {
         Self {
+            streams: StreamSelection::Video,
+            audio_channels: AudioChannels::StereoDownmix,
             hardware: HardwarePreference::Prefer,
             format: FrameFormat::Nv12,
             frame_timeout: Duration::from_secs(10),
@@ -206,7 +273,8 @@ impl std::fmt::Debug for VideoFrame {
 /// hardware preference.
 pub struct Decoder {
     pipeline: gst::Pipeline,
-    sink: AppSink,
+    sink: Option<AppSink>,
+    audio: Option<AudioBranch>,
     chosen: Arc<Mutex<Option<String>>>,
     frame_timeout: Duration,
     forward_window: RationalTime,
@@ -217,6 +285,46 @@ pub struct Decoder {
     seeks: u64,
     frames_since_seek: u64,
     prerolled: bool,
+}
+
+/// The audio half of a decode: the second `appsink`, the shape it negotiated,
+/// and the buffers the samples are converted through.
+struct AudioBranch {
+    sink: AppSink,
+    format: AudioFormat,
+    /// The fold to stereo, or `None` when the source channels pass through.
+    downmix: Option<StereoDownmix>,
+    /// Source-order samples of the buffer being converted.
+    source: Vec<f32>,
+    /// Samples handed out, folded when a fold is in force.
+    delivered: Vec<f32>,
+    /// Frame the next block starts on, once the first buffer has set it.
+    next_frame: Option<i64>,
+    /// Blocks delivered so far.
+    blocks: u64,
+    /// True once the audio branch reached end of stream.
+    finished: bool,
+}
+
+/// Checks `path` is a readable file and turns it into a `file://` URI.
+///
+/// # Errors
+///
+/// Returns `media.file_unreadable` when the path cannot be read, is not a
+/// file, or cannot be expressed as a URI.
+fn readable_file_uri(path: &Path) -> SubResult<gst::glib::GString> {
+    let metadata = std::fs::metadata(path)
+        .sub_context_with(codes::FILE_UNREADABLE, || "media file cannot be read")
+        .map_err(|e| e.with_detail("path", path.display().to_string()))?;
+    if !metadata.is_file() {
+        return Err(
+            SubError::new(codes::FILE_UNREADABLE, "media path is not a file")
+                .with_detail("path", path.display().to_string()),
+        );
+    }
+    gst::glib::filename_to_uri(path, None)
+        .map_err(|e| SubError::wrap(codes::FILE_UNREADABLE, "media path is not a URI", &e))
+        .map_err(|e| e.with_detail("path", path.display().to_string()))
 }
 
 impl Decoder {
@@ -240,18 +348,7 @@ impl Decoder {
         gst::init()
             .map_err(|e| SubError::wrap(codes::INIT_FAILED, "GStreamer failed to start", &e))?;
 
-        let metadata = std::fs::metadata(path)
-            .sub_context_with(codes::FILE_UNREADABLE, || "media file cannot be read")
-            .map_err(|e| e.with_detail("path", path.display().to_string()))?;
-        if !metadata.is_file() {
-            return Err(
-                SubError::new(codes::FILE_UNREADABLE, "media path is not a file")
-                    .with_detail("path", path.display().to_string()),
-            );
-        }
-        let uri = gst::glib::filename_to_uri(path, None)
-            .map_err(|e| SubError::wrap(codes::FILE_UNREADABLE, "media path is not a URI", &e))
-            .map_err(|e| e.with_detail("path", path.display().to_string()))?;
+        let uri = readable_file_uri(path)?;
 
         if options.hardware == HardwarePreference::Prefer {
             prefer_hardware_decoders();
@@ -260,57 +357,95 @@ impl Decoder {
         let pipeline = gst::Pipeline::new();
         let source = gst::ElementFactory::make("uridecodebin")
             .property("uri", &uri)
-            // Only raw video is exposed; decodebin disposes of the other
-            // streams itself, so no pad is left unlinked to stall the flow.
+            // Only the streams named in `caps` are exposed; decodebin disposes
+            // of the others itself, so no pad is left unlinked to stall the
+            // flow.
             .property("expose-all-streams", false)
-            .property("caps", raw_video_caps())
+            .property("caps", raw_caps(options.streams))
             .build()
             .sub_context(codes::UNSUPPORTED, "uridecodebin is unavailable")?;
-        let convert = gst::ElementFactory::make("videoconvert")
-            .build()
-            .sub_context(codes::UNSUPPORTED, "videoconvert is unavailable")?;
-        let sink = gst::ElementFactory::make("appsink")
-            .property("sync", false)
-            .property("max-buffers", 2_u32)
-            .property("caps", sink_caps(options.format))
-            .build()
-            .sub_context(codes::UNSUPPORTED, "appsink is unavailable")?;
-
         pipeline
-            .add_many([&source, &convert, &sink])
+            .add(&source)
             .sub_context(codes::DECODE_FAILED, "could not build the decode pipeline")?;
-        convert
-            .link(&sink)
-            .sub_context(codes::DECODE_FAILED, "could not link the decode pipeline")?;
 
-        let convert_sink_pad = convert
-            .static_pad("sink")
-            .ok_or_else(|| SubError::new(codes::DECODE_FAILED, "videoconvert has no sink pad"))?;
-        // A file with several video streams exposes several pads; the first one
-        // is decoded and any later one is discarded rather than left dangling.
+        let video_sink = if options.streams.wants_video() {
+            Some(build_video_branch(&pipeline, options.format)?)
+        } else {
+            None
+        };
+        let audio_sink = if options.streams.wants_audio() {
+            Some(build_audio_branch(&pipeline)?)
+        } else {
+            None
+        };
+
+        // A file with several streams of one type exposes several pads; the
+        // first of each type is decoded and any later one is discarded rather
+        // than left dangling.
         let saw_video = Arc::new(AtomicBool::new(false));
-        let taken = Arc::clone(&saw_video);
-        let weak_pipeline = pipeline.downgrade();
-        source.connect_pad_added(move |_, pad| {
-            if taken.swap(true, Ordering::SeqCst) {
-                if let Some(pipeline) = weak_pipeline.upgrade() {
-                    discard_pad(&pipeline, pad);
-                }
-                return;
-            }
-            if let Err(err) = pad.link(&convert_sink_pad) {
-                tracing::warn!(%err, "decoded video pad could not be linked");
-            }
-        });
+        let saw_audio = Arc::new(AtomicBool::new(false));
+        link_decoded_pads(
+            &source,
+            &pipeline,
+            &LinkTargets {
+                video: video_sink.as_ref().map(|sink| (sink, &saw_video)),
+                audio: audio_sink.as_ref().map(|sink| (sink, &saw_audio)),
+            },
+        )?;
+
+        let no_more_pads = Arc::new(AtomicBool::new(false));
+        let pads_done = Arc::clone(&no_more_pads);
+        source.connect_no_more_pads(move |_| pads_done.store(true, Ordering::SeqCst));
 
         let chosen = Arc::new(Mutex::new(None));
         watch_chosen_decoder(&pipeline, &chosen);
 
-        let decoder = Self {
-            sink: sink
-                .downcast::<AppSink>()
-                .map_err(|_| SubError::new(codes::DECODE_FAILED, "appsink has the wrong type"))?,
+        let video_sink = video_sink
+            .map(|sink| {
+                sink.downcast::<AppSink>()
+                    .map_err(|_| SubError::new(codes::DECODE_FAILED, "appsink has the wrong type"))
+            })
+            .transpose()?;
+        let audio_sink = audio_sink
+            .map(|sink| {
+                sink.downcast::<AppSink>()
+                    .map_err(|_| SubError::new(codes::DECODE_FAILED, "appsink has the wrong type"))
+            })
+            .transpose()?;
+
+        pipeline.set_state(gst::State::Playing).map_err(|e| {
+            SubError::wrap(
+                codes::DECODE_FAILED,
+                "the decode pipeline would not start",
+                &e,
+            )
+            .with_detail("path", path.display().to_string())
+        })?;
+
+        // The audio shape is negotiated, not declared, so the decoder waits for
+        // it here: a caller then always knows the sample rate and the layout,
+        // and a file opened for audio that carries none fails at open rather
+        // than at the first pull.
+        let audio = match audio_sink {
+            Some(sink) => open_audio_branch(
+                &pipeline,
+                sink,
+                &AudioNegotiation {
+                    saw_audio: &saw_audio,
+                    no_more_pads: &no_more_pads,
+                },
+                options,
+            )
+            .map_err(|e| {
+                let _ = pipeline.set_state(gst::State::Null);
+                e.with_detail("path", path.display().to_string())
+            })?,
+            None => None,
+        };
+        Ok(Self {
             pipeline,
+            sink: video_sink,
+            audio,
             chosen,
             frame_timeout: options.frame_timeout,
             forward_window: duration_time(options.forward_decode_window),
@@ -321,19 +456,7 @@ impl Decoder {
             seeks: 0,
             frames_since_seek: 0,
             prerolled: false,
-        };
-        decoder
-            .pipeline
-            .set_state(gst::State::Playing)
-            .map_err(|e| {
-                SubError::wrap(
-                    codes::DECODE_FAILED,
-                    "the decode pipeline would not start",
-                    &e,
-                )
-                .with_detail("path", path.display().to_string())
-            })?;
-        Ok(decoder)
+        })
     }
 
     /// Pulls the next frame, or `None` once the stream has ended.
@@ -346,18 +469,25 @@ impl Decoder {
     /// Returns `media.decode_failed` when the pipeline reports an error or
     /// delivers a frame in a shape this decoder does not understand,
     /// `media.decode_timeout` when no frame arrives within the frame budget,
-    /// and `media.no_video_stream` when the file ends without a single frame.
+    /// `media.no_video_stream` when the file ends without a single frame, and
+    /// the same code when this decoder was opened for audio only.
     pub fn next_frame(&mut self) -> SubResult<Option<VideoFrame>> {
         if self.finished {
             return Ok(None);
         }
+        let sink = self.sink.clone().ok_or_else(|| {
+            SubError::new(
+                codes::NO_VIDEO_STREAM,
+                "this decoder was opened for audio only",
+            )
+        })?;
         let deadline = Instant::now() + self.frame_timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             // Waiting for the whole budget in one call would hide an error the
             // pipeline has already posted, so the wait is sliced and the bus is
             // read between slices.
-            if let Some(sample) = self.sink.try_pull_sample(clock_time(left.min(POLL_SLICE))) {
+            if let Some(sample) = sink.try_pull_sample(clock_time(left.min(POLL_SLICE))) {
                 let frame = Self::frame_from_sample(&sample)?;
                 self.delivered += 1;
                 self.prerolled = true;
@@ -371,7 +501,7 @@ impl Decoder {
                 // pipeline error; "no video stream" says far more than that.
                 return Err(self.no_video_stream().unwrap_or(err));
             }
-            if self.sink.is_eos() {
+            if sink.is_eos() {
                 self.finished = true;
                 return self.no_video_stream().map_or(Ok(None), Err);
             }
@@ -545,6 +675,89 @@ impl Decoder {
         self.chosen.lock().ok().and_then(|name| name.clone())
     }
 
+    /// The shape of the audio this decoder delivers: sample rate, source
+    /// channel count and layout, and the channel count each block carries.
+    ///
+    /// Known as soon as the decoder is open — the negotiation is waited for
+    /// there — and `None` when no audio was asked for, or when a file opened
+    /// with [`StreamSelection::VideoAndAudio`] carries none.
+    pub fn audio_format(&self) -> Option<&AudioFormat> {
+        self.audio.as_ref().map(|branch| &branch.format)
+    }
+
+    /// Pulls the next run of audio frames, or `None` once the audio stream has
+    /// ended.
+    ///
+    /// Blocks are interleaved `f32`, stereo unless [`AudioChannels::Source`]
+    /// was asked for, and carry a sample-accurate start position at the
+    /// source's own sample rate. Their length is whatever the decoder produced;
+    /// a caller that needs fixed-size buffers accumulates them.
+    ///
+    /// The samples borrow the decoder's own buffer, which the next call
+    /// overwrites.
+    ///
+    /// # Errors
+    ///
+    /// Returns `media.no_audio_stream` when this decoder has no audio branch,
+    /// `media.decode_failed` when the pipeline reports an error or the stream
+    /// changes shape mid-file, and `media.decode_timeout` when no block arrives
+    /// within the frame budget.
+    pub fn next_audio_block(&mut self) -> SubResult<Option<AudioBlock<'_>>> {
+        let Self {
+            pipeline,
+            audio,
+            frame_timeout,
+            ..
+        } = self;
+        let branch = audio.as_mut().ok_or_else(|| {
+            SubError::new(
+                codes::NO_AUDIO_STREAM,
+                "this decoder has no audio stream to pull from",
+            )
+        })?;
+        if branch.finished {
+            return Ok(None);
+        }
+        let deadline = Instant::now() + *frame_timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if let Some(sample) = branch
+                .sink
+                .try_pull_sample(clock_time(left.min(POLL_SLICE)))
+            {
+                let (start, frames) = branch.fill_from_sample(&sample)?;
+                if frames == 0 {
+                    // An empty buffer carries no frames; it is skipped rather
+                    // than handed out as a zero-length block.
+                    continue;
+                }
+                branch.blocks += 1;
+                return Ok(Some(AudioBlock {
+                    start: RationalTime::new(start, branch.format.frame_rate()),
+                    sample_rate: branch.format.sample_rate,
+                    channels: branch.format.channels,
+                    samples: &branch.delivered,
+                }));
+            }
+            if let Some(err) = pipeline_error(pipeline) {
+                branch.finished = true;
+                return Err(err);
+            }
+            if branch.sink.is_eos() {
+                branch.finished = true;
+                return Ok(None);
+            }
+            if left.is_zero() {
+                branch.finished = true;
+                return Err(SubError::new(
+                    codes::DECODE_TIMEOUT,
+                    "no decoded audio arrived within the frame budget",
+                )
+                .with_detail("timeout_ms", frame_timeout.as_millis().to_string()));
+            }
+        }
+    }
+
     /// Turns one appsink sample into a frame, mapping its buffer for reading.
     fn frame_from_sample(sample: &gst::Sample) -> SubResult<VideoFrame> {
         let caps = sample
@@ -575,17 +788,78 @@ impl Decoder {
 
     /// The first error message sitting on the bus, if any.
     fn pipeline_error(&self) -> Option<SubError> {
-        let bus = self.pipeline.bus()?;
-        while let Some(message) = bus.pop() {
-            if let gst::MessageView::Error(err) = message.view() {
-                return Some(SubError::wrap(
-                    codes::DECODE_FAILED,
-                    "the decode pipeline failed",
-                    &err.error(),
-                ));
-            }
+        pipeline_error(&self.pipeline)
+    }
+}
+
+/// The first error message sitting on a pipeline's bus, if any.
+fn pipeline_error(pipeline: &gst::Pipeline) -> Option<SubError> {
+    let bus = pipeline.bus()?;
+    while let Some(message) = bus.pop() {
+        if let gst::MessageView::Error(err) = message.view() {
+            return Some(SubError::wrap(
+                codes::DECODE_FAILED,
+                "the decode pipeline failed",
+                &err.error(),
+            ));
         }
-        None
+    }
+    None
+}
+
+impl AudioBranch {
+    /// Converts one appsink sample into the delivery buffer, returning the
+    /// frame the block starts on and how many frames it holds.
+    ///
+    /// Positions are counted in frames from the first buffer's timestamp, so
+    /// consecutive blocks are contiguous and sample-accurate whatever rounding
+    /// the container applied to its own nanosecond timestamps.
+    fn fill_from_sample(&mut self, sample: &gst::Sample) -> SubResult<(i64, usize)> {
+        let caps = sample
+            .caps()
+            .ok_or_else(|| SubError::new(codes::DECODE_FAILED, "decoded audio has no caps"))?;
+        let info = gstreamer_audio::AudioInfo::from_caps(caps)
+            .map_err(|e| SubError::wrap(codes::DECODE_FAILED, "decoded caps are not audio", &e))?;
+        let channels = u16::try_from(info.channels()).unwrap_or(u16::MAX);
+        if info.rate() != self.format.sample_rate || channels != self.format.source_channels {
+            return Err(SubError::new(
+                codes::DECODE_FAILED,
+                "the audio stream changed shape mid-file",
+            )
+            .with_detail("sample_rate", info.rate().to_string())
+            .with_detail("channels", channels.to_string()));
+        }
+        let buffer = sample
+            .buffer()
+            .ok_or_else(|| SubError::new(codes::DECODE_FAILED, "decoded audio has no buffer"))?;
+        let map = buffer
+            .map_readable()
+            .map_err(|_| SubError::new(codes::DECODE_FAILED, "decoded audio could not be read"))?;
+
+        // The sink negotiated F32LE, so the bytes are four-byte little-endian
+        // samples whatever this machine's own endianness is.
+        self.source.clear();
+        self.source.extend(
+            map.as_slice()
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
+        );
+        if let Some(downmix) = &self.downmix {
+            downmix.apply(&self.source, &mut self.delivered);
+        } else {
+            self.delivered.clear();
+            self.delivered.extend_from_slice(&self.source);
+        }
+
+        let frames = self.source.len() / usize::from(self.format.source_channels);
+        let start = match self.next_frame {
+            Some(next) => next,
+            None => buffer
+                .pts()
+                .map_or(0, |pts| frames_at(pts.nseconds(), self.format.frame_rate())),
+        };
+        self.next_frame = Some(start.saturating_add(i64::try_from(frames).unwrap_or(i64::MAX)));
+        Ok((start, frames))
     }
 }
 
@@ -596,6 +870,11 @@ impl std::fmt::Debug for Decoder {
             .field("frames_delivered", &self.delivered)
             .field("position_ns", &self.position.map(RationalTime::value))
             .field("seeks", &self.seeks)
+            .field("audio_format", &self.audio_format())
+            .field(
+                "audio_blocks_delivered",
+                &self.audio.as_ref().map(|branch| branch.blocks),
+            )
             .field("finished", &self.finished)
             .finish_non_exhaustive()
     }
@@ -612,15 +891,289 @@ impl Drop for Decoder {
     }
 }
 
-/// Caps decodebin treats as decoded: any raw video, including the memory
-/// features a hardware decoder attaches.
-fn raw_video_caps() -> gst::Caps {
-    let mut caps = gst::Caps::builder("video/x-raw").build();
+/// The flags the wait for the audio negotiation watches.
+struct AudioNegotiation<'a> {
+    /// Set once a decoded audio pad has been linked into the branch.
+    saw_audio: &'a Arc<AtomicBool>,
+    /// Set once decodebin has exposed every pad it is going to.
+    no_more_pads: &'a Arc<AtomicBool>,
+}
+
+/// Waits for the audio branch to negotiate and builds it.
+///
+/// Returns `Ok(None)` when the file carries no audio and the caller asked for
+/// video as well; a decode opened for audio only fails instead.
+fn open_audio_branch(
+    pipeline: &gst::Pipeline,
+    sink: AppSink,
+    negotiation: &AudioNegotiation<'_>,
+    options: DecoderOptions,
+) -> SubResult<Option<AudioBranch>> {
+    let negotiated = wait_for_audio_format(
+        pipeline,
+        &sink,
+        negotiation.saw_audio,
+        negotiation.no_more_pads,
+        options.frame_timeout,
+        options.audio_channels,
+    )?;
+    match negotiated {
+        Some((format, downmix)) => Ok(Some(AudioBranch {
+            sink,
+            format,
+            downmix,
+            source: Vec::new(),
+            delivered: Vec::new(),
+            next_frame: None,
+            blocks: 0,
+            finished: false,
+        })),
+        None if options.streams == StreamSelection::AudioOnly => Err(SubError::new(
+            codes::NO_AUDIO_STREAM,
+            "the file carries no audio stream to decode",
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Caps decodebin treats as decoded, for the streams this decode wants: raw
+/// video including the memory features a hardware decoder attaches, raw audio,
+/// or both.
+fn raw_caps(streams: StreamSelection) -> gst::Caps {
+    let mut caps = gst::Caps::new_empty();
     if let Some(caps) = caps.get_mut() {
-        caps.set_features(0, Some(gst::CapsFeatures::new_any()));
+        if streams.wants_video() {
+            caps.append_structure_full(
+                gst::Structure::new_empty("video/x-raw"),
+                Some(gst::CapsFeatures::new_any()),
+            );
+        }
+        if streams.wants_audio() {
+            caps.append_structure(gst::Structure::new_empty("audio/x-raw"));
+        }
     }
     caps
 }
+
+/// Builds the video half of the pipeline — `videoconvert` into an `appsink` —
+/// and returns the sink, still to be linked to a decoded pad.
+fn build_video_branch(pipeline: &gst::Pipeline, format: FrameFormat) -> SubResult<gst::Element> {
+    let convert = gst::ElementFactory::make("videoconvert")
+        .build()
+        .sub_context(codes::UNSUPPORTED, "videoconvert is unavailable")?;
+    let sink = gst::ElementFactory::make("appsink")
+        .property("sync", false)
+        .property("max-buffers", 2_u32)
+        .property("caps", sink_caps(format))
+        .build()
+        .sub_context(codes::UNSUPPORTED, "appsink is unavailable")?;
+    pipeline
+        .add_many([&convert, &sink])
+        .sub_context(codes::DECODE_FAILED, "could not build the decode pipeline")?;
+    convert
+        .link(&sink)
+        .sub_context(codes::DECODE_FAILED, "could not link the decode pipeline")?;
+    Ok(sink)
+}
+
+/// Builds the audio half of the pipeline — `audioconvert` into a second
+/// `appsink` — and returns the sink, still to be linked to a decoded pad.
+///
+/// The sink names the sample format only, so the source's own rate and channel
+/// count negotiate through unchanged: resampling and the fold to stereo are
+/// this crate's business, not the converter's.
+fn build_audio_branch(pipeline: &gst::Pipeline) -> SubResult<gst::Element> {
+    let convert = gst::ElementFactory::make("audioconvert")
+        .build()
+        .sub_context(codes::UNSUPPORTED, "audioconvert is unavailable")?;
+    let sink = gst::ElementFactory::make("appsink")
+        .property("sync", false)
+        .property("max-buffers", AUDIO_QUEUE_BUFFERS)
+        .property("caps", audio_sink_caps())
+        .build()
+        .sub_context(codes::UNSUPPORTED, "appsink is unavailable")?;
+    pipeline
+        .add_many([&convert, &sink])
+        .sub_context(codes::DECODE_FAILED, "could not build the decode pipeline")?;
+    convert
+        .link(&sink)
+        .sub_context(codes::DECODE_FAILED, "could not link the decode pipeline")?;
+    Ok(sink)
+}
+
+/// The branches a decoded pad can be linked into, each with the flag that
+/// records whether that branch has already claimed a stream.
+struct LinkTargets<'a> {
+    video: Option<(&'a gst::Element, &'a Arc<AtomicBool>)>,
+    audio: Option<(&'a gst::Element, &'a Arc<AtomicBool>)>,
+}
+
+/// Links each decoded pad into the branch that wants it, discarding the pads
+/// of a second stream of a type this decode has already claimed.
+fn link_decoded_pads(
+    source: &gst::Element,
+    pipeline: &gst::Pipeline,
+    targets: &LinkTargets<'_>,
+) -> SubResult<()> {
+    /// Resolves a branch's sink element to the pad a decoded pad links into.
+    fn entry_pad(sink: &gst::Element) -> SubResult<gst::Pad> {
+        sink.static_pad("sink")
+            .and_then(|pad| pad.peer())
+            .and_then(|peer| peer.parent_element())
+            .and_then(|convert| convert.static_pad("sink"))
+            .ok_or_else(|| SubError::new(codes::DECODE_FAILED, "a decode branch has no sink pad"))
+    }
+
+    let video = targets
+        .video
+        .map(|(sink, taken)| Ok::<_, SubError>((entry_pad(sink)?, Arc::clone(taken))))
+        .transpose()?;
+    let audio = targets
+        .audio
+        .map(|(sink, taken)| Ok::<_, SubError>((entry_pad(sink)?, Arc::clone(taken))))
+        .transpose()?;
+
+    let weak_pipeline = pipeline.downgrade();
+    source.connect_pad_added(move |_, pad| {
+        let media = pad_media_type(pad);
+        let target = match media.as_deref() {
+            Some(name) if name.starts_with("video/") => video.as_ref(),
+            Some(name) if name.starts_with("audio/") => audio.as_ref(),
+            _ => None,
+        };
+        let Some((entry, taken)) = target else {
+            if let Some(pipeline) = weak_pipeline.upgrade() {
+                discard_pad(&pipeline, pad);
+            }
+            return;
+        };
+        if taken.swap(true, Ordering::SeqCst) {
+            if let Some(pipeline) = weak_pipeline.upgrade() {
+                discard_pad(&pipeline, pad);
+            }
+            return;
+        }
+        if let Err(err) = pad.link(entry) {
+            tracing::warn!(%err, media = ?media, "decoded pad could not be linked");
+        }
+    });
+    Ok(())
+}
+
+/// The media type of a decoded pad, for example `video/x-raw`.
+fn pad_media_type(pad: &gst::Pad) -> Option<String> {
+    let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
+    Some(caps.structure(0)?.name().to_string())
+}
+
+/// Waits for the audio branch to negotiate, and reports the shape it settled
+/// on together with the fold that shape needs.
+///
+/// Returns `Ok(None)` when the file exposed no audio pad at all: whether that
+/// is an error depends on what the caller asked for.
+fn wait_for_audio_format(
+    pipeline: &gst::Pipeline,
+    sink: &AppSink,
+    saw_audio: &Arc<AtomicBool>,
+    no_more_pads: &Arc<AtomicBool>,
+    timeout: Duration,
+    channels: AudioChannels,
+) -> SubResult<Option<(AudioFormat, Option<StereoDownmix>)>> {
+    let pad = sink
+        .static_pad("sink")
+        .ok_or_else(|| SubError::new(codes::DECODE_FAILED, "the audio appsink has no sink pad"))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(caps) = pad.current_caps() {
+            return audio_format_from_caps(&caps, channels).map(Some);
+        }
+        if let Some(err) = pipeline_error(pipeline) {
+            // A file with no audio at all fails as a pipeline error rather
+            // than by quietly exposing no pad: decodebin cannot build a branch
+            // that ends in the raw audio this decode asked for, so it gives up
+            // — on a video-only file it reports the video decoder it could not
+            // plug, and never reaches no-more-pads at all. As long as no audio
+            // pad has been seen, that error says the file had no audio to give
+            // this decode, not that decoding went wrong.
+            if !saw_audio.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+            return Err(err);
+        }
+        if sink.is_eos()
+            || (no_more_pads.load(Ordering::SeqCst) && !saw_audio.load(Ordering::SeqCst))
+        {
+            return Ok(None);
+        }
+        if Instant::now() >= deadline {
+            return Err(SubError::new(
+                codes::DECODE_TIMEOUT,
+                "the audio stream did not negotiate within the frame budget",
+            )
+            .with_detail("timeout_ms", timeout.as_millis().to_string()));
+        }
+        std::thread::sleep(NEGOTIATION_SLICE);
+    }
+}
+
+/// Reads a negotiated audio shape out of the caps the sink settled on.
+fn audio_format_from_caps(
+    caps: &gst::Caps,
+    channels: AudioChannels,
+) -> SubResult<(AudioFormat, Option<StereoDownmix>)> {
+    let info = gstreamer_audio::AudioInfo::from_caps(caps)
+        .map_err(|e| SubError::wrap(codes::DECODE_FAILED, "decoded caps are not audio", &e))?;
+    let source_channels = u16::try_from(info.channels()).unwrap_or(u16::MAX);
+    if info.rate() == 0 || source_channels == 0 || source_channels > MAX_CHANNELS {
+        return Err(
+            SubError::new(codes::UNSUPPORTED, "the audio stream has an unusable shape")
+                .with_detail("sample_rate", info.rate().to_string())
+                .with_detail("channels", source_channels.to_string()),
+        );
+    }
+    let positions = info.positions();
+    let roles = roles_from_positions(positions, source_channels);
+    let source_layout = layout_from_roles(&roles);
+    let downmix = match channels {
+        AudioChannels::StereoDownmix => Some(StereoDownmix::from_roles(&roles)),
+        AudioChannels::Source => None,
+    };
+    let format = AudioFormat {
+        sample_rate: info.rate(),
+        source_channels,
+        source_layout,
+        channels: if downmix.is_some() {
+            2
+        } else {
+            source_channels
+        },
+    };
+    tracing::info!(
+        sample_rate = format.sample_rate,
+        source_channels = format.source_channels,
+        layout = format.source_layout.as_str(),
+        channels = format.channels,
+        "audio stream negotiated"
+    );
+    Ok((format, downmix))
+}
+
+/// Caps the audio sink accepts: interleaved 32-bit float, in system memory,
+/// at whatever rate and channel count the source carries.
+fn audio_sink_caps() -> gst::Caps {
+    gst::Caps::builder("audio/x-raw")
+        .field("format", "F32LE")
+        .field("layout", "interleaved")
+        .build()
+}
+
+/// How many decoded audio buffers the audio sink holds before it blocks. Wider
+/// than the video queue because a caller usually pulls a run of audio between
+/// frames.
+const AUDIO_QUEUE_BUFFERS: u32 = 64;
+
+/// How long the wait for the audio negotiation sleeps between checks.
+const NEGOTIATION_SLICE: Duration = Duration::from_millis(2);
 
 /// Caps the sink accepts: exactly one format, in system memory.
 ///

@@ -13,6 +13,7 @@ sub-model = { path = "../sub-model" }
 sub-time = { path = "../sub-time" }
 gstreamer = "0.25"
 gstreamer-app = "0.25"
+gstreamer-audio = "0.25"
 gstreamer-pbutils = "0.25"
 gstreamer-video = { version = "0.25", features = ["v1_18"] }
 serde = { version = "1", features = ["derive"] }
