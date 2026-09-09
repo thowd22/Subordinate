@@ -162,10 +162,18 @@ gen_video() {
         # the muxer records buffer timestamps 33.3 ms apart for the first three
         # seconds and 16.6 ms apart for the last three. Matroska stores those
         # per-frame timestamps, giving a real variable-frame-rate file.
+        #
+        # bframes=0 is load bearing: x264's reorder delay assumes one frame
+        # duration, so with B-frames the pictures either side of the rate
+        # change come out of the encoder carrying each other's timestamps --
+        # two duplicate stamps near the end of the file and none at all for the
+        # first two pictures of the faster half -- and nothing downstream can
+        # then name those pictures by time. Only this fixture needs it; the
+        # constant-rate clips keep their B-frames.
         run concat name=c \
             ! capssetter replace=true \
             caps="video/x-raw,format=I420,width=1280,height=720,framerate=60/1" \
-            ! x264enc bitrate=6000 key-int-max=60 speed-preset=veryfast \
+            ! x264enc bitrate=6000 key-int-max=60 speed-preset=veryfast bframes=0 \
             ! h264parse ! matroskamux ! filesink location="$out_dir/$1" \
             videotestsrc pattern=smpte num-buffers=90 \
             ! "video/x-raw,format=I420,width=1280,height=720,framerate=30/1" ! c. \
