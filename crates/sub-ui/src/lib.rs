@@ -8,6 +8,7 @@
 
 pub mod app;
 pub mod diagnostics;
+pub mod history_panel;
 pub mod sequence_tabs;
 pub mod shortcuts;
 pub mod timeline;
@@ -17,6 +18,9 @@ pub mod viewer;
 
 pub use app::{AppOptions, SubordinateApp, run};
 pub use diagnostics::DiagnosticsPanel;
+pub use history_panel::{
+    HistoryAction, HistoryList, HistoryPanel, ORIGINAL_STATE_LABEL, edit_menu_ui,
+};
 pub use sequence_tabs::{
     NewSequenceDialog, SequenceTabAction, SequenceTabs, SequenceViewState, default_sequence_name,
 };
