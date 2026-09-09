@@ -33,13 +33,21 @@
 //! ```
 
 use eframe::egui;
+use sub_audio::MeterLevels;
 use sub_model::sequence::Sequence;
 use sub_time::{Rational, RationalTime, Rounding, Timecode, TimecodeRate};
 
+use crate::meter::MeterState;
 use crate::shortcuts::{Action, default_action_for};
 
 /// Height of the scrub bar, in points.
 const SCRUB_HEIGHT: f32 = 18.0;
+
+/// How wide the master meter in the transport row is, in points.
+const MASTER_METER_WIDTH: f32 = 120.0;
+
+/// How tall the master meter in the transport row is, in points.
+const MASTER_METER_HEIGHT: f32 = 8.0;
 
 /// Casts a pixel or frame count to a float, at the painting boundary only.
 #[allow(
@@ -497,6 +505,8 @@ pub struct ViewerPanel {
     pub state: ViewerState,
     /// Whether the panel claims the arrow and Home/End keys.
     pub keyboard: bool,
+    /// The master bus meter, fed from the mixer's meter bank.
+    pub master_meter: MeterState,
 }
 
 impl ViewerPanel {
@@ -506,6 +516,7 @@ impl ViewerPanel {
         Self {
             state: ViewerState::new(rate),
             keyboard: true,
+            master_meter: MeterState::new(),
         }
     }
 
@@ -515,7 +526,14 @@ impl ViewerPanel {
         Self {
             state: ViewerState::for_sequence(sequence),
             keyboard: true,
+            master_meter: MeterState::new(),
         }
+    }
+
+    /// Feeds the master meter with the levels the audio callback published,
+    /// `elapsed` seconds after the last frame.
+    pub fn update_master_meter(&mut self, levels: MeterLevels, elapsed: f32) {
+        self.master_meter.update(levels, elapsed);
     }
 
     /// Draws the panel and reports whether the playhead moved.
@@ -585,6 +603,14 @@ impl ViewerPanel {
             if ui.button(">|").on_hover_text("Last frame (End)").clicked() {
                 moved |= self.state.go_to_end();
             }
+            // The master meter takes the right-hand end of the transport row,
+            // where it is next to the picture it belongs to.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let width = ui.available_width().min(MASTER_METER_WIDTH);
+                if width > 0.0 {
+                    self.master_meter.ui(ui, width, MASTER_METER_HEIGHT);
+                }
+            });
         });
         moved
     }
@@ -671,6 +697,7 @@ fn pixel_offset(offset: f32) -> i64 {
 mod tests {
     use super::{ViewerAction, ViewerFit, ViewerFrame, ViewerPanel, ViewerState, action_for_key};
     use eframe::egui;
+    use sub_audio::MeterLevels;
     use sub_model::sequence::{Sequence, SequenceSettings};
     use sub_time::{Rational, RationalTime};
 
@@ -728,10 +755,24 @@ mod tests {
         }
     }
 
+    /// Every filled rectangle in `shape`, with the colour it was filled in.
+    fn collect_rects(shape: &egui::Shape, into: &mut Vec<(egui::Rect, egui::Color32)>) {
+        match shape {
+            egui::Shape::Rect(rect) => into.push((rect.rect, rect.fill)),
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_rects(shape, into);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// What one painted frame drew, and whether the playhead moved.
     struct Painted {
         texts: Vec<String>,
         meshes: Vec<(egui::TextureId, egui::Rect)>,
+        rects: Vec<(egui::Rect, egui::Color32)>,
         moved: bool,
     }
 
@@ -742,6 +783,7 @@ mod tests {
         let mut painted = Painted {
             texts: Vec::new(),
             meshes: Vec::new(),
+            rects: Vec::new(),
             moved: false,
         };
         for frame in 0..2 {
@@ -752,6 +794,7 @@ mod tests {
             };
             painted.texts.clear();
             painted.meshes.clear();
+            painted.rects.clear();
             let mut moved = false;
             let mut output = ctx.run_ui(input, |ui| {
                 moved = panel.ui(ui, Some(preview()));
@@ -760,6 +803,7 @@ mod tests {
             for clipped in &output.shapes {
                 collect_text(&clipped.shape, &mut painted.texts);
                 collect_meshes(&clipped.shape, &mut painted.meshes);
+                collect_rects(&clipped.shape, &mut painted.rects);
             }
             // No painter here consumes the font atlas, so release it by hand
             // rather than let epaint panic on the unapplied delta.
@@ -1073,6 +1117,55 @@ mod tests {
             "the duration is painted: {:?}",
             painted.texts
         );
+    }
+
+    #[test]
+    fn the_painted_viewer_draws_a_master_meter_that_lights_when_the_master_clips() {
+        let mut panel = ViewerPanel::new(Rational::FPS_24);
+        panel
+            .state
+            .set_duration(RationalTime::new(240, Rational::FPS_24));
+
+        let quiet = paint(&mut panel, &[]);
+        assert!(
+            !quiet
+                .rects
+                .iter()
+                .any(|(_, color)| *color == crate::meter::CLIP_COLOR),
+            "a silent master is not lit"
+        );
+
+        panel.update_master_meter(MeterLevels::new(1.2, 0.9), 1.0 / 60.0);
+        assert!(panel.master_meter.clipping());
+        let loud = paint(&mut panel, &[]);
+        let lit: Vec<_> = loud
+            .rects
+            .iter()
+            .filter(|(_, color)| *color == crate::meter::CLIP_COLOR)
+            .collect();
+        assert!(
+            !lit.is_empty(),
+            "the clipped master meter is painted in the clip colour"
+        );
+        for (rect, _) in lit {
+            assert!(
+                rect.width() > 0.0 && rect.height() > 0.0,
+                "the meter is drawn with real area: {rect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_master_meter_holds_its_peak_and_falls_when_the_transport_stops() {
+        let mut panel = ViewerPanel::new(Rational::FPS_24);
+        panel.update_master_meter(MeterLevels::new(1.0, 0.7), 1.0 / 60.0);
+        let held = panel.master_meter.peak_hold_db();
+        panel.update_master_meter(MeterLevels::SILENT, 10.0);
+        assert!(
+            panel.master_meter.peak_hold_db() < held,
+            "the hold falls once the transport has been quiet"
+        );
+        assert!(!panel.master_meter.clipping());
     }
 
     #[test]

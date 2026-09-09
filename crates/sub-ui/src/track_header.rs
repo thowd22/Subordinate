@@ -18,11 +18,16 @@ use eframe::egui::{
     Align, Button, Key, Label, Layout, Rect, Response, RichText, Sense, TextEdit, Ui, UiBuilder,
     Vec2, pos2,
 };
+use sub_audio::MeterLevels;
 use sub_edit::BoxedCommand;
 use sub_edit::commands::{
     AddTrack, RemoveTrack, RenameTrack, ReorderTrack, SetTrackLocked, SetTrackMuted,
 };
 use sub_model::{SequenceId, Track, TrackId, TrackKind};
+
+use crate::meter::MeterState;
+
+use std::collections::HashMap;
 
 /// Padding between the header's edge and its controls, in points.
 const PADDING: f32 = 5.0;
@@ -32,6 +37,16 @@ const TOGGLE_SIZE: Vec2 = Vec2::new(20.0, 16.0);
 
 /// The height of the row holding the kind label and the toggles, in points.
 const CONTROL_ROW_HEIGHT: f32 = 16.0;
+
+/// The height of the level meter in the control row, in points.
+const METER_HEIGHT: f32 = 6.0;
+
+/// The width the kind label is given before the meter takes the rest of the
+/// control row, in points.
+const KIND_WIDTH: f32 = 32.0;
+
+/// The gap between the controls in the control row, in points.
+const CONTROL_GAP: f32 = 2.0;
 
 /// What a track header control asks the Command API to do.
 ///
@@ -280,6 +295,8 @@ pub struct HeaderLayout {
     pub mute: Rect,
     /// The lock toggle.
     pub lock: Rect,
+    /// The level meter, between the kind label and the toggles.
+    pub meter: Rect,
 }
 
 impl HeaderLayout {
@@ -299,18 +316,37 @@ impl HeaderLayout {
             TOGGLE_SIZE,
         );
         let mute = Rect::from_min_size(
-            pos2(lock.left() - TOGGLE_SIZE.x - 2.0, controls_top),
+            pos2(lock.left() - TOGGLE_SIZE.x - CONTROL_GAP, controls_top),
             TOGGLE_SIZE,
+        );
+        // The control row reads left to right: the kind, the level meter, then
+        // the two toggles. The meter takes whatever the kind label leaves, and
+        // closes to nothing rather than overlapping anything in a header too
+        // narrow for all four.
+        let kind_right = (inner.left() + KIND_WIDTH)
+            .min(mute.left() - CONTROL_GAP)
+            .max(inner.left());
+        let kind = Rect::from_min_max(
+            pos2(inner.left(), controls_top),
+            pos2(kind_right, inner.bottom()),
+        );
+        let meter_height = METER_HEIGHT.min(inner.height());
+        let meter_top = (controls_top + (CONTROL_ROW_HEIGHT - meter_height) / 2.0).max(inner.top());
+        let meter_left = kind.right() + CONTROL_GAP;
+        let meter = Rect::from_min_max(
+            pos2(meter_left, meter_top),
+            pos2(
+                (mute.left() - CONTROL_GAP).max(meter_left),
+                (meter_top + meter_height).min(inner.bottom()),
+            ),
         );
         Self {
             rect,
             name: Rect::from_min_max(inner.min, pos2(inner.right(), controls_top)),
-            kind: Rect::from_min_max(
-                pos2(inner.left(), controls_top),
-                pos2((mute.left() - 2.0).max(inner.left()), inner.bottom()),
-            ),
+            kind,
             mute,
             lock,
+            meter,
         }
     }
 }
@@ -335,6 +371,9 @@ struct Rename {
 pub struct TrackHeaderState {
     /// The rename in progress.
     rename: Option<Rename>,
+    /// One meter per track that has been metered, keyed by track. A track
+    /// with no entry draws a silent meter.
+    meters: HashMap<TrackId, MeterState>,
 }
 
 impl TrackHeaderState {
@@ -395,6 +434,38 @@ impl TrackHeaderState {
                 None
             }
         }
+    }
+
+    /// Feeds one track's meter with the levels the audio callback published,
+    /// `elapsed` seconds after the last frame.
+    ///
+    /// Nothing is read from the audio thread here beyond the two atomics the
+    /// caller already loaded: the header column only holds the peak and lets
+    /// it fall.
+    pub fn update_meter(&mut self, track: TrackId, levels: MeterLevels, elapsed: f32) {
+        self.meters
+            .entry(track)
+            .or_default()
+            .update(levels, elapsed);
+    }
+
+    /// Lets every meter fall by `elapsed` seconds without a new measurement,
+    /// which is what a stopped transport does.
+    pub fn decay_meters(&mut self, elapsed: f32) {
+        for meter in self.meters.values_mut() {
+            meter.decay(elapsed);
+        }
+    }
+
+    /// Drops the meters of tracks that are no longer in the sequence.
+    pub fn retain_meters(&mut self, keep: impl Fn(TrackId) -> bool) {
+        self.meters.retain(|track, _| keep(*track));
+    }
+
+    /// The meter of `track`, when it has been fed one.
+    #[must_use]
+    pub fn meter(&self, track: TrackId) -> Option<&MeterState> {
+        self.meters.get(&track)
     }
 
     /// Lays the controls of `track` out over `rect` and runs them.
@@ -477,6 +548,12 @@ impl TrackHeaderState {
                 locked: !track.locked,
             });
         }
+
+        // The meter is painted rather than laid out as a widget: it takes no
+        // input, and the header's rectangles are computed up front so that the
+        // column can be tested without a frame.
+        let meter = self.meters.get(&track.id).copied().unwrap_or_default();
+        meter.paint(inner.painter(), layout.meter, inner.visuals());
 
         self.menu(&background, track, index, count).or(action)
     }
@@ -582,6 +659,7 @@ mod tests {
         HeaderLayout, MenuChoice, TrackAction, TrackHeaderState, empty_menu_entries, menu_entries,
     };
     use eframe::egui::{Rect, pos2};
+    use sub_audio::MeterLevels;
     use sub_edit::History;
     use sub_model::sequence::SequenceSettings;
     use sub_model::{Project, Sequence, Track, TrackKind};
@@ -598,6 +676,66 @@ mod tests {
         }
         project.sequences.push(sequence.clone());
         (project, sequence)
+    }
+
+    #[test]
+    fn the_meter_sits_in_the_control_row_between_the_kind_and_the_toggles() {
+        let layout = HeaderLayout::new(Rect::from_min_max(pos2(0.0, 0.0), pos2(132.0, 54.0)));
+        assert!(
+            layout.rect.contains_rect(layout.meter),
+            "the meter escapes the header"
+        );
+        assert!(layout.meter.width() > 0.0 && layout.meter.height() > 0.0);
+        assert!(
+            layout.meter.left() >= layout.kind.right(),
+            "the meter starts after the kind label"
+        );
+        assert!(
+            layout.meter.right() <= layout.mute.left(),
+            "the meter stops before the toggles"
+        );
+        assert!(
+            layout.meter.top() >= layout.name.bottom(),
+            "the meter sits below the name, in the control row"
+        );
+    }
+
+    #[test]
+    fn a_header_too_narrow_for_a_meter_closes_it_to_nothing() {
+        // The toggles alone are wider than this header, so there is no room
+        // left for a meter at all: it must come out empty rather than
+        // negative, since a painter would draw an inverted rectangle.
+        let layout = HeaderLayout::new(Rect::from_min_max(pos2(0.0, 0.0), pos2(40.0, 54.0)));
+        assert!(
+            layout.meter.width() <= 0.0 + f32::EPSILON,
+            "a squeezed meter is empty, not {} wide",
+            layout.meter.width()
+        );
+        assert!(layout.meter.height() >= 0.0);
+    }
+
+    #[test]
+    fn a_meter_holds_its_peak_per_track_and_can_be_dropped_with_its_track() {
+        let (_, sequence) = project_with(&["V1", "V2"]);
+        let first = sequence.tracks[0].id;
+        let second = sequence.tracks[1].id;
+        let mut state = TrackHeaderState::new();
+        assert!(state.meter(first).is_none(), "an unfed track has no meter");
+
+        state.update_meter(first, MeterLevels::new(1.0, 0.5), 1.0 / 60.0);
+        let meter = state.meter(first).expect("a meter");
+        assert!(meter.clipping(), "full scale lights the clip indicator");
+        assert!((meter.peak_hold_db() - 0.0).abs() < 1e-6);
+        assert!(state.meter(second).is_none(), "meters do not bleed across");
+
+        state.decay_meters(10.0);
+        assert!(
+            !state.meter(first).expect("a meter").clipping(),
+            "the indicator clears once the transport has been quiet"
+        );
+
+        state.retain_meters(|track| track == second);
+        assert!(state.meter(first).is_none(), "a removed track is forgotten");
     }
 
     #[test]
