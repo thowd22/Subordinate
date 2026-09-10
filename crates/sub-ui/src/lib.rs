@@ -9,6 +9,7 @@
 pub mod app;
 pub mod audio_settings;
 pub mod diagnostics;
+pub mod dock;
 pub mod history_panel;
 pub mod keymap;
 pub mod media_bin;
@@ -28,6 +29,7 @@ pub mod waveform;
 pub use app::{AppOptions, SubordinateApp, run};
 pub use audio_settings::{AudioSettingsAction, AudioSettingsPanel, device_label, status_line};
 pub use diagnostics::DiagnosticsPanel;
+pub use dock::{DockLayout, LAYOUT_FILE_NAME, LAYOUT_VERSION, LoadedLayout, Panel, layout_menu_ui};
 pub use history_panel::{
     HistoryAction, HistoryList, HistoryPanel, ORIGINAL_STATE_LABEL, edit_menu_ui,
 };
@@ -102,6 +104,16 @@ pub mod codes {
 
     /// A plugin asked for a shortcut that is not a keyboard chord.
     pub const PLUGIN_INVALID_CHORD: ErrorCode = ErrorCode::from_static("ui.plugin_invalid_chord");
+
+    /// A `layout.json` is not valid JSON, names a panel this build does not
+    /// have, or was written by a different schema version.
+    pub const LAYOUT_PARSE: ErrorCode = ErrorCode::from_static("ui.layout_parse");
+
+    /// A `layout.json` exists but could not be read.
+    pub const LAYOUT_UNREADABLE: ErrorCode = ErrorCode::from_static("ui.layout_unreadable");
+
+    /// The panel layout could not be written to the config directory.
+    pub const LAYOUT_UNWRITABLE: ErrorCode = ErrorCode::from_static("ui.layout_unwritable");
 
     /// A plugin asked for a chord the editor or an earlier plugin already
     /// holds. The command keeps its menu entry and loses its shortcut.

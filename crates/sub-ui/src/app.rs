@@ -10,6 +10,7 @@ use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
 use sub_core::SubError;
+use sub_model::Project;
 use sub_model::sequence::{Resolution, Sequence, SequenceSettings};
 use sub_render::{
     Compositor, RenderContext, RenderError, ResolvedClip, SourceFrame, describe_adapter,
@@ -23,8 +24,11 @@ use sub_audio::{AudioOutput, CpalBackend, MeterBank, OutputOptions};
 
 use crate::audio_settings::{AudioSettingsAction, AudioSettingsPanel};
 use crate::diagnostics::DiagnosticsPanel;
+use crate::dock::{DockLayout, Panel, layout_menu_ui};
 use crate::keymap::LoadedKeymap;
+use crate::media_bin::MediaBinPanel;
 use crate::shortcuts::{Action, ShortcutMap, ShortcutsWindow};
+use crate::timeline_panel::TimelinePanel;
 use crate::viewer::{ViewerAction, ViewerFrame, ViewerPanel};
 
 /// How many tracks the shared meter bank has room for. A sequence with more
@@ -82,6 +86,15 @@ pub struct SubordinateApp {
     compositor: Compositor,
     /// The viewer panel: picture, scrub bar and timecode.
     viewer: ViewerPanel,
+    /// The project the bin and the timeline show. Loading a project replaces
+    /// it; until then it is empty, as the sequence is.
+    project: Project,
+    /// The media bin panel.
+    media_bin: MediaBinPanel,
+    /// The timeline panel.
+    timeline: TimelinePanel,
+    /// Where the panels are docked, as read from the user's `layout.json`.
+    layout: DockLayout,
     /// The compositor output as egui knows it, and the canvas it was
     /// registered at, so a resolution change re-registers rather than
     /// stretching a texture that no longer exists.
@@ -129,6 +142,11 @@ impl SubordinateApp {
         let sequence = Sequence::new("Sequence", SequenceSettings::default());
         let compositor = Compositor::for_sequence(render.clone(), &sequence);
         let viewer = ViewerPanel::for_sequence(&sequence);
+        let timeline = TimelinePanel::new(sequence.settings.frame_rate);
+        // The panel arrangement is configuration too: a file that cannot be
+        // read costs the user their arrangement, never their session.
+        let layout = DockLayout::load();
+        layout.log_problems();
         let meters = Arc::new(MeterBank::new(METERED_TRACKS));
         let audio = audio_output(sequence.settings.sample_rate, Arc::clone(&meters));
         Ok(Self {
@@ -144,6 +162,10 @@ impl SubordinateApp {
             sequence,
             compositor,
             viewer,
+            project: Project::new("Untitled"),
+            media_bin: MediaBinPanel::new(),
+            timeline,
+            layout: layout.layout,
             preview: None,
             needs_composite: true,
             keymap,
@@ -268,6 +290,56 @@ impl SubordinateApp {
         ViewerFrame::new(texture, resolution.width(), resolution.height())
     }
 
+    /// Draws the docked panels and returns whether the playhead moved.
+    ///
+    /// The dock owns the arrangement; each panel's body is drawn here, so a
+    /// panel dragged into another split or grouped into a tab keeps working
+    /// exactly as it did. The inspector and export panels have no widgets of
+    /// their own yet (TASK-62 brings the export one), so their tabs say so
+    /// rather than showing an empty rectangle.
+    fn dock_ui(&mut self, ui: &mut egui::Ui, preview: ViewerFrame) -> bool {
+        // Destructured so each panel body borrows the fields it draws with
+        // while the dock borrows the layout.
+        let Self {
+            layout,
+            viewer,
+            media_bin,
+            timeline,
+            project,
+            sequence,
+            ..
+        } = self;
+        // The engine's revision counter reaches the app with the engine
+        // handle; until then the sequence never changes, so one revision is
+        // the whole story and the sync is a no-op after the first frame.
+        timeline.sync(sequence, 0);
+        let mut moved = false;
+        layout.ui(ui, |ui, panel| match panel {
+            Panel::Viewer => moved |= viewer.ui(ui, Some(preview)),
+            Panel::MediaBin => {
+                for action in media_bin.ui(ui, project) {
+                    // The bin's actions become commands once the app owns an
+                    // engine handle; until then they are logged rather than
+                    // silently swallowed.
+                    log::debug!("media bin action is not wired up yet: {action:?}");
+                }
+            }
+            Panel::Timeline => {
+                let response = timeline.ui(ui, project, sequence);
+                for action in response.actions {
+                    log::debug!("timeline action is not wired up yet: {action:?}");
+                }
+            }
+            Panel::Inspector => {
+                ui.label("The inspector arrives with the parameter panel.");
+            }
+            Panel::Export => {
+                ui.label("The export panel arrives with TASK-62.");
+            }
+        });
+        moved
+    }
+
     /// How many frames have been painted since startup.
     pub fn frames_painted(&self) -> u32 {
         self.frames_painted
@@ -282,10 +354,22 @@ impl SubordinateApp {
 }
 
 impl eframe::App for SubordinateApp {
+    /// eframe's periodic save, and the one it makes on exit.
+    ///
+    /// The panel arrangement is ours to write rather than eframe storage's,
+    /// so this is where a rearranged layout reaches `layout.json`. An
+    /// unchanged layout writes nothing.
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        match self.layout.persist() {
+            Ok(true) => log::debug!("panel layout saved"),
+            Ok(false) => {}
+            Err(error) => log::warn!("layout: [{}] {}", error.code, error.message),
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // The timeline, bin and inspector panels land here in later tasks;
-        // the adapter line stays because it is what makes a startup problem
-        // obvious at a glance.
+        // The adapter line stays in the bar because it is what makes a
+        // startup problem obvious at a glance.
         ui.horizontal(|ui| {
             ui.heading("Subordinate");
             ui.label(format!(
@@ -293,6 +377,9 @@ impl eframe::App for SubordinateApp {
                 self.render.backend_label(),
                 self.render.describe()
             ));
+            ui.menu_button("View", |ui| {
+                layout_menu_ui(ui, &mut self.layout);
+            });
             if ui.button("Hardware diagnostics").clicked() {
                 self.diagnostics.open = !self.diagnostics.open;
             }
@@ -322,7 +409,7 @@ impl eframe::App for SubordinateApp {
             .update_master_meter(self.meters.master(), elapsed);
 
         let preview = self.composite();
-        if self.viewer.ui(ui, Some(preview)) {
+        if self.dock_ui(ui, preview) {
             self.needs_composite = true;
         }
 
