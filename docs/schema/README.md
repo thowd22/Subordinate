@@ -46,3 +46,21 @@ CI runs. Regenerate it with:
 ```sh
 SUB_UPDATE_SCHEMA=1 cargo test -p sub-command committed_schema_is_up_to_date
 ```
+
+# Plugin manifest JSON Schema
+
+`plugin-manifest.json` is the data model of a plugin's `plugin.toml`
+(docs/PLAN.md §6.3): identity (reverse-DNS `id`, `name`, semver `version`, the
+`api` interface version), the WIT `worlds` implemented, the `[capabilities]`
+requested and the `[mcp.tools.*]` declared. TOML tables are JSON objects, so a
+manifest converted to JSON validates against it — which is how a scaffolding
+agent can check the file it wrote without building the host.
+
+It is generated from the Rust manifest types in `crates/sub-plugin/src/manifest.rs`,
+not hand-edited. The `committed_schema_is_up_to_date` test in
+`crates/sub-plugin/src/schema.rs` fails when the committed copy drifts.
+Regenerate it with:
+
+```sh
+SUB_UPDATE_SCHEMA=1 cargo test -p sub-plugin committed_schema_is_up_to_date
+```

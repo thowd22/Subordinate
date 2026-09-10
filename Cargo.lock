@@ -4690,10 +4690,15 @@ dependencies = [
 name = "sub-plugin"
 version = "0.1.0"
 dependencies = [
+ "schemars",
+ "semver",
+ "serde",
  "serde_json",
  "sub-core",
  "sub-model",
  "sub-time",
+ "thiserror 2.0.20",
+ "toml",
  "wasmtime",
 ]
 

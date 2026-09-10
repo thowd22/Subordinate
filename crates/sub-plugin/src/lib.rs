@@ -42,9 +42,20 @@
 //! let time = RationalTime::from_frames(1, Rational::FPS_29_97);
 //! assert_eq!(RationalTime::try_from(WitRationalTime::from(time)).unwrap(), time);
 //! ```
+//!
+//! # The manifest
+//!
+//! [`manifest`] parses `plugin.toml` (docs/PLAN.md §6.3): identity, the
+//! interface version the plugin was built against, its WIT worlds, the
+//! capabilities it asks for and the MCP tools it contributes. [`schema`]
+//! exports its JSON Schema, committed at `docs/schema/plugin-manifest.json`.
 
 pub mod bindings;
 mod convert;
+pub mod manifest;
+pub mod schema;
+
+pub use manifest::{MANIFEST_FILE_NAME, Manifest, PluginId, World};
 
 pub use bindings::Command;
 pub use bindings::subordinate::plugin::command_api;
@@ -78,4 +89,14 @@ pub mod codes {
     /// A time range crossing in from a plugin has a negative duration or two
     /// endpoints at different rates.
     pub const INVALID_TIME_RANGE: ErrorCode = ErrorCode::from_static("plugin.invalid_time_range");
+    /// A `plugin.toml` is not the TOML the manifest shape expects: a syntax
+    /// error, a missing key, an unknown key or a value of the wrong type.
+    pub const INVALID_MANIFEST_SYNTAX: ErrorCode =
+        ErrorCode::from_static("plugin.invalid_manifest_syntax");
+    /// A `plugin.toml` parses but breaks a manifest rule. The `field` detail
+    /// is the dotted path of the first offending key and `fields` lists them
+    /// all.
+    pub const INVALID_MANIFEST: ErrorCode = ErrorCode::from_static("plugin.invalid_manifest");
+    /// A `plugin.toml` could not be read from disk.
+    pub const MANIFEST_UNREADABLE: ErrorCode = ErrorCode::from_static("plugin.manifest_unreadable");
 }
