@@ -24,6 +24,20 @@
 //! - `log(level, message)` — a line into the host's `tracing` subscriber,
 //!   tagged with the plugin id.
 //!
+//! # The interchange worlds
+//!
+//! `importer` and `exporter` build on that same import (TASK-78):
+//!
+//! - `importer-api.supported-extensions()` and `importer-api.import(path)` —
+//!   the plugin parses a file and describes the media items and sequences it
+//!   found; it never edits the project. [`import_plan`] turns that description
+//!   into the `media.import` and `sequence.insert` calls the host applies, so
+//!   an import is undoable and every identifier is minted host-side.
+//! - `exporter-api.presets()` and `exporter-api.post-export(path)` — the
+//!   plugin contributes named encoder presets and may act on the file once the
+//!   host has written it. [`export_presets`] validates the preset records into
+//!   the [`ExportPreset`] rows the export panel (TASK-62) lists.
+//!
 //! [`bindings`] holds the generated host side of that world; [`convert`] maps
 //! its records onto [`sub_core::SubError`], [`sub_time::RationalTime`] and the
 //! `sub_model` identifiers, so an implementation of the generated `Host` trait
@@ -45,8 +59,20 @@
 
 pub mod bindings;
 mod convert;
+mod interchange;
 
 pub use bindings::Command;
+pub use bindings::exporter::Exporter;
+pub use bindings::exporter::exports::subordinate::plugin::exporter_api::{
+    PresetDesc as WitPresetDesc, PresetSetting as WitPresetSetting,
+};
+pub use bindings::importer::Importer;
+pub use bindings::importer::exports::subordinate::plugin::importer_api::{
+    ClipSpec as WitClipSpec, MarkerSpec as WitMarkerSpec, MediaOrSequenceSpec as WitImportSpec,
+    MediaRef as WitMediaRef, MediaSpec as WitMediaSpec, SequenceSpec as WitSequenceSpec,
+    TrackItemSpec as WitTrackItemSpec, TrackSpec as WitTrackSpec,
+    TransitionSpec as WitTransitionSpec,
+};
 pub use bindings::subordinate::plugin::command_api;
 pub use bindings::subordinate::plugin::command_api::{
     ClipMetadata, LogLevel, MarkerMetadata, ProjectMetadata, Resolution as WitResolution,
@@ -62,6 +88,7 @@ pub use bindings::subordinate::plugin::types::{
 pub use convert::{
     marker_metadata, project_metadata, sequence_metadata, track_clip_metadata, track_metadata,
 };
+pub use interchange::{CommandCall, ExportPreset, ImportTarget, export_presets, import_plan};
 
 /// Error codes this crate raises. The `plugin.*` domain belongs to the host;
 /// these are the ones the boundary itself can produce, before any plugin code
@@ -78,4 +105,11 @@ pub mod codes {
     /// A time range crossing in from a plugin has a negative duration or two
     /// endpoints at different rates.
     pub const INVALID_TIME_RANGE: ErrorCode = ErrorCode::from_static("plugin.invalid_time_range");
+    /// An importer described something the project model cannot hold: a media
+    /// reference pointing past the end of the import, a negative gap, or a
+    /// clip playing existing media without a name.
+    pub const INVALID_SPEC: ErrorCode = ErrorCode::from_static("plugin.invalid_spec");
+    /// An exporter offered a preset with a malformed id, name, container or
+    /// settings, or two presets sharing an id.
+    pub const INVALID_PRESET: ErrorCode = ErrorCode::from_static("plugin.invalid_preset");
 }

@@ -15,8 +15,8 @@ use sub_plugin::command_api::{
     ClipMetadata, Host, LogLevel, MarkerMetadata, ProjectMetadata, SequenceMetadata, TrackMetadata,
 };
 use sub_plugin::{
-    Command, WitError, WitProjectId, WitSequenceId, WitTrackId, marker_metadata, project_metadata,
-    sequence_metadata, track_clip_metadata, track_metadata,
+    Command, Exporter, Importer, WitError, WitProjectId, WitSequenceId, WitTrackId,
+    marker_metadata, project_metadata, sequence_metadata, track_clip_metadata, track_metadata,
 };
 use sub_time::{Rational, RationalTime, TimeRange};
 
@@ -270,4 +270,24 @@ fn the_command_world_links_with_every_import_satisfied() {
     let mut linker = wasmtime::component::Linker::<TestHost>::new(&engine);
     Command::add_to_linker::<_, wasmtime::component::HasSelf<TestHost>>(&mut linker, |state| state)
         .expect("the command world's imports are all implemented");
+}
+
+#[test]
+fn the_interchange_worlds_link_with_every_import_satisfied() {
+    // An importer and an exporter reach the host through the same
+    // `command-api` import as a command plugin, so the one `Host` impl links
+    // into all three worlds.
+    let engine = wasmtime::Engine::default();
+
+    let mut linker = wasmtime::component::Linker::<TestHost>::new(&engine);
+    Importer::add_to_linker::<_, wasmtime::component::HasSelf<TestHost>>(&mut linker, |state| {
+        state
+    })
+    .expect("the importer world's imports are all implemented");
+
+    let mut linker = wasmtime::component::Linker::<TestHost>::new(&engine);
+    Exporter::add_to_linker::<_, wasmtime::component::HasSelf<TestHost>>(&mut linker, |state| {
+        state
+    })
+    .expect("the exporter world's imports are all implemented");
 }

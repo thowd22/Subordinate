@@ -4691,7 +4691,9 @@ name = "sub-plugin"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "sub-command",
  "sub-core",
+ "sub-edit",
  "sub-model",
  "sub-time",
  "wasmtime",

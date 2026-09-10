@@ -298,3 +298,205 @@ world command {
     /// encoding the Command API uses for parameters; so is the returned value.
     export run: func(project: project-id, args: string) -> result<string, error>;
 }
+
+/// Turning a file into media items or whole sequences.
+///
+/// An importer never edits the project itself: it parses a path and hands the
+/// host a description of what it found. The host applies that description
+/// through the Command API, so an import is an ordinary undoable command and
+/// the identifiers of everything created stay the host's to mint.
+///
+/// Time is exact throughout: a source range is a `time-range`, a gap is a
+/// `rational-time`, and a sequence declares its `frame-rate` as a fraction.
+interface importer-api {
+    use types.{error, rational, rational-time, time-range, media-id};
+    use command-api.{track-kind, resolution};
+
+    /// A media file the importer found, described well enough for the host to
+    /// file it in a bin.
+    record media-spec {
+        /// Where the file lives, relative to the project folder, with `/` as
+        /// the separator. Never absolute and never containing `..`.
+        path: string,
+        /// Display name for the bin. Empty means "use the file name".
+        name: string,
+    }
+
+    /// Which media item a clip plays.
+    ///
+    /// A sequence produced by the same import usually refers to media the same
+    /// import produced, which has no identifier yet; `existing` is for a file
+    /// already in the project's bins.
+    variant media-ref {
+        /// A zero-based index into the `media` entries of this same import.
+        imported(u32),
+        /// A media item already in the project.
+        existing(media-id),
+    }
+
+    /// One marker, on a sequence or on a clip.
+    record marker-spec {
+        /// Display name shown on the ruler.
+        name: string,
+        /// Free-form note; empty when there is none.
+        note: string,
+        /// The span covered; a point marker has a zero duration.
+        marked-range: time-range,
+    }
+
+    /// One clip on a track.
+    record clip-spec {
+        /// Display name for the timeline rectangle. Empty means "use the
+        /// media item's name".
+        name: string,
+        /// The media the clip plays.
+        media: media-ref,
+        /// The portion of that media used, in media time.
+        source-range: time-range,
+        /// Markers anchored to the clip, in source time.
+        markers: list<marker-spec>,
+    }
+
+    /// A blend across the cut between the items either side of it. Crossfade
+    /// is the only transition the MVP models.
+    record transition-spec {
+        /// How far the blend reaches back into the outgoing item.
+        in-offset: rational-time,
+        /// How far it reaches forward into the incoming item.
+        out-offset: rational-time,
+    }
+
+    /// One entry in a track's ordered child list.
+    variant track-item-spec {
+        /// A piece of media.
+        clip(clip-spec),
+        /// Empty time of this length.
+        gap(rational-time),
+        /// A blend across the neighbouring cut; it consumes no track time of
+        /// its own.
+        transition(transition-spec),
+    }
+
+    /// One lane of a sequence.
+    record track-spec {
+        /// Display name for the track header, such as `V1`.
+        name: string,
+        /// Whether the lane carries picture or sound.
+        kind: track-kind,
+        /// The items, in playback order. Placement is positional: an item
+        /// starts where the preceding ones end.
+        items: list<track-item-spec>,
+    }
+
+    /// A whole sequence: timebase, lanes and markers.
+    record sequence-spec {
+        /// Display name for the sequence tab.
+        name: string,
+        /// Frames per second, exact.
+        frame-rate: rational,
+        /// The picture size the sequence composites at.
+        resolution: resolution,
+        /// The audio sample rate in hertz; never zero.
+        sample-rate: u32,
+        /// The lanes, bottom to top.
+        tracks: list<track-spec>,
+        /// Markers on the sequence itself, in sequence time.
+        markers: list<marker-spec>,
+    }
+
+    /// One thing an import produced.
+    variant media-or-sequence-spec {
+        /// A media file for the bin.
+        media(media-spec),
+        /// A sequence for the project. Its clips may refer to media entries
+        /// earlier in the same result list.
+        sequence(sequence-spec),
+    }
+
+    /// The lowercase file extensions this importer handles, without the dot,
+    /// e.g. `["otio", "edl"]`. The host uses them to build file dialog filters
+    /// and to choose an importer for a path.
+    supported-extensions: func() -> list<string>;
+
+    /// Reads `path` and describes what it holds.
+    ///
+    /// `path` is inside a folder the plugin's manifest granted it read access
+    /// to; anything else is refused by the host before this is called. The
+    /// importer only reads: the host applies the result through the Command
+    /// API, filing media in the bin and inserting sequences, as one undoable
+    /// step per item.
+    %import: func(path: string) -> result<list<media-or-sequence-spec>, error>;
+}
+
+/// Encoder presets and custom export targets.
+///
+/// An exporter contributes named presets to the export panel and may take an
+/// action once the host has written the file: upload it, write a sidecar,
+/// notify something. Encoding itself stays in the host.
+interface exporter-api {
+    use types.{error, rational};
+
+    /// One setting of a preset, as a `key`/`value` pair.
+    ///
+    /// The value is a JSON fragment, the same encoding `run-command` uses for
+    /// parameters: WIT has no dynamic JSON type, and keeping the settings open
+    /// means a new encoder option needs no WIT revision.
+    record preset-setting {
+        /// The setting's key, unique within one preset.
+        key: string,
+        /// The setting's value, a JSON fragment.
+        value: string,
+    }
+
+    /// A preset the export panel offers.
+    record preset-desc {
+        /// Stable identifier, unique within the plugin, in the same lowercase
+        /// dot-separated form as an error code, e.g. `youtube.1080p`. Never
+        /// renamed once shipped: the project file remembers it.
+        id: string,
+        /// Display name for the export panel.
+        name: string,
+        /// One-line description of what the preset produces; empty when there
+        /// is none.
+        description: string,
+        /// The container extension the preset writes, without the dot, e.g.
+        /// `mp4`.
+        container: string,
+        /// Frames per second the preset encodes at, exact. Absent means "use
+        /// the sequence's own rate".
+        frame-rate: option<rational>,
+        /// Encoder settings, applied over the host's defaults for the
+        /// container.
+        settings: list<preset-setting>,
+    }
+
+    /// Every preset this exporter offers, in the order the panel lists them.
+    presets: func() -> list<preset-desc>;
+
+    /// Called once the host has finished writing `path`.
+    ///
+    /// The hook is optional in effect: an exporter that only contributes
+    /// presets returns `ok` without doing anything, and the SDK's default
+    /// implementation does exactly that. `path` is the file the host wrote,
+    /// inside a folder the manifest granted write access to.
+    post-export: func(path: string) -> result<_, error>;
+}
+
+/// A plugin that turns files into media items and sequences.
+///
+/// It imports `command-api` like every other world, both because reading the
+/// project tells it what timebase to describe things in and because an
+/// importer may want to run commands of its own; the host applies the returned
+/// specs itself.
+world importer {
+    import command-api;
+
+    export importer-api;
+}
+
+/// A plugin that contributes export presets and post-export actions.
+world exporter {
+    import command-api;
+
+    export exporter-api;
+}
