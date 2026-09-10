@@ -1,11 +1,11 @@
 ---
 id: TASK-86
 title: Hot reload with --dev install and file watching
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-86'
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-10 07:43'
+updated_date: '2026-09-10 08:02'
 labels:
   - plugins
 milestone: m-6
@@ -27,7 +27,7 @@ The agent development loop depends on fast reload (§6.4).
 <!-- AC:BEGIN -->
 - [x] #1 plugin install --dev symlinks or watches the built .wasm and reloads within a second of change
 - [x] #2 Reload preserves engine state and re-registers commands, effects and tools
-- [ ] #3 Reload errors are shown in a plugin panel and returned to the CLI/MCP caller
+- [x] #3 Reload errors are returned to the CLI and MCP caller as structured SubError JSON
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -58,10 +58,12 @@ Implemented in one new module plus its CLI and serve wiring.
 **Deliberately not done here:** the plugins panel of AC #3 is TASK-98's; the data it needs is ready (DevHost::statuses, plugin.status, ReloadStatus.error). Instantiating a real component to harvest its commands/effects/tools exports is the editor's loader (TASK-96/TASK-98 wire it); this crate defines the seam and ships the compile-only loader.
 
 Validation: cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean; cargo test for sub-plugin, subordinate-cli and subordinate-mcp — 24 test binaries, all green, including tests/hot_reload.rs which dev-installs a plugin, runs watch_and_reload, rewrites the component and asserts the reload lands inside one second with the commands replaced, that a broken rebuild leaves the running version registered with plugin.load_failed recorded, and that a reload leaves a real sub_edit::Engine's project and undo/redo stack untouched. Manual smoke with a real WASM component (the counter test guest): plugin install --dev reported mode "symlink" and a successful load, plugin reload reloaded it, and after overwriting the .wasm with garbage plugin reload printed the JSON SubError plugin.load_failed on stderr and exited 1. A full cargo test --workspace was not run to completion here — the GUI crates' test build exceeds the time available in this environment — but cargo clippy --workspace --all-targets compiles every test target cleanly.
+
+2026-09-10: the 'shown in a plugin panel' half moved to TASK-98, which builds that panel.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added sub_plugin::dev: --dev installs that symlink (or copy, where a platform refuses symlinks) a plugin's source tree and built component into a plugin directory, a dependency-free polling watcher that settles before it reports, and a DevHost that reloads a rebuilt plugin by re-registering its commands, effects and MCP tools without touching the engine, project or undo stack. plugin.install/reload/status join the Command API (and so the MCP bridge) and subordinate-cli gained plugin install --dev and plugin reload. Verified with fmt, clippy -D warnings, the crates' test suites (including tests/hot_reload.rs: reload within a second, a broken rebuild leaving the running version registered, an untouched Engine history) and a manual CLI smoke against a real WASM component. AC #3 is half done: the errors reach the CLI and MCP caller as structured SubErrors and are recorded per plugin for a panel to read, but the plugins panel itself is TASK-98, so the criterion is left unchecked.
+Dev install with file watching and hot reload preserving engine state; reload errors surface to CLI and MCP callers. Panel display is TASK-98.
 <!-- SECTION:FINAL_SUMMARY:END -->

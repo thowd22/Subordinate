@@ -1,17 +1,16 @@
 ---
 id: TASK-81
 title: 'WIT mcp-tools world: plugin-contributed MCP tools'
-status: In Progress
-assignee:
-  - '@opus-task-81'
+status: To Do
+assignee: []
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-10 01:03'
+updated_date: '2026-09-10 08:02'
 labels:
   - plugins
   - mcp
 milestone: m-6
 dependencies:
-  - TASK-75
+  - TASK-84
 references:
   - docs/PLAN.md
 priority: high
@@ -52,4 +51,6 @@ New module crates/sub-plugin/src/mcp.rs is the host half: ToolDeclaration (a man
 Naming: an MCP tool name is the plugin id with dots turned into underscores, then an underscore, then the plugin-local name (com.example.silence-cutter + cut_silence -> com_example_silence-cutter_cut_silence). That reuses the dot-to-underscore rule subordinate-mcp already applies to Command API method names and stays inside the [A-Za-z0-9_-] set MCP clients accept; ToolCatalog::local_name maps a prefixed name back so the bridge routes a call without guessing. AC #3 is only half provable here: the prefixing contract and the reverse lookup are implemented and tested, but tools cannot actually appear through the running MCP bridge until the wasmtime plugin host (TASK-84) can instantiate a plugin and TASK-96 wires plugin catalogues into subordinate-mcp's tool list. Left unchecked rather than claimed.
 
 Verification: cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean (GStreamer prefix env exported for sub-media); cargo test -p sub-plugin 17 unit + 4 integration + 3 doc tests pass, including the_mcp_tools_world_links_against_the_same_host, which links the world into a wasmtime Linker with every import satisfied by the same TestHost the command world uses. cargo test -p spike-wasm-command-world (7 tests) also passes, which rebuilds the wasm32-wasip2 guest components against the edited WIT package, so the new interface and world parse under wit-bindgen as well as wasmtime bindgen. AC #1 and #2 checked on that evidence; AC #3 left unchecked (see the note above).
+
+2026-09-10: requeued; the wasmtime host (TASK-84), registry (TASK-85) and MCP bridge (TASK-93) now exist, so criterion 3 (plugin tools listed through the bridge with the plugin id prefix) can be completed.
 <!-- SECTION:NOTES:END -->

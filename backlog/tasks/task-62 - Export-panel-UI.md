@@ -4,6 +4,7 @@ title: Export panel UI
 status: To Do
 assignee: []
 created_date: '2026-09-08 21:05'
+updated_date: '2026-09-10 08:02'
 labels:
   - ui
   - export
@@ -29,4 +30,5 @@ Users pick a preset, range and output path and watch progress.
 - [ ] #1 Panel offers preset, sequence, in/out range, output path and encoder override
 - [ ] #2 Progress bar, ETA and cancel button wired to the export job
 - [ ] #3 Recent export list with open-folder action
+- [ ] #4 Exporter plugin presets from the exporter WIT world appear in the preset list (moved from TASK-78)
 <!-- AC:END -->

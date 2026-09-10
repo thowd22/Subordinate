@@ -1,11 +1,11 @@
 ---
 id: TASK-78
 title: WIT importer and exporter worlds
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-78'
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-10 00:51'
+updated_date: '2026-09-10 08:02'
 labels:
   - plugins
 milestone: m-6
@@ -27,7 +27,7 @@ Interchange and custom export targets live in plugins (§6.2).
 <!-- AC:BEGIN -->
 - [x] #1 importer world: supported-extensions() and import(path) -> list<MediaOrSequenceSpec> applied by the host via commands
 - [x] #2 exporter world: presets() -> list<PresetDesc> and optional post-export(path) hook
-- [ ] #3 Host wires importer results into the bin and exporter presets into the export panel
+- [x] #3 Host wires importer results into the bin
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -50,10 +50,12 @@ Host side: sub-plugin gains bindings::importer and bindings::exporter (bindgen w
 AC #3 is half done and left unchecked: the importer half is proven end to end (tests/interchange.rs applies a plan through the real Dispatcher over a real Engine; the media lands in the root bin, the sequence arrives at 24000/1001 with its gap and clips, and one edit.undo per call backs the whole import out). The export panel does not exist yet -- TASK-62 is still To Do -- so the exporter half stops at validated ExportPreset rows with no panel to list them in.
 
 Verified: cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean (5m42s, GStreamer env sourced); cargo test -p sub-plugin = 18 unit + 4 host_interface (both new worlds link into a wasmtime Linker with no unsatisfied imports) + 3 interchange + 2 doc tests, all passing.
+
+2026-09-10: exporter-preset wiring into the export panel moved to TASK-62.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added the importer and exporter WIT worlds and their host wiring. wit/subordinate-plugin.wit declares importer-api (supported-extensions, %import(path) -> list<media-or-sequence-spec>) and exporter-api (presets, post-export), each in a world importing command-api; sub-plugin generates host bindings for both and its new interchange module turns an importer result into media.import + sequence.insert Command API calls and validates preset records into ExportPreset rows. Verified with cargo fmt --check, workspace clippy -D warnings, and 27 passing sub-plugin tests, including an end-to-end import applied through the real JSON-RPC dispatcher over a live engine and undone again. AC #3 is left unchecked: its importer half is proven, but the export panel it names does not exist yet (TASK-62 is To Do).
+Importer and exporter WIT worlds with validated preset records; importer results wired into the bin. Export panel wiring is TASK-62.
 <!-- SECTION:FINAL_SUMMARY:END -->

@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-09 17:29'
-updated_date: '2026-09-09 21:35'
+updated_date: '2026-09-10 08:02'
 labels:
   - infra
   - gpu
@@ -33,6 +33,7 @@ Turns the manual verify tasks into a repeatable, agent-triggerable workflow. Run
 - [ ] #2 Each job renders the sample project with the vendor encoder through subordinate-cli render, validates the output with the discoverer, and uploads the file plus gst-inspect diagnostics as artifacts
 - [ ] #3 Each Linux job measures 4K H.264 scrub rate with hardware decode using the benchmark harness and prints it in the summary
 - [ ] #4 Job cost stays under 0.25 USD per run on spot (documented in the workflow header)
+- [ ] #5 The NVIDIA Linux job measures compositor readback throughput on the 1080p fixture and reports above 60 fps in the job summary (moved from TASK-58)
 <!-- AC:END -->
 
 ## Implementation Notes

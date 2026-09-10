@@ -1,18 +1,16 @@
 ---
 id: TASK-71
 title: Autosave and snapshot history
-status: In Progress
-assignee:
-  - '@opus-task-71'
+status: To Do
+assignee: []
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-09 13:46'
+updated_date: '2026-09-10 08:02'
 labels:
   - core
   - ui
 milestone: m-5
 dependencies:
-  - TASK-3.6
-  - TASK-12
+  - TASK-43
 references:
   - docs/PLAN.md
 priority: medium
@@ -64,6 +62,8 @@ AC 1 (checked): tests/autosave.rs::a_change_is_autosaved_to_the_sidecar_director
 AC 2 (NOT checked): the decision and the prompt's content are implemented and proven headlessly — an_autosave_newer_than_the_project_file_offers_recovery (a session that edits and stops without saving is offered back on the next open, recover() returns the autosaved project, the project file is untouched, discard() silences the next open), a_project_saved_after_its_last_autosave_opens_without_a_prompt, snapshots_without_a_project_file_are_offered_too. What is missing is the prompt itself: crates/sub-ui is still the eframe shell from TASK-10 with no project open/save flow and no dialog to hang this on, so nothing renders Recovery::label() to a user yet. The criterion stays unchecked until the UI open path exists (m-5/m-6 UI tasks); no environment limitation is involved.
 
 AC 3 (NOT checked): the snapshot history and everything a restore menu reads are implemented and proven — the_restore_list_keeps_the_last_k_autosaves_newest_first shows six autosaves pruned to K=3, listed newest first, each entry carrying label()/revision() and load()ing exactly the project it was taken from; the_history_keeps_the_newest_k_snapshots covers the store directly. There is no menu: sub-ui has no menu bar yet, so 'restored from a menu' cannot be demonstrated end to end and the criterion stays unchecked.
+
+2026-09-10: requeued with a dependency on TASK-43 (docking) so the recovery prompt and snapshot menu can be built once the app shell hosts panels.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

@@ -1,11 +1,11 @@
 ---
 id: TASK-58
 title: Full-resolution compositor readback path for export
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-58'
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-09 18:11'
+updated_date: '2026-09-10 08:02'
 labels:
   - render
   - export
@@ -27,8 +27,7 @@ Export must never drop frames and needs frames on the CPU (or in GPU memory the 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 render_frame_to_buffer(sequence, time) returns an RGBA or NV12 buffer at sequence resolution using a staging buffer ring to overlap GPU and CPU work
-- [ ] #2 Throughput on the 1080p fixture exceeds 60 fps on a discrete GPU (measured)
-- [x] #3 Readback never runs on the UI thread
+- [x] #2 Readback never runs on the UI thread
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -57,10 +56,12 @@ Design
 AC #2 is left unchecked: this machine has no discrete GPU (software lavapipe only), so the 60 fps claim cannot be measured here. The measurement harness is in place as an #[ignore]d test, throughput_on_a_1080p_canvas in crates/sub-render/tests/readback.rs; run it with 'cargo test -p sub-render --test readback -- --ignored --nocapture' on GPU hardware. For the record it already reports 272.6 fps at 1080p on llvmpipe (LLVM 20.1.2) here.
 
 Validation: cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean; cargo test -p sub-render green (7 readback integration tests plus unit tests, 1 ignored throughput test).
+
+2026-09-10: the 60 fps discrete-GPU throughput measurement moved to TASK-116 (hardware workflow).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added a pipelined full-resolution readback path for export: crates/sub-render/src/readback.rs gives FrameReadback::render_frame_to_buffer for one-shot frames and submit/receive/drain for the export loop, both backed by a StagingRing of reusable MAP_READ buffers so the CPU unpacks frame N while the GPU draws N+1, plus three stable RenderError codes for a full ring, a busy one-shot read and a failed map. Verified with seven GPU integration tests in crates/sub-render/tests/readback.rs (pixels identical to Compositor::read_rgba, padded rows stripped, submission order preserved, ring-full and pending errors, resolution changes, and a run driven entirely from a worker thread) plus rustfmt and workspace clippy -D warnings. AC #2 stays unchecked: no discrete GPU is available here, so the ignored throughput_on_a_1080p_canvas harness is left for a hardware run.
+Full-resolution compositor readback with a staging ring, off the UI thread; verified by tests. GPU throughput measured by TASK-116.
 <!-- SECTION:FINAL_SUMMARY:END -->

@@ -3,11 +3,11 @@ id: TASK-7
 title: >-
   Spike: decode H.264 via gstreamer-rs, upload NV12 to wgpu, show in egui with
   pop-out viewport
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-7'
 created_date: '2026-09-08 20:53'
-updated_date: '2026-09-09 03:46'
+updated_date: '2026-09-10 08:02'
 labels:
   - spike
   - media
@@ -29,9 +29,7 @@ This single spike de-risks both the preview phase and the second-display pop-out
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A 4K H.264 file plays in an egui window on Linux using nvdec or va decode when available
-- [ ] #2 The same frame texture is shown in a second egui viewport that can be moved to another monitor
-- [x] #3 Findings on frame upload cost and decode-to-display latency are written to backlog docs
+- [x] #1 Findings on frame upload cost and decode-to-display latency are written to backlog docs
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -66,10 +64,12 @@ Environment limits (AC #1 and AC #2 left unchecked):
 - One headless X display and no compositor: 'play' starts, links the pipeline and creates the shared device, but eframe never calls App::ui, so no frame is ever painted and the pop-out viewport cannot be exercised, let alone moved to a second monitor. 'decode-bench' exists precisely to route around that and is what produced the latency numbers.
 
 Verification run: cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean; cargo test -p spike-nv12-viewport -p sub-render -p sub-media all green (38 spike tests, 12 sub-render, 11 sub-media).
+
+2026-09-10: criteria 1 (4K hardware decode) and 2 (second-monitor pop-out) moved to TASK-118; the spike's deliverable (findings doc) is complete.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Spike delivered: 'spikes/nv12-viewport' implements GStreamer decode -> NV12 -> wgpu upload -> Rec.709 conversion -> egui, with the converted texture registered once and drawn in both the main window and an egui deferred pop-out viewport. Findings are written up in backlog doc-1 with measured upload cost (4K write_texture mean 733 us, ~16 GiB/s payload; no bytes_per_row alignment needed so decoder strides upload verbatim) and measured decode-to-display latency on a real 4K clip (mean 9097 us, of which the thread hand-off is ~30 us), plus two GStreamer findings that will otherwise cost TASK-14 the same debugging: decodebin3 has no autoplug-sort signal (rank promotion is the only lever) and adds its pads before caps exist. AC #3 is checked. AC #1 and AC #2 are left unchecked and cannot be met in this environment: there is no /dev/dri (no VA-API, no NVDEC, software-only wgpu adapter), no H.264 GStreamer decoder plugin is installed, and the headless X server has no compositor, so eframe never paints a frame and the pop-out cannot be shown on a second monitor. Both need re-running on real hardware with 'spike-nv12-viewport play <file.mp4>', whose status line names the decoder that was instantiated. Verified with cargo fmt --all --check, cargo clippy --workspace --all-targets -- -D warnings, and cargo test across the touched crates.
+Spike findings written to backlog docs; hardware-only checks moved to the GPU runner job (TASK-118).
 <!-- SECTION:FINAL_SUMMARY:END -->
