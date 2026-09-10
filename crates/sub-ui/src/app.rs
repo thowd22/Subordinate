@@ -33,10 +33,11 @@ use crate::audio_settings::{AudioSettingsAction, AudioSettingsPanel};
 use crate::diagnostics::DiagnosticsPanel;
 use crate::dock::{DockLayout, Panel, layout_menu_ui};
 use crate::keymap::LoadedKeymap;
-use crate::media_bin::MediaBinPanel;
+use crate::media_bin::{BinSelection, MediaBinPanel};
 use crate::popout::{PopoutViewer, popout_menu_ui};
 use crate::recovery::{RecoveryOutcome, RecoveryPrompt, SnapshotMenu};
 use crate::shortcuts::{Action, ShortcutMap, ShortcutsWindow};
+use crate::source_edit::EditMode;
 use crate::timeline_panel::TimelinePanel;
 use crate::viewer::{TransportAction, ViewerAction, ViewerFrame, ViewerPanel};
 
@@ -596,11 +597,43 @@ impl SubordinateApp {
                 self.timeline.set_playhead(self.viewer.state.playhead());
                 let marker = self.timeline.add_marker_at_playhead();
                 log::debug!("marker {marker} dropped at the playhead");
+            } else if let Some(mode) = edit_mode_for(action) {
+                self.edit_from_bin(mode);
             } else {
                 log::debug!("shortcut {} is not wired up yet", action.id());
             }
         }
         moved
+    }
+
+    /// Edits the bin's selected item onto the target track at the playhead.
+    ///
+    /// Comma inserts and period overwrites, both at the playhead and both on
+    /// the lane the editor last pointed at
+    /// ([`TimelinePanel::target_track`](crate::timeline_panel::TimelinePanel::target_track)).
+    /// Nothing is applied here: the plan is a Command, and the app owns no
+    /// engine handle yet, so it is logged the way every other edit this panel
+    /// raises is. A refusal — a locked track, an item with no picture on a
+    /// video track — is logged with its hint instead.
+    fn edit_from_bin(&mut self, mode: EditMode) {
+        let BinSelection::Media(media) = self.media_bin.selection(&self.project) else {
+            log::debug!("{}: nothing is selected in the bin", mode.id());
+            return;
+        };
+        self.timeline.set_playhead(self.viewer.state.playhead());
+        match self
+            .timeline
+            .plan_edit_at_playhead(&self.project, &self.sequence, media, mode)
+        {
+            Ok(plan) => log::debug!(
+                "{} is not wired up yet: {} at {} on track {}",
+                mode.id(),
+                plan.label(),
+                plan.start(),
+                plan.track_index
+            ),
+            Err(refusal) => log::debug!("{}: {}", mode.id(), refusal.message()),
+        }
     }
 
     /// Runs the transport for this frame and returns whether the playhead
@@ -814,6 +847,18 @@ impl SubordinateApp {
                         group.len()
                     );
                 }
+                if let Some(plan) = response.source_edit {
+                    // A drop from the bin is one command, applied through the
+                    // engine handle the app does not own yet.
+                    log::debug!(
+                        "bin drop is not wired up yet: {} at {}",
+                        plan.label(),
+                        plan.start()
+                    );
+                }
+                if let Some(refusal) = response.drop_refused {
+                    log::debug!("bin drop refused: {}", refusal.message());
+                }
                 for action in response.marker_actions {
                     // Every marker gesture is one undoable command; they
                     // reach the engine with the rest of the panel's actions.
@@ -1004,6 +1049,16 @@ impl eframe::App for SubordinateApp {
 
 /// wgpu configuration for eframe: our adapter preference, and the backend
 /// logged as soon as it is known.
+/// The edit an action asks the bin's selection for, when it asks for one.
+#[must_use]
+pub const fn edit_mode_for(action: Action) -> Option<EditMode> {
+    match action {
+        Action::InsertAtPlayhead => Some(EditMode::Insert),
+        Action::OverwriteAtPlayhead => Some(EditMode::Overwrite),
+        _ => None,
+    }
+}
+
 fn wgpu_configuration() -> eframe::egui_wgpu::WgpuConfiguration {
     let mut configuration = eframe::egui_wgpu::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut configuration.wgpu_setup {

@@ -7,8 +7,8 @@
 
 use sub_core::SubResult;
 use sub_edit::{
-    AddClip, AnyCommand, Command, CommandEnvelope, CommandRegistry, History, MoveClip, RemoveClip,
-    RestoreTrackItems, RippleDelete, SplitClip, TrimClipIn, TrimClipOut, clip, codes,
+    AddClip, AnyCommand, Command, CommandEnvelope, CommandRegistry, History, InsertClip, MoveClip,
+    RemoveClip, RestoreTrackItems, RippleDelete, SplitClip, TrimClipIn, TrimClipOut, clip, codes,
 };
 use sub_model::{
     Clip, ClipId, MediaId, MediaItem, MediaPath, Project, Sequence, SequenceId, SequenceSettings,
@@ -346,6 +346,114 @@ fn add_reports_a_missing_sequence_track_and_clip() {
     .apply(&mut fixture.project)
     .unwrap_err();
     assert_eq!(err.code, codes::CLIP_NOT_FOUND);
+}
+
+#[test]
+fn insert_pushes_the_clips_after_the_insert_point_later() {
+    let mut fixture = Fixture::new(&[("a", 0, 24), ("b", 0, 24)]);
+    let clip = fixture.clip("new", 12);
+    round_trip(
+        &mut fixture.project,
+        InsertClip {
+            sequence: fixture.sequence,
+            track: fixture.track,
+            start: frames(24),
+            clip,
+            tail_id: None,
+        },
+    )
+    .expect("insert");
+
+    assert_eq!(
+        fixture.layout(),
+        expect(&[("a", 0, 24), ("new", 24, 12), ("b", 36, 24)]),
+        "nothing is overwritten: b rides the ripple"
+    );
+}
+
+#[test]
+fn insert_inside_a_clip_splits_it_and_ripples_only_the_tail() {
+    let mut fixture = Fixture::new(&[("a", 0, 48), ("b", 0, 24)]);
+    let original = fixture.id_of("a");
+    let clip = fixture.clip("new", 12);
+    round_trip(
+        &mut fixture.project,
+        InsertClip {
+            sequence: fixture.sequence,
+            track: fixture.track,
+            start: frames(12),
+            clip,
+            tail_id: None,
+        },
+    )
+    .expect("insert");
+
+    assert_eq!(
+        fixture.layout(),
+        expect(&[("a", 0, 12), ("new", 12, 12), ("a", 24, 36), ("b", 60, 24)])
+    );
+    let clips = fixture.clips();
+    assert_eq!(clips[0].1, original, "the head keeps the clip's identity");
+    assert_ne!(clips[2].1, original, "the tail is a new clip");
+    assert_eq!(
+        fixture.source_of("a"),
+        (0, 12),
+        "the head keeps its own source frames"
+    );
+}
+
+#[test]
+fn insert_past_the_end_of_the_track_moves_nothing_and_pads_with_a_gap() {
+    let mut fixture = Fixture::new(&[("a", 0, 24)]);
+    let clip = fixture.clip("new", 12);
+    round_trip(
+        &mut fixture.project,
+        InsertClip {
+            sequence: fixture.sequence,
+            track: fixture.track,
+            start: frames(48),
+            clip,
+            tail_id: None,
+        },
+    )
+    .expect("insert");
+
+    assert_eq!(fixture.layout(), expect(&[("a", 0, 24), ("new", 48, 12)]));
+    assert_eq!(
+        fixture.items()[1].as_gap().map(|gap| gap.duration),
+        Some(frames(24)),
+        "the hole before the inserted clip is a gap"
+    );
+}
+
+#[test]
+fn insert_refuses_unknown_media_and_a_duplicate_clip_id() {
+    let mut fixture = Fixture::new(&[("a", 0, 24)]);
+    let mut clip = fixture.clip("new", 12);
+    clip.media = MediaId::new();
+    let err = InsertClip {
+        sequence: fixture.sequence,
+        track: fixture.track,
+        start: frames(0),
+        clip,
+        tail_id: None,
+    }
+    .apply(&mut fixture.project)
+    .unwrap_err();
+    assert_eq!(err.code, codes::MEDIA_NOT_FOUND);
+
+    let mut clip = fixture.clip("new", 12);
+    clip.id = fixture.id_of("a");
+    let err = InsertClip {
+        sequence: fixture.sequence,
+        track: fixture.track,
+        start: frames(0),
+        clip,
+        tail_id: None,
+    }
+    .apply(&mut fixture.project)
+    .unwrap_err();
+    assert_eq!(err.code, codes::DUPLICATE_CLIP);
 }
 
 #[test]
@@ -808,6 +916,7 @@ fn every_clip_command_registers_and_decodes_from_its_envelope() {
         registry.kinds().collect::<Vec<_>>(),
         [
             "clip.add",
+            "clip.insert",
             "clip.move",
             "clip.remove",
             "clip.ripple_delete",

@@ -93,9 +93,13 @@ pub enum Action {
     AddMarker,
     /// Split the clips under the playhead (Ctrl+K).
     SplitAtPlayhead,
-    /// Nudge the selection one frame earlier (comma).
+    /// Insert the bin's item at the playhead, rippling what follows (comma).
+    InsertAtPlayhead,
+    /// Overwrite from the playhead with the bin's item (period).
+    OverwriteAtPlayhead,
+    /// Nudge the selection one frame earlier (Alt+comma).
     NudgeBack,
-    /// Nudge the selection one frame later (period).
+    /// Nudge the selection one frame later (Alt+period).
     NudgeForward,
     /// Undo the last command (Ctrl+Z).
     Undo,
@@ -109,7 +113,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, in the order the help window lists them.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 20] = [
         Self::PlayBackward,
         Self::PausePlayback,
         Self::PlayForward,
@@ -122,6 +126,8 @@ impl Action {
         Self::SetOutPoint,
         Self::AddMarker,
         Self::SplitAtPlayhead,
+        Self::InsertAtPlayhead,
+        Self::OverwriteAtPlayhead,
         Self::NudgeBack,
         Self::NudgeForward,
         Self::Undo,
@@ -146,6 +152,8 @@ impl Action {
             Self::SetOutPoint => "marking.set_out_point",
             Self::AddMarker => "marking.add_marker",
             Self::SplitAtPlayhead => "editing.split_at_playhead",
+            Self::InsertAtPlayhead => "editing.insert_at_playhead",
+            Self::OverwriteAtPlayhead => "editing.overwrite_at_playhead",
             Self::NudgeBack => "editing.nudge_back",
             Self::NudgeForward => "editing.nudge_forward",
             Self::Undo => "editing.undo",
@@ -171,6 +179,8 @@ impl Action {
             Self::SetOutPoint => "Set out point",
             Self::AddMarker => "Add marker",
             Self::SplitAtPlayhead => "Split at playhead",
+            Self::InsertAtPlayhead => "Insert at playhead",
+            Self::OverwriteAtPlayhead => "Overwrite at playhead",
             Self::NudgeBack => "Nudge one frame back",
             Self::NudgeForward => "Nudge one frame forward",
             Self::Undo => "Undo",
@@ -194,6 +204,8 @@ impl Action {
             | Self::GoToEnd => Category::Transport,
             Self::SetInPoint | Self::SetOutPoint | Self::AddMarker => Category::Marking,
             Self::SplitAtPlayhead
+            | Self::InsertAtPlayhead
+            | Self::OverwriteAtPlayhead
             | Self::NudgeBack
             | Self::NudgeForward
             | Self::Undo
@@ -239,7 +251,8 @@ pub fn chord_label(chord: KeyboardShortcut) -> String {
 ///
 /// Ctrl is written as [`Modifiers::COMMAND`] so it is Cmd on macOS without a
 /// second table. The set is the NLE convention: JKL shuttling, I/O for
-/// in/out, comma and period for nudging, and the platform's own undo pair.
+/// in/out, comma and period for the insert and overwrite edits (Alt with
+/// either nudges instead), and the platform's own undo pair.
 pub const DEFAULT_BINDINGS: &[Binding] = &[
     Binding::new(Action::PlayBackward, Modifiers::NONE, Key::J),
     Binding::new(Action::PausePlayback, Modifiers::NONE, Key::K),
@@ -253,8 +266,10 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     Binding::new(Action::SetOutPoint, Modifiers::NONE, Key::O),
     Binding::new(Action::AddMarker, Modifiers::NONE, Key::M),
     Binding::new(Action::SplitAtPlayhead, Modifiers::COMMAND, Key::K),
-    Binding::new(Action::NudgeBack, Modifiers::NONE, Key::Comma),
-    Binding::new(Action::NudgeForward, Modifiers::NONE, Key::Period),
+    Binding::new(Action::InsertAtPlayhead, Modifiers::NONE, Key::Comma),
+    Binding::new(Action::OverwriteAtPlayhead, Modifiers::NONE, Key::Period),
+    Binding::new(Action::NudgeBack, Modifiers::ALT, Key::Comma),
+    Binding::new(Action::NudgeForward, Modifiers::ALT, Key::Period),
     Binding::new(Action::Undo, Modifiers::COMMAND, Key::Z),
     Binding::new(
         Action::Redo,
@@ -683,8 +698,10 @@ mod tests {
             (Key::L, Modifiers::NONE, Action::PlayForward),
             (Key::I, Modifiers::NONE, Action::SetInPoint),
             (Key::O, Modifiers::NONE, Action::SetOutPoint),
-            (Key::Comma, Modifiers::NONE, Action::NudgeBack),
-            (Key::Period, Modifiers::NONE, Action::NudgeForward),
+            (Key::Comma, Modifiers::NONE, Action::InsertAtPlayhead),
+            (Key::Period, Modifiers::NONE, Action::OverwriteAtPlayhead),
+            (Key::Comma, Modifiers::ALT, Action::NudgeBack),
+            (Key::Period, Modifiers::ALT, Action::NudgeForward),
             (Key::K, Modifiers::COMMAND, Action::SplitAtPlayhead),
             (Key::Z, Modifiers::COMMAND, Action::Undo),
             (

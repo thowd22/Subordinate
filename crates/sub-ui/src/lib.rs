@@ -25,6 +25,7 @@ pub mod selection;
 pub mod sequence_tabs;
 pub mod shortcuts;
 pub mod snapping;
+pub mod source_edit;
 pub mod thumbnails;
 pub mod timeline;
 pub mod timeline_panel;
@@ -32,7 +33,7 @@ pub mod track_header;
 pub mod viewer;
 pub mod waveform;
 
-pub use app::{AppOptions, ProjectState, SubordinateApp, UI_SMOKE_READY, run};
+pub use app::{AppOptions, ProjectState, SubordinateApp, UI_SMOKE_READY, edit_mode_for, run};
 pub use audio_settings::{AudioSettingsAction, AudioSettingsPanel, device_label, status_line};
 pub use diagnostics::DiagnosticsPanel;
 pub use dock::{DockLayout, LAYOUT_FILE_NAME, LAYOUT_VERSION, LoadedLayout, Panel, layout_menu_ui};
@@ -44,9 +45,9 @@ pub use markers::{
     DEFAULT_MARKER_NAME, MARKER_PALETTE, MarkerAction, MarkerState, marker_color, moved_range,
 };
 pub use media_bin::{
-    BinSelection, BinSort, BinViewMode, MediaBinAction, MediaBinPanel, SortColumn, bin_path,
-    dropped_paths, duration_text, folder_name, frame_rate_text, pick_media_files, resolution_text,
-    sorted_media,
+    BinDrag, BinSelection, BinSort, BinViewMode, MediaBinAction, MediaBinPanel, SortColumn,
+    bin_path, drag_source_id, dragged_media, dropped_paths, duration_text, folder_name,
+    frame_rate_text, pick_media_files, resolution_text, sorted_media,
 };
 pub use media_import::{
     IMPORT_JOB_KIND, ImportJob, ImportOptions, ImportOutcome, ImportQueue, imported_item,
@@ -91,6 +92,7 @@ pub use snapping::{
     DEFAULT_THRESHOLD_PX, SnapCandidate, SnapKind, SnapSettings, collect_candidates, snap,
     snapped_time, track_edges,
 };
+pub use source_edit::{EditMode, PlannedEdit, SourceRefusal, apply_source_edit, plan_source_edit};
 pub use thumbnails::{
     BUCKET_SIZES, DEFAULT_BUDGET_BYTES, DEFAULT_UPLOADS_PER_FRAME, ThumbnailCache,
     ThumbnailCacheConfig, ThumbnailCacheStats, ZoomBucket, fitted_size, scale_to_bucket, tile_time,
@@ -163,6 +165,12 @@ pub mod codes {
     /// into a track of another kind, or touch a locked track. The `reason`
     /// detail carries the [`MoveRefusal`](crate::selection::MoveRefusal) id.
     pub const CLIP_MOVE_REFUSED: ErrorCode = ErrorCode::from_static("ui.clip_move_refused");
+
+    /// An item from the bin cannot be edited onto a track: the track is
+    /// locked or of another kind, or the item has not been probed. The
+    /// `reason` detail carries the
+    /// [`SourceRefusal`](crate::source_edit::SourceRefusal) id.
+    pub const SOURCE_EDIT_REFUSED: ErrorCode = ErrorCode::from_static("ui.source_edit_refused");
 
     /// A plugin's install directory could not be handed to the platform's
     /// file manager.

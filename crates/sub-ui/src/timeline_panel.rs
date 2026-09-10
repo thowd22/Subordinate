@@ -24,8 +24,10 @@ use sub_model::{Clip, Marker, MarkerId, MediaItem, Project, Sequence, Track, Tra
 use sub_time::{Rational, RationalTime, TimeRange, Timecode, TimecodeRate};
 
 use crate::markers::{self, DEFAULT_MARKER_NAME, MarkerAction, MarkerState};
+use crate::media_bin::BinDrag;
 use crate::selection::{ClipRef, MoveGroup, MoveRefusal, Selection, clips_in_marquee, plan_move};
 use crate::snapping::{self, SnapCandidate, SnapKind, SnapSettings};
+use crate::source_edit::{EditMode, PlannedEdit, SourceRefusal, plan_source_edit};
 use crate::thumbnails::{ThumbnailCache, ZoomBucket, tile_time};
 use crate::timeline::{TimelineView, TrackLayout, ZoomLevel};
 use crate::track_header::{TrackAction, TrackHeaderState, empty_column_menu};
@@ -588,6 +590,20 @@ pub struct TimelinePanel {
     /// Marker actions raised from outside a painted frame — the `M` shortcut
     /// — waiting for the next frame to report them.
     pending_markers: Vec<MarkerAction>,
+    /// The lane the keyboard edits land on: the last one the editor pointed
+    /// at.
+    ///
+    /// Comma and period edit from the bin without a pointer, so they need a
+    /// destination of their own; every other editor calls it the target track
+    /// and moves it with the last click, which is what this follows.
+    target_track: usize,
+    /// What the item being dragged out of the bin would do if it were dropped
+    /// where the pointer is, recomputed each frame.
+    ///
+    /// `Ok` is the edit that will be committed on release and the span it
+    /// occupies; `Err` is why it will not be, which is what paints the refusal
+    /// and its hint before the button comes up.
+    drop_plan: Option<Result<PlannedEdit, SourceRefusal>>,
 }
 
 /// A gesture that started in the lanes and is still under the pointer.
@@ -644,6 +660,19 @@ pub struct TimelineResponse {
     /// ([`MarkerAction::into_command`]), so dropping, dragging, renaming and
     /// deleting a marker are all undoable.
     pub marker_actions: Vec<MarkerAction>,
+    /// The edit an item dropped from the bin asks for, planned and ready to
+    /// apply with
+    /// [`apply_source_edit`](crate::source_edit::apply_source_edit).
+    ///
+    /// The panel has placed nothing: a drop from the bin is one command like
+    /// any other edit, and the caller is the one that owns the history.
+    pub source_edit: Option<PlannedEdit>,
+    /// Why the item hovering over the lanes, or the one just dropped, cannot
+    /// be edited onto the track under it.
+    ///
+    /// Present while the pointer holds a drag the track will refuse, so the
+    /// hint can be shown before the button comes up.
+    pub drop_refused: Option<SourceRefusal>,
 }
 
 impl TimelinePanel {
@@ -673,6 +702,8 @@ impl TimelinePanel {
             marker_press: false,
             marker_grab_offset: 0.0,
             pending_markers: Vec::new(),
+            target_track: 0,
+            drop_plan: None,
         }
     }
 
@@ -693,6 +724,64 @@ impl TimelinePanel {
     #[must_use]
     pub fn drag_preview(&self) -> Option<&MoveGroup> {
         self.drag_plan.as_ref().and_then(|plan| plan.as_ref().ok())
+    }
+
+    /// The lane a keyboard edit from the bin lands on.
+    ///
+    /// The last lane the editor pointed at, and the first one until they point
+    /// at any.
+    #[must_use]
+    pub const fn target_track(&self) -> usize {
+        self.target_track
+    }
+
+    /// Aims the keyboard edits at lane `index`.
+    pub const fn set_target_track(&mut self, index: usize) {
+        self.target_track = index;
+    }
+
+    /// What dropping the item now held over the lanes would do, while it would
+    /// do anything.
+    #[must_use]
+    pub fn drop_preview(&self) -> Option<&PlannedEdit> {
+        self.drop_plan.as_ref().and_then(|plan| plan.as_ref().ok())
+    }
+
+    /// Why the item now held over the lanes cannot be dropped there, while it
+    /// cannot.
+    #[must_use]
+    pub fn drop_refusal(&self) -> Option<SourceRefusal> {
+        self.drop_plan
+            .as_ref()
+            .and_then(|plan| plan.as_ref().err().copied())
+    }
+
+    /// Plans an edit of `media` from the bin at the playhead, on the target
+    /// track.
+    ///
+    /// This is what comma and period ask for: the same plan a drop makes, with
+    /// the playhead for the instant and [`TimelinePanel::target_track`] for the
+    /// destination. Nothing is applied; the caller puts the plan through the
+    /// Command API.
+    ///
+    /// # Errors
+    ///
+    /// The [`SourceRefusal`] saying why the edit cannot be made.
+    pub fn plan_edit_at_playhead(
+        &self,
+        project: &Project,
+        sequence: &Sequence,
+        media: sub_model::MediaId,
+        mode: EditMode,
+    ) -> Result<PlannedEdit, SourceRefusal> {
+        plan_source_edit(
+            project,
+            sequence,
+            media,
+            self.target_track,
+            self.playhead,
+            mode,
+        )
     }
 
     /// Why the drag under the pointer would be refused, while one is.
@@ -1110,6 +1199,7 @@ impl TimelinePanel {
             let input = wheel_input(ui, &layout);
             self.apply_wheel(input, layout.content.height(), tracks);
         }
+        let dropped = self.handle_bin_drag(&response, &layout, project, sequence);
         let mut marker_actions = self.handle_markers(ui, &response, &layout, sequence);
         let seek = self.handle_scrub(&response, &layout, sequence);
         let shift = ui.input(|input| input.modifiers.shift);
@@ -1136,6 +1226,7 @@ impl TimelinePanel {
         self.paint_lanes(&painter, &layout, &visuals, project, sequence, &mut strips);
         self.thumbnails = thumbnails;
         self.paint_gesture(&painter, &layout, sequence);
+        self.paint_drop_target(&painter, &layout);
         self.paint_markers(&painter, &layout, sequence);
         self.paint_playhead(&painter, &layout);
         let actions = self.header_controls(ui, &layout, sequence);
@@ -1149,6 +1240,113 @@ impl TimelinePanel {
             clip_move: lanes.clip_move,
             refused: lanes.refused,
             marker_actions,
+            source_edit: dropped.edit,
+            drop_refused: dropped.refused.or_else(|| self.drop_refusal()),
+        }
+    }
+
+    /// Tracks an item dragged out of the media bin, and takes the drop.
+    ///
+    /// While the pointer holds a bin drag over the lanes the edit it would
+    /// make is planned every frame, so the target span — or the refusal and
+    /// its hint — is on screen before the button comes up. The plan is made
+    /// again on release rather than reused, because the pointer may have moved
+    /// between the last painted frame and the release.
+    ///
+    /// A drop is always an overwrite: it lands where it was aimed, and nothing
+    /// else moves. Comma and period are how an editor asks for the rippling
+    /// kind ([`TimelinePanel::plan_edit_at_playhead`]).
+    fn handle_bin_drag(
+        &mut self,
+        response: &Response,
+        layout: &PanelLayout,
+        project: &Project,
+        sequence: &Sequence,
+    ) -> DropOutcome {
+        self.drop_plan = None;
+        let mut outcome = DropOutcome::default();
+        let hovering = response.dnd_hover_payload::<BinDrag>();
+        let released = response.dnd_release_payload::<BinDrag>();
+        let Some(drag) = released.as_deref().or(hovering.as_deref()) else {
+            return outcome;
+        };
+        let Some(pos) = response
+            .ctx
+            .pointer_interact_pos()
+            .filter(|pos| layout.content.contains(*pos))
+        else {
+            return outcome;
+        };
+        let index = self.lane_at(layout.content.top(), pos.y);
+        let plan = usize::try_from(index)
+            .map_err(|_| SourceRefusal::NoSuchTrack)
+            .and_then(|index| {
+                let time = self
+                    .view
+                    .time_at_pixel(round_px(pos.x - layout.content.left()));
+                plan_source_edit(
+                    project,
+                    sequence,
+                    drag.media,
+                    index,
+                    time,
+                    EditMode::Overwrite,
+                )
+            });
+        if released.is_some() {
+            match plan {
+                Ok(edit) => {
+                    self.target_track = edit.track_index;
+                    outcome.edit = Some(edit);
+                }
+                Err(refusal) => outcome.refused = Some(refusal),
+            }
+        } else {
+            self.drop_plan = Some(plan);
+        }
+        outcome
+    }
+
+    /// Paints where the item held over the lanes would land: a ghost of the
+    /// clip, or the refused wash where it cannot go.
+    fn paint_drop_target(&self, painter: &Painter, layout: &PanelLayout) {
+        let lanes = painter.with_clip_rect(layout.content);
+        match &self.drop_plan {
+            Some(Ok(edit)) => {
+                let rect = self.clip_rect(layout, edit.track_index, edit.range);
+                lanes.rect_filled(
+                    rect,
+                    CornerRadius::same(2),
+                    tint(SELECTION_COLOR, GHOST_ALPHA),
+                );
+                lanes.rect_stroke(
+                    rect,
+                    CornerRadius::same(2),
+                    Stroke::new(SELECTION_WIDTH, SELECTION_COLOR),
+                    StrokeKind::Inside,
+                );
+            }
+            Some(Err(_)) => {
+                let Some(index) = usize::try_from(
+                    self.lane_at(
+                        layout.content.top(),
+                        painter
+                            .ctx()
+                            .pointer_interact_pos()
+                            .map_or(layout.content.top(), |pos| pos.y),
+                    ),
+                )
+                .ok() else {
+                    return;
+                };
+                let top = self.lane_top(layout.content.top(), index);
+                let lane = Rect::from_min_size(
+                    pos2(layout.content.left(), top),
+                    Vec2::new(layout.content.width(), self.metrics.track_height),
+                );
+                lanes.rect_filled(lane, CornerRadius::ZERO, tint(REFUSED_COLOR, REFUSED_ALPHA));
+            }
+            None => {}
         }
     }
 
@@ -1542,6 +1740,13 @@ impl TimelinePanel {
         sequence: &Sequence,
         shift: bool,
     ) -> bool {
+        // Pointing at a lane aims the keyboard edits at it, whether or not
+        // there is a clip under the pointer.
+        if let Ok(index) = usize::try_from(self.lane_at(layout.content.top(), pos.y))
+            && index < sequence.tracks.len()
+        {
+            self.target_track = index;
+        }
         if let Some(item) = self.clip_at(pos, layout, sequence) {
             let changed = if shift {
                 self.selection.toggle(item)
@@ -2043,6 +2248,18 @@ impl TimelinePanel {
 ///
 /// The panel folds this into its [`TimelineResponse`]; it exists so the
 /// gesture code has one thing to return rather than a tuple of three.
+/// What one frame of the bin drag produced.
+///
+/// Empty on every frame but the one the button comes up on, where it carries
+/// either the edit the drop asks for or the reason the track refused it.
+#[derive(Debug, Default)]
+struct DropOutcome {
+    /// The edit a released drop asks for.
+    edit: Option<PlannedEdit>,
+    /// Why the released drop could not become an edit.
+    refused: Option<SourceRefusal>,
+}
+
 #[derive(Debug, Default)]
 struct LaneOutcome {
     /// Whether the selection changed this frame.

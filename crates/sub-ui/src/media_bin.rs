@@ -235,6 +235,38 @@ pub enum MediaBinAction {
     RelinkAll,
 }
 
+/// The item an editor is dragging out of the bin.
+///
+/// This is the payload of an egui drag-and-drop, so it crosses panels: the bin
+/// starts the drag and the timeline reads it while the pointer is over a lane
+/// and takes it when the button comes up. It carries the item's identity and
+/// nothing else — where the clip lands, how long it is and whether the track
+/// will have it are the timeline's business
+/// ([`plan_source_edit`](crate::source_edit::plan_source_edit)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BinDrag {
+    /// The item being dragged.
+    pub media: MediaId,
+}
+
+/// The widget id the row or tile of `media` drags with.
+///
+/// Derived from the item's identity, so the same item is the same drag source
+/// in the list and the grid, and a test can name it without painting first.
+#[must_use]
+pub fn drag_source_id(media: MediaId) -> egui::Id {
+    egui::Id::new(("media-bin-drag", media))
+}
+
+/// The item being dragged out of the bin right now, if one is.
+///
+/// The timeline asks this while it paints, so a drop target can be drawn
+/// before the button comes up.
+#[must_use]
+pub fn dragged_media(ctx: &egui::Context) -> Option<MediaId> {
+    egui::DragAndDrop::payload::<BinDrag>(ctx).map(|drag| drag.media)
+}
+
 /// What the bin has selected: a folder, or an item inside one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinSelection {
@@ -505,10 +537,21 @@ impl MediaBinPanel {
                     };
                     let selected = self.selected_media == Some(item.id);
                     let label = egui::Button::selectable(selected, text);
-                    if ui
-                        .add_sized(Vec2::new(column.width(), 18.0), label)
-                        .clicked()
-                    {
+                    let size = Vec2::new(column.width(), 18.0);
+                    // The name is where the item is picked up: an editor
+                    // drags a clip onto the timeline by its name, and the
+                    // metadata columns stay ordinary buttons.
+                    let clicked = if column == SortColumn::Name {
+                        ui.dnd_drag_source(
+                            drag_source_id(item.id),
+                            BinDrag { media: item.id },
+                            |ui| ui.add_sized(size, label).clicked(),
+                        )
+                        .inner
+                    } else {
+                        ui.add_sized(size, label).clicked()
+                    };
+                    if clicked {
                         self.select_media(item.id);
                     }
                 }
@@ -541,7 +584,14 @@ impl MediaBinPanel {
                 ui.allocate_ui(TILE, |ui| {
                     egui::Frame::group(ui.style()).show(ui, |ui| {
                         let name = RichText::new(&item.name).strong();
-                        if ui.add(egui::Button::selectable(selected, name)).clicked() {
+                        let clicked = ui
+                            .dnd_drag_source(
+                                drag_source_id(item.id),
+                                BinDrag { media: item.id },
+                                |ui| ui.add(egui::Button::selectable(selected, name)).clicked(),
+                            )
+                            .inner;
+                        if clicked {
                             self.select_media(item.id);
                         }
                         ui.label(RichText::new(duration_text(item)).weak());

@@ -64,6 +64,7 @@ use crate::command::{Command, CommandRegistry, Inverse};
 /// Returns `edit.duplicate_command` if one of the kinds is already registered.
 pub fn register(registry: &mut CommandRegistry) -> SubResult<()> {
     registry.register::<AddClip>()?;
+    registry.register::<InsertClip>()?;
     registry.register::<RemoveClip>()?;
     registry.register::<MoveClip>()?;
     registry.register::<TrimClipIn>()?;
@@ -116,6 +117,63 @@ impl Command for AddClip {
 
     fn label(&self) -> String {
         "Add clip".to_owned()
+    }
+}
+
+/// Puts a clip on a track at a timeline position, pushing what follows later.
+///
+/// This is the rippling counterpart of [`AddClip`]: nothing on the track is
+/// overwritten. Everything starting at or after `start` moves later by the
+/// clip's duration, and a clip straddling `start` is split there first so the
+/// half that follows the insert point rides the ripple with the rest. The head
+/// of that split keeps the original identity, exactly as [`SplitClip`] does.
+///
+/// Only this track ripples. An insert that must keep several tracks in step
+/// issues one command per track inside a history group, as the timeline does
+/// for a drag.
+#[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InsertClip {
+    /// The sequence holding the track.
+    pub sequence: SequenceId,
+    /// The track the clip lands on.
+    pub track: TrackId,
+    /// Where the clip starts, in sequence time.
+    pub start: RationalTime,
+    /// The clip itself.
+    pub clip: Clip,
+    /// The identity given to the tail of a clip the insert point divides; a
+    /// fresh one when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_id: Option<ClipId>,
+}
+
+impl Command for InsertClip {
+    const KIND: &'static str = "clip.insert";
+    const DESCRIPTION: &'static str =
+        "Place a clip on a track at a timeline position, rippling what follows later.";
+
+    fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
+        require_media(project, self.clip.media)?;
+        self.clip.validate()?;
+        let span = placement_span(&self.clip, self.start)?;
+        edit_track(project, self.sequence, self.track, |layout| {
+            if layout.contains_clip(self.clip.id) {
+                return Err(SubError::new(
+                    codes::DUPLICATE_CLIP,
+                    "a clip with that id is already on the track",
+                )
+                .with_detail("clip", self.clip.id));
+            }
+            layout.split_at(self.start, self.tail_id)?;
+            layout.shift_from(self.start, span.duration())?;
+            layout.insert(self.start, TrackItem::Clip(self.clip.clone()));
+            Ok(())
+        })
+    }
+
+    fn label(&self) -> String {
+        "Insert clip".to_owned()
     }
 }
 
@@ -643,6 +701,49 @@ impl Layout {
             }
         }
         self.placed = kept;
+        Ok(())
+    }
+
+    /// Cuts the clip straddling `at` in two, so an insert there ripples only
+    /// what follows the cut.
+    ///
+    /// A clip starting exactly at `at`, and a point with no clip under it, are
+    /// left alone: there is nothing to divide. The head keeps the original
+    /// identity and the tail takes `tail_id`, or a fresh one.
+    fn split_at(&mut self, at: RationalTime, tail_id: Option<ClipId>) -> SubResult<()> {
+        let straddling = self.placed.iter().position(|placed| {
+            placed
+                .item
+                .as_clip()
+                .and_then(|clip| placement_span(clip, placed.start).ok())
+                .is_some_and(|range| range.contains(at) && range.start() < at)
+        });
+        let Some(index) = straddling else {
+            return Ok(());
+        };
+        let placed = self.placed.remove(index);
+        let start = placed.start;
+        // The position above only matches a clip.
+        let TrackItem::Clip(clip) = &placed.item else {
+            return Ok(());
+        };
+        let range = placement_span(clip, start)?;
+        let head_length = checked(at.checked_sub(start), "split offset")?;
+        let tail_length = checked(range.end_exclusive().checked_sub(at), "split offset")?;
+        let mut head = trim_tail(clip, checked(tail_length.checked_neg(), "split offset")?)?;
+        let mut tail = trim_head(clip, head_length)?;
+        // `ClipId::default` mints a fresh identifier.
+        tail.id = tail_id.unwrap_or_default();
+        if tail.id == head.id {
+            return Err(SubError::new(
+                codes::DUPLICATE_CLIP,
+                "the tail of a split needs an identity of its own",
+            )
+            .with_detail("clip", head.id));
+        }
+        split_fades(clip, &mut head, &mut tail);
+        self.insert(start, TrackItem::Clip(head));
+        self.insert(at, TrackItem::Clip(tail));
         Ok(())
     }
 
