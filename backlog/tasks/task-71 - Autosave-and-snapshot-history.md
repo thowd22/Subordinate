@@ -4,7 +4,7 @@ title: Autosave and snapshot history
 status: To Do
 assignee: []
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-10 08:02'
+updated_date: '2026-09-10 08:07'
 labels:
   - core
   - ui
@@ -28,6 +28,7 @@ Crash recovery and cheap versioning.
 - [x] #1 Autosave writes to the sidecar dir every N seconds after changes without blocking the UI
 - [ ] #2 On open, a newer autosave than the project file prompts to recover
 - [ ] #3 Snapshots keep the last K autosaves and can be restored from a menu
+- [ ] #4 An egui_kittest test in `sub-ui` built on the shared harness in `crates/sub-ui/tests/support/mod.rs` covers the recovery prompt and the snapshot restore list: a committed snapshot of the dialog and an interaction test asserting recover and discard
 <!-- AC:END -->
 
 ## Implementation Plan

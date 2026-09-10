@@ -4,8 +4,9 @@
 //! own files and share [`support`]. This one covers the harness: that the
 //! committed sample project loads, that a panel painted through it renders and
 //! matches its committed snapshot, that a click routed through `AccessKit`
-//! reaches a real panel, and that the committed snapshot directory stays
-//! inside its size budget.
+//! reaches a real panel, that the committed snapshot directory stays inside
+//! its size budget, and that the convention requiring all of this is still
+//! written where agents read it.
 
 mod support;
 
@@ -25,6 +26,22 @@ const MAX_SNAPSHOT_DIR_BYTES: u64 = 5 * 1024 * 1024;
 /// `kittest.toml`.
 fn snapshot_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots")
+}
+
+/// The workspace root, two levels above this crate.
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Reads a file at the workspace root.
+///
+/// # Panics
+///
+/// Panics when it is missing, which is a broken checkout.
+fn read_workspace_file(relative: &str) -> String {
+    let path = workspace_root().join(relative);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("could not read {}: {err}", path.display()))
 }
 
 #[test]
@@ -139,4 +156,39 @@ fn committed_snapshots_stay_inside_their_size_budget() {
         "the committed snapshots total {total} bytes, over the {MAX_SNAPSHOT_DIR_BYTES} byte \
          budget for the directory"
     );
+}
+
+/// The convention this harness exists to make cheap (TASK-124).
+///
+/// The rule only works if an agent reads it before touching a panel, so it
+/// lives in the two files agents are pointed at. Deleting either half is a
+/// silent failure otherwise, hence this test rather than trust.
+#[test]
+fn the_ui_test_convention_is_documented_where_agents_read_it() {
+    let conventions = read_workspace_file("CLAUDE.md");
+    assert!(
+        conventions.contains("crates/sub-ui/tests/support/mod.rs"),
+        "CLAUDE.md must name the shared UI test harness module"
+    );
+    assert!(
+        conventions.contains("egui_kittest"),
+        "CLAUDE.md must state that a sub-ui change ships a kittest test"
+    );
+
+    let development = read_workspace_file("docs/DEVELOPMENT.md");
+    assert!(
+        development.contains("## UI tests (egui_kittest)"),
+        "docs/DEVELOPMENT.md must keep its UI testing section"
+    );
+    for expected in [
+        "crates/sub-ui/tests/support/mod.rs",
+        "UPDATE_SNAPSHOTS=1 cargo test -p sub-ui",
+        "ui-snapshot-diffs-",
+        "GPU runners are only for checks",
+    ] {
+        assert!(
+            development.contains(expected),
+            "the UI testing section must still cover {expected:?}"
+        );
+    }
 }

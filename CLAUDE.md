@@ -7,6 +7,7 @@ Cross-platform video editor: small Rust core, agent-first WASM plugin system, lo
 - **Tasks:** 8 milestones (m-0 .. m-7) mirror the roadmap phases. Coarse tasks TASK-1..5 are parents; their dotted subtasks (TASK-1.1 etc.) are the units of work.
 - **Picking work:** choose a To Do task whose dependencies are all Done (`backlog task view <id> --plain` shows the graph). Start at m-0. Tasks labelled `spike` produce findings in a backlog doc, not production code. Tasks labelled `verify` need real hardware and are manual.
 - **Conventions:** all timeline math in `RationalTime`, never floats. Every mutation is an undoable Command exposed through the Command API. Errors are `SubError` with stable codes. Nothing in the audio callback may lock or allocate.
+- **UI tests:** any task that touches `sub-ui` adds or updates an `egui_kittest` snapshot or interaction test through the shared harness in `crates/sub-ui/tests/support/mod.rs`. Snapshot references live in `crates/sub-ui/tests/snapshots/`; re-record with `UPDATE_SNAPSHOTS=1 cargo test -p sub-ui` and commit the PNG diff. See the "UI tests (egui_kittest)" section of `docs/DEVELOPMENT.md`.
 
 
 <!-- BACKLOG.MD GUIDELINES START -->

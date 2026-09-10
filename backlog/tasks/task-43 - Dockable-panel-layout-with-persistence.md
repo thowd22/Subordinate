@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@opus-task-43'
 created_date: '2026-09-08 21:04'
-updated_date: '2026-09-10 08:47'
+updated_date: '2026-09-10 09:03'
 labels:
   - ui
 milestone: m-2
@@ -29,6 +29,7 @@ Panels: bin, timeline, viewer, inspector, export (§5.7).
 - [x] #1 egui_dock (or equivalent) hosts all panels with drag-to-rearrange and tab groups
 - [x] #2 Layout persists per user and resets via a menu item
 - [x] #3 Default layout matches the plan's panel list
+- [ ] #4 An egui_kittest test in `sub-ui` built on the shared harness in `crates/sub-ui/tests/support/mod.rs` covers docking: a committed snapshot of the default layout, and a test that a saved layout round-trips through persistence
 <!-- AC:END -->
 
 ## Implementation Plan
