@@ -47,12 +47,16 @@
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sub_core::{SubError, SubResult};
 
 use crate::bindings::mcp_tools::subordinate::plugin::mcp as wit_mcp;
 use crate::codes;
+use crate::manifest::Manifest;
 
 /// One tool a plugin's manifest declares.
 ///
@@ -160,6 +164,29 @@ pub struct ToolDescriptor {
     pub schema: Value,
 }
 
+/// One tool as `plugin.tools` publishes it over the Command API.
+///
+/// The MCP bridge turns a row of this straight into a tool: `name` is the tool
+/// name a client calls, `input_schema` its argument schema, and `plugin` and
+/// `tool` are what the bridge sends back when the tool is called.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PublishedTool {
+    /// The MCP tool name: the plugin id with dots turned into underscores, an
+    /// underscore, then the plugin-local name.
+    pub name: String,
+    /// The dotted, human-facing name: plugin id, a dot, the local name.
+    pub title: String,
+    /// The description from the manifest.
+    pub description: String,
+    /// The plugin that contributes the tool.
+    pub plugin: String,
+    /// The plugin-local name, as the component's `call` takes it.
+    pub tool: String,
+    /// The argument schema from the manifest.
+    pub input_schema: Value,
+}
+
 /// A compiled declaration: the manifest entry plus its ready validator.
 struct CompiledTool {
     declaration: ToolDeclaration,
@@ -247,6 +274,44 @@ impl ToolCatalog {
         })
     }
 
+    /// Builds the catalogue for an installed plugin straight from its
+    /// manifest, reading the schema file each `[mcp.tools.*]` entry names.
+    ///
+    /// `directory` is the directory holding the plugin's `plugin.toml`; a
+    /// tool's `schema` path is relative to it, and the manifest parser has
+    /// already refused a path that leaves it. A plugin that declares no tools
+    /// gives an empty catalogue rather than an error, so a caller can build one
+    /// for every installed plugin without asking first.
+    ///
+    /// # Errors
+    ///
+    /// Returns `plugin.tool_schema_unreadable` when a declared schema file
+    /// cannot be read, plus the errors of [`ToolCatalog::new`] for an id, a
+    /// name or a schema the host will not take.
+    pub fn from_manifest(manifest: &Manifest, directory: &Path) -> SubResult<Self> {
+        let plugin_id = manifest.plugin.id.as_str().to_owned();
+        let mut declarations = Vec::with_capacity(manifest.mcp.tools.len());
+        for (name, tool) in &manifest.mcp.tools {
+            let path = directory.join(&tool.schema);
+            let text = std::fs::read_to_string(&path).map_err(|error| {
+                SubError::new(
+                    codes::TOOL_SCHEMA_UNREADABLE,
+                    "a plugin's declared tool schema file cannot be read",
+                )
+                .with_detail("plugin_id", plugin_id.clone())
+                .with_detail("tool", name.clone())
+                .with_detail("path", path.display().to_string())
+                .with_cause(&error)
+            })?;
+            declarations.push(ToolDeclaration::from_json(
+                name.clone(),
+                tool.description.clone(),
+                &text,
+            )?);
+        }
+        Self::new(plugin_id, declarations)
+    }
+
     /// The plugin these tools belong to.
     pub fn plugin_id(&self) -> &str {
         &self.plugin_id
@@ -272,6 +337,26 @@ impl ToolCatalog {
         self.tools
             .values()
             .map(|compiled| compiled.descriptor.clone())
+            .collect()
+    }
+
+    /// Every tool as the Command API publishes it, in name order.
+    ///
+    /// This is the wire shape of one row of `plugin.tools`: the same
+    /// descriptors, carrying the plugin id, so the MCP bridge can list a
+    /// plugin's tools and route a call back without holding a catalogue of its
+    /// own.
+    pub fn published(&self) -> Vec<PublishedTool> {
+        self.tools
+            .values()
+            .map(|compiled| PublishedTool {
+                name: compiled.descriptor.mcp_name.clone(),
+                title: compiled.descriptor.title.clone(),
+                description: compiled.descriptor.description.clone(),
+                plugin: self.plugin_id.clone(),
+                tool: compiled.descriptor.local_name.clone(),
+                input_schema: compiled.descriptor.schema.clone(),
+            })
             .collect()
     }
 
@@ -457,6 +542,78 @@ fn is_plugin_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch plugin directory holding a manifest and its schema files.
+    fn plugin_directory(
+        name: &str,
+        manifest: &str,
+        schemas: &[(&str, &str)],
+    ) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(format!("subordinate-mcp-catalog-{name}"));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(&directory).expect("a plugin directory");
+        std::fs::write(directory.join("plugin.toml"), manifest).expect("a manifest");
+        for (file, text) in schemas {
+            std::fs::write(directory.join(file), text).expect("a schema file");
+        }
+        directory
+    }
+
+    /// A manifest declaring one tool whose schema lives in `schema.json`.
+    const MANIFEST: &str = "[plugin]\nid = \"com.example.silence-cutter\"\nname = \"Cutter\"\n\
+                            version = \"0.1.0\"\napi = \"0.1\"\n\
+                            worlds = [\"command\", \"mcp-tools\"]\n\n\
+                            [mcp.tools.cut_silence]\ndescription = \"Cut the quiet bits\"\n\
+                            schema = \"schema.json\"\n";
+
+    #[test]
+    fn a_catalogue_is_built_from_a_manifest_and_its_schema_files() {
+        let schema = r#"{"type":"object","properties":{"threshold_db":{"type":"number"}}}"#;
+        let directory = plugin_directory("built", MANIFEST, &[("schema.json", schema)]);
+        let manifest = Manifest::parse(MANIFEST).expect("a manifest");
+
+        let catalog = ToolCatalog::from_manifest(&manifest, &directory).expect("a catalogue");
+        assert_eq!(catalog.plugin_id(), "com.example.silence-cutter");
+        assert_eq!(catalog.len(), 1);
+        let declaration = catalog.declaration("cut_silence").expect("the declaration");
+        assert_eq!(declaration.description(), "Cut the quiet bits");
+        assert_eq!(
+            declaration.schema(),
+            &serde_json::from_str::<Value>(schema).expect("the schema")
+        );
+
+        let published = catalog.published();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].name, "com_example_silence-cutter_cut_silence");
+        assert_eq!(published[0].title, "com.example.silence-cutter.cut_silence");
+        assert_eq!(published[0].plugin, "com.example.silence-cutter");
+        assert_eq!(published[0].tool, "cut_silence");
+        assert_eq!(published[0].description, "Cut the quiet bits");
+        assert!(published[0].input_schema.is_object());
+    }
+
+    #[test]
+    fn a_missing_schema_file_is_reported_against_the_tool() {
+        let directory = plugin_directory("missing", MANIFEST, &[]);
+        let manifest = Manifest::parse(MANIFEST).expect("a manifest");
+
+        let error = ToolCatalog::from_manifest(&manifest, &directory).expect_err("no schema file");
+        assert_eq!(error.code.as_str(), "plugin.tool_schema_unreadable");
+        assert_eq!(error.details["tool"], "cut_silence");
+        assert_eq!(error.details["plugin_id"], "com.example.silence-cutter");
+    }
+
+    #[test]
+    fn a_plugin_with_no_tools_gives_an_empty_catalogue() {
+        let text = "[plugin]\nid = \"com.example.plain\"\nname = \"Plain\"\n\
+                    version = \"0.1.0\"\napi = \"0.1\"\nworlds = [\"command\"]\n";
+        let directory = plugin_directory("plain", text, &[]);
+        let manifest = Manifest::parse(text).expect("a manifest");
+
+        let catalog = ToolCatalog::from_manifest(&manifest, &directory).expect("a catalogue");
+        assert!(catalog.is_empty());
+        assert!(catalog.published().is_empty());
+    }
 
     fn schema() -> Value {
         json!({
