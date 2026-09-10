@@ -5,8 +5,15 @@
 //! runner. What the tests care about is what the strip remembers: switching
 //! tabs must put the timeline and the viewer back exactly where they were,
 //! and the last tab must refuse to close.
+//!
+//! The last two tests go through the shared `egui_kittest` harness instead:
+//! they click a tab by its accessibility label, and they hold the strip to a
+//! committed snapshot.
+
+mod support;
 
 use eframe::egui;
+use egui_kittest::kittest::Queryable;
 use sub_model::media::{StreamInfo, VideoStream};
 use sub_model::sequence::{Resolution, SequenceSettings};
 use sub_model::{
@@ -236,4 +243,81 @@ fn the_new_sequence_dialog_yields_a_create_action() {
         dialog.effective_name(&sub_ui::default_sequence_name(&project.sequences)),
         "Sequence 3"
     );
+}
+
+/// The committed sample project's sequences with a third one on the end,
+/// which is what the tab strip is snapshotted with.
+fn three_sequences() -> Vec<Sequence> {
+    let project = support::fixture_project();
+    let mut sequences = project.sequences;
+    let settings = sequences
+        .first()
+        .expect("the sample project has sequences")
+        .settings;
+    sequences.push(Sequence::new("Inserts", settings));
+    sequences
+}
+
+#[test]
+fn the_tab_strip_matches_its_snapshot_with_three_sequences() {
+    if !support::can_render() {
+        return;
+    }
+    let sequences = three_sequences();
+    let mut tabs = SequenceTabs::new();
+    tabs.sync(&sequences);
+    let mut harness = support::panel_harness(|ui| {
+        tabs.ui(ui, &sequences);
+    });
+    harness.run();
+    support::snapshot(&mut harness, "sequence_tab_strip");
+}
+
+#[test]
+fn clicking_a_tab_through_the_harness_switches_and_switches_back() {
+    // Switching tabs is view state rather than an edit, so no `Command` runs
+    // and there is nothing to undo. What stands in for undo is switching
+    // back: it must put the timeline and the viewer exactly where they were.
+    let sequences = three_sequences();
+    let main = sequences[0].id;
+    let titles = sequences[1].id;
+    let titles_rate = sequences[1].settings.frame_rate;
+    let zoom = ZoomLevel::ONE.scaled(8, 1);
+
+    let mut tabs = SequenceTabs::new();
+    tabs.sync(&sequences);
+    let mut panel = TimelinePanel::new(sequences[0].settings.frame_rate);
+    panel.view_mut().set_width_px(1000);
+    panel.view_mut().set_zoom(zoom);
+    panel.view_mut().set_scroll_px(640);
+    panel.restore_lane_scroll(24.0);
+    let mut viewer = ViewerState::for_sequence(&sequences[0]);
+    assert!(viewer.seek_to_frame(96));
+
+    let mut harness =
+        support::panel_harness_state((tabs, panel, viewer), |ui, (tabs, panel, viewer)| {
+            if let Some(SequenceTabAction::Switch(sequence)) = tabs.ui(ui, &sequences) {
+                tabs.switch_to(&sequences, sequence, panel, viewer)
+                    .expect("the tab names a sequence in this project");
+            }
+        });
+    harness.run();
+
+    harness.get_by_label("Titles").click();
+    harness.run();
+    {
+        let (tabs, panel, viewer) = harness.state();
+        assert_eq!(tabs.active(), Some(titles), "the second tab is active");
+        assert_eq!(viewer.rate(), titles_rate, "and the viewer took its rate");
+        assert_eq!(panel.view().scroll_px(), 0, "a fresh tab starts fresh");
+    }
+
+    harness.get_by_label("Main").click();
+    harness.run();
+    let (tabs, panel, viewer) = harness.state();
+    assert_eq!(tabs.active(), Some(main));
+    assert_eq!(panel.view().zoom(), zoom);
+    assert_eq!(panel.view().scroll_px(), 640);
+    assert_lane_scroll(panel.lane_scroll_px(), 24.0, "switching back");
+    assert_eq!(viewer.playhead_frame(), 96);
 }
