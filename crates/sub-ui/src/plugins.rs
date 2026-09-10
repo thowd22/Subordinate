@@ -319,6 +319,14 @@ mod tests {
         }
     }
 
+    /// How `Ctrl+Shift+G` reads back once parsed: `Ctrl` is `Modifiers::COMMAND`,
+    /// which prints as `Cmd` in macOS order.
+    const SHIFT_G_LABEL: &str = if cfg!(target_os = "macos") {
+        "Shift+Cmd+G"
+    } else {
+        "Ctrl+Shift+G"
+    };
+
     fn registry(plugin: &str, descs: &[CommandDesc]) -> PluginCommandRegistry {
         let mut registry = PluginCommandRegistry::new();
         registry
@@ -333,7 +341,7 @@ mod tests {
         let menu = PluginMenu::register(&registry, &ShortcutMap::default_map());
 
         assert!(menu.problems().is_empty());
-        assert_eq!(menu.entries()[0].chord_label(), "Ctrl+Shift+G");
+        assert_eq!(menu.entries()[0].chord_label(), SHIFT_G_LABEL);
         let mut events = vec![eframe::egui::Event::Key {
             key: Key::G,
             physical_key: None,
@@ -373,7 +381,7 @@ mod tests {
 
         assert_eq!(
             menu.chord_for("a/go").map(super::chord_label),
-            Some("Ctrl+Shift+G".to_owned())
+            Some(SHIFT_G_LABEL.to_owned())
         );
         assert_eq!(menu.chord_for("b/go"), None);
         assert_eq!(menu.problems().len(), 1);
