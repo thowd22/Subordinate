@@ -280,6 +280,18 @@ jobs:
           cargo test
           cargo fmt --all --check
 
+      # The first-party cut-silence plugin, likewise its own workspace. The
+      # decoder, the detector and the planner are plain Rust and are tested on
+      # the host triple; the component itself is what `plugin install` takes
+      # (TASK-99).
+      - name: First-party plugin (cut-silence)
+        if: runner.os == 'Linux'
+        working-directory: plugins/cut-silence
+        run: |
+          cargo build --release --target wasm32-wasip2
+          cargo test
+          cargo fmt --all --check
+
       # Start the real app, paint a few empty frames and exit. This is what
       # proves eframe comes up on the wgpu backend on every OS (TASK-19 #3).
       - name: GUI smoke test (Linux)

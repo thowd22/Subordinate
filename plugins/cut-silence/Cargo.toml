@@ -1,0 +1,28 @@
+[package]
+name = "subordinate-plugin-cut-silence"
+description = "First-party Subordinate plugin: find silence in a media item and cut it out of the timeline"
+publish = false
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+# First-party plugin code is MIT OR Apache-2.0 like the WIT and the SDK, so a
+# plugin author may copy it under any licence.
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/thowd22/Subordinate"
+
+[lib]
+# `cdylib` is what wasm32-wasip2 turns into a component; `rlib` lets the
+# detector, the decoder and the planner be unit-tested on the host triple.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json = "1"
+wit-bindgen = "0.61"
+
+[profile.release]
+opt-level = "s"
+strip = true
+
+# Its own workspace: the plugin targets wasm32-wasip2 and must stay out of the
+# host workspace's build and lint graph, exactly like plugins/gain.
+[workspace]
