@@ -1,11 +1,10 @@
 ---
 id: TASK-126
 title: Linux CI build regressed from 5 to 13 minutes after the sccache change
-status: In Progress
-assignee:
-  - '@opus-task-126'
+status: To Do
+assignee: []
 created_date: '2026-09-10 00:47'
-updated_date: '2026-09-10 09:52'
+updated_date: '2026-09-10 16:27'
 labels:
   - infra
   - ci
@@ -27,7 +26,7 @@ TASK-125 fixed Windows CI (36m to 8m) but a warm-cache no-change rerun of run 34
 <!-- AC:BEGIN -->
 - [ ] #1 ubuntu-26.04 job on a warm no-change rerun completes in under 7 minutes, recorded in the task notes with the run id
 - [x] #2 sccache hit rate on Linux is above 90 percent on the warm rerun, or sccache is disabled on Linux with the reason documented in ci.yml
-- [ ] #3 Windows stays under 15 minutes on the same rerun
+- [x] #3 Windows stays under 15 minutes on the same rerun
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -74,6 +73,8 @@ Change made: sccache removed on every OS, not just Linux. The matrix is back to 
 Not done here, and required for the fix to take full effect: the roughly 1080 stale sccache entries still occupy the cache budget. Deleting them from this worktree was blocked by the permission classifier, so it stays a manual step, documented in docs/DEVELOPMENT.md 'CI build speed' and pointed at from ci.yml (list them with the gh cache list command, delete each id, repeat until none are left). Until that is done the first rust-cache saves may still be evicted.
 
 Verification performed here: ci.yml re-parsed with PyYAML and asserted (matrix os list, no job-level env, no step named or using sccache, save-if on the Swatinem step, no RUSTC_WRAPPER or SCCACHE token anywhere in the file); cargo fmt --all --check passes. The diff touches only .github/workflows/ci.yml, docs/DEVELOPMENT.md and this task file, no Rust source at all, so clippy and the test suite cannot be affected by it and were not re-run in this worktree (GStreamer is not installed system-wide here). AC #1 and #3 remain unchecked: both require a measured warm no-change rerun on GitHub Actions and this worktree must never push, so no run could be triggered or measured. To close them, delete the stale sccache entries, merge this branch, let one run land on main to populate the rust-cache archives under the new key, then rerun that run with no changes and record the run id plus the ubuntu-26.04 and windows-latest job durations.
+
+2026-09-10 supervisor measurement, warm no-change rerun of run 34495825617 after the sccache removal: ubuntu-26.04 10m47s (Build 184s, Clippy 48s, 'Generate the long fixture' 129s, plus benchmark and smoke steps), windows-latest 13m37s, macos-latest 8m27s; repository cache now holds ten rust-cache archives and no sccache entries. Criterion 3 (Windows under 15m) met. Criterion 1 (Linux under 7m) not met: the Linux job has since gained the long-fixture generation (2m), the scrub benchmark and the window smoke, so the 7-minute target predates that scope. Suggested follow-up: cache the generated fixtures (keyed on scripts/gen-fixtures.sh) and revisit the target.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
