@@ -57,3 +57,22 @@ pub mod effect_cpu {
         },
     });
 }
+
+/// The richer `commands` world: the same host imports, plus the menu and
+/// shortcut registration exports.
+///
+/// `with` points the generated code at the modules above rather than at a
+/// second copy of them, so a `WitError` returned by a `commands` plugin and one
+/// returned by a `command` plugin are the same Rust type and one host state can
+/// serve both worlds.
+pub mod menu {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "commands",
+        additional_derives: [PartialEq, Eq, Hash],
+        with: {
+            "subordinate:plugin/types": super::subordinate::plugin::types,
+            "subordinate:plugin/command-api": super::subordinate::plugin::command_api,
+        },
+    });
+}

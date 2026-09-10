@@ -46,6 +46,17 @@
 //! picture size. A plugin that only ships a shader targets `effect` and
 //! exports nothing else.
 //!
+//! # Plugin-contributed commands
+//!
+//! The `commands` world is the same import with menu and shortcut
+//! registration on top: a plugin answers `commands()` once with a
+//! [`CommandDesc`] per entry it contributes, and the host validates and keeps
+//! those in a [`PluginCommandRegistry`], which is what the Plugins menu and the
+//! keyboard map read. [`run_as_undo_group`] then wraps a whole run in one
+//! engine command group, so a plugin command is one step on the undo stack
+//! however many primitives it applies, and a failed run leaves nothing behind.
+//! See [`menu`].
+//!
 //! [`bindings`] holds the generated host side of those worlds; [`convert`] maps
 //! its records onto [`sub_core::SubError`], [`sub_time::RationalTime`] and the
 //! `sub_model` identifiers, so an implementation of the generated `Host` trait
@@ -67,6 +78,7 @@
 
 pub mod bindings;
 mod convert;
+pub mod menu;
 
 pub use bindings::Command;
 pub use bindings::effect::Effect;
@@ -79,6 +91,8 @@ pub use bindings::effect::subordinate::plugin::effect_types::{
     ParamValue as WitParamValue, PixelFormat as WitPixelFormat,
 };
 pub use bindings::effect_cpu::EffectCpu;
+pub use bindings::menu::Commands;
+pub use bindings::menu::subordinate::plugin::command_menu;
 pub use bindings::subordinate::plugin::command_api;
 pub use bindings::subordinate::plugin::command_api::{
     ClipMetadata, LogLevel, MarkerMetadata, ProjectMetadata, Resolution as WitResolution,
@@ -93,6 +107,10 @@ pub use bindings::subordinate::plugin::types::{
 };
 pub use convert::{
     marker_metadata, project_metadata, sequence_metadata, track_clip_metadata, track_metadata,
+};
+pub use menu::{
+    CommandContext, CommandDesc, PluginCommand, PluginCommandRegistry, QUALIFIED_SEPARATOR,
+    run_as_undo_group,
 };
 
 /// Error codes this crate raises. The `plugin.*` domain belongs to the host;
@@ -110,4 +128,19 @@ pub mod codes {
     /// A time range crossing in from a plugin has a negative duration or two
     /// endpoints at different rates.
     pub const INVALID_TIME_RANGE: ErrorCode = ErrorCode::from_static("plugin.invalid_time_range");
+    /// A plugin registering commands has an id that is not a lowercase
+    /// dot-separated identifier.
+    pub const INVALID_PLUGIN_ID: ErrorCode = ErrorCode::from_static("plugin.invalid_plugin_id");
+    /// A registered command's id is not a lowercase dot-separated identifier.
+    pub const INVALID_COMMAND_ID: ErrorCode = ErrorCode::from_static("plugin.invalid_command_id");
+    /// A registered command's title is empty or spans more than one line.
+    pub const INVALID_COMMAND_TITLE: ErrorCode =
+        ErrorCode::from_static("plugin.invalid_command_title");
+    /// A registered command asks for a shortcut that is empty. An unset
+    /// shortcut is how a command says it wants none.
+    pub const INVALID_SHORTCUT: ErrorCode = ErrorCode::from_static("plugin.invalid_shortcut");
+    /// One plugin registered the same command id twice.
+    pub const DUPLICATE_COMMAND: ErrorCode = ErrorCode::from_static("plugin.duplicate_command");
+    /// A qualified command id names no registered command.
+    pub const UNKNOWN_COMMAND: ErrorCode = ErrorCode::from_static("plugin.unknown_command");
 }

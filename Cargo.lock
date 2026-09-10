@@ -4692,6 +4692,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "sub-core",
+ "sub-edit",
  "sub-model",
  "sub-time",
  "wasmtime",
@@ -4741,6 +4742,7 @@ dependencies = [
  "sub-export",
  "sub-media",
  "sub-model",
+ "sub-plugin",
  "sub-render",
  "sub-test-support",
  "sub-time",
