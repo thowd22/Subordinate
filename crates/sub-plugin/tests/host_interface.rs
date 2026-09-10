@@ -15,8 +15,9 @@ use sub_plugin::command_api::{
     ClipMetadata, Host, LogLevel, MarkerMetadata, ProjectMetadata, SequenceMetadata, TrackMetadata,
 };
 use sub_plugin::{
-    Command, WitError, WitProjectId, WitSequenceId, WitTrackId, marker_metadata, project_metadata,
-    sequence_metadata, track_clip_metadata, track_metadata,
+    Command, Effect, EffectCpu, WitEffectDesc, WitError, WitFrame, WitParamBinding, WitProjectId,
+    WitSequenceId, WitTrackId, marker_metadata, project_metadata, sequence_metadata,
+    track_clip_metadata, track_metadata,
 };
 use sub_time::{Rational, RationalTime, TimeRange};
 
@@ -94,6 +95,10 @@ impl TestHost {
 }
 
 impl sub_plugin::types::Host for TestHost {}
+
+/// The effect worlds add value types but no host functions, so this is empty:
+/// an effect plugin still reaches the project only through `command-api`.
+impl sub_plugin::effect_types::Host for TestHost {}
 
 impl Host for TestHost {
     fn run_command(
@@ -270,4 +275,39 @@ fn the_command_world_links_with_every_import_satisfied() {
     let mut linker = wasmtime::component::Linker::<TestHost>::new(&engine);
     Command::add_to_linker::<_, wasmtime::component::HasSelf<TestHost>>(&mut linker, |state| state)
         .expect("the command world's imports are all implemented");
+}
+
+#[test]
+fn the_effect_worlds_link_against_the_same_host() {
+    let engine = wasmtime::Engine::default();
+
+    // An effect plugin imports the same `command-api`, so one host serves all
+    // three worlds.
+    let mut linker = wasmtime::component::Linker::<TestHost>::new(&engine);
+    Effect::add_to_linker::<_, wasmtime::component::HasSelf<TestHost>>(&mut linker, |state| state)
+        .expect("the effect world's imports are all implemented");
+
+    let mut linker = wasmtime::component::Linker::<TestHost>::new(&engine);
+    EffectCpu::add_to_linker::<_, wasmtime::component::HasSelf<TestHost>>(&mut linker, |state| {
+        state
+    })
+    .expect("the effect-cpu world's imports are all implemented");
+}
+
+/// Never called: it type-checks the exports each effect world promises.
+/// `describe` takes nothing and returns a declaration; `process-cpu` exists
+/// only on `effect-cpu`, takes one frame plus a value per declared parameter,
+/// and can fail with the same stable-coded error as everything else.
+#[expect(dead_code, reason = "a compile-time check of the generated signatures")]
+fn the_effect_exports_have_the_signatures_the_wit_declares(
+    effect: &Effect,
+    cpu: &EffectCpu,
+    store: &mut wasmtime::Store<TestHost>,
+    frame: &WitFrame,
+    params: &[WitParamBinding],
+) -> wasmtime::Result<()> {
+    let _: WitEffectDesc = effect.call_describe(&mut *store)?;
+    let _: WitEffectDesc = cpu.call_describe(&mut *store)?;
+    let _: Result<WitFrame, WitError> = cpu.call_process_cpu(&mut *store, frame, params)?;
+    Ok(())
 }

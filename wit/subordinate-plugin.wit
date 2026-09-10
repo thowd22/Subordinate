@@ -298,3 +298,221 @@ world command {
     /// encoding the Command API uses for parameters; so is the returned value.
     export run: func(project: project-id, args: string) -> result<string, error>;
 }
+
+/// The value types of a GPU effect: its parameter schema, the WGSL it runs and
+/// the frames the optional CPU path sees.
+///
+/// A WASM guest never touches the GPU (decision-6). An effect plugin therefore
+/// *declares* itself — a list of parameters plus one WGSL source — and the core
+/// compiles the shader, builds the uniform buffer from the declared parameters
+/// and runs it in the compositor. The plugin's own code runs once, at describe
+/// time, not per frame.
+interface effect-types {
+    use types.{rational-time};
+
+    /// An RGBA colour, each channel in `0.0..=1.0`.
+    ///
+    /// Linear, not gamma-encoded, and untagged: the MVP composites in
+    /// Rec.709 (decision-3), so a colour parameter reaches the shader as
+    /// written with no conversion.
+    record color {
+        /// Red.
+        r: f32,
+        /// Green.
+        g: f32,
+        /// Blue.
+        b: f32,
+        /// Alpha, where 0.0 is fully transparent.
+        a: f32,
+    }
+
+    /// A continuous parameter, e.g. an exposure stop or a mix amount.
+    record float-param {
+        /// Smallest accepted value, inclusive.
+        min: f32,
+        /// Largest accepted value, inclusive; never below `min`.
+        max: f32,
+        /// The value the host uses until the user changes it; within range.
+        default: f32,
+        /// Increment a stepped control snaps to; none means continuous.
+        step: option<f32>,
+    }
+
+    /// A whole-number parameter, e.g. a sample count.
+    record int-param {
+        /// Smallest accepted value, inclusive.
+        min: s32,
+        /// Largest accepted value, inclusive; never below `min`.
+        max: s32,
+        /// The value the host uses until the user changes it; within range.
+        default: s32,
+    }
+
+    /// An on/off parameter. It reaches the shader as `0` or `1`.
+    record bool-param {
+        /// The value the host uses until the user changes it.
+        default: bool,
+    }
+
+    /// A colour parameter, edited with a colour picker.
+    record color-param {
+        /// The value the host uses until the user changes it.
+        default: color,
+    }
+
+    /// One choice of an `enum-param`.
+    record enum-variant {
+        /// Stable machine-readable key, e.g. `luma`. Never renamed: a saved
+        /// project stores this, not the label or the index.
+        id: string,
+        /// Human-readable label for the inspector.
+        label: string,
+    }
+
+    /// A closed set of choices, e.g. a blend mode.
+    record enum-param {
+        /// The choices, in the order the inspector lists them; never empty.
+        variants: list<enum-variant>,
+        /// Index into `variants` of the default choice; always in bounds.
+        default: u32,
+    }
+
+    /// Which kind of value a parameter holds, with its range and default.
+    ///
+    /// `boolean` rather than `bool` only because `bool` is a WIT keyword; it
+    /// is the flag case the SDK and the inspector call a bool parameter.
+    variant param-kind {
+        /// A continuous value.
+        float(float-param),
+        /// A whole number.
+        int(int-param),
+        /// A flag.
+        boolean(bool-param),
+        /// An RGBA colour.
+        color(color-param),
+        /// One of a closed set of choices.
+        choice(enum-param),
+    }
+
+    /// One parameter of an effect: what the inspector shows and what the
+    /// shader reads.
+    record param-desc {
+        /// Stable machine-readable key, e.g. `exposure`. It is the field name
+        /// the host gives this parameter in the shader's uniform struct, and
+        /// the key a project file stores, so it is never renamed. Lowercase
+        /// `[a-z0-9_]`, starting with a letter.
+        id: string,
+        /// Human-readable label for the inspector.
+        label: string,
+        /// One-line explanation for tooltips; empty when there is none.
+        doc: string,
+        /// The value's type, range and default.
+        kind: param-kind,
+    }
+
+    /// A parameter's current value. The case always matches the `param-kind`
+    /// the parameter was declared with.
+    variant param-value {
+        /// A continuous value, within the declared range.
+        float(f32),
+        /// A whole number, within the declared range.
+        int(s32),
+        /// A flag.
+        boolean(bool),
+        /// An RGBA colour.
+        color(color),
+        /// Index into the declared `variants`; always in bounds.
+        choice(u32),
+    }
+
+    /// One parameter's value, keyed by `param-desc.id`.
+    record param-binding {
+        /// The parameter's `id`.
+        id: string,
+        /// Its value for this invocation.
+        value: param-value,
+    }
+
+    /// How the bytes of a `frame` are laid out.
+    enum pixel-format {
+        /// Eight bits per channel, R, G, B then A, linear.
+        rgba8-unorm,
+        /// Eight bits per channel, R, G, B then A, sRGB-encoded.
+        rgba8-unorm-srgb,
+    }
+
+    /// One picture crossing the boundary to the optional CPU path.
+    record frame {
+        /// Width in pixels; never zero.
+        width: u32,
+        /// Height in pixels; never zero.
+        height: u32,
+        /// Bytes per row, which may exceed `width` times the pixel size.
+        stride: u32,
+        /// How `pixels` is laid out.
+        format: pixel-format,
+        /// The instant this frame sits at, exact: effect timing is rational
+        /// like the rest of the timeline, never seconds as a float.
+        time: rational-time,
+        /// The pixels, `stride` times `height` bytes.
+        pixels: list<u8>,
+    }
+
+    /// What a plugin declares about the one effect it provides.
+    ///
+    /// `shader` is WGSL source the host compiles and caches by hash. It
+    /// declares a fragment entry point named `entry` that samples the input
+    /// picture and reads the declared parameters from the uniform struct the
+    /// host builds from `params`; the host owns every binding, so the shader
+    /// never allocates or binds resources itself.
+    record effect-desc {
+        /// The effect's parameters, in the order the inspector shows them.
+        /// Empty for an effect that takes none. Every `id` is unique.
+        params: list<param-desc>,
+        /// WGSL source for the effect.
+        shader: string,
+        /// Name of the fragment entry point in `shader`, e.g. `fs_main`.
+        entry: string,
+    }
+}
+
+/// A GPU effect: the plugin declares parameters and a WGSL shader, the core
+/// compiles and runs them (decision-6).
+///
+/// `describe` is called once when the host loads the plugin, and again after a
+/// hot reload. It takes no project, because an effect declaration is static:
+/// per-clip parameter values live in the project model and are edited through
+/// ordinary undoable commands, not by the plugin.
+world effect {
+    use effect-types.{effect-desc};
+
+    import command-api;
+
+    /// Declares this plugin's effect. Called at load time, not per frame.
+    export describe: func() -> effect-desc;
+}
+
+/// The `effect` world plus the optional CPU path.
+///
+/// A plugin exports `process-cpu` by targeting this world instead of `effect`;
+/// a plugin that only ships a shader targets `effect` and exports nothing else.
+/// Both are `subordinate:plugin@0.1.0` and the host accepts either.
+///
+/// **`process-cpu` is slow.** It copies a whole frame into the sandbox, runs a
+/// per-pixel loop in WASM and copies the result back, so it is for small
+/// buffers only — thumbnails, analysis passes, unit-test fixtures — and never
+/// for playback or export at picture size (docs/PLAN.md section 6, decision-6).
+/// When a plugin exports it, the host still prefers `shader`; it falls back to
+/// `process-cpu` only where no GPU is available or the buffer is small enough
+/// that the round trip is cheaper than a render pass.
+world effect-cpu {
+    include effect;
+
+    use effect-types.{frame, param-binding};
+    use types.{error};
+
+    /// Processes one small frame on the CPU. `params` carries a value for
+    /// every parameter `describe` declared, in declaration order. The returned
+    /// frame keeps the input's width, height and format.
+    export process-cpu: func(frame: frame, params: list<param-binding>) -> result<frame, error>;
+}

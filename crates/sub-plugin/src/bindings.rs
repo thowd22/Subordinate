@@ -1,10 +1,16 @@
 //! Host bindings generated from `wit/subordinate-plugin.wit`.
 //!
-//! [`wasmtime::component::bindgen!`] turns the `command` world into a
-//! [`Command`] type for instantiating a plugin and a `Host` trait per imported
-//! interface for the host to implement. The generated items are re-exported
-//! from the crate root, so a caller writes `sub_plugin::WitError` rather than
-//! reaching through the whole package path.
+//! [`wasmtime::component::bindgen!`] turns each world into a type for
+//! instantiating a plugin ([`Command`], [`effect::Effect`],
+//! [`effect_cpu::EffectCpu`]) and a `Host` trait per imported interface for the
+//! host to implement. The generated items are re-exported from the crate root,
+//! so a caller writes `sub_plugin::WitError` rather than reaching through the
+//! whole package path.
+//!
+//! Each world needs its own macro expansion, so the effect worlds live in
+//! submodules and reuse the `command` world's types through `with:`. There is
+//! therefore exactly one Rust `Error`, one `ProjectId` and one `Host` trait
+//! across all three worlds, and one `EffectDesc` across both effect worlds.
 //!
 //! The macro expansion carries no doc comments of its own beyond the ones
 //! written in the WIT, and its `Vec::from_raw_parts` lifting code is not
@@ -22,3 +28,32 @@ wasmtime::component::bindgen!({
     // hands a plugin.
     additional_derives: [PartialEq, Eq, Hash],
 });
+
+/// The `effect` world: a plugin that declares WGSL and a parameter schema.
+pub mod effect {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "effect",
+        // A parameter's range and default are `f32`, so these records are
+        // comparable but neither `Eq` nor `Hash`.
+        additional_derives: [PartialEq],
+        with: {
+            "subordinate:plugin/types": crate::bindings::subordinate::plugin::types,
+            "subordinate:plugin/command-api": crate::bindings::subordinate::plugin::command_api,
+        },
+    });
+}
+
+/// The `effect` world plus the optional, slow CPU path.
+pub mod effect_cpu {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "effect-cpu",
+        additional_derives: [PartialEq],
+        with: {
+            "subordinate:plugin/types": crate::bindings::subordinate::plugin::types,
+            "subordinate:plugin/command-api": crate::bindings::subordinate::plugin::command_api,
+            "subordinate:plugin/effect-types": crate::bindings::effect::subordinate::plugin::effect_types,
+        },
+    });
+}
