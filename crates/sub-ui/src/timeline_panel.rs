@@ -17,12 +17,13 @@
 //! `Painter` demands screen coordinates.
 
 use eframe::egui::{
-    Align2, Color32, Context, CornerRadius, FontId, Painter, Rect, Response, Sense, Stroke,
+    Align2, Color32, Context, CornerRadius, FontId, Painter, Pos2, Rect, Response, Sense, Stroke,
     StrokeKind, Ui, Vec2, Visuals, pos2,
 };
 use sub_model::{Clip, MediaItem, Project, Sequence, Track, TrackKind};
-use sub_time::{Rational, RationalTime, Timecode, TimecodeRate};
+use sub_time::{Rational, RationalTime, TimeRange, Timecode, TimecodeRate};
 
+use crate::selection::{ClipRef, MoveGroup, MoveRefusal, Selection, clips_in_marquee, plan_move};
 use crate::snapping::{self, SnapCandidate, SnapSettings};
 use crate::thumbnails::{ThumbnailCache, ZoomBucket, tile_time};
 use crate::timeline::{TimelineView, TrackLayout, ZoomLevel};
@@ -106,6 +107,28 @@ const SNAP_COLOR: Color32 = Color32::from_rgb(240, 208, 96);
 
 /// The denominator a wheel zoom factor is approximated over.
 const ZOOM_RATIO_DENOMINATOR: u32 = 4096;
+
+/// The colour a selected clip is outlined in.
+///
+/// Near-white, which is the one thing brighter than every clip fill and
+/// outline in the palette above, so selection reads at a glance whatever kind
+/// of media is under it — and it is what every other editor draws.
+const SELECTION_COLOR: Color32 = Color32::from_rgb(248, 248, 252);
+
+/// How wide the outline round a selected clip is, in points.
+const SELECTION_WIDTH: f32 = 2.0;
+
+/// The colour a drag that cannot become an edit is painted in.
+const REFUSED_COLOR: Color32 = Color32::from_rgb(224, 88, 88);
+
+/// How much of [`REFUSED_COLOR`] is washed over a clip whose drag is refused.
+const REFUSED_ALPHA: u8 = 64;
+
+/// How much of [`SELECTION_COLOR`] fills a ghost of a clip being dragged.
+const GHOST_ALPHA: u8 = 56;
+
+/// How much of [`SELECTION_COLOR`] fills the marquee rectangle.
+const MARQUEE_ALPHA: u8 = 32;
 
 /// The fixed sizes the panel lays itself out with, in points.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -496,6 +519,41 @@ pub struct TimelinePanel {
     candidates: Vec<SnapCandidate>,
     /// What the last reported seek snapped to, for painting the flag.
     snapped: Option<SnapCandidate>,
+    /// The clips the editor has selected.
+    ///
+    /// Selection is what the editor is pointing at rather than part of the
+    /// edit, so it lives here and never in the project; only the move it
+    /// produces is a Command (see [`crate::selection`]).
+    selection: Selection,
+    /// The gesture in the lanes that is still under the pointer.
+    gesture: Option<Gesture>,
+    /// What was selected when a marquee started, so the band adds to it.
+    marquee_base: Vec<ClipRef>,
+    /// What the drag in progress would do, recomputed each frame.
+    ///
+    /// `Ok` is the move that will be committed on release and the ghosts that
+    /// preview it; `Err` is why it will not be, which is what makes a refused
+    /// drag visible before the button comes up.
+    drag_plan: Option<Result<MoveGroup, MoveRefusal>>,
+}
+
+/// A gesture that started in the lanes and is still under the pointer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Gesture {
+    /// A rubber band selecting everything it covers.
+    Marquee {
+        /// Where the band was pressed.
+        origin: Pos2,
+        /// Where the pointer is now.
+        current: Pos2,
+    },
+    /// The selection being dragged to a new time, and maybe a new track.
+    Move {
+        /// Where the drag was pressed.
+        origin: Pos2,
+        /// Where the pointer is now.
+        current: Pos2,
+    },
 }
 
 /// What one painted frame of the panel produced.
@@ -516,6 +574,17 @@ pub struct TimelineResponse {
     pub seek: Option<RationalTime>,
     /// What [`TimelineResponse::seek`] snapped to, when it snapped.
     pub snapped: Option<SnapCandidate>,
+    /// Whether the selection changed this frame.
+    pub selection_changed: bool,
+    /// The move a released clip drag asks for, as one undoable group.
+    ///
+    /// The panel has moved nothing: it plans the drag and hands the plan over,
+    /// for the caller to apply with
+    /// [`apply_move`](crate::selection::apply_move) so the whole drag is one
+    /// entry in the undo stack.
+    pub clip_move: Option<MoveGroup>,
+    /// Why the drag under the pointer cannot become an edit, while it cannot.
+    pub refused: Option<MoveRefusal>,
 }
 
 impl TimelinePanel {
@@ -537,6 +606,53 @@ impl TimelinePanel {
             scrubbing: false,
             candidates: Vec::new(),
             snapped: None,
+            selection: Selection::new(),
+            gesture: None,
+            marquee_base: Vec::new(),
+            drag_plan: None,
+        }
+    }
+
+    /// The clips the editor has selected.
+    #[must_use]
+    pub const fn selection(&self) -> &Selection {
+        &self.selection
+    }
+
+    /// The selection, mutably, for the commands that select from outside the
+    /// lanes: select all, select none, a clip picked in the inspector.
+    pub const fn selection_mut(&mut self) -> &mut Selection {
+        &mut self.selection
+    }
+
+    /// What the drag under the pointer would commit, while one is in progress
+    /// and legal.
+    #[must_use]
+    pub fn drag_preview(&self) -> Option<&MoveGroup> {
+        self.drag_plan.as_ref().and_then(|plan| plan.as_ref().ok())
+    }
+
+    /// Why the drag under the pointer would be refused, while one is.
+    #[must_use]
+    pub fn drag_refusal(&self) -> Option<MoveRefusal> {
+        match self.drag_plan {
+            Some(Err(refusal)) => Some(refusal),
+            _ => None,
+        }
+    }
+
+    /// Whether a clip drag is under the pointer.
+    #[must_use]
+    pub const fn is_dragging_clips(&self) -> bool {
+        matches!(self.gesture, Some(Gesture::Move { .. }))
+    }
+
+    /// The rubber band under the pointer, while a marquee is in progress.
+    #[must_use]
+    pub fn marquee_rect(&self) -> Option<Rect> {
+        match self.gesture {
+            Some(Gesture::Marquee { origin, current }) => Some(Rect::from_two_pos(origin, current)),
+            _ => None,
         }
     }
 
@@ -753,6 +869,10 @@ impl TimelinePanel {
                 .map(|track| TrackLayout::build(track, rate)),
         );
         self.synced_revision = Some(revision);
+        // An edit can take a selected clip away — a remove, a ripple, an undo
+        // of the drag that made it — and a phantom in the selection would
+        // otherwise be dragged again and refused as unknown.
+        self.selection.retain_existing(sequence);
     }
 
     /// Forgets the clip indexes so the next [`TimelinePanel::sync`] rebuilds
@@ -861,6 +981,12 @@ impl TimelinePanel {
             self.apply_wheel(input, layout.content.height(), tracks);
         }
         let seek = self.handle_scrub(&response, &layout, sequence);
+        let shift = ui.input(|input| input.modifiers.shift);
+        let lanes = if seek.is_some() {
+            LaneOutcome::default()
+        } else {
+            self.handle_lanes(&response, &layout, sequence, shift)
+        };
         self.prepare_waveforms(ui.ctx(), project, sequence, layout);
         let visuals = ui.visuals().clone();
         let painter = ui.painter().with_clip_rect(rect);
@@ -878,6 +1004,7 @@ impl TimelinePanel {
         };
         self.paint_lanes(&painter, &layout, &visuals, project, sequence, &mut strips);
         self.thumbnails = thumbnails;
+        self.paint_gesture(&painter, &layout, sequence);
         self.paint_playhead(&painter, &layout);
         let actions = self.header_controls(ui, &layout, sequence);
         TimelineResponse {
@@ -885,6 +1012,9 @@ impl TimelinePanel {
             actions,
             seek,
             snapped: if seek.is_some() { self.snapped } else { None },
+            selection_changed: lanes.selection_changed,
+            clip_move: lanes.clip_move,
+            refused: lanes.refused,
         }
     }
 
@@ -898,14 +1028,19 @@ impl TimelinePanel {
     /// answer.
     ///
     /// A press anywhere else — a lane, the header column — is not a seek and
-    /// leaves the playhead alone; clip selection and dragging arrive with
-    /// TASK-30.
+    /// leaves the playhead alone: it belongs to clip selection instead, which
+    /// [`TimelinePanel::handle_lanes`] takes. A drag that started in a lane
+    /// and wandered up into the ruler stays that drag, so a gesture in
+    /// progress is never turned into a scrub half way through.
     fn handle_scrub(
         &mut self,
         response: &Response,
         layout: &PanelLayout,
         sequence: &Sequence,
     ) -> Option<RationalTime> {
+        if self.gesture.is_some() {
+            return None;
+        }
         let held = response.is_pointer_button_down_on();
         let Some(pos) = response.interact_pointer_pos() else {
             self.scrubbing = false;
@@ -937,6 +1072,275 @@ impl TimelinePanel {
         let time = self.snapped.map_or(raw, |candidate| candidate.time);
         self.playhead = time;
         Some(time)
+    }
+
+    /// Turns a press, drag or release in the lanes into selection and moves.
+    ///
+    /// The three gestures the lanes have are told apart by what is under the
+    /// press: a clip starts a move of whatever is selected, empty lane starts
+    /// a marquee, and shift makes either one add to the selection instead of
+    /// replacing it. Everything the drag computes is exact — the offset is a
+    /// difference of two [`RationalTime`]s and the track offset a difference
+    /// of two lane indexes — so the preview on screen and the commands
+    /// committed on release come from the same numbers.
+    ///
+    /// Nothing is mutated but the panel's own view state: the move is planned
+    /// here and applied by the caller through the Command API.
+    fn handle_lanes(
+        &mut self,
+        response: &Response,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+        shift: bool,
+    ) -> LaneOutcome {
+        let mut outcome = LaneOutcome::default();
+        let held = response.is_pointer_button_down_on();
+        let pointer = response.interact_pointer_pos();
+        let Some(gesture) = self.gesture else {
+            if let Some(pos) = pointer.filter(|_| held)
+                && layout.content.contains(pos)
+            {
+                outcome.selection_changed = self.begin_lane_gesture(pos, layout, sequence, shift);
+            }
+            return outcome;
+        };
+        match gesture {
+            Gesture::Marquee { origin, current } => {
+                let pos = pointer.unwrap_or(current);
+                self.gesture = Some(Gesture::Marquee {
+                    origin,
+                    current: pos,
+                });
+                outcome.selection_changed = self.apply_marquee(origin, pos, layout, sequence);
+                if !held {
+                    self.gesture = None;
+                    self.marquee_base.clear();
+                }
+            }
+            Gesture::Move { origin, current } => {
+                let pos = pointer.unwrap_or(current);
+                self.gesture = Some(Gesture::Move {
+                    origin,
+                    current: pos,
+                });
+                let (delta, track_delta) = self.drag_offset(origin, pos, layout);
+                match plan_move(sequence, &self.selection, delta, track_delta) {
+                    Ok(group) => {
+                        self.drag_plan = group.clone().map(Ok);
+                        if !held {
+                            outcome.clip_move = group;
+                        }
+                    }
+                    Err(refusal) => {
+                        self.drag_plan = Some(Err(refusal));
+                        outcome.refused = Some(refusal);
+                    }
+                }
+                if !held {
+                    self.gesture = None;
+                    self.drag_plan = None;
+                }
+            }
+        }
+        outcome
+    }
+
+    /// Starts the gesture a press at `pos` belongs to, and says whether the
+    /// selection changed.
+    ///
+    /// A press on an already-selected clip keeps the selection as it is, so
+    /// dragging a group of clips does not collapse it to the one that happened
+    /// to be under the pointer.
+    fn begin_lane_gesture(
+        &mut self,
+        pos: Pos2,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+        shift: bool,
+    ) -> bool {
+        if let Some(item) = self.clip_at(pos, layout, sequence) {
+            let changed = if shift {
+                self.selection.toggle(item)
+            } else if self.selection.contains(item) {
+                false
+            } else {
+                self.selection.select_only(item)
+            };
+            self.gesture = Some(Gesture::Move {
+                origin: pos,
+                current: pos,
+            });
+            return changed;
+        }
+        // Empty lane, or a clip on a locked track, which cannot be edited and
+        // so is not selectable: a marquee, over what shift kept.
+        let changed = !shift && self.selection.clear();
+        self.marquee_base = self.selection.items().to_vec();
+        self.gesture = Some(Gesture::Marquee {
+            origin: pos,
+            current: pos,
+        });
+        changed
+    }
+
+    /// Selects everything the band from `origin` to `current` covers, on top
+    /// of whatever the marquee started with.
+    fn apply_marquee(
+        &mut self,
+        origin: Pos2,
+        current: Pos2,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+    ) -> bool {
+        let mut items = self.marquee_base.clone();
+        for item in self.marquee_hits(origin, current, layout, sequence) {
+            if !items.contains(&item) {
+                items.push(item);
+            }
+        }
+        self.selection.set(items)
+    }
+
+    /// The clips the band from `origin` to `current` covers.
+    fn marquee_hits(
+        &self,
+        origin: Pos2,
+        current: Pos2,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+    ) -> Vec<ClipRef> {
+        let rate = self.view.rate();
+        let left = layout.content.left();
+        let (from_x, to_x) = ordered(origin.x, current.x);
+        let start = self.view.time_at_pixel(round_px(from_x - left));
+        let start = if start.is_negative() {
+            RationalTime::zero(rate)
+        } else {
+            start
+        };
+        let end = self.view.time_at_pixel(round_px(to_x - left));
+        let Some(span) = TimeRange::from_start_end(start, end.max(start)) else {
+            return Vec::new();
+        };
+        let (from_y, to_y) = ordered(origin.y, current.y);
+        let top = layout.content.top();
+        let first = usize::try_from(self.lane_at(top, from_y).max(0)).unwrap_or(0);
+        let last = usize::try_from(self.lane_at(top, to_y).max(0))
+            .unwrap_or(0)
+            .saturating_add(1)
+            .min(sequence.tracks.len());
+        clips_in_marquee(sequence, first..last.max(first), span)
+    }
+
+    /// How far a drag from `origin` to `current` moves a clip: an exact time
+    /// offset, and a whole number of lanes.
+    fn drag_offset(
+        &self,
+        origin: Pos2,
+        current: Pos2,
+        layout: &PanelLayout,
+    ) -> (RationalTime, isize) {
+        let rate = self.view.rate();
+        let left = layout.content.left();
+        let from = self.view.time_at_pixel(round_px(origin.x - left));
+        let to = self.view.time_at_pixel(round_px(current.x - left));
+        let delta = to
+            .checked_sub(from)
+            .unwrap_or_else(|| RationalTime::zero(rate));
+        let top = layout.content.top();
+        let lanes = self
+            .lane_at(top, current.y)
+            .saturating_sub(self.lane_at(top, origin.y));
+        (delta, isize::try_from(lanes).unwrap_or(0))
+    }
+
+    /// The clip under `pos`, when it is on an editable track.
+    fn clip_at(&self, pos: Pos2, layout: &PanelLayout, sequence: &Sequence) -> Option<ClipRef> {
+        if !layout.content.contains(pos) {
+            return None;
+        }
+        let index = usize::try_from(self.lane_at(layout.content.top(), pos.y)).ok()?;
+        let track = sequence.tracks.get(index)?;
+        if !clip_edits_allowed(track) {
+            return None;
+        }
+        let time = self
+            .view
+            .time_at_pixel(round_px(pos.x - layout.content.left()));
+        let placement = self.layouts.get(index)?.at(time)?;
+        Some(ClipRef::new(track.id, placement.clip))
+    }
+
+    /// The lane index the point `y` points below `top` falls in, which may be
+    /// off either end of the tracks.
+    fn lane_at(&self, top: f32, y: f32) -> i64 {
+        let pitch = self.metrics.lane_pitch().max(1.0);
+        floor_px((y - top + self.lane_scroll_px) / pitch)
+    }
+
+    /// The rectangle a clip spanning `range` on track `index` occupies.
+    fn clip_rect(&self, layout: &PanelLayout, index: usize, range: TimeRange) -> Rect {
+        let top = self.lane_top(layout.content.top(), index);
+        let lane = Rect::from_min_size(
+            pos2(layout.content.left(), top),
+            Vec2::new(layout.content.width(), self.metrics.track_height),
+        );
+        let body = lane.shrink2(Vec2::new(0.0, 3.0));
+        let left = lane.left() + self.view.pixel_of(range.start());
+        let right = lane.left() + self.view.pixel_of(range.end_exclusive());
+        Rect::from_min_max(
+            pos2(left, body.top()),
+            pos2(right.max(left + 1.0), body.bottom()),
+        )
+    }
+
+    /// Paints what the gesture in progress is about to do: the rubber band of
+    /// a marquee, or the ghosts of a drag.
+    ///
+    /// A refused drag paints no ghosts; the clips it would have moved are
+    /// washed in [`REFUSED_COLOR`] by [`TimelinePanel::paint_clips`] instead,
+    /// so the refusal is on the clips the editor is looking at.
+    fn paint_gesture(&self, painter: &Painter, layout: &PanelLayout, sequence: &Sequence) {
+        let lanes = painter.with_clip_rect(layout.content);
+        match self.gesture {
+            Some(Gesture::Marquee { origin, current }) => {
+                let band = Rect::from_two_pos(origin, current).intersect(layout.content);
+                lanes.rect_filled(
+                    band,
+                    CornerRadius::ZERO,
+                    tint(SELECTION_COLOR, MARQUEE_ALPHA),
+                );
+                lanes.rect_stroke(
+                    band,
+                    CornerRadius::ZERO,
+                    Stroke::new(1.0, SELECTION_COLOR),
+                    StrokeKind::Inside,
+                );
+            }
+            Some(Gesture::Move { .. }) => {
+                let Some(Ok(group)) = self.drag_plan.as_ref() else {
+                    return;
+                };
+                for preview in &group.previews {
+                    if preview.to_track_index >= sequence.tracks.len() {
+                        continue;
+                    }
+                    let rect = self.clip_rect(layout, preview.to_track_index, preview.range);
+                    lanes.rect_filled(
+                        rect,
+                        CornerRadius::same(3),
+                        tint(SELECTION_COLOR, GHOST_ALPHA),
+                    );
+                    lanes.rect_stroke(
+                        rect,
+                        CornerRadius::same(3),
+                        Stroke::new(SELECTION_WIDTH, SELECTION_COLOR),
+                        StrokeKind::Inside,
+                    );
+                }
+            }
+            None => {}
+        }
     }
 
     /// Paints the playhead: a line down the ruler and the lanes, with a head
@@ -1204,6 +1608,9 @@ impl TimelinePanel {
                 dimmed,
                 strip,
             );
+            if self.selection.contains(ClipRef::new(track.id, clip.id)) {
+                paint_selected(painter, rect, self.drag_refusal().is_some());
+            }
         }
     }
 
@@ -1245,6 +1652,57 @@ impl TimelinePanel {
             waveform.uv_of(clip.source_range),
             dim(waveform_color(kind), dimmed),
         );
+    }
+}
+
+/// What one frame of the lane gestures produced.
+///
+/// The panel folds this into its [`TimelineResponse`]; it exists so the
+/// gesture code has one thing to return rather than a tuple of three.
+#[derive(Debug, Default)]
+struct LaneOutcome {
+    /// Whether the selection changed this frame.
+    selection_changed: bool,
+    /// The move a released drag asks for.
+    clip_move: Option<MoveGroup>,
+    /// Why the drag under the pointer cannot become an edit.
+    refused: Option<MoveRefusal>,
+}
+
+/// Marks a selected clip, and says when its drag is being refused.
+///
+/// A refused drag washes the clip in [`REFUSED_COLOR`] as well as outlining
+/// it, so it is obvious before the button comes up that letting go will do
+/// nothing (a locked track, or a landing before the head of the sequence).
+fn paint_selected(painter: &Painter, rect: Rect, refused: bool) {
+    let radius = CornerRadius::same(3);
+    let color = if refused {
+        REFUSED_COLOR
+    } else {
+        SELECTION_COLOR
+    };
+    if refused {
+        painter.rect_filled(rect, radius, tint(REFUSED_COLOR, REFUSED_ALPHA));
+    }
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(SELECTION_WIDTH, color),
+        StrokeKind::Inside,
+    );
+}
+
+/// `color` at `alpha`, for the washes and fills the gestures paint.
+fn tint(color: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
+/// The two values in ascending order.
+fn ordered(left: f32, right: f32) -> (f32, f32) {
+    if left <= right {
+        (left, right)
+    } else {
+        (right, left)
     }
 }
 
@@ -1515,6 +1973,18 @@ fn width_px(width: f32) -> u32 {
 )]
 fn round_px(delta: f32) -> i64 {
     delta.clamp(-1.0e9, 1.0e9).round() as i64
+}
+
+/// A position in points as the whole number of pixels it falls in.
+///
+/// Rounding down rather than to nearest is what makes a lane index the lane
+/// the point is actually inside, whatever fraction of it the point is at.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "an absurd position is clamped before it is narrowed"
+)]
+fn floor_px(value: f32) -> i64 {
+    value.clamp(-1.0e9, 1.0e9).floor() as i64
 }
 
 /// True if `frames` frames span at least `min_px` points at `zoom`.

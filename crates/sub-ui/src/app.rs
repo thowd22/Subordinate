@@ -609,6 +609,20 @@ impl SubordinateApp {
                 for action in response.actions {
                     log::debug!("timeline action is not wired up yet: {action:?}");
                 }
+                if let Some(refusal) = response.refused {
+                    log::debug!("clip drag refused: {}", refusal.id());
+                }
+                if let Some(group) = response.clip_move {
+                    // The drag is planned, not applied: applying it takes the
+                    // engine handle the app does not own yet, and it must go
+                    // through `selection::apply_move` so the whole drag is one
+                    // entry in the undo stack.
+                    log::debug!(
+                        "clip move is not wired up yet: {} ({} clips)",
+                        group.label,
+                        group.len()
+                    );
+                }
             }
             Panel::Inspector => {
                 ui.label("The inspector arrives with the parameter panel.");
