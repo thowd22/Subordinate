@@ -847,93 +847,7 @@ impl SubordinateApp {
                     // is a seek and not a Command.
                     moved |= viewer.state.seek_to(time);
                 }
-                for action in response.actions {
-                    log::debug!("timeline action is not wired up yet: {action:?}");
-                }
-                if let Some(refusal) = response.refused {
-                    log::debug!("clip drag refused: {}", refusal.id());
-                }
-                if let Some(group) = response.clip_move {
-                    // The drag is planned, not applied: applying it takes the
-                    // engine handle the app does not own yet, and it must go
-                    // through `selection::apply_move` so the whole drag is one
-                    // entry in the undo stack.
-                    log::debug!(
-                        "clip move is not wired up yet: {} ({} clips)",
-                        group.label,
-                        group.len()
-                    );
-                }
-                if let Some(refusal) = response.trim_refused {
-                    log::debug!("clip trim refused: {}", refusal.id());
-                }
-                if let Some(group) = response.clip_trim {
-                    // Planned, not applied, for the same reason as the move
-                    // above: it goes through `trim::apply_trim` so the trim
-                    // and everything a ripple carried are one undo entry.
-                    log::debug!(
-                        "clip trim is not wired up yet: {} ({} commands)",
-                        group.label,
-                        group.len()
-                    );
-                }
-                if let Some(refusal) = response.transition_refused {
-                    log::debug!("crossfade drag refused: {}", refusal.id());
-                }
-                if let Some(drag) = response.transition {
-                    // Planned, not applied, like every other edit here: it
-                    // goes through `transition::apply_transition` so changing
-                    // a crossfade's duration is one entry in the undo stack.
-                    log::debug!(
-                        "crossfade is not wired up yet: {} ({})",
-                        drag.label(),
-                        drag.fitted.duration()
-                    );
-                }
-                if let Some(refusal) = response.fade_refused {
-                    log::debug!("clip fade refused: {}", refusal.id());
-                }
-                if let Some(edit) = response.clip_fade {
-                    // Planned, not applied: a fade is one command through
-                    // `fade::apply_fade`, on the engine handle the app does
-                    // not own yet.
-                    log::debug!(
-                        "clip fade is not wired up yet: {} to {}",
-                        edit.label(),
-                        edit.duration
-                    );
-                }
-                if let Some(refusal) = response.split_refused {
-                    log::debug!("clip split refused: {}", refusal.id());
-                }
-                if let Some(group) = response.clip_split {
-                    // Planned, not applied, for the same reason a drag is:
-                    // applying it takes the engine handle the app does not
-                    // own yet, and it goes through `split::apply_split` so a
-                    // through-edit is one entry in the undo stack.
-                    log::debug!(
-                        "clip split is not wired up yet: {} ({} clips)",
-                        group.label,
-                        group.len()
-                    );
-                }
-                if let Some(plan) = response.source_edit {
-                    // A drop from the bin is one command, applied through the
-                    // engine handle the app does not own yet.
-                    log::debug!(
-                        "bin drop is not wired up yet: {} at {}",
-                        plan.label(),
-                        plan.start()
-                    );
-                }
-                if let Some(refusal) = response.drop_refused {
-                    log::debug!("bin drop refused: {}", refusal.message());
-                }
-                for action in response.marker_actions {
-                    // Every marker gesture is one undoable command; they
-                    // reach the engine with the rest of the panel's actions.
-                    log::debug!("marker action is not wired up yet: {action:?}");
-                }
+                log_timeline_edits(response);
             }
             Panel::Inspector => {
                 let response = inspector.ui(ui, sequence, timeline.selection());
@@ -1227,6 +1141,102 @@ fn grain_duration(settings: ScrubSettings) -> Duration {
     }
     let nanos = numerator.saturating_mul(1_000_000_000) / denominator;
     Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+}
+
+/// Logs every edit a timeline frame asked for, until the app owns an engine
+/// handle to apply them through.
+///
+/// Each of these is planned by the panel and applied by the caller, so that
+/// one gesture becomes exactly one entry in the undo stack; for now the plan
+/// is logged rather than silently dropped.
+fn log_timeline_edits(response: crate::timeline_panel::TimelineResponse) {
+    for action in response.actions {
+        log::debug!("timeline action is not wired up yet: {action:?}");
+    }
+    if let Some(refusal) = response.refused {
+        log::debug!("clip drag refused: {}", refusal.id());
+    }
+    if let Some(group) = response.clip_move {
+        // The drag is planned, not applied: applying it takes the
+        // engine handle the app does not own yet, and it must go
+        // through `selection::apply_move` so the whole drag is one
+        // entry in the undo stack.
+        log::debug!(
+            "clip move is not wired up yet: {} ({} clips)",
+            group.label,
+            group.len()
+        );
+    }
+    if let Some(refusal) = response.trim_refused {
+        log::debug!("clip trim refused: {}", refusal.id());
+    }
+    if let Some(group) = response.clip_trim {
+        // Planned, not applied, for the same reason as the move
+        // above: it goes through `trim::apply_trim` so the trim
+        // and everything a ripple carried are one undo entry.
+        log::debug!(
+            "clip trim is not wired up yet: {} ({} commands)",
+            group.label,
+            group.len()
+        );
+    }
+    if let Some(refusal) = response.transition_refused {
+        log::debug!("crossfade drag refused: {}", refusal.id());
+    }
+    if let Some(drag) = response.transition {
+        // Planned, not applied, like every other edit here: it
+        // goes through `transition::apply_transition` so changing
+        // a crossfade's duration is one entry in the undo stack.
+        log::debug!(
+            "crossfade is not wired up yet: {} ({})",
+            drag.label(),
+            drag.fitted.duration()
+        );
+    }
+    if let Some(refusal) = response.fade_refused {
+        log::debug!("clip fade refused: {}", refusal.id());
+    }
+    if let Some(edit) = response.clip_fade {
+        // Planned, not applied: a fade is one command through
+        // `fade::apply_fade`, on the engine handle the app does
+        // not own yet.
+        log::debug!(
+            "clip fade is not wired up yet: {} to {}",
+            edit.label(),
+            edit.duration
+        );
+    }
+    if let Some(refusal) = response.split_refused {
+        log::debug!("clip split refused: {}", refusal.id());
+    }
+    if let Some(group) = response.clip_split {
+        // Planned, not applied, for the same reason a drag is:
+        // applying it takes the engine handle the app does not
+        // own yet, and it goes through `split::apply_split` so a
+        // through-edit is one entry in the undo stack.
+        log::debug!(
+            "clip split is not wired up yet: {} ({} clips)",
+            group.label,
+            group.len()
+        );
+    }
+    if let Some(plan) = response.source_edit {
+        // A drop from the bin is one command, applied through the
+        // engine handle the app does not own yet.
+        log::debug!(
+            "bin drop is not wired up yet: {} at {}",
+            plan.label(),
+            plan.start()
+        );
+    }
+    if let Some(refusal) = response.drop_refused {
+        log::debug!("bin drop refused: {}", refusal.message());
+    }
+    for action in response.marker_actions {
+        // Every marker gesture is one undoable command; they reach the engine
+        // with the rest of the panel's actions.
+        log::debug!("marker action is not wired up yet: {action:?}");
+    }
 }
 
 #[cfg(test)]
