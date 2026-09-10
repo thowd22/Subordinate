@@ -17,6 +17,7 @@ use sub_command::endpoint::Endpoint;
 use sub_command::transport::Server;
 use sub_edit::Engine;
 use sub_model::{Project, Sequence, SequenceSettings};
+use subordinate_mcp::tools::ToolSet;
 
 /// The instance this test serves, kept out of the way of a real editor.
 const INSTANCE: &str = "mcp-stdio-test";
@@ -182,10 +183,18 @@ fn the_binary_speaks_mcp_over_stdio_and_drives_the_command_api() {
     assert_eq!(initialized["serverInfo"]["name"], "subordinate-mcp");
     assert!(initialized["capabilities"]["tools"].is_object());
 
-    // Every Command API method is offered, with the schema's own description.
+    // Every Command API method is offered, with the schema's own description,
+    // and so are the plugin host's, exported as their own document.
     let listed = client.request("tools/list", &json!({}));
     let tools = listed["tools"].as_array().expect("a tool list");
-    assert_eq!(tools.len(), 50);
+    assert_eq!(
+        tools.len(),
+        ToolSet::committed().expect("the committed tools").len()
+    );
+    assert!(
+        tools.iter().any(|tool| tool["name"] == "plugin_list"),
+        "plugin.list is not offered",
+    );
     let create = tools
         .iter()
         .find(|tool| tool["name"] == "bin_create")

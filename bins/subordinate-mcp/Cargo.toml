@@ -26,6 +26,9 @@ tracing = "0.1"
 [dev-dependencies]
 sub-edit = { version = "0.1.0", path = "../../crates/sub-edit" }
 sub-model = { version = "0.1.0", path = "../../crates/sub-model" }
+# Test-only: the bridge integration test serves the plugin host's methods from
+# the editor side, which is what makes the plugin_* tools reachable.
+sub-plugin = { version = "0.1.0", path = "../../crates/sub-plugin" }
 
 [lints]
 workspace = true

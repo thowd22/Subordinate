@@ -23,6 +23,7 @@ use sub_command::transport::Server;
 use sub_core::{ResultExt, SubResult, codes};
 use sub_edit::Engine;
 use sub_model::{Project, json as project_json};
+use sub_plugin::registry::{self, PluginDirs, PluginRegistry};
 
 /// How `serve` was asked to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +35,8 @@ pub struct Options {
     /// Where the socket and lock file live, overriding the per-user default.
     /// Tests set it; a user has no reason to.
     pub directory: Option<PathBuf>,
+    /// The per-user plugin directory, overriding the platform default.
+    pub plugin_dir: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -42,6 +45,7 @@ impl Default for Options {
             project: None,
             instance: DEFAULT_INSTANCE.to_owned(),
             directory: None,
+            plugin_dir: None,
         }
     }
 }
@@ -65,12 +69,44 @@ pub fn serve(options: &Options, ready: impl FnOnce(&Value)) -> SubResult<Value> 
     let name = project.name.clone();
 
     let engine = Engine::spawn(project)?;
-    let dispatcher = Arc::new(Dispatcher::new(engine.handle().clone()));
+    let mut dispatcher = Dispatcher::new(engine.handle().clone());
+    install_plugin_methods(&mut dispatcher, options)?;
+    let dispatcher = Arc::new(dispatcher);
     let served = run(options, &dispatcher, &name, ready);
     let stopped = engine.shutdown();
     let report = served?;
     stopped?;
     Ok(report)
+}
+
+/// Puts `plugin.list`, `plugin.enable`, `plugin.disable` and `plugin.remove` on
+/// the dispatcher, so an agent manages plugins through the MCP bridge exactly
+/// as a user does through the CLI (docs/PLAN.md §6.4).
+///
+/// A machine with no per-user data directory is served without them rather
+/// than not served at all: nothing else the Command API does depends on the
+/// plugin directories.
+fn install_plugin_methods(dispatcher: &mut Dispatcher, options: &Options) -> SubResult<()> {
+    let user = match options.plugin_dir.clone() {
+        Some(dir) => dir,
+        None => match registry::default_user_dir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                tracing::warn!(
+                    code = error.code.as_str(),
+                    "plugin management is not served: {}",
+                    error.message,
+                );
+                return Ok(());
+            }
+        },
+    };
+    let dirs = PluginDirs::new(user);
+    let dirs = match options.project.as_deref() {
+        Some(project) => dirs.with_project_file(project),
+        None => dirs,
+    };
+    registry::register_methods(dispatcher, Arc::new(PluginRegistry::new(dirs)))
 }
 
 /// Binds the endpoint, announces it, waits for stdin to close and shuts down.

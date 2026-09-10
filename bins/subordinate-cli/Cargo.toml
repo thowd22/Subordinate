@@ -14,7 +14,9 @@ sub-edit = { version = "0.1.0", path = "../../crates/sub-edit" }
 sub-export = { version = "0.1.0", path = "../../crates/sub-export" }
 sub-media = { version = "0.1.0", path = "../../crates/sub-media" }
 sub-model = { version = "0.1.0", path = "../../crates/sub-model" }
+sub-plugin = { version = "0.1.0", path = "../../crates/sub-plugin" }
 sub-time = { version = "0.1.0", path = "../../crates/sub-time" }
+serde = "1"
 serde_json = "1"
 tracing = "0.1"
 

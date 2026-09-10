@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod plugin;
 mod project;
 mod serve;
 
@@ -62,6 +63,15 @@ enum Command {
         /// Whether the readiness line and the report are indented.
         pretty: bool,
     },
+    /// List installed plugins, or switch one on, off or away.
+    Plugin {
+        /// Which of the four operations was asked for.
+        action: plugin::Action,
+        /// Which plugin directories to look in.
+        options: plugin::Options,
+        /// Whether the report is indented.
+        pretty: bool,
+    },
     /// Anything unrecognised, reported with the offending argument.
     Unknown(String),
     /// A subcommand missing an argument it needs.
@@ -88,8 +98,16 @@ Usage:
   subordinate-cli inspect <file>
                                print the whole project structure as JSON
   subordinate-cli serve [--project <file>] [--instance <name>]
-                        [--directory <dir>]
+                        [--directory <dir>] [--plugin-dir <dir>]
                                serve the Command API until stdin closes
+  subordinate-cli plugin list [--dir <dir>] [--project <file>]
+                               list installed plugins, load failures and
+                               id conflicts
+  subordinate-cli plugin enable <id> [--dir <dir>] [--project <file>]
+  subordinate-cli plugin disable <id>
+                               switch a plugin on or off
+  subordinate-cli plugin remove <id>
+                               delete an installed plugin from disk
   subordinate-cli --help       print this text
 
 Every subcommand prints JSON, indented by default and on one line with
@@ -118,6 +136,7 @@ fn parse(args: &[String]) -> Command {
             pretty,
         }),
         Some("serve") => parse_serve(args),
+        Some("plugin") => parse_plugin(args),
         Some(other) => Command::Unknown(other.to_owned()),
     }
 }
@@ -243,10 +262,59 @@ fn parse_serve<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
                 Some(value) => options.directory = Some(PathBuf::from(value)),
                 None => return Command::Incomplete("--directory needs a path".to_owned()),
             },
+            "--plugin-dir" => match args.next() {
+                Some(value) => options.plugin_dir = Some(PathBuf::from(value)),
+                None => return Command::Incomplete("--plugin-dir needs a path".to_owned()),
+            },
             other => return Command::Unknown(other.to_owned()),
         }
     }
     Command::Serve { options, pretty }
+}
+
+/// Reads `plugin <list|enable|disable|remove> [<id>] [--dir <dir>]
+/// [--project <file>]`.
+fn parse_plugin<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
+    let mut pretty = true;
+    let mut options = plugin::Options::default();
+    let Some(word) = args.next() else {
+        return Command::Incomplete(plugin::NEEDS_ACTION.to_owned());
+    };
+    let mut id = None;
+    while let Some(arg) = args.next() {
+        match arg {
+            "--compact" => pretty = false,
+            "--pretty" | "--json" => pretty = true,
+            "--dir" => match args.next() {
+                Some(value) => options.user_dir = Some(PathBuf::from(value)),
+                None => return Command::Incomplete("--dir needs a path".to_owned()),
+            },
+            "--project" => match args.next() {
+                Some(value) => options.project = Some(PathBuf::from(value)),
+                None => {
+                    return Command::Incomplete("--project needs the path of a project".to_owned());
+                }
+            },
+            other if id.is_none() && !other.starts_with('-') => id = Some(other.to_owned()),
+            other => return Command::Unknown(other.to_owned()),
+        }
+    }
+
+    let needs_id = |what: &str| Command::Incomplete(format!("plugin {what} needs a plugin id"));
+    let action = match (word, id) {
+        ("list", None) => plugin::Action::List,
+        ("list", Some(extra)) => return Command::Unknown(extra),
+        ("enable", Some(id)) => plugin::Action::Enable(id),
+        ("disable", Some(id)) => plugin::Action::Disable(id),
+        ("remove", Some(id)) => plugin::Action::Remove(id),
+        (word @ ("enable" | "disable" | "remove"), None) => return needs_id(word),
+        (other, _) => return Command::Unknown(other.to_owned()),
+    };
+    Command::Plugin {
+        action,
+        options,
+        pretty,
+    }
 }
 
 /// Prints `value` as JSON, one line when `pretty` is false.
@@ -376,6 +444,11 @@ fn main() -> ExitCode {
             });
             report(result, pretty)
         }
+        Command::Plugin {
+            action,
+            options,
+            pretty,
+        } => report(plugin::run(&action, &options), pretty),
         Command::Unknown(arg) => {
             eprintln!("unknown argument: {arg}\n\n{USAGE}");
             ExitCode::FAILURE
@@ -389,7 +462,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, parse};
+    use super::{Command, parse, plugin};
     use std::path::Path;
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -512,6 +585,88 @@ mod tests {
     }
 
     #[test]
+    fn plugin_parses_its_four_operations() {
+        let Command::Plugin {
+            action,
+            options,
+            pretty,
+        } = parse(&args(&[
+            "plugin",
+            "list",
+            "--dir",
+            "/data/plugins",
+            "--compact",
+        ]))
+        else {
+            panic!("plugin list did not parse");
+        };
+        assert_eq!(action, plugin::Action::List);
+        assert_eq!(
+            options.user_dir.as_deref(),
+            Some(Path::new("/data/plugins"))
+        );
+        assert!(options.project.is_none());
+        assert!(!pretty);
+
+        for (word, build) in [
+            ("enable", plugin::Action::Enable as fn(String) -> _),
+            ("disable", plugin::Action::Disable),
+            ("remove", plugin::Action::Remove),
+        ] {
+            let Command::Plugin { action, .. } = parse(&args(&[
+                "plugin",
+                word,
+                "com.example.one",
+                "--project",
+                "cut.sub",
+            ])) else {
+                panic!("plugin {word} did not parse");
+            };
+            assert_eq!(action, build("com.example.one".to_owned()));
+        }
+
+        let Command::Plugin { options, .. } =
+            parse(&args(&["plugin", "list", "--project", "cut.sub"]))
+        else {
+            panic!("plugin list did not parse");
+        };
+        assert_eq!(options.project.as_deref(), Some(Path::new("cut.sub")));
+    }
+
+    #[test]
+    fn plugin_reports_a_missing_subcommand_or_id() {
+        assert_eq!(
+            parse(&args(&["plugin"])),
+            Command::Incomplete(plugin::NEEDS_ACTION.to_owned())
+        );
+        assert!(matches!(
+            parse(&args(&["plugin", "enable"])),
+            Command::Incomplete(_)
+        ));
+        assert_eq!(
+            parse(&args(&["plugin", "install"])),
+            Command::Unknown("install".to_owned())
+        );
+        assert_eq!(
+            parse(&args(&["plugin", "list", "com.example.one"])),
+            Command::Unknown("com.example.one".to_owned())
+        );
+    }
+
+    #[test]
+    fn serve_takes_a_plugin_directory() {
+        let Command::Serve { options, .. } =
+            parse(&args(&["serve", "--plugin-dir", "/data/plugins"]))
+        else {
+            panic!("serve did not parse");
+        };
+        assert_eq!(
+            options.plugin_dir.as_deref(),
+            Some(Path::new("/data/plugins"))
+        );
+    }
+
+    #[test]
     fn unknown_arguments_are_reported_rather_than_ignored() {
         assert_eq!(
             parse(&args(&["render"])),
@@ -532,7 +687,9 @@ mod tests {
         for spelling in ["--help", "-h", "help"] {
             assert_eq!(parse(&args(&[spelling])), Command::Help);
         }
-        for subcommand in ["diag", "schema", "new", "open", "save", "inspect", "serve"] {
+        for subcommand in [
+            "diag", "schema", "new", "open", "save", "inspect", "serve", "plugin",
+        ] {
             assert!(
                 super::USAGE.contains(subcommand),
                 "{subcommand} is undocumented",

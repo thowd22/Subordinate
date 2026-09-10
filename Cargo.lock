@@ -4924,6 +4924,7 @@ dependencies = [
  "sub-time",
  "thiserror 2.0.20",
  "toml",
+ "tracing",
  "wasmtime",
  "wasmtime-wasi",
 ]
@@ -4992,6 +4993,7 @@ dependencies = [
 name = "subordinate-cli"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "sub-command",
  "sub-core",
@@ -4999,6 +5001,7 @@ dependencies = [
  "sub-export",
  "sub-media",
  "sub-model",
+ "sub-plugin",
  "sub-time",
  "tracing",
 ]
@@ -5013,6 +5016,7 @@ dependencies = [
  "sub-core",
  "sub-edit",
  "sub-model",
+ "sub-plugin",
  "tokio",
  "tracing",
 ]
