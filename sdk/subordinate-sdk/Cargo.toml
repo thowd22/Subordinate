@@ -7,8 +7,34 @@ rust-version.workspace = true
 repository.workspace = true
 license = "MIT OR Apache-2.0"
 
+# One world per plugin, so one feature per world. Exactly one must be enabled: a
+# component implements a single `subordinate:plugin@0.1.0` world, and two sets of
+# generated bindings in one module would offer the componentiser two worlds to
+# satisfy. `src/bindings.rs` turns a wrong count into a compile error.
+[features]
+default = ["command"]
+command = []
+effect = []
+effect-cpu = []
+commands = []
+mcp-tools = []
+audio-effect = []
+importer = []
+exporter = []
+analyzer = []
+
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 wit-bindgen = "0.61"
+
+# Host-only. These prove the SDK's parameter structs serialise to exactly the
+# JSON the engine's own command structs read. They are dev-dependencies, so a
+# plugin building for wasm32-wasip2 never sees them.
+[dev-dependencies]
+sub-edit = { path = "../../crates/sub-edit" }
+sub-model = { path = "../../crates/sub-model" }
+sub-time = { path = "../../crates/sub-time" }
 
 [lints]
 workspace = true

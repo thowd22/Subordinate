@@ -250,6 +250,20 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The SDK generates one WIT world per cargo feature and only the default
+      # one, `command`, is in the workspace build above. Lint the other eight so
+      # a WIT change that breaks a world is caught here rather than by the first
+      # plugin that targets it (TASK-89). Linux only: the bindings are
+      # target-neutral.
+      - name: Plugin SDK worlds
+        if: runner.os == 'Linux'
+        run: |
+          for world in effect effect-cpu commands mcp-tools audio-effect importer exporter analyzer; do
+            echo "::group::subordinate-sdk ($world)"
+            cargo clippy -p subordinate-sdk --no-default-features --features "$world" -- -D warnings
+            echo "::endgroup::"
+          done
+
       # The reference audio-effect plugin is its own one-package workspace, so
       # the steps above never see it. Build it as a component and run its DSP
       # tests on the host triple, on Linux only: the plugin is target-neutral

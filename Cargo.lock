@@ -5092,6 +5092,11 @@ dependencies = [
 name = "subordinate-sdk"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "sub-edit",
+ "sub-model",
+ "sub-time",
  "wit-bindgen 0.61.1",
 ]
 
