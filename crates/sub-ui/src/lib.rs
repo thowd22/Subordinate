@@ -32,6 +32,7 @@ pub mod thumbnails;
 pub mod timeline;
 pub mod timeline_panel;
 pub mod track_header;
+pub mod transition;
 pub mod trim;
 pub mod viewer;
 pub mod waveform;
@@ -191,6 +192,13 @@ pub mod codes {
     /// `reason` detail carries the
     /// [`SourceRefusal`](crate::source_edit::SourceRefusal) id.
     pub const SOURCE_EDIT_REFUSED: ErrorCode = ErrorCode::from_static("ui.source_edit_refused");
+
+    /// A crossfade drag cannot become an edit: the cut is on a locked track,
+    /// the transition has left the sequence, or the drag would leave no blend
+    /// at all. Running out of handle is not here — a crossfade is clamped to
+    /// the handles rather than refused. The `reason` detail carries the
+    /// [`TransitionRefusal`](crate::transition::TransitionRefusal) id.
+    pub const TRANSITION_REFUSED: ErrorCode = ErrorCode::from_static("ui.transition_refused");
 
     /// A plugin's install directory could not be handed to the platform's
     /// file manager.

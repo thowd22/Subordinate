@@ -3,8 +3,10 @@
 //!
 //! docs/PLAN.md §5.3 describes the graph as, per frame and per video track
 //! top-down: sample the clip frame, colour convert, apply transform and
-//! opacity, blend. This module is that walk. Crossfades (TASK-38) and shader
-//! effects (TASK-87) extend it rather than replace it.
+//! opacity, blend. This module is that walk. Crossfades extend it rather than
+//! replace it: inside a transition a track contributes both of the clips the
+//! blend joins, the incoming one weighted by how far through the blend the
+//! playhead is. Shader effects (TASK-87) extend it the same way.
 //!
 //! Three pieces are deliberately separated so most of the behaviour is
 //! testable without a GPU:
@@ -27,8 +29,11 @@
 
 use std::num::NonZeroU64;
 
-use sub_model::{Clip, ClipId, Resolution, Sequence, TrackId, TrackKind, Transform};
-use sub_time::{RationalTime, TimeRange};
+use sub_model::{
+    Clip, ClipId, Fixed6, Opacity, Resolution, Sequence, Track, TrackId, TrackItem, TrackKind,
+    Transform, Transition,
+};
+use sub_time::{Rational, RationalTime, TimeRange};
 
 use crate::context::RenderContext;
 use crate::effect::{EffectCache, EffectFailure, EffectInstance};
@@ -56,7 +61,18 @@ pub struct ResolvedClip<'a> {
     ///
     /// Exactly `clip.source_range.start() + (time - timeline_range.start())`,
     /// computed in `RationalTime`, so a 30000/1001 timebase never drifts.
+    /// Inside a crossfade this reaches outside the clip's own source range,
+    /// into the handle the transition blends across: past the out point for
+    /// the outgoing clip, before the in point for the incoming one.
     pub source_time: RationalTime,
+    /// What a crossfade does to this layer's opacity.
+    ///
+    /// [`Opacity::OPAQUE`] everywhere but inside a transition, where the
+    /// incoming clip ramps linearly from nothing to whole across the blend
+    /// while the outgoing clip stays as it was underneath it. The compositor
+    /// multiplies it into the clip's own opacity, so a half-transparent clip
+    /// fading in reaches half, never more.
+    pub blend: Opacity,
 }
 
 impl ResolvedClip<'_> {
@@ -64,16 +80,28 @@ impl ResolvedClip<'_> {
     pub fn clip_id(&self) -> ClipId {
         self.clip.id
     }
+
+    /// The opacity the shader receives: the clip's own, scaled by the
+    /// crossfade weight.
+    pub fn effective_opacity(&self) -> f32 {
+        self.clip.opacity.as_f32() * self.blend.as_f32()
+    }
 }
 
-/// Every clip under the playhead, one per video track, in composite order:
-/// the bottom track first and the top track last.
+/// Every clip under the playhead, in composite order: the bottom track first
+/// and the top track last.
 ///
-/// This is the §5.3 walk. A track contributes at most one layer, and only if
-/// it is a video track, is not muted — a muted video track contributes
-/// nothing to the composite — and has a clip rather than a gap under the
-/// playhead. A gap therefore yields no layer at all, which is what makes it
-/// transparent: whatever the tracks below it drew stays visible.
+/// This is the §5.3 walk. A track contributes a layer only if it is a video
+/// track, is not muted — a muted video track contributes nothing to the
+/// composite — and has a clip rather than a gap under the playhead. A gap
+/// therefore yields no layer at all, which is what makes it transparent:
+/// whatever the tracks below it drew stays visible.
+///
+/// A track contributes *two* layers where the playhead is inside a crossfade
+/// (TASK-38): the outgoing clip, still playing into the handle past its out
+/// point, and then the incoming clip over it, ramping up from nothing through
+/// [`ResolvedClip::blend`]. Drawn in that order over premultiplied alpha,
+/// that is exactly the linear dissolve `(1 - w) * outgoing + w * incoming`.
 ///
 /// The iterator yields in draw order rather than top-down so a caller can
 /// blend as it goes; [`resolve_clip_at`] takes the topmost element for the
@@ -93,20 +121,139 @@ pub fn resolve_layers_at(
         .tracks
         .iter()
         .filter(|track| track.kind == TrackKind::Video && !track.muted)
-        .filter_map(move |track| {
-            let playhead = playhead?;
-            let (clip, range) = track
-                .clip_placements(rate)
-                .find(|(_, range)| range.contains(playhead))?;
-            let offset = playhead.checked_sub(range.start())?;
-            let source_time = clip.source_range.start().checked_add(offset)?;
-            Some(ResolvedClip {
-                track: track.id,
-                clip,
-                timeline_range: range,
-                source_time,
-            })
+        .flat_map(move |track| {
+            playhead
+                .map(|playhead| track_layers(track, rate, playhead))
+                .unwrap_or_default()
         })
+}
+
+/// The layers one track contributes under the playhead: a crossfade's pair,
+/// one clip, or nothing at all.
+fn track_layers(track: &Track, rate: Rational, playhead: RationalTime) -> Vec<ResolvedClip<'_>> {
+    if let Some(pair) = crossfade_layers(track, rate, playhead) {
+        return pair;
+    }
+    track
+        .clip_placements(rate)
+        .find(|(_, range)| range.contains(playhead))
+        .and_then(|(clip, range)| resolve(track.id, clip, range, playhead, Opacity::OPAQUE))
+        .into_iter()
+        .collect()
+}
+
+/// The two layers of the crossfade the playhead is inside, if it is inside
+/// one.
+///
+/// A transition sits between the two items it blends and occupies no track
+/// time, so its placement is the empty range at the cut; the blend runs from
+/// `cut - in_offset` to `cut + out_offset`. A transition with a clip missing
+/// on either side blends nothing and is ignored, exactly as an editor would
+/// expect of a cut a later edit took a clip away from.
+fn crossfade_layers(
+    track: &Track,
+    rate: Rational,
+    playhead: RationalTime,
+) -> Option<Vec<ResolvedClip<'_>>> {
+    let mut outgoing: Option<(&Clip, TimeRange)> = None;
+    let mut pending: Option<(Transition, RationalTime, (&Clip, TimeRange))> = None;
+    for (item, range) in track.placements(rate) {
+        match item {
+            TrackItem::Transition(transition) => {
+                pending = outgoing.map(|before| (*transition, range.start(), before));
+            }
+            TrackItem::Gap(_) => {
+                outgoing = None;
+                pending = None;
+            }
+            TrackItem::Clip(clip) => {
+                if let Some((transition, cut, before)) = pending.take()
+                    && let Some(pair) = blend_at(
+                        track.id,
+                        &transition,
+                        cut,
+                        before,
+                        (clip, range),
+                        rate,
+                        playhead,
+                    )
+                {
+                    return Some(pair);
+                }
+                outgoing = Some((clip, range));
+            }
+        }
+    }
+    None
+}
+
+/// The pair of layers `transition` produces at `playhead`, when the playhead
+/// is inside its blend.
+fn blend_at<'a>(
+    track: TrackId,
+    transition: &Transition,
+    cut: RationalTime,
+    outgoing: (&'a Clip, TimeRange),
+    incoming: (&'a Clip, TimeRange),
+    rate: Rational,
+    playhead: RationalTime,
+) -> Option<Vec<ResolvedClip<'a>>> {
+    let start = cut
+        .checked_sub(transition.in_offset())?
+        .checked_rescaled_to(rate)?;
+    let end = cut
+        .checked_add(transition.out_offset())?
+        .checked_rescaled_to(rate)?;
+    if playhead < start || playhead >= end {
+        return None;
+    }
+    let weight = crossfade_weight(start, end, playhead)?;
+    let under = resolve(track, outgoing.0, outgoing.1, playhead, Opacity::OPAQUE)?;
+    let over = resolve(track, incoming.0, incoming.1, playhead, weight)?;
+    Some(vec![under, over])
+}
+
+/// How far through the blend `playhead` is, as the incoming clip's weight.
+///
+/// The ratio is taken in exact integer arithmetic at the sequence timebase
+/// and only then rounded to the six decimal places [`Opacity`] carries; no
+/// float takes part in deciding which frame is how far through a dissolve.
+fn crossfade_weight(
+    start: RationalTime,
+    end: RationalTime,
+    playhead: RationalTime,
+) -> Option<Opacity> {
+    let span = i128::from(end.value().checked_sub(start.value())?);
+    if span <= 0 {
+        return None;
+    }
+    let elapsed = i128::from(playhead.value().checked_sub(start.value())?).clamp(0, span);
+    let micros = elapsed * i128::from(Fixed6::ONE.micros()) / span;
+    Opacity::new(Fixed6::from_micros(i64::try_from(micros).ok()?)).ok()
+}
+
+/// One layer: the clip, where it sits, the source time the playhead maps to
+/// through it, and the crossfade weight it carries.
+///
+/// The source time is offset from the clip's *placement*, so a clip reached
+/// from outside its own span — which is what a crossfade does — reads into
+/// its handle rather than being clamped to its edge.
+fn resolve(
+    track: TrackId,
+    clip: &Clip,
+    timeline_range: TimeRange,
+    playhead: RationalTime,
+    blend: Opacity,
+) -> Option<ResolvedClip<'_>> {
+    let offset = playhead.checked_sub(timeline_range.start())?;
+    let source_time = clip.source_range.start().checked_add(offset)?;
+    Some(ResolvedClip {
+        track,
+        clip,
+        timeline_range,
+        source_time,
+        blend,
+    })
 }
 
 /// The frontmost clip under the playhead, or `None` when every video track
@@ -376,7 +523,8 @@ pub struct LayerSummary {
     pub clip: ClipId,
     /// The source time asked for.
     pub source_time: RationalTime,
-    /// The clip's opacity, as the shader received it.
+    /// The clip's opacity, as the shader received it: its own, scaled by the
+    /// crossfade weight where the playhead is inside a transition.
     pub opacity: f32,
     /// Where the picture landed, or `None` when the source had no picture
     /// ready and nothing was drawn for this layer.
@@ -695,7 +843,7 @@ impl Compositor {
         let mut effect_failures = Vec::new();
         let mut chain = 0;
         for resolved in resolve_layers_at(sequence, time) {
-            let opacity = resolved.clip.opacity.as_f32();
+            let opacity = resolved.effective_opacity();
             let mut layer = source
                 .frame(&resolved)
                 .filter(|frame| frame.width > 0 && frame.height > 0);
@@ -1185,7 +1333,7 @@ mod tests {
     use sub_model::params::{Fixed6, Point2, Scale2};
     use sub_model::{
         Clip, Gap, MediaId, Opacity, Resolution, Sequence, SequenceSettings, Track, TrackKind,
-        Transform,
+        Transform, Transition,
     };
     use sub_time::{Rational, RationalTime, TimeRange};
 
@@ -1549,5 +1697,148 @@ mod tests {
         assert!((values[6] - 1920.0).abs() < EPSILON, "canvas width");
         assert!((values[7] - 1080.0).abs() < EPSILON, "canvas height");
         assert!((values[8] - 0.5).abs() < EPSILON, "opacity");
+    }
+
+    /// A sequence whose V1 holds two butt-joined 24-frame clips with a
+    /// 12-frame crossfade at the cut: `a` from source 48, `b` from source 240,
+    /// so both have handle to blend across.
+    fn sequence_with_a_crossfade() -> Sequence {
+        let media = MediaId::new();
+        let mut track = Track::new("V1", TrackKind::Video);
+        track
+            .items
+            .push(Clip::new("a", media, range(48, 24)).into());
+        track
+            .items
+            .push(Transition::crossfade(frames(6), frames(6)).into());
+        track
+            .items
+            .push(Clip::new("b", media, range(240, 24)).into());
+        let mut sequence = Sequence::new("Main", SequenceSettings::default());
+        sequence.tracks.push(track);
+        sequence
+    }
+
+    #[test]
+    fn a_crossfade_draws_both_clips_with_the_incoming_one_ramping_up() {
+        let sequence = sequence_with_a_crossfade();
+        let outgoing = sequence.tracks[0].items[0].as_clip().expect("a clip").id;
+        let incoming = sequence.tracks[0].items[2].as_clip().expect("a clip").id;
+
+        // The blend runs from frame 18 to frame 30, the cut being frame 24.
+        let layers: Vec<_> = resolve_layers_at(&sequence, frames(18)).collect();
+        assert_eq!(layers.len(), 2, "both clips are drawn inside the blend");
+        assert_eq!(layers[0].clip_id(), outgoing);
+        assert_eq!(layers[1].clip_id(), incoming);
+        assert_eq!(layers[0].blend, Opacity::OPAQUE);
+        assert_eq!(layers[1].blend, Opacity::TRANSPARENT, "nothing yet");
+
+        let middle: Vec<_> = resolve_layers_at(&sequence, frames(24)).collect();
+        assert_eq!(middle[1].blend, Opacity::from_f64(0.5).expect("half"));
+
+        let late: Vec<_> = resolve_layers_at(&sequence, frames(27)).collect();
+        assert_eq!(late[1].blend, Opacity::from_f64(0.75).expect("three parts"));
+    }
+
+    #[test]
+    fn the_blend_is_linear_in_the_frames_it_covers() {
+        let sequence = sequence_with_a_crossfade();
+        let weight = |frame| {
+            resolve_layers_at(&sequence, frames(frame))
+                .last()
+                .expect("a layer")
+                .blend
+                .factor()
+                .micros()
+        };
+        let steps: Vec<i64> = (18..30).map(weight).collect();
+        assert_eq!(steps[0], 0);
+        // A twelfth is not a whole number of micro-units, so the ramp is the
+        // same step every frame to within the one micro-unit `Opacity` can
+        // hold.
+        for pair in steps.windows(2) {
+            assert!(
+                (pair[1] - pair[0] - 83_333).abs() <= 1,
+                "every frame of the dissolve is the same step: {steps:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_side_of_a_crossfade_reads_into_its_own_handle() {
+        let sequence = sequence_with_a_crossfade();
+
+        // Three frames past the cut: the outgoing clip is three frames past
+        // its out point (48 + 24 + 3) and the incoming three frames into
+        // itself (240 + 3).
+        let layers: Vec<_> = resolve_layers_at(&sequence, frames(27)).collect();
+        assert_eq!(layers[0].source_time, frames(75));
+        assert_eq!(layers[1].source_time, frames(243));
+
+        // Three frames before it: the incoming clip reads three frames before
+        // its in point.
+        let layers: Vec<_> = resolve_layers_at(&sequence, frames(21)).collect();
+        assert_eq!(layers[0].source_time, frames(69));
+        assert_eq!(layers[1].source_time, frames(237));
+    }
+
+    #[test]
+    fn outside_the_blend_a_crossfade_changes_nothing() {
+        let sequence = sequence_with_a_crossfade();
+        let before: Vec<_> = resolve_layers_at(&sequence, frames(17)).collect();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].blend, Opacity::OPAQUE);
+        assert_eq!(before[0].source_time, frames(65));
+
+        let after: Vec<_> = resolve_layers_at(&sequence, frames(30)).collect();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].source_time, frames(246));
+        assert_eq!(
+            resolve_clip_at(&sequence, frames(24))
+                .expect("a clip")
+                .clip_id(),
+            sequence.tracks[0].items[2].as_clip().expect("a clip").id,
+            "the frontmost layer inside a blend is the incoming clip"
+        );
+    }
+
+    #[test]
+    fn a_clip_opacity_still_bounds_a_fading_layer() {
+        let mut sequence = sequence_with_a_crossfade();
+        if let Some(clip) = sequence.tracks[0].items[2].as_clip().cloned() {
+            let mut clip = clip;
+            clip.opacity = Opacity::from_f64(0.5).expect("half");
+            sequence.tracks[0].items[2] = clip.into();
+        }
+        let layers: Vec<_> = resolve_layers_at(&sequence, frames(30 - 1)).collect();
+        let incoming = layers.last().expect("a layer");
+        assert!(
+            (incoming.effective_opacity() - 0.5 * (11.0 / 12.0)).abs() < EPSILON,
+            "the crossfade weight scales the clip's own opacity"
+        );
+    }
+
+    #[test]
+    fn a_transition_with_a_gap_beside_it_blends_nothing() {
+        let media = MediaId::new();
+        let mut track = Track::new("V1", TrackKind::Video);
+        track.items.push(
+            Gap {
+                duration: frames(12),
+            }
+            .into(),
+        );
+        track
+            .items
+            .push(Transition::crossfade(frames(6), frames(6)).into());
+        track
+            .items
+            .push(Clip::new("b", media, range(240, 24)).into());
+        let mut sequence = Sequence::new("Main", SequenceSettings::default());
+        sequence.tracks.push(track);
+
+        let layers: Vec<_> = resolve_layers_at(&sequence, frames(13)).collect();
+        assert_eq!(layers.len(), 1, "only the clip that is really there");
+        assert_eq!(layers[0].blend, Opacity::OPAQUE);
     }
 }

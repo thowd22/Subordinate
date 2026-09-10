@@ -30,8 +30,11 @@ use crate::snapping::{self, SnapCandidate, SnapKind, SnapSettings};
 use crate::source_edit::{EditMode, PlannedEdit, SourceRefusal, plan_source_edit};
 use crate::split::{SplitGroup, SplitRefusal, plan_split, plan_split_clip};
 use crate::thumbnails::{ThumbnailCache, ZoomBucket, tile_time};
-use crate::timeline::{TimelineView, TrackLayout, ZoomLevel};
+use crate::timeline::{TimelineView, TrackLayout, TransitionPlacement, ZoomLevel};
 use crate::track_header::{TrackAction, TrackHeaderState, empty_column_menu};
+use crate::transition::{
+    TransitionDrag, TransitionEdge, TransitionRef, TransitionRefusal, plan_transition,
+};
 use crate::trim::{TrimEdge, TrimGroup, TrimRefusal, plan_trim};
 use crate::waveform::WaveformCache;
 
@@ -184,6 +187,16 @@ const GHOST_ALPHA: u8 = 56;
 
 /// How much of [`SELECTION_COLOR`] fills the marquee rectangle.
 const MARQUEE_ALPHA: u8 = 32;
+
+/// The colour a crossfade region is drawn in: the same yellow the razor and
+/// the snap flag use, so the cut-shaped parts of the timeline read together.
+const TRANSITION_COLOR: Color32 = SNAP_COLOR;
+
+/// How opaque the wash inside a crossfade region is.
+const TRANSITION_ALPHA: u8 = 48;
+
+/// How wide the crossfade region's outline is.
+const TRANSITION_WIDTH: f32 = 1.0;
 
 /// The colour the razor's cut line is drawn in.
 ///
@@ -649,6 +662,15 @@ pub struct TimelinePanel {
     /// The clip edge under the pointer, which is what turns the cursor into a
     /// trim cursor and paints the handle bright.
     hovered_trim: Option<(ClipRef, TrimEdge)>,
+    /// What the crossfade drag in progress would do, recomputed each frame.
+    ///
+    /// The same shape as [`TimelinePanel::trim_plan`]: `Ok` is the command
+    /// that will be committed on release and the blend it produces, `Err` is
+    /// why there is none.
+    transition_plan: Option<Result<TransitionDrag, TransitionRefusal>>,
+    /// The crossfade region under the pointer, and the edge a press would
+    /// take hold of.
+    hovered_transition: Option<(TransitionRef, TransitionEdge)>,
     /// The ruler's markers: what is selected, dragged or being renamed.
     marker_state: MarkerState,
     /// Whether the pointer press in progress was claimed by a marker, in
@@ -713,6 +735,17 @@ enum Gesture {
         /// Where the pointer is now.
         current: Pos2,
     },
+    /// A crossfade's duration being dragged from one of its edges.
+    Transition {
+        /// Where the drag was pressed.
+        origin: Pos2,
+        /// Where the pointer is now.
+        current: Pos2,
+        /// The crossfade being dragged.
+        target: TransitionRef,
+        /// The edge that is held.
+        edge: TransitionEdge,
+    },
     /// One clip's edge being dragged to a new time.
     Trim {
         /// Where the drag was pressed.
@@ -764,6 +797,14 @@ pub struct TimelineResponse {
     pub clip_trim: Option<TrimGroup>,
     /// Why the trim under the pointer cannot become an edit, while it cannot.
     pub trim_refused: Option<TrimRefusal>,
+    /// The crossfade a released transition drag asks for, as one command.
+    ///
+    /// Like the trim and the move, the panel has changed nothing: it plans the
+    /// drag and hands the plan over, for the caller to apply with
+    /// [`apply_transition`](crate::transition::apply_transition).
+    pub transition: Option<TransitionDrag>,
+    /// Why the crossfade drag under the pointer cannot become an edit.
+    pub transition_refused: Option<TransitionRefusal>,
     /// The cut a razor click or `Ctrl+K` asks for, as one undoable group.
     ///
     /// The panel has cut nothing: it plans the cut and hands the plan over,
@@ -819,6 +860,8 @@ impl TimelinePanel {
             drag_plan: None,
             trim_plan: None,
             hovered_trim: None,
+            transition_plan: None,
+            hovered_transition: None,
             marker_state: MarkerState::new(),
             marker_press: false,
             marker_grab_offset: 0.0,
@@ -1442,6 +1485,8 @@ impl TimelinePanel {
             refused: lanes.refused,
             clip_trim: lanes.clip_trim,
             trim_refused: lanes.trim_refused,
+            transition: lanes.transition,
+            transition_refused: lanes.transition_refused,
             clip_split: lanes.clip_split,
             split_refused: lanes.split_refused,
             marker_actions,
@@ -1914,6 +1959,17 @@ impl TimelinePanel {
                     self.marquee_base.clear();
                 }
             }
+            Gesture::Transition {
+                origin,
+                current,
+                target,
+                edge,
+            } => self.drag_transition(
+                &mut outcome,
+                (layout, project, sequence),
+                (origin, pointer.unwrap_or(current), target, edge),
+                held,
+            ),
             Gesture::Trim {
                 origin,
                 current,
@@ -1971,6 +2027,51 @@ impl TimelinePanel {
             }
         }
         outcome
+    }
+
+    /// Plans the crossfade drag in progress, and commits it on release.
+    ///
+    /// `drag` is where the gesture was pressed, where the pointer is now, and
+    /// which edge of which blend it has hold of; `held` is the button still
+    /// being down. A drag that cannot become an edit reports its refusal every
+    /// frame it is refused, so the reason is on screen before the button comes
+    /// up.
+    fn drag_transition(
+        &mut self,
+        outcome: &mut LaneOutcome,
+        scene: (&PanelLayout, &Project, &Sequence),
+        drag: (Pos2, Pos2, TransitionRef, TransitionEdge),
+        held: bool,
+    ) {
+        let (layout, project, sequence) = scene;
+        let (origin, pos, target, edge) = drag;
+        self.gesture = Some(Gesture::Transition {
+            origin,
+            current: pos,
+            target,
+            edge,
+        });
+        let delta = self.trim_offset(origin, pos, layout);
+        let plan = edge
+            .duration_delta(delta)
+            .ok_or(TransitionRefusal::OutOfRange)
+            .and_then(|delta| plan_transition(project, sequence, target, delta));
+        match plan {
+            Ok(drag) => {
+                self.transition_plan = Some(Ok(drag));
+                if !held {
+                    outcome.transition = Some(drag);
+                }
+            }
+            Err(refusal) => {
+                self.transition_plan = Some(Err(refusal));
+                outcome.transition_refused = Some(refusal);
+            }
+        }
+        if !held {
+            self.gesture = None;
+            self.transition_plan = None;
+        }
     }
 
     /// Turns a hover and a press in the lanes into a cut.
@@ -2102,6 +2203,17 @@ impl TimelinePanel {
             && index < sequence.tracks.len()
         {
             self.target_track = index;
+        }
+        // A crossfade owns the region it blends across: a press there drags
+        // its duration rather than moving or trimming the clips under it.
+        if let Some((target, edge)) = self.transition_target_at(pos, layout, sequence) {
+            self.gesture = Some(Gesture::Transition {
+                origin: pos,
+                current: pos,
+                target,
+                edge,
+            });
+            return false;
         }
         if let Some((target, edge)) = self.trim_target_at(pos, layout, sequence) {
             // An edge is a trim, not a move: the press selects the clip so the
@@ -2257,6 +2369,64 @@ impl TimelinePanel {
         }
     }
 
+    /// The crossfade region under `pos`, and the edge a press would grab.
+    ///
+    /// The whole region is grabbable: which half the pointer is in decides
+    /// which edge moves, and the other edge moves with it in the opposite
+    /// direction, because the blend stays centred on the cut.
+    fn transition_target_at(
+        &self,
+        pos: Pos2,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+    ) -> Option<(TransitionRef, TransitionEdge)> {
+        if !layout.content.contains(pos) {
+            return None;
+        }
+        let index = usize::try_from(self.lane_at(layout.content.top(), pos.y)).ok()?;
+        let track = sequence.tracks.get(index)?;
+        if !clip_edits_allowed(track) {
+            return None;
+        }
+        let time = self
+            .view
+            .time_at_pixel(round_px(pos.x - layout.content.left()));
+        let placement = self.layouts.get(index)?.transition_at(time)?;
+        let rect = self.clip_rect(layout, index, placement.range);
+        let edge = if pos.x < rect.center().x {
+            TransitionEdge::Head
+        } else {
+            TransitionEdge::Tail
+        };
+        Some((TransitionRef::new(track.id, placement.clip), edge))
+    }
+
+    /// The crossfade region under the pointer, and the edge a press would
+    /// grab, as the last painted frame saw it.
+    #[must_use]
+    pub fn hovered_transition(&self) -> Option<(TransitionRef, TransitionEdge)> {
+        self.hovered_transition
+    }
+
+    /// What the crossfade drag under the pointer would commit, while it is
+    /// under the pointer.
+    #[must_use]
+    pub fn transition_preview(&self) -> Option<&TransitionDrag> {
+        match self.transition_plan.as_ref() {
+            Some(Ok(drag)) => Some(drag),
+            _ => None,
+        }
+    }
+
+    /// Why the crossfade drag under the pointer will not become an edit.
+    #[must_use]
+    pub fn transition_refusal(&self) -> Option<TransitionRefusal> {
+        match self.transition_plan.as_ref() {
+            Some(Err(refusal)) => Some(*refusal),
+            _ => None,
+        }
+    }
+
     /// Notes the clip edge under the pointer and asks for the trim cursor.
     ///
     /// The cursor is the whole of the hover affordance: a handle is painted on
@@ -2271,15 +2441,26 @@ impl TimelinePanel {
     ) {
         // The razor never trims: while it is out, no edge is hovered and the
         // cursor stays the razor's own.
+        self.hovered_transition = match self.gesture {
+            _ if matches!(self.tool, Tool::Razor) => None,
+            Some(Gesture::Transition { target, edge, .. }) => Some((target, edge)),
+            Some(_) => None,
+            None => response
+                .hover_pos()
+                .and_then(|pos| self.transition_target_at(pos, layout, sequence)),
+        };
         self.hovered_trim = match self.gesture {
             _ if matches!(self.tool, Tool::Razor) => None,
+            // A crossfade owns its region, edges of the clips under it
+            // included, so the two hovers never light up at once.
+            _ if self.hovered_transition.is_some() => None,
             Some(Gesture::Trim { target, edge, .. }) => Some((target, edge)),
             Some(_) => None,
             None => response
                 .hover_pos()
                 .and_then(|pos| self.trim_target_at(pos, layout, sequence)),
         };
-        if self.hovered_trim.is_some() {
+        if self.hovered_trim.is_some() || self.hovered_transition.is_some() {
             ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
         }
     }
@@ -2392,9 +2573,10 @@ impl TimelinePanel {
             }
             // The trimmed span's ghost is painted above, before the gesture
             // is matched on, because it is the whole of what a trim previews.
-            // The razor paints its own cut line; a press that has already cut
-            // has nothing left to preview.
-            Some(Gesture::Trim { .. } | Gesture::Cut) | None => {}
+            // A crossfade drag previews as the region itself, painted with
+            // the lanes. The razor paints its own cut line; a press that has
+            // already cut has nothing left to preview.
+            Some(Gesture::Trim { .. } | Gesture::Transition { .. } | Gesture::Cut) | None => {}
         }
     }
 
@@ -2617,8 +2799,9 @@ impl TimelinePanel {
                 ),
                 visuals,
             );
-            if let Some(index) = self.layouts.get(index) {
-                self.paint_clips(&lanes, lane, index, track, project, strips);
+            if let Some(layout) = self.layouts.get(index) {
+                self.paint_clips(&lanes, lane, layout, track, project, strips);
+                self.paint_transitions(&lanes, lane, layout, track);
             }
         }
     }
@@ -2675,6 +2858,49 @@ impl TimelinePanel {
                 paint_trim_handles(painter, rect, edge);
             }
         }
+    }
+
+    /// Paints the crossfades of one track: the region each blend covers,
+    /// washed and outlined, with the dissolve's own X across it.
+    ///
+    /// The region is the blend, not an item: it starts where the outgoing clip
+    /// begins to fade and ends where the incoming one is whole, straddling the
+    /// cut. The X is the shape every editor draws a dissolve as — two ramps
+    /// crossing where the two pictures are equal.
+    fn paint_transitions(&self, painter: &Painter, lane: Rect, index: &TrackLayout, track: &Track) {
+        let body = lane.shrink2(Vec2::new(0.0, 3.0));
+        let dimmed = !clip_edits_allowed(track);
+        let visible = self.view.visible_range();
+        for placement in index.transitions() {
+            if !placement.range.overlaps(visible) {
+                continue;
+            }
+            let rect = self.transition_rect(lane, body, placement.range);
+            let held = self
+                .hovered_transition
+                .is_some_and(|(target, _)| target.clip == placement.clip);
+            paint_transition_region(painter, rect, dim(TRANSITION_COLOR, dimmed), held);
+        }
+        if let Some(drag) = self.transition_preview()
+            && drag.target.track == track.id
+            && let Some(placement) = index.transition_of(drag.target.clip)
+            && let Some(range) = fitted_range(placement, &drag.fitted)
+        {
+            // The model still holds the old blend while the button is down, so
+            // the ghost is what the release would commit.
+            let rect = self.transition_rect(lane, body, range);
+            paint_transition_region(painter, rect, TRANSITION_COLOR, true);
+        }
+    }
+
+    /// The rectangle a blend spanning `range` occupies inside `lane`.
+    fn transition_rect(&self, lane: Rect, body: Rect, range: TimeRange) -> Rect {
+        let left = lane.left() + self.view.pixel_of(range.start());
+        let right = lane.left() + self.view.pixel_of(range.end_exclusive());
+        Rect::from_min_max(
+            pos2(left, body.top()),
+            pos2(right.max(left + 1.0), body.bottom()),
+        )
     }
 
     /// Draws the waveform strip inside one clip's rectangle.
@@ -2746,10 +2972,47 @@ struct LaneOutcome {
     clip_trim: Option<TrimGroup>,
     /// Why the trim under the pointer cannot become an edit.
     trim_refused: Option<TrimRefusal>,
+    /// The crossfade a released transition drag asks for.
+    transition: Option<TransitionDrag>,
+    /// Why the crossfade drag under the pointer cannot become an edit.
+    transition_refused: Option<TransitionRefusal>,
     /// The cut a razor click asks for.
     clip_split: Option<SplitGroup>,
     /// Why the cut under the pointer cannot become an edit.
     split_refused: Option<SplitRefusal>,
+}
+
+/// Paints one crossfade region: a wash, an outline and the dissolve's X.
+///
+/// `held` is the pointer being on it or dragging it, which brightens the
+/// outline so the region reads as the thing a press would grab.
+fn paint_transition_region(painter: &Painter, rect: Rect, color: Color32, held: bool) {
+    painter.rect_filled(rect, CornerRadius::same(2), tint(color, TRANSITION_ALPHA));
+    let width = if held {
+        TRANSITION_WIDTH * 2.0
+    } else {
+        TRANSITION_WIDTH
+    };
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(2),
+        Stroke::new(width, color),
+        eframe::egui::StrokeKind::Inside,
+    );
+    let stroke = Stroke::new(TRANSITION_WIDTH, color);
+    painter.line_segment([rect.left_bottom(), rect.right_top()], stroke);
+    painter.line_segment([rect.left_top(), rect.right_bottom()], stroke);
+}
+
+/// The span a fitted blend covers, given where its cut is.
+fn fitted_range(
+    placement: &TransitionPlacement,
+    fitted: &sub_model::Transition,
+) -> Option<TimeRange> {
+    TimeRange::from_start_end(
+        placement.cut.checked_sub(fitted.in_offset())?,
+        placement.cut.checked_add(fitted.out_offset())?,
+    )
 }
 
 /// Paints the grips a trim drag takes hold of, at both ends of a clip.

@@ -141,6 +141,12 @@ pub mod codes {
     /// A position or duration is negative, or cannot be combined exactly with
     /// the others involved.
     pub const INVALID_TIME: ErrorCode = ErrorCode::from_static("edit.invalid_time");
+    /// A crossfade was asked for where one cannot go: a duration that is not
+    /// positive, a cut with no clip on both sides, or a cut with no handle to
+    /// blend across.
+    pub const INVALID_TRANSITION: ErrorCode = ErrorCode::from_static("edit.invalid_transition");
+    /// A command names a transition the track does not hold at that cut.
+    pub const TRANSITION_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.transition_not_found");
     /// A clip command was aimed at a locked track.
     pub const TRACK_LOCKED: ErrorCode = ErrorCode::from_static("edit.track_locked");
     /// A track still holding clips was removed without `force`.

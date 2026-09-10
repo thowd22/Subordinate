@@ -214,6 +214,22 @@ impl Transition {
         }
     }
 
+    /// How far the blend reaches back into the outgoing item.
+    #[must_use]
+    pub const fn in_offset(&self) -> RationalTime {
+        match self {
+            Self::Crossfade { in_offset, .. } => *in_offset,
+        }
+    }
+
+    /// How far the blend reaches forward into the incoming item.
+    #[must_use]
+    pub const fn out_offset(&self) -> RationalTime {
+        match self {
+            Self::Crossfade { out_offset, .. } => *out_offset,
+        }
+    }
+
     /// The total length of the blend.
     #[must_use]
     pub fn duration(&self) -> RationalTime {
