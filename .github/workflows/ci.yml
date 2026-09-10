@@ -228,6 +228,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The reference audio-effect plugin is its own one-package workspace, so
+      # the steps above never see it. Build it as a component and run its DSP
+      # tests on the host triple, on Linux only: the plugin is target-neutral
+      # and the WASM output is identical on every runner (TASK-77).
+      - name: Reference plugin (audio-effect)
+        if: runner.os == 'Linux'
+        working-directory: plugins/gain
+        run: |
+          cargo build --release --target wasm32-wasip2
+          cargo test
+          cargo fmt --all --check
+
       # Start the real app, paint a few empty frames and exit. This is what
       # proves eframe comes up on the wgpu backend on every OS (TASK-19 #3).
       - name: GUI smoke test (Linux)

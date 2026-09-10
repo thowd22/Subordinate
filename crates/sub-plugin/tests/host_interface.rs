@@ -15,8 +15,8 @@ use sub_plugin::command_api::{
     ClipMetadata, Host, LogLevel, MarkerMetadata, ProjectMetadata, SequenceMetadata, TrackMetadata,
 };
 use sub_plugin::{
-    Command, WitError, WitProjectId, WitSequenceId, WitTrackId, marker_metadata, project_metadata,
-    sequence_metadata, track_clip_metadata, track_metadata,
+    AudioEffect, Command, WitError, WitProjectId, WitSequenceId, WitTrackId, marker_metadata,
+    project_metadata, sequence_metadata, track_clip_metadata, track_metadata,
 };
 use sub_time::{Rational, RationalTime, TimeRange};
 
@@ -94,6 +94,11 @@ impl TestHost {
 }
 
 impl sub_plugin::types::Host for TestHost {}
+
+// The `audio` interface carries only value types, so its generated `Host`
+// trait has nothing to implement; the audio-effect world still needs it in
+// scope to link.
+impl sub_plugin::audio_types::Host for TestHost {}
 
 impl Host for TestHost {
     fn run_command(
@@ -270,4 +275,18 @@ fn the_command_world_links_with_every_import_satisfied() {
     let mut linker = wasmtime::component::Linker::<TestHost>::new(&engine);
     Command::add_to_linker::<_, wasmtime::component::HasSelf<TestHost>>(&mut linker, |state| state)
         .expect("the command world's imports are all implemented");
+}
+
+/// The `audio-effect` world imports the same `command-api`, and its bindings
+/// reuse the command world's generated interface, so the one `Host`
+/// implementation serves both worlds. Each world gets its own linker, because
+/// both define `command-api` and a linker takes each import once.
+#[test]
+fn the_audio_effect_world_links_against_the_same_host() {
+    let engine = wasmtime::Engine::default();
+    let mut linker = wasmtime::component::Linker::<TestHost>::new(&engine);
+    AudioEffect::add_to_linker::<_, wasmtime::component::HasSelf<TestHost>>(&mut linker, |state| {
+        state
+    })
+    .expect("the audio-effect world's imports are all implemented");
 }

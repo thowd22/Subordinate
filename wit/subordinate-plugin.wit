@@ -298,3 +298,109 @@ world command {
     /// encoding the Command API uses for parameters; so is the returned value.
     export run: func(project: project-id, args: string) -> result<string, error>;
 }
+
+/// Block-based audio processing: the value types an `audio-effect` plugin
+/// describes itself with and is driven by (docs/PLAN.md section 6.2).
+///
+/// Audio is the one place in Subordinate where floats are the right type:
+/// samples are `f32` and a parameter is a scalar the DSP applies. Timeline math
+/// stays rational and is not part of this interface — an audio effect is handed
+/// a block and a sample rate, never a timeline instant.
+interface audio {
+    /// A parameter's unit, so a host can label and scale a control without
+    /// knowing the plugin.
+    enum param-unit {
+        /// A bare multiplier or ratio.
+        linear,
+        /// Decibels, full scale.
+        decibel,
+        /// Frequency in hertz.
+        hertz,
+        /// A duration in seconds.
+        seconds,
+        /// A percentage, 0 to 100.
+        percent,
+    }
+
+    /// One parameter a plugin accepts, as `describe` reports it.
+    ///
+    /// `minimum <= default <= maximum`, and the host clamps a value into that
+    /// range before it reaches `process`, so a plugin never has to.
+    record param-descriptor {
+        /// Stable machine-readable name, e.g. `gain-db`. Lowercase, hyphenated,
+        /// unique within one plugin, and never renamed once published.
+        name: string,
+        /// Human-readable label for the control.
+        label: string,
+        /// What the value means.
+        unit: param-unit,
+        /// Smallest accepted value.
+        minimum: f32,
+        /// Largest accepted value.
+        maximum: f32,
+        /// The value the host uses until a user changes it.
+        default: f32,
+    }
+
+    /// One parameter value for one block, as the host passes it to `process`.
+    record param {
+        /// The descriptor's `name`.
+        name: string,
+        /// The value, already clamped to the descriptor's range.
+        value: f32,
+    }
+
+    /// What a plugin says about itself when the host loads it.
+    record effect-description {
+        /// Stable machine-readable identifier, e.g. `com.example.gain`.
+        id: string,
+        /// Human-readable name for the effect.
+        name: string,
+        /// Every parameter the effect accepts, in the order a UI should show
+        /// them.
+        params: list<param-descriptor>,
+        /// The largest block, in frames per channel, the effect can process in
+        /// one call. Zero means any size.
+        max-block-frames: u32,
+        /// The share of one block's wall-clock duration the effect claims, in
+        /// percent of real time: 25 means a 10 ms block should take at most
+        /// 2.5 ms. The host treats this as a hint bounded by its own policy and
+        /// bypasses the effect after repeated overruns of whichever budget is
+        /// smaller.
+        budget-percent: u32,
+    }
+}
+
+/// A block-based audio effect: gain, EQ, and anything else that maps a buffer
+/// of samples onto a buffer of samples.
+///
+/// The host calls `process` from an engine worker, never from the real-time
+/// audio callback: the callback may not allocate or block, and crossing into
+/// WebAssembly does both. Processing is still held to a real-time budget so a
+/// slow plugin cannot starve playback — the host times every block and, after
+/// repeated overruns, bypasses the plugin and passes the audio through
+/// untouched.
+world audio-effect {
+    use types.{error};
+    use audio.{effect-description, param};
+
+    import command-api;
+
+    /// Reports the effect's identity, parameters and budget claim. Called when
+    /// the host loads the plugin; it must not depend on any prior call.
+    export describe: func() -> effect-description;
+
+    /// Processes one block of interleaved samples.
+    ///
+    /// `block` holds `channels` samples per frame, interleaved, so its length
+    /// is always a whole multiple of `channels`. `rate` is the sample rate in
+    /// hertz. `params` carries one entry per parameter the plugin described,
+    /// already clamped to its range.
+    ///
+    /// The returned buffer has exactly the length and channel interleaving of
+    /// `block`. Returning an error, returning a different length, and exceeding
+    /// the time budget all count the same way: the host drops the block's
+    /// output, passes the input through, and bypasses the plugin once the
+    /// faults repeat.
+    export process: func(block: list<f32>, channels: u32, rate: u32, params: list<param>) -> result<list<f32>, error>;
+}

@@ -24,6 +24,20 @@
 //! - `log(level, message)` — a line into the host's `tracing` subscriber,
 //!   tagged with the plugin id.
 //!
+//! # The audio-effect world
+//!
+//! `audio-effect` is the second world (docs/PLAN.md §6.2). A plugin exports
+//! `describe()`, which reports its identity, its parameters and the share of
+//! real time it claims, and `process(block, channels, rate, params)`, which
+//! maps one buffer of interleaved `f32` samples onto another of the same shape.
+//!
+//! The host half of that contract is [`audio`]: [`audio::BlockFormat`] fixes
+//! and checks the block shape, and [`audio::RealTimeBudget`] times every block
+//! against a fraction of the block's own wall-clock duration and bypasses the
+//! plugin once it misses that deadline — or fails outright — too many times in
+//! a row. Neither type allocates or locks. `plugins/gain` is the reference
+//! plugin for the world.
+//!
 //! [`bindings`] holds the generated host side of that world; [`convert`] maps
 //! its records onto [`sub_core::SubError`], [`sub_time::RationalTime`] and the
 //! `sub_model` identifiers, so an implementation of the generated `Host` trait
@@ -43,10 +57,16 @@
 //! assert_eq!(RationalTime::try_from(WitRationalTime::from(time)).unwrap(), time);
 //! ```
 
+pub mod audio;
 pub mod bindings;
 mod convert;
 
 pub use bindings::Command;
+pub use bindings::audio::AudioEffect;
+pub use bindings::audio::subordinate::plugin::audio as audio_types;
+pub use bindings::audio::subordinate::plugin::audio::{
+    EffectDescription, Param, ParamDescriptor, ParamUnit,
+};
 pub use bindings::subordinate::plugin::command_api;
 pub use bindings::subordinate::plugin::command_api::{
     ClipMetadata, LogLevel, MarkerMetadata, ProjectMetadata, Resolution as WitResolution,
@@ -78,4 +98,17 @@ pub mod codes {
     /// A time range crossing in from a plugin has a negative duration or two
     /// endpoints at different rates.
     pub const INVALID_TIME_RANGE: ErrorCode = ErrorCode::from_static("plugin.invalid_time_range");
+    /// An audio block format has a zero frame count, channel count or sample
+    /// rate.
+    pub const INVALID_BLOCK_FORMAT: ErrorCode =
+        ErrorCode::from_static("plugin.invalid_block_format");
+    /// An interleaved audio buffer is not `frames * channels` samples long,
+    /// either on the way into a plugin or on the way back out.
+    pub const INVALID_AUDIO_BLOCK: ErrorCode = ErrorCode::from_static("plugin.invalid_audio_block");
+    /// A real-time budget is zero, or is not between 1 and 100 percent of one
+    /// block's wall-clock duration.
+    pub const INVALID_BUDGET: ErrorCode = ErrorCode::from_static("plugin.invalid_budget");
+    /// An audio effect was bypassed after repeatedly missing its real-time
+    /// budget or failing outright.
+    pub const AUDIO_BYPASSED: ErrorCode = ErrorCode::from_static("plugin.audio_bypassed");
 }
