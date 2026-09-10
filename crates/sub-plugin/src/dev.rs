@@ -380,6 +380,17 @@ pub fn install(
     source: &Path,
     dev: bool,
 ) -> SubResult<DevInstall> {
+    crate::errors::explained(install_inner(dirs, location, source, dev))
+}
+
+/// The install proper; [`install`] is this plus the error catalogue, so every
+/// failure names the hint its code implies.
+fn install_inner(
+    dirs: &PluginDirs,
+    location: Option<InstallLocation>,
+    source: &Path,
+    dev: bool,
+) -> SubResult<DevInstall> {
     let location = location.unwrap_or(InstallLocation::User);
     let source = DevSource::resolve(source)?;
     let manifest = Manifest::read_dir(&source.root)?;
@@ -875,11 +886,15 @@ pub struct ReloadError {
 }
 
 impl From<&SubError> for ReloadError {
+    /// Flattens a failed load, filling in the `wit` and `hint` details its
+    /// code implies (see [`crate::errors`]) so the row a plugins panel or an
+    /// agent reads says what to do about it.
     fn from(error: &SubError) -> Self {
+        let error = crate::errors::explain(error.clone());
         Self {
             code: error.code.as_str().to_owned(),
-            message: error.message.clone(),
-            details: error.details.clone(),
+            message: error.message,
+            details: error.details,
         }
     }
 }
@@ -1047,11 +1062,14 @@ impl DevHost {
     ///
     /// [`codes::NOT_INSTALLED`] when nothing is installed under `id`,
     /// [`codes::LOAD_FAILED`] and the rest of the host's codes from the
-    /// loader, and whatever [`PluginRegistry::scan`] returns.
+    /// loader, and whatever [`PluginRegistry::scan`] returns. Each carries the
+    /// WIT item it belongs to and a hint (see [`crate::errors`]), so the
+    /// developer loop reports a bad build in terms of what to do about it.
     pub fn reload(&mut self, id: &PluginId) -> SubResult<ReloadStatus> {
         match self.try_reload(id) {
             Ok(status) => Ok(status),
             Err(error) => {
+                let error = crate::errors::explain(error);
                 self.record_failure(id, &error);
                 Err(error)
             }

@@ -169,6 +169,21 @@
 //! [`SubError`](sub_core::SubError) to whoever asked. `plugin.install`,
 //! `plugin.reload` and `plugin.status` put the same three on the Command API.
 //!
+//! # Structured errors
+//!
+//! Every plugin failure — a `plugin.toml` that will not parse, a capability
+//! that was never approved, a build that is not a component, a reload that
+//! failed, a call that ran out of fuel — leaves this crate as a
+//! [`SubError`](sub_core::SubError) with a stable `plugin.*` code (docs/PLAN.md
+//! §6.4). [`errors`] is the catalogue behind them: one row per code in
+//! [`codes`], naming the WIT type or function the failure belongs to and a
+//! one-line hint saying what would fix it. Both are added as the `wit` and
+//! `hint` details at every boundary a failure crosses — the `error` record a
+//! plugin sees, the [`LoadFailure`] and [`ReloadError`] rows a scan and a
+//! reload report, the `plugin.*` Command API methods and the CLI — so an agent
+//! reading one error object learns what broke, where, and what to do next. The
+//! same table is published to plugin authors as `subordinate_sdk::errors`.
+//!
 //! # The capability model
 //!
 //! A manifest only *asks*. [`capability`] is what the asking turns into
@@ -187,6 +202,7 @@ mod convert;
 pub mod dev;
 #[cfg(feature = "render")]
 pub mod effect;
+pub mod errors;
 mod interchange;
 pub mod manifest;
 pub mod mcp;
@@ -261,6 +277,7 @@ pub use dev::{
     DevHost, DevInstall, DevSource, DevWatcher, LinkMode, PluginArtifacts, ReloadError,
     ReloadStatus, WatchHandle,
 };
+pub use errors::{HINT, PluginErrorExt, WIT};
 pub use interchange::{CommandCall, ExportPreset, ImportTarget, export_presets, import_plan};
 pub use menu::{
     CommandContext, CommandDesc, PluginCommand, PluginCommandRegistry, QUALIFIED_SEPARATOR,

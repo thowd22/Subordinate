@@ -262,14 +262,19 @@ pub struct LoadFailure {
 
 impl LoadFailure {
     /// Records `error` against the directory it came from.
+    ///
+    /// The error is run through [`crate::errors::explain`] first, so the row
+    /// carries the `wit` and `hint` details its code implies alongside
+    /// whatever the failure itself had to say.
     #[must_use]
     pub fn new(directory: PathBuf, location: InstallLocation, error: &SubError) -> Self {
+        let error = crate::errors::explain(error.clone());
         Self {
             directory,
             location,
             code: error.code.as_str().to_owned(),
-            message: error.message.clone(),
-            details: error.details.clone(),
+            message: error.message,
+            details: error.details,
         }
     }
 }
@@ -475,7 +480,14 @@ impl PluginRegistry {
     /// cannot be listed, and the [`codes::REGISTRY_STATE_UNREADABLE`] or
     /// [`codes::INVALID_REGISTRY_STATE`] of a `plugins.json` this build cannot
     /// read. A directory that is simply not there is empty, not an error.
+    /// Each carries the hint its code implies (see [`crate::errors`]).
     pub fn scan(&self) -> SubResult<Scan> {
+        crate::errors::explained(self.scan_inner())
+    }
+
+    /// The walk proper; [`PluginRegistry::scan`] is this plus the error
+    /// catalogue.
+    fn scan_inner(&self) -> SubResult<Scan> {
         let disabled = RegistryState::load(&self.dirs.state_path())?.disabled;
 
         let mut plugins: BTreeMap<PluginId, InstalledPlugin> = BTreeMap::new();
@@ -552,7 +564,13 @@ impl PluginRegistry {
     /// [`codes::NOT_INSTALLED`] when no loaded plugin has that id, plus
     /// whatever [`PluginRegistry::scan`] and writing the state file return.
     pub fn set_enabled(&self, id: &PluginId, enabled: bool) -> SubResult<EnableChange> {
-        let scan = self.scan()?;
+        crate::errors::explained(self.set_enabled_inner(id, enabled))
+    }
+
+    /// The switch proper; [`PluginRegistry::set_enabled`] is this plus the
+    /// error catalogue.
+    fn set_enabled_inner(&self, id: &PluginId, enabled: bool) -> SubResult<EnableChange> {
+        let scan = self.scan_inner()?;
         if scan.get(id).is_none() {
             return Err(not_installed(id));
         }
@@ -583,7 +601,13 @@ impl PluginRegistry {
     /// [`codes::NOT_INSTALLED`] when no loaded plugin has that id, and
     /// [`codes::REMOVE_FAILED`] when the directory cannot be deleted.
     pub fn remove(&self, id: &PluginId) -> SubResult<Removal> {
-        let scan = self.scan()?;
+        crate::errors::explained(self.remove_inner(id))
+    }
+
+    /// The deletion proper; [`PluginRegistry::remove`] is this plus the error
+    /// catalogue.
+    fn remove_inner(&self, id: &PluginId) -> SubResult<Removal> {
+        let scan = self.scan_inner()?;
         let plugin = scan.get(id).ok_or_else(|| not_installed(id))?;
         std::fs::remove_dir_all(&plugin.directory).map_err(|err| {
             SubError::wrap(

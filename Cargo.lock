@@ -4923,6 +4923,7 @@ dependencies = [
  "sub-plugin",
  "sub-render",
  "sub-time",
+ "subordinate-sdk",
  "thiserror 2.0.20",
  "toml",
  "tracing",

@@ -41,10 +41,13 @@ impl From<&SubError> for wit_types::Error {
     /// Flattens a host error into the record a plugin sees.
     ///
     /// `code` and `message` cross verbatim and every detail crosses as its
-    /// compact JSON text. [`SubError::cause`] is deliberately dropped: a cause
-    /// chain is host-internal and may name paths a sandboxed plugin must not
-    /// learn.
+    /// compact JSON text, including the `wit` and `hint` details
+    /// [`crate::errors::explain`] adds here, so a plugin is told which WIT item
+    /// the failure belongs to and what would fix it.
+    /// [`SubError::cause`] is deliberately dropped: a cause chain is
+    /// host-internal and may name paths a sandboxed plugin must not learn.
     fn from(error: &SubError) -> Self {
+        let error = crate::errors::explain(error.clone());
         Self {
             code: error.code.as_str().to_owned(),
             message: error.message.clone(),
