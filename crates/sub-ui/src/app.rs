@@ -19,13 +19,14 @@ use sub_render::{
 };
 use sub_time::RationalTime;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sub_audio::mixer::{MixGraphBuilder, MixerConfig, MixerControl, mixer};
+use sub_audio::scrub::{ScrubControl, ScrubSettings, scrub};
 use sub_audio::{AudioOutput, CpalBackend, MeterBank, OutputOptions};
 
 use crate::audio_settings::{AudioSettingsAction, AudioSettingsPanel};
@@ -174,6 +175,18 @@ pub struct SubordinateApp {
     /// audio transport can be seeked to the playhead. `None` until a stream
     /// has been opened.
     audio_control: Rc<RefCell<Option<MixerControl>>>,
+    /// The engine half of the scrub player attached to that mixer, so a drag
+    /// on the playhead can ask for a grain (docs/PLAN.md §5.4). `None` until a
+    /// stream has been opened.
+    scrub_control: Rc<RefCell<Option<ScrubControl>>>,
+    /// What scrubbing does, as the settings panel last left it. Shared with
+    /// the mixer factory so a stream opened later starts with the same
+    /// settings.
+    scrub_settings: Rc<Cell<ScrubSettings>>,
+    /// When the grain asked for last stops sounding. The output stage is held
+    /// open until then, so a grain is not cut off by the stream closing the
+    /// moment the drag pauses.
+    scrub_until: Option<Instant>,
     /// The project the bin and the timeline show. Loading a project replaces
     /// it; until then it is empty, as the sequence is.
     project: Project,
@@ -245,10 +258,14 @@ impl SubordinateApp {
         layout.log_problems();
         let meters = Arc::new(MeterBank::new(METERED_TRACKS));
         let audio_control = Rc::new(RefCell::new(None));
+        let scrub_control = Rc::new(RefCell::new(None));
+        let scrub_settings = Rc::new(Cell::new(ScrubSettings::default()));
         let audio = audio_output(
             sequence.settings.sample_rate,
             Arc::clone(&meters),
             Rc::clone(&audio_control),
+            Rc::clone(&scrub_control),
+            Rc::clone(&scrub_settings),
         );
         let mut popout = PopoutViewer::new();
         if let Some(position) = options.popout_position {
@@ -277,6 +294,9 @@ impl SubordinateApp {
             popout,
             scheduler,
             audio_control,
+            scrub_control,
+            scrub_settings,
+            scrub_until: None,
             project: Project::new("Untitled"),
             media_bin: MediaBinPanel::new(),
             timeline,
@@ -438,6 +458,7 @@ impl SubordinateApp {
         }
         self.audio_settings
             .set_diagnostics(self.audio.diagnostics());
+        self.audio_settings.set_scrub(self.scrub_settings.get());
         match self.audio_settings.show(ctx) {
             AudioSettingsAction::None => {}
             AudioSettingsAction::Rescan => self.audio_settings.refresh(),
@@ -447,7 +468,67 @@ impl SubordinateApp {
                 self.audio_settings
                     .set_selected(self.audio.selected_device());
             }
+            AudioSettingsAction::SetScrub(settings) => self.apply_scrub_settings(settings),
         }
+    }
+
+    /// Applies scrub settings to the player, if a stream is open, and keeps
+    /// them for the next stream that opens.
+    ///
+    /// Settings the player refuses — a grain outside its range — are reported
+    /// in the panel and not kept, so the widgets snap back to what is really
+    /// in force rather than lying about it.
+    fn apply_scrub_settings(&mut self, settings: ScrubSettings) {
+        if let Err(error) = settings.validate() {
+            self.audio_settings.set_error(Some(error));
+            return;
+        }
+        if let Some(control) = self.scrub_control.borrow().as_ref()
+            && let Err(error) = control.apply(settings)
+        {
+            self.audio_settings.set_error(Some(error));
+            return;
+        }
+        self.scrub_settings.set(settings);
+    }
+
+    /// Plays one grain of the mix at `position`, the way an NLE sounds while
+    /// the playhead is dragged (docs/PLAN.md §5.4).
+    ///
+    /// The output stage is opened if it is closed, because a drag is the one
+    /// thing that makes a sound while nothing is playing, and held open until
+    /// the grain has finished. With scrubbing turned off in the settings this
+    /// does nothing at all: no stream is opened and no grain is asked for.
+    fn scrub_audio(&mut self, position: RationalTime) {
+        let settings = self.scrub_settings.get();
+        if !settings.enabled {
+            return;
+        }
+        if !self.audio.is_open()
+            && let Err(error) = self.audio.start()
+        {
+            log::warn!(
+                "no audio output; scrubbing is silent: [{}] {}",
+                error.code,
+                error.message
+            );
+            return;
+        }
+        if let Some(control) = self.scrub_control.borrow().as_ref() {
+            match control.grain_at(position) {
+                Ok(()) => self.scrub_until = Some(Instant::now() + grain_duration(settings)),
+                Err(error) => log::warn!(
+                    "could not scrub the audio: [{}] {}",
+                    error.code,
+                    error.message
+                ),
+            }
+        }
+    }
+
+    /// Whether a scrub grain asked for earlier may still be sounding.
+    fn scrub_is_sounding(&self) -> bool {
+        self.scrub_until.is_some_and(|until| Instant::now() < until)
     }
 
     /// The viewer panel, which owns the playhead.
@@ -537,7 +618,14 @@ impl SubordinateApp {
     fn run_transport(&mut self, ctx: &egui::Context, elapsed: Duration) -> bool {
         self.scheduler.set_duration(self.viewer.state.duration());
         if !self.scheduler.is_playing() {
-            self.stop_audio();
+            // A scrub grain is the one thing that sounds while nothing is
+            // playing, so the stream stays open until it has finished.
+            if self.scrub_is_sounding() {
+                ctx.request_repaint();
+            } else {
+                self.scrub_until = None;
+                self.stop_audio();
+            }
             self.scheduler.seek(self.viewer.state.playhead());
             return false;
         }
@@ -852,6 +940,10 @@ impl eframe::App for SubordinateApp {
         self.shortcuts_window
             .show_with_problems(ui.ctx(), &self.keymap.map, &self.keymap.problems);
 
+        // Where the playhead started this frame, so a drag on the scrub bar
+        // or the timeline ruler can be heard (docs/PLAN.md §5.4).
+        let playhead_was = self.viewer.state.playhead();
+
         // The map runs before any panel reads the keyboard, so a bound chord
         // is handled once, here, and never again by a panel further down.
         if self.apply_shortcuts(ui.ctx()) {
@@ -882,6 +974,14 @@ impl eframe::App for SubordinateApp {
         }
         if self.dock_ui(ui, preview) {
             self.needs_composite = true;
+        }
+
+        // Moving the playhead by hand — dragging it, or stepping it — plays a
+        // short grain of the mix around where it landed. Playback itself is
+        // not a scrub: it already has the stream.
+        let playhead = self.viewer.state.playhead();
+        if playhead != playhead_was && !self.scheduler.is_playing() {
+            self.scrub_audio(playhead);
         }
 
         self.frames_painted = self.frames_painted.saturating_add(1);
@@ -962,6 +1062,8 @@ fn audio_output(
     sample_rate: u32,
     meters: Arc<MeterBank>,
     control: Rc<RefCell<Option<MixerControl>>>,
+    scrub_control: Rc<RefCell<Option<ScrubControl>>>,
+    scrub_settings: Rc<Cell<ScrubSettings>>,
 ) -> AudioOutput<CpalBackend> {
     AudioOutput::new(
         CpalBackend::new(),
@@ -970,9 +1072,24 @@ fn audio_output(
             let graph = MixGraphBuilder::new(sample_rate, 2).build()?;
             let (fresh, mixer) = mixer(graph, MixerConfig::default())?;
             *control.borrow_mut() = Some(fresh);
-            Ok(mixer.with_meters(Arc::clone(&meters)))
+            let (scrubber, player) = scrub(scrub_settings.get(), sample_rate)?;
+            *scrub_control.borrow_mut() = Some(scrubber);
+            Ok(mixer.with_meters(Arc::clone(&meters)).with_scrub(player))
         }),
     )
+}
+
+/// How long a grain of these settings lasts, as a wall-clock duration.
+///
+/// The grain itself is an exact [`RationalTime`]; this is only how long the
+/// output stage is held open for it, which is wall time by nature.
+fn grain_duration(settings: ScrubSettings) -> Duration {
+    let (numerator, denominator) = settings.grain.as_seconds_fraction();
+    if denominator <= 0 || numerator <= 0 {
+        return Duration::ZERO;
+    }
+    let nanos = numerator.saturating_mul(1_000_000_000) / denominator;
+    Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]

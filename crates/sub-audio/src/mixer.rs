@@ -66,6 +66,7 @@ use crate::codes;
 use crate::decode::MAX_CHANNELS;
 use crate::meter::{MeterBank, levels_of};
 use crate::resample::PcmReader;
+use crate::scrub::ScrubPlayer;
 
 /// The lowest gain the mixer accepts, in decibels. A bus at this level is
 /// silent, matching `sub_model::GainDb::SILENT`.
@@ -642,6 +643,7 @@ pub fn mixer(graph: Arc<MixGraph>, config: MixerConfig) -> SubResult<(MixerContr
         scratch: vec![0.0; config.max_block_frames * usize::from(channels)],
         track_buf: vec![0.0; config.max_block_frames * usize::from(channels)],
         meters: None,
+        scrub: None,
         max_block_frames: config.max_block_frames,
         position: 0,
         underrun_frames: 0,
@@ -856,6 +858,9 @@ pub struct Mixer {
     /// Where per-track and master levels are published, when the engine
     /// attached a bank.
     meters: Option<Arc<MeterBank>>,
+    /// The scrub player, when the engine attached one. While it is engaged it
+    /// owns the transport: short windowed grains instead of playback.
+    scrub: Option<ScrubPlayer>,
     /// The longest block `scratch` can hold.
     max_block_frames: usize,
     /// The transport position, in frames from sequence zero.
@@ -901,7 +906,21 @@ impl Mixer {
         let total = out.len() / channels;
         let mut done = 0;
         while done < total {
-            let frames = (total - done).min(self.max_block_frames);
+            let wanted = (total - done).min(self.max_block_frames);
+            // A scrub, when one is engaged, owns the transport for this
+            // stretch: it says where to render from, how far, and whether
+            // there is anything to render at all (see [`crate::scrub`]).
+            let slice = self.scrub.as_mut().and_then(|scrub| scrub.prepare(wanted));
+            let frames = slice.map_or(wanted, |slice| slice.frames);
+            if let Some(start) = slice.and_then(|slice| slice.seek) {
+                self.position = start;
+            }
+            if slice.is_some_and(|slice| slice.silent) {
+                // The block is already zeroed and the transport stays put:
+                // between grains a scrub is silence, not playback.
+                done += frames;
+                continue;
+            }
             let block = &mut out[done * channels..(done + frames) * channels];
             let mut work = RenderScratch {
                 slots: &mut self.slots,
@@ -911,6 +930,11 @@ impl Mixer {
             };
             let underruns = Self::render(&self.graph, &mut work, block, self.position, frames);
             self.underrun_frames = self.underrun_frames.saturating_add(underruns);
+            if slice.is_some()
+                && let Some(scrub) = self.scrub.as_mut()
+            {
+                scrub.shape(block, channels, frames);
+            }
             self.position += frames as u64;
             done += frames;
         }
@@ -968,6 +992,26 @@ impl Mixer {
     /// The bank this mixer publishes levels into, when one was attached.
     pub fn meters(&self) -> Option<&Arc<MeterBank>> {
         self.meters.as_ref()
+    }
+
+    /// Attaches the audio-thread half of a scrub player (see
+    /// [`crate::scrub`]).
+    ///
+    /// Called on the engine thread before the mixer is handed to the callback.
+    /// While the player is engaged — scrubbing turned on and a grain asked for
+    /// — it moves the transport to the grain's start, shapes what the mixer
+    /// renders there with a raised-cosine envelope at a reduced gain, and
+    /// leaves silence between grains. With scrubbing turned off the mixer
+    /// behaves exactly as it does with no player at all.
+    #[must_use]
+    pub fn with_scrub(mut self, scrub: ScrubPlayer) -> Self {
+        self.scrub = Some(scrub);
+        self
+    }
+
+    /// The scrub player driving this mixer, when one was attached.
+    pub fn scrub(&self) -> Option<&ScrubPlayer> {
+        self.scrub.as_ref()
     }
 
     /// Swaps in whatever the engine has published, handing back what it
@@ -1153,6 +1197,106 @@ mod tests {
             (left - right).abs() < 1e-4,
             "expected {right}, rendered {left}"
         );
+    }
+
+    #[test]
+    fn a_scrub_grain_plays_a_window_of_the_mix_and_then_silence() {
+        use crate::scrub::{ScrubSettings, scrub};
+
+        let graph = MixGraphBuilder::new(48_000, 1)
+            .track(TrackSpec::new().with_clip(ClipSpec::new(0, frames(0), frames(480))))
+            .build()
+            .expect("a graph");
+        let (mut control, mixer) = build(graph);
+        let settings = ScrubSettings::default().with_grain_ms(5);
+        let (scrub_control, player) = scrub(settings, 48_000).expect("a player");
+        let mut mixer = mixer.with_scrub(player);
+        assert!(mixer.scrub().is_some());
+        let _writer = install(&mut control, 0, 1.0, 480);
+
+        // Nothing has been dragged yet, so the mixer is silent and the
+        // transport has not moved.
+        let mut out = [1.0f32; 128];
+        assert_eq!(mixer.process(&mut out), 128);
+        assert!(out.iter().all(|sample| *sample == 0.0));
+        assert_eq!(mixer.position_frames(), 0);
+
+        scrub_control
+            .grain_at(RationalTime::zero(rate()))
+            .expect("a request");
+        let mut out = [0.0f32; 256];
+        assert_eq!(mixer.process(&mut out), 256);
+        let window = 240;
+        assert!(out[0].abs() < f32::EPSILON, "a grain fades in from silence");
+        assert!(
+            out[window - 1].abs() < f32::EPSILON,
+            "and out again, so there is no click"
+        );
+        let peak = out[..window].iter().copied().fold(0.0f32, f32::max);
+        let level = settings.gain().expect("a gain");
+        close(peak, level);
+        assert!(peak < 1.0, "a scrub is quieter than playback");
+        assert!(
+            out[window..].iter().all(|sample| *sample == 0.0),
+            "the rest of the block is silence between grains"
+        );
+        assert_eq!(
+            mixer.position_frames(),
+            window as u64,
+            "silence does not advance the transport"
+        );
+    }
+
+    #[test]
+    fn a_scrub_grain_starts_where_the_drag_landed() {
+        use crate::scrub::{ScrubSettings, scrub};
+
+        let graph = MixGraphBuilder::new(48_000, 1)
+            .track(TrackSpec::new().with_clip(ClipSpec::new(0, frames(240), frames(480))))
+            .build()
+            .expect("a graph");
+        let (mut control, mixer) = build(graph);
+        let (scrub_control, player) =
+            scrub(ScrubSettings::default().with_grain_ms(5), 48_000).expect("a player");
+        let mut mixer = mixer.with_scrub(player);
+        let _writer = install(&mut control, 0, 1.0, 480);
+
+        scrub_control
+            .grain_at(frames(240))
+            .expect("a request at the clip");
+        let mut out = [0.0f32; 256];
+        mixer.process(&mut out);
+        assert!(
+            out[..240].iter().any(|sample| *sample > 0.0),
+            "the grain is taken from where the drag landed, not from zero"
+        );
+        assert_eq!(mixer.position_frames(), 480);
+    }
+
+    #[test]
+    fn a_disabled_scrub_leaves_the_mixer_running_as_it_was() {
+        use crate::scrub::{ScrubSettings, scrub};
+
+        let graph = MixGraphBuilder::new(48_000, 1)
+            .track(TrackSpec::new().with_clip(ClipSpec::new(0, frames(0), frames(64))))
+            .build()
+            .expect("a graph");
+        let (mut control, mixer) = build(graph);
+        let (scrub_control, player) =
+            scrub(ScrubSettings::default().with_enabled(false), 48_000).expect("a player");
+        let mut mixer = mixer.with_scrub(player);
+        let _writer = install(&mut control, 0, 1.0, 64);
+        scrub_control
+            .grain_at(RationalTime::zero(rate()))
+            .expect("a request nobody plays");
+
+        let mut out = [0.0f32; 64];
+        assert_eq!(mixer.process(&mut out), 64);
+        assert!(
+            out.iter().all(|sample| (*sample - 1.0).abs() < 1e-6),
+            "with scrubbing off the clip plays at full gain"
+        );
+        assert_eq!(mixer.position_frames(), 64, "and the transport free-runs");
     }
 
     #[test]
