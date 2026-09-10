@@ -35,7 +35,11 @@ jobs:
   check:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    # The Windows job is the long one: about 35 minutes when the rust-cache
+    # archive restores cleanly, and a cold cache or a slow GStreamer download
+    # pushes it past 40 -- it was cancelled mid GUI smoke test at exactly the
+    # old limit. 60 leaves headroom without letting a genuine hang sit forever.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
