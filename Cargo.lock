@@ -4896,7 +4896,10 @@ dependencies = [
  "sub-core",
  "sub-edit",
  "sub-model",
+ "sub-render",
+ "sub-time",
  "tracing",
+ "wgpu",
 ]
 
 [[package]]
