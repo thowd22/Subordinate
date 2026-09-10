@@ -24,7 +24,17 @@
 //! - `log(level, message)` — a line into the host's `tracing` subscriber,
 //!   tagged with the plugin id.
 //!
-//! [`bindings`] holds the generated host side of that world; [`convert`] maps
+//! # Worlds
+//!
+//! `command` runs one plugin command against a project. `mcp-tools` lets a
+//! plugin contribute MCP tools of its own: it exports `tools()` and
+//! `call(name, args-json)`, and the host publishes each tool under the plugin's
+//! id so an agent sees plugin tools beside the built-in ones. [`mcp`] is the
+//! host half of that world — the manifest's declarations, the check that the
+//! component's exports match them, and the argument validation a call passes
+//! before it reaches the plugin.
+//!
+//! [`bindings`] holds the generated host side of those worlds; [`convert`] maps
 //! its records onto [`sub_core::SubError`], [`sub_time::RationalTime`] and the
 //! `sub_model` identifiers, so an implementation of the generated `Host` trait
 //! (TASK-84) never hand-builds a record.
@@ -45,8 +55,12 @@
 
 pub mod bindings;
 mod convert;
+pub mod mcp;
 
 pub use bindings::Command;
+pub use bindings::mcp_tools::McpTools;
+pub use bindings::mcp_tools::subordinate::plugin::mcp as mcp_types;
+pub use bindings::mcp_tools::subordinate::plugin::mcp::ToolDesc as WitToolDesc;
 pub use bindings::subordinate::plugin::command_api;
 pub use bindings::subordinate::plugin::command_api::{
     ClipMetadata, LogLevel, MarkerMetadata, ProjectMetadata, Resolution as WitResolution,
@@ -78,4 +92,25 @@ pub mod codes {
     /// A time range crossing in from a plugin has a negative duration or two
     /// endpoints at different rates.
     pub const INVALID_TIME_RANGE: ErrorCode = ErrorCode::from_static("plugin.invalid_time_range");
+    /// A plugin id is not two or more lowercase reverse-DNS segments.
+    pub const INVALID_PLUGIN_ID: ErrorCode = ErrorCode::from_static("plugin.invalid_plugin_id");
+    /// An MCP tool name is not a lowercase `[a-z][a-z0-9_]*` identifier.
+    pub const INVALID_TOOL_NAME: ErrorCode = ErrorCode::from_static("plugin.invalid_tool_name");
+    /// An MCP tool's argument schema is not JSON, not an object, or not a
+    /// JSON Schema the host can compile.
+    pub const INVALID_TOOL_SCHEMA: ErrorCode = ErrorCode::from_static("plugin.invalid_tool_schema");
+    /// One plugin declares the same MCP tool name twice.
+    pub const DUPLICATE_TOOL: ErrorCode = ErrorCode::from_static("plugin.duplicate_tool");
+    /// A plugin offers or is asked for an MCP tool its manifest does not
+    /// declare.
+    pub const UNDECLARED_TOOL: ErrorCode = ErrorCode::from_static("plugin.undeclared_tool");
+    /// A plugin's manifest declares an MCP tool the component does not export.
+    pub const MISSING_TOOL: ErrorCode = ErrorCode::from_static("plugin.missing_tool");
+    /// A plugin's exported tool schema differs from the declared one.
+    pub const TOOL_SCHEMA_MISMATCH: ErrorCode =
+        ErrorCode::from_static("plugin.tool_schema_mismatch");
+    /// A tool call's arguments are not a JSON object, or the tool's schema
+    /// rejects them.
+    pub const INVALID_TOOL_ARGUMENTS: ErrorCode =
+        ErrorCode::from_static("plugin.invalid_tool_arguments");
 }
