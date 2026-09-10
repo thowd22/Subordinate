@@ -7,7 +7,7 @@
     },
     "Capabilities": {
       "additionalProperties": false,
-      "description": "`[capabilities]`: everything the sandbox opens only on request.\n\nThe manifest only *declares* these; granting them is the install-time\napproval step, and enforcement is the host's (TASK-83, TASK-84). Absent\nkeys mean \"not requested\", which is why parsing rejects unknown ones.",
+      "description": "`[capabilities]`: everything the sandbox opens only on request.\n\nThe manifest only *declares* these. Granting them is the install-time\napproval step and enforcement is the host's, both in the crate's\n`capability` module: an approval store records what the user approved, and\nresolving it expands the roots into the sandbox's WASI preopens. Absent\nkeys mean \"not requested\", which is why parsing rejects unknown ones.",
       "properties": {
         "fs_read": {
           "description": "Roots the plugin may read, as `$PROJECT`-style roots or paths under\nthem.",

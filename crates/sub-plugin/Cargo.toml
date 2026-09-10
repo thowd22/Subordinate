@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+blake3 = "1"
 # Argument validation for plugin-contributed MCP tools. Default features off:
 # they pull reqwest and rustls to resolve remote `$ref`s, and a plugin's tool
 # schema must be self-contained, never fetched from the network at call time.
@@ -27,6 +28,10 @@ wasmtime = { version = "48", default-features = false, features = [
     "runtime",
     "std",
 ] }
+# The capability model builds the sandbox's WASI context: a granted root becomes
+# a preopened directory and everything else stays closed. "p2" is the
+# component-model preview 2 context the plugin worlds are built against.
+wasmtime-wasi = { version = "48", default-features = false, features = ["p2"] }
 
 [dev-dependencies]
 sub-command = { version = "0.1.0", path = "../sub-command" }
