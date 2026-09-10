@@ -4920,6 +4920,7 @@ dependencies = [
  "sub-core",
  "sub-edit",
  "sub-model",
+ "sub-plugin",
  "sub-time",
  "thiserror 2.0.20",
  "toml",

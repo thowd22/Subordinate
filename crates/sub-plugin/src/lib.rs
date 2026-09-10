@@ -125,6 +125,18 @@
 //! assert_eq!(RationalTime::try_from(WitRationalTime::from(time)).unwrap(), time);
 //! ```
 //!
+//! # The runtime
+//!
+//! [`runtime`] is the wasmtime host itself (docs/PLAN.md §4): one
+//! [`PluginRuntime`] owns the engine every plugin shares and the single ticker
+//! thread its epoch deadlines are counted in, [`Limits`] carries the fuel,
+//! deadline and memory ceilings one instance runs under, and [`termination`]
+//! turns a stopped call into a [`SubError`](sub_core::SubError) with a stable
+//! code — so a plugin that loops forever is reported, not fatal, and every
+//! other plugin on the same engine keeps running. [`InstancePool`] keeps warm
+//! instances for the hot paths — an effect's `describe`, a plugin command from
+//! a menu — and re-arms their budgets on every checkout.
+//!
 //! # The manifest
 //!
 //! [`manifest`] parses `plugin.toml` (docs/PLAN.md §6.3): identity, the
@@ -151,6 +163,7 @@ mod interchange;
 pub mod manifest;
 pub mod mcp;
 pub mod menu;
+pub mod runtime;
 pub mod schema;
 
 pub use capability::{
@@ -219,6 +232,9 @@ pub use interchange::{CommandCall, ExportPreset, ImportTarget, export_presets, i
 pub use menu::{
     CommandContext, CommandDesc, PluginCommand, PluginCommandRegistry, QUALIFIED_SEPARATOR,
     run_as_undo_group,
+};
+pub use runtime::{
+    InstancePool, Limits, PluginRuntime, PluginState, Termination, WarmInstance, termination,
 };
 
 /// Error codes this crate raises. The `plugin.*` domain belongs to the host;
@@ -332,4 +348,23 @@ pub mod codes {
     pub const INVALID_PRESET: ErrorCode = ErrorCode::from_static("plugin.invalid_preset");
     /// An analysis metadata value is not JSON, or a key was reported twice.
     pub const INVALID_METADATA: ErrorCode = ErrorCode::from_static("plugin.invalid_metadata");
+    /// The wasm engine itself could not be built or configured: a build with
+    /// no compiler, or fuel asked of an engine that does not meter it.
+    pub const ENGINE_FAILED: ErrorCode = ErrorCode::from_static("plugin.engine_failed");
+    /// A plugin's `.wasm` could not be read or is not a component this engine
+    /// can compile.
+    pub const LOAD_FAILED: ErrorCode = ErrorCode::from_static("plugin.load_failed");
+    /// A plugin's imports could not be satisfied by the host's linker.
+    pub const LINK_FAILED: ErrorCode = ErrorCode::from_static("plugin.link_failed");
+    /// A component compiled and linked but could not be instantiated, which
+    /// includes an instance whose memory ceiling is smaller than the memory it
+    /// declares.
+    pub const INSTANTIATE_FAILED: ErrorCode = ErrorCode::from_static("plugin.instantiate_failed");
+    /// A plugin call ran out of its instruction budget and was stopped.
+    pub const FUEL_EXHAUSTED: ErrorCode = ErrorCode::from_static("plugin.fuel_exhausted");
+    /// A plugin call overran its wall-clock deadline and was stopped.
+    pub const DEADLINE_EXCEEDED: ErrorCode = ErrorCode::from_static("plugin.deadline_exceeded");
+    /// A plugin trapped: unreachable code, an allocation its memory ceiling
+    /// refused, an out-of-bounds access.
+    pub const TRAPPED: ErrorCode = ErrorCode::from_static("plugin.trapped");
 }
