@@ -144,6 +144,18 @@
 //! capabilities it asks for and the MCP tools it contributes. [`schema`]
 //! exports its JSON Schema, committed at `docs/schema/plugin-manifest.json`.
 //!
+//! # The registry
+//!
+//! [`registry`] is where plugins are installed and which of them are switched
+//! on (docs/PLAN.md §6.4): [`PluginDirs`] pairs the per-user plugin directory
+//! with a project's own `.subordinate/plugins`, [`PluginRegistry::scan`] parses
+//! every manifest it finds there — reporting a broken one as a
+//! [`LoadFailure`] rather than giving up on the rest — and the project-local
+//! copy wins an id conflict, with the hidden one recorded as [`Shadowed`].
+//! [`registry::register_methods`] puts `plugin.list`, `plugin.enable`,
+//! `plugin.disable` and `plugin.remove` on the Command API, so the CLI, the
+//! GUI and an agent over MCP manage plugins through one surface.
+//!
 //! # The capability model
 //!
 //! A manifest only *asks*. [`capability`] is what the asking turns into
@@ -163,6 +175,7 @@ mod interchange;
 pub mod manifest;
 pub mod mcp;
 pub mod menu;
+pub mod registry;
 pub mod runtime;
 pub mod schema;
 
@@ -232,6 +245,10 @@ pub use interchange::{CommandCall, ExportPreset, ImportTarget, export_presets, i
 pub use menu::{
     CommandContext, CommandDesc, PluginCommand, PluginCommandRegistry, QUALIFIED_SEPARATOR,
     run_as_undo_group,
+};
+pub use registry::{
+    EnableChange, InstallLocation, InstalledPlugin, LoadFailure, PluginDirs, PluginRegistry,
+    Removal, Scan, Shadowed,
 };
 pub use runtime::{
     InstancePool, Limits, PluginRuntime, PluginState, Termination, WarmInstance, termination,
@@ -367,4 +384,24 @@ pub mod codes {
     /// A plugin trapped: unreachable code, an allocation its memory ceiling
     /// refused, an out-of-bounds access.
     pub const TRAPPED: ErrorCode = ErrorCode::from_static("plugin.trapped");
+    /// A plugin id names nothing installed in either plugin directory.
+    pub const NOT_INSTALLED: ErrorCode = ErrorCode::from_static("plugin.not_installed");
+    /// A plugin directory exists but could not be listed.
+    pub const PLUGIN_DIR_UNREADABLE: ErrorCode =
+        ErrorCode::from_static("plugin.plugin_dir_unreadable");
+    /// This platform offers no per-user data directory to install plugins in.
+    pub const PLUGIN_DIR_UNAVAILABLE: ErrorCode =
+        ErrorCode::from_static("plugin.plugin_dir_unavailable");
+    /// The recorded enable/disable state is not JSON this build reads, or was
+    /// written by another schema version.
+    pub const INVALID_REGISTRY_STATE: ErrorCode =
+        ErrorCode::from_static("plugin.invalid_registry_state");
+    /// The recorded enable/disable state could not be read from disk.
+    pub const REGISTRY_STATE_UNREADABLE: ErrorCode =
+        ErrorCode::from_static("plugin.registry_state_unreadable");
+    /// The enable/disable state could not be written to disk.
+    pub const REGISTRY_STATE_UNWRITABLE: ErrorCode =
+        ErrorCode::from_static("plugin.registry_state_unwritable");
+    /// An installed plugin's directory could not be deleted.
+    pub const REMOVE_FAILED: ErrorCode = ErrorCode::from_static("plugin.remove_failed");
 }

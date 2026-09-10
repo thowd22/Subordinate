@@ -30,6 +30,15 @@ use crate::codes;
 /// `committed_schema_is_up_to_date` test keeps the file honest.
 pub const COMMAND_API_SCHEMA: &str = include_str!("../../../docs/schema/command-api.json");
 
+/// The committed plugin management schema, compiled in.
+///
+/// `plugin.list`, `plugin.enable`, `plugin.disable` and `plugin.remove` are
+/// served by the plugin host rather than by the engine, so they are exported
+/// as their own document (`sub_plugin::registry::schema`). They become tools
+/// exactly like the engine's methods, and calling one is the same JSON-RPC
+/// round trip to the running editor.
+pub const PLUGIN_API_SCHEMA: &str = include_str!("../../../docs/schema/plugin-api.json");
+
 /// The tools this bridge offers, and the method each one calls.
 #[derive(Debug, Clone)]
 pub struct ToolSet {
@@ -40,21 +49,17 @@ pub struct ToolSet {
 }
 
 impl ToolSet {
-    /// The tools of the schema compiled into this build.
+    /// The tools of the schemas compiled into this build: the engine's methods
+    /// and the plugin host's.
     ///
     /// # Errors
     ///
-    /// Returns `mcp.schema_invalid` if the compiled document is not a Command
-    /// API schema, which would mean the build is broken.
+    /// Returns `mcp.schema_invalid` if either compiled document is not a
+    /// Command API schema, which would mean the build is broken.
     pub fn committed() -> SubResult<Self> {
-        let document: Value = serde_json::from_str(COMMAND_API_SCHEMA).map_err(|error| {
-            SubError::new(
-                codes::SCHEMA_INVALID,
-                "the compiled Command API schema is not JSON",
-            )
-            .with_cause(&error)
-        })?;
-        Self::from_schema(&document)
+        let mut tools = Self::from_schema(&compiled_in(COMMAND_API_SCHEMA)?)?;
+        tools.extend_from_schema(&compiled_in(PLUGIN_API_SCHEMA)?)?;
+        Ok(tools)
     }
 
     /// The tools of an exported Command API schema document.
@@ -65,6 +70,25 @@ impl ToolSet {
     /// when a method has no name, when a `$ref` names a definition that is not
     /// there, or when two methods would collide on one tool name.
     pub fn from_schema(document: &Value) -> SubResult<Self> {
+        let mut tools = Self {
+            tools: Vec::new(),
+            methods: BTreeMap::new(),
+        };
+        tools.extend_from_schema(document)?;
+        Ok(tools)
+    }
+
+    /// Adds the tools of another exported schema document, keeping the ones
+    /// already there.
+    ///
+    /// The engine's methods and the plugin host's are exported as separate
+    /// documents, so the bridge offers the union of the two.
+    ///
+    /// # Errors
+    ///
+    /// The same `mcp.schema_invalid` cases as [`ToolSet::from_schema`],
+    /// including a method whose tool name is already taken.
+    pub fn extend_from_schema(&mut self, document: &Value) -> SubResult<()> {
         let methods = document
             .get("methods")
             .and_then(Value::as_array)
@@ -76,8 +100,7 @@ impl ToolSet {
             })?;
         let defs = document.get("$defs").and_then(Value::as_object);
 
-        let mut tools = Vec::with_capacity(methods.len());
-        let mut names = BTreeMap::new();
+        self.tools.reserve(methods.len());
         for method in methods {
             let name = method
                 .get("name")
@@ -99,7 +122,7 @@ impl ToolSet {
                 Arc::new(schema),
             );
             tool.title = Some(name.clone());
-            if let Some(previous) = names.insert(tool_name.clone(), name.clone()) {
+            if let Some(previous) = self.methods.insert(tool_name.clone(), name.clone()) {
                 return Err(SubError::new(
                     codes::SCHEMA_INVALID,
                     "two methods map to the same MCP tool name",
@@ -107,12 +130,9 @@ impl ToolSet {
                 .with_detail("tool", tool_name)
                 .with_detail("methods", [previous, name]));
             }
-            tools.push(tool);
+            self.tools.push(tool);
         }
-        Ok(Self {
-            tools,
-            methods: names,
-        })
+        Ok(())
     }
 
     /// Every tool, in schema order.
@@ -139,6 +159,17 @@ impl ToolSet {
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
+}
+
+/// Parses one of the schema documents compiled into this build.
+fn compiled_in(text: &str) -> SubResult<Value> {
+    serde_json::from_str(text).map_err(|error| {
+        SubError::new(
+            codes::SCHEMA_INVALID,
+            "a compiled-in Command API schema is not JSON",
+        )
+        .with_cause(&error)
+    })
 }
 
 /// The MCP tool name for a Command API method name.
@@ -201,7 +232,7 @@ fn resolve(reference: &str, defs: Option<&Map<String, Value>>) -> SubResult<Json
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMAND_API_SCHEMA, ToolSet, tool_name};
+    use super::{COMMAND_API_SCHEMA, PLUGIN_API_SCHEMA, ToolSet, tool_name};
     use serde_json::{Value, json};
 
     /// The committed schema, parsed.
@@ -209,12 +240,21 @@ mod tests {
         serde_json::from_str(COMMAND_API_SCHEMA).expect("the committed schema is JSON")
     }
 
+    /// The committed plugin management schema, parsed.
+    fn plugin_document() -> Value {
+        serde_json::from_str(PLUGIN_API_SCHEMA).expect("the committed plugin schema is JSON")
+    }
+
     #[test]
     fn every_method_of_the_command_api_becomes_a_tool() {
         let document = document();
         let tools = ToolSet::committed().expect("the committed schema yields tools");
         let methods = document["methods"].as_array().expect("methods");
-        assert_eq!(tools.len(), methods.len());
+        let plugin_methods = plugin_document()["methods"]
+            .as_array()
+            .expect("plugin methods")
+            .len();
+        assert_eq!(tools.len(), methods.len() + plugin_methods);
         assert!(!tools.is_empty());
 
         for method in methods {
@@ -265,6 +305,48 @@ mod tests {
         assert!(schema["properties"].get("sequence").is_some());
         // `Clip` is referred to from the parameters, so it travels with them.
         assert!(schema["$defs"].get("Clip").is_some());
+    }
+
+    #[test]
+    fn the_plugin_management_methods_are_tools_too() {
+        let tools = ToolSet::committed().expect("tools");
+        for method in [
+            "plugin.list",
+            "plugin.enable",
+            "plugin.disable",
+            "plugin.remove",
+        ] {
+            let name = tool_name(method);
+            let tool = tools
+                .tools()
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{method} has a tool"));
+            assert_eq!(tool.title.as_deref(), Some(method));
+            assert_eq!(tools.method(&name), Some(method));
+            assert_eq!(tool.input_schema["type"], "object");
+        }
+        let enable = tools
+            .tools()
+            .iter()
+            .find(|tool| tool.name == "plugin_enable")
+            .expect("plugin.enable is a tool");
+        assert!(enable.input_schema["properties"].get("id").is_some());
+    }
+
+    #[test]
+    fn extending_with_a_document_that_repeats_a_name_is_reported() {
+        let mut tools = ToolSet::from_schema(&json!({
+            "methods": [{ "name": "plugin.list", "description": "List." }],
+        }))
+        .expect("one tool");
+        let clash = tools
+            .extend_from_schema(&json!({
+                "methods": [{ "name": "plugin.list", "description": "List again." }],
+            }))
+            .expect_err("the name is taken");
+        assert_eq!(clash.code.as_str(), "mcp.schema_invalid");
+        assert_eq!(tools.len(), 1, "the clashing tool was not offered");
     }
 
     #[test]

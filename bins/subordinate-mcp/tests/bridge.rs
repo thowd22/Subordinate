@@ -16,6 +16,7 @@ use sub_command::endpoint::Endpoint;
 use sub_command::transport::Server;
 use sub_edit::Engine;
 use sub_model::Project;
+use sub_plugin::registry;
 use subordinate_mcp::backend::{Backend, Options, cli_name};
 use subordinate_mcp::bridge::Bridge;
 use subordinate_mcp::tools::ToolSet;
@@ -29,6 +30,23 @@ fn workspace(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("a test directory");
     directory
+}
+
+/// How many methods the two committed schemas describe between them, which is
+/// how many tools the bridge must offer.
+fn method_count() -> usize {
+    [
+        subordinate_mcp::tools::COMMAND_API_SCHEMA,
+        subordinate_mcp::tools::PLUGIN_API_SCHEMA,
+    ]
+    .into_iter()
+    .map(|text| {
+        serde_json::from_str::<serde_json::Value>(text).expect("a committed schema")["methods"]
+            .as_array()
+            .expect("a methods array")
+            .len()
+    })
+    .sum()
 }
 
 /// The options that point the bridge at `directory`.
@@ -63,8 +81,26 @@ fn tool_calls_reach_a_running_editor_and_come_back_as_content() {
     let directory = workspace("running");
     let engine = Engine::spawn(Project::new("Doc cut")).expect("an engine");
     let endpoint = Endpoint::in_directory(directory.clone(), INSTANCE).expect("an endpoint");
-    let dispatcher = Arc::new(Dispatcher::new(engine.handle().clone()));
-    let server = Server::bind(endpoint, dispatcher).expect("a bound server");
+    let mut dispatcher = Dispatcher::new(engine.handle().clone());
+
+    // The editor serves the plugin host's methods beside the engine's, which is
+    // what makes the plugin tools reachable from here.
+    let plugins = directory.join("plugins");
+    std::fs::create_dir_all(plugins.join("com.example.demo")).expect("a plugin directory");
+    std::fs::write(
+        plugins.join("com.example.demo").join("plugin.toml"),
+        "[plugin]\nid = \"com.example.demo\"\nname = \"Demo\"\nversion = \"0.1.0\"\n\
+         api = \"0.1\"\nworlds = [\"command\"]\n",
+    )
+    .expect("a manifest");
+    registry::register_methods(
+        &mut dispatcher,
+        Arc::new(registry::PluginRegistry::new(registry::PluginDirs::new(
+            &plugins,
+        ))),
+    )
+    .expect("the plugin methods");
+    let server = Server::bind(endpoint, Arc::new(dispatcher)).expect("a bound server");
 
     let backend = Backend::connect(&options(&directory)).expect("the bridge finds the editor");
     assert!(
@@ -73,9 +109,11 @@ fn tool_calls_reach_a_running_editor_and_come_back_as_content() {
     );
     let bridge = bridge(backend);
 
-    // The whole Command API is offered, and `tools/list` says so.
-    assert_eq!(bridge.tools().len(), 50);
+    // The whole Command API is offered, and `tools/list` says so: the engine's
+    // methods plus the plugin host's, which are exported as a second document.
+    assert_eq!(bridge.tools().len(), method_count());
     assert_eq!(bridge.tools().method("bin_create"), Some("bin.create"));
+    assert_eq!(bridge.tools().method("plugin_list"), Some("plugin.list"));
     let info = bridge.get_info();
     assert!(info.capabilities.tools.is_some());
     assert!(info.instructions.is_some());
@@ -97,6 +135,32 @@ fn tool_calls_reach_a_running_editor_and_come_back_as_content() {
         .expect("undo is a tool");
     assert_eq!(undone.is_error, Some(false));
     assert!(engine.handle().snapshot().root_bin.children.is_empty());
+
+    // The plugin management tools reach the registry the editor was given, so
+    // an agent lists and switches plugins without leaving MCP.
+    let listed = bridge
+        .call(call("plugin_list", &json!({})))
+        .expect("plugin.list is a tool");
+    assert_eq!(listed.is_error, Some(false));
+    let scan = listed.structured_content.expect("structured content");
+    assert_eq!(scan["plugins"][0]["id"], "com.example.demo");
+    assert_eq!(scan["plugins"][0]["enabled"], true);
+
+    let disabled = bridge
+        .call(call("plugin_disable", &json!({ "id": "com.example.demo" })))
+        .expect("plugin.disable is a tool");
+    assert_eq!(disabled.is_error, Some(false));
+    let listed = bridge
+        .call(call("plugin_list", &json!({})))
+        .expect("plugin.list is a tool");
+    let scan = listed.structured_content.expect("structured content");
+    assert_eq!(scan["plugins"][0]["enabled"], false);
+
+    let removed = bridge
+        .call(call("plugin_remove", &json!({ "id": "com.example.demo" })))
+        .expect("plugin.remove is a tool");
+    assert_eq!(removed.is_error, Some(false));
+    assert!(!plugins.join("com.example.demo").exists());
 
     // A failure is a tool error carrying the engine's stable code, not a
     // protocol error.
