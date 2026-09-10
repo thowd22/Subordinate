@@ -209,6 +209,21 @@ impl Backend {
         self.server.is_some()
     }
 
+    /// Opens a second connection to the same editor, for change events.
+    ///
+    /// The connection [`Backend::invoke`] uses is a strict request-and-reply
+    /// channel shared by every tool call; a subscription pushes notifications
+    /// whenever the project changes, which must not arrive in the middle of a
+    /// round trip on it. So the event feed gets a connection of its own
+    /// (`sub_command::events` scopes a subscription to one connection anyway).
+    ///
+    /// # Errors
+    ///
+    /// Returns the `command.*` codes for a connection that fails.
+    pub fn open_events(&self) -> SubResult<Client> {
+        Client::connect_to(&self.address)
+    }
+
     /// Calls a Command API method and returns its result.
     ///
     /// # Errors
