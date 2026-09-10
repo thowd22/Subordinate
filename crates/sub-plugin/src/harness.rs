@@ -654,6 +654,49 @@ impl Harness {
         Ok(report)
     }
 
+    /// Runs one of a plugin's MCP tools and answers what it returned.
+    ///
+    /// This is the live counterpart of the `mcp-tools` checks above and the
+    /// far end of the MCP bridge's plugin tool forwarding (TASK-96): the
+    /// bridge routes a prefixed tool name to a plugin id and a plugin-local
+    /// name, the plugin host validates the arguments against the manifest's
+    /// schema, and this instantiates the component in the `mcp-tools` world
+    /// and calls it. The instance is fresh per call and dropped when the call
+    /// returns, so one tool call cannot see another's state, and the tool
+    /// reaches the project only through the same [`Dispatcher`] the socket
+    /// serves — an edit it makes is one undoable command.
+    ///
+    /// `args_json` is a JSON object the caller has already validated; nothing
+    /// here validates it again.
+    ///
+    /// # Errors
+    ///
+    /// [`codes::LOAD_FAILED`] for a component that will not compile,
+    /// [`codes::LINK_FAILED`] and [`codes::INSTANTIATE_FAILED`] when it will
+    /// not link or instantiate, the plugin's own [`SubError`] when the tool
+    /// answers an error, and the runtime's termination codes — fuel, deadline,
+    /// trap — when the call is stopped.
+    pub fn call_tool(
+        &self,
+        plugin: &PluginId,
+        wasm: &Path,
+        tool: &str,
+        args_json: &str,
+    ) -> SubResult<String> {
+        let component = self.runtime.compile_file(plugin, wasm)?;
+        let mut linker = self.linker()?;
+        McpTools::add_to_linker::<_, HasSelf<HarnessHost>>(&mut linker, |state| state)
+            .map_err(|err| link_failed(&err))?;
+        let mut store = self.store()?;
+        let instance = McpTools::instantiate(&mut store, &component, &linker)
+            .map_err(|err| instantiate_failed(plugin, &err))?;
+        match instance.call_call(&mut store, tool, args_json) {
+            Ok(Ok(answer)) => Ok(answer),
+            Ok(Err(err)) => Err(crate::errors::explain(SubError::from(err))),
+            Err(err) => Err(crate::errors::explain(termination(plugin, &err))),
+        }
+    }
+
     /// A store and a linker for one world.
     fn store(&self) -> SubResult<wasmtime::Store<HarnessHost>> {
         self.runtime.store(

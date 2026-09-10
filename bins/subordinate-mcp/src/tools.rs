@@ -200,6 +200,15 @@ pub struct PluginTools {
     tools: Vec<Tool>,
     /// Published tool name to the plugin and plugin-local name behind it.
     routes: BTreeMap<String, PluginRoute>,
+    /// The listing this was read from, as text.
+    ///
+    /// It is what tells one refresh from the next: after a reload, an install
+    /// or a plugin switched on or off, a listing whose text differs means the
+    /// tools a client holds are stale and `notifications/tools/list_changed`
+    /// is owed. Comparing the whole listing rather than the names catches a
+    /// tool whose description or argument schema changed under the same name,
+    /// which is the ordinary case while a plugin is being developed.
+    digest: String,
 }
 
 impl PluginTools {
@@ -220,7 +229,10 @@ impl PluginTools {
                     "a plugin tool listing has no tools array",
                 )
             })?;
-        let mut parsed = Self::default();
+        let mut parsed = Self {
+            digest: Value::Array(rows.clone()).to_string(),
+            ..Self::default()
+        };
         for row in rows {
             let text = |field: &str| -> SubResult<String> {
                 row.get(field)
@@ -301,6 +313,13 @@ impl PluginTools {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
+    }
+
+    /// Whether `other` is a different listing from this one, and so whether a
+    /// client that holds this one needs telling.
+    #[must_use]
+    pub fn differs_from(&self, other: &Self) -> bool {
+        self.digest != other.digest
     }
 }
 

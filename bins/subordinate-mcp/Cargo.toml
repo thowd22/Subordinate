@@ -28,7 +28,11 @@ sub-edit = { version = "0.1.0", path = "../../crates/sub-edit" }
 sub-model = { version = "0.1.0", path = "../../crates/sub-model" }
 # Test-only: the bridge integration test serves the plugin host's methods from
 # the editor side, which is what makes the plugin_* tools reachable.
-sub-plugin = { version = "0.1.0", path = "../../crates/sub-plugin" }
+# `test-guests` builds the wasm components that crate's own tests use; the
+# plugin tool test here installs one of them and calls its tool for real.
+sub-plugin = { version = "0.1.0", path = "../../crates/sub-plugin", features = [
+    "test-guests",
+] }
 
 [lints]
 workspace = true

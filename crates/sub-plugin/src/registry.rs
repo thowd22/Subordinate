@@ -1035,11 +1035,13 @@ pub mod schema {
                  prefix.",
             ),
         ];
-        // The dev-install and hot-reload methods are served by the same host
-        // and belong in the same document, so an MCP bridge builds
-        // plugin_install, plugin_reload and plugin_status from it too.
+        // The dev-install, hot-reload, tool-call and authoring methods are
+        // served by the same host and belong in the same document, so an MCP
+        // bridge builds plugin_install, plugin_reload, plugin_status,
+        // plugin_call_tool, plugin_new and plugin_test from it too.
         let mut methods = methods;
         methods.extend(crate::dev::schema::methods(&mut generator));
+        methods.extend(crate::authoring::schema::methods(&mut generator));
         methods.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
         let defs = generator.take_definitions(true);
         sorted(serde_json::json!({
@@ -1099,13 +1101,16 @@ pub mod schema {
             assert_eq!(
                 names,
                 [
+                    "plugin.call_tool",
                     "plugin.disable",
                     "plugin.enable",
                     "plugin.install",
                     "plugin.list",
+                    "plugin.new",
                     "plugin.reload",
                     "plugin.remove",
                     "plugin.status",
+                    "plugin.test",
                     "plugin.tools",
                 ]
             );

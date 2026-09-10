@@ -68,14 +68,18 @@ SUB_UPDATE_SCHEMA=1 cargo test -p sub-plugin committed_schema_is_up_to_date
 # Plugin management JSON Schema
 
 `plugin-api.json` describes the plugin management methods of the Command API —
-`plugin.list`, `plugin.enable`, `plugin.disable` and `plugin.remove` — in
-exactly the shape `command-api.json` uses, so the MCP bridge turns them into
-tools the same way. They are separate documents because the methods are served
-by the plugin host rather than by the engine: a build with no plugin directory
-open still serves the whole Command API.
+`plugin.new`, `plugin.install`, `plugin.reload`, `plugin.test`, `plugin.list`,
+`plugin.status`, `plugin.enable`, `plugin.disable`, `plugin.remove`,
+`plugin.tools` and `plugin.call_tool` — in exactly the shape
+`command-api.json` uses, so the MCP bridge turns them into tools the same way.
+Between them they are the whole plugin developer loop (docs/PLAN.md §6.4),
+which is why an agent can scaffold, install, test and then call a plugin
+without leaving the conversation. They are separate documents because the
+methods are served by the plugin host rather than by the engine: a build with
+no plugin directory open still serves the whole Command API.
 
-It is generated from the Rust registry types in
-`crates/sub-plugin/src/registry.rs`, not hand-edited. The
+It is generated from the Rust registry, dev and authoring types in
+`crates/sub-plugin/src/`, not hand-edited. The
 `committed_schema_is_up_to_date` test in that module's `schema` submodule fails
 when the committed copy drifts. Regenerate it with:
 

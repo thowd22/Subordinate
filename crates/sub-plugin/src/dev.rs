@@ -872,6 +872,58 @@ pub fn compile_only_loader(runtime: PluginRuntime) -> Loader {
     })
 }
 
+/// A loader that compiles the component and contributes the manifest's MCP
+/// tools.
+///
+/// It is what a process that publishes plugin tools without running the other
+/// worlds uses — the headless `serve` behind the MCP bridge (TASK-96). The
+/// manifest is the source of truth for a tool's description and schema, so a
+/// tool can be listed and its arguments validated without instantiating
+/// anything; the component is entered only when the tool is actually called.
+///
+/// # Errors
+///
+/// The loader it returns fails with the compile errors of
+/// [`PluginRuntime::compile_file`] and the schema errors of
+/// [`ToolCatalog::from_manifest`].
+#[must_use]
+pub fn manifest_tools_loader(runtime: PluginRuntime) -> Loader {
+    Arc::new(move |plugin: &InstalledPlugin, path: &Path| {
+        runtime.compile_file(&plugin.id, path)?;
+        let catalog = ToolCatalog::from_manifest(&plugin.manifest, &plugin.directory)?;
+        Ok(PluginArtifacts {
+            tools: catalog.declarations(),
+            ..PluginArtifacts::default()
+        })
+    })
+}
+
+/// How a host runs one of a plugin's MCP tools: given the installed plugin,
+/// the path of its component, the plugin-local tool name and the JSON
+/// arguments, answer the tool's JSON output.
+///
+/// The host owns this for the same reason it owns the [`Loader`]: entering a
+/// component needs the Command API handle and the resolved capabilities, which
+/// this module knows nothing about. [`crate::harness::Harness::call_tool`] is
+/// the implementation the editor and the headless server both use, wrapped by
+/// [`harness_tool_caller`].
+pub type ToolCaller =
+    Arc<dyn Fn(&InstalledPlugin, &Path, &str, &str) -> SubResult<String> + Send + Sync>;
+
+/// A [`ToolCaller`] that runs tools through `harness`.
+///
+/// The harness is the real host — its `run-command` and `query` go through the
+/// [`Dispatcher`] it was built over — so a tool call reaches the project as
+/// ordinary undoable commands and nothing else.
+#[must_use]
+pub fn harness_tool_caller(harness: Arc<crate::harness::Harness>) -> ToolCaller {
+    Arc::new(
+        move |plugin: &InstalledPlugin, wasm: &Path, tool: &str, args: &str| {
+            harness.call_tool(&plugin.id, wasm, tool, args)
+        },
+    )
+}
+
 /// One error, flattened the way [`crate::registry::LoadFailure`] flattens one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReloadError {
@@ -949,6 +1001,9 @@ pub struct DevHost {
     registry: Arc<PluginRegistry>,
     /// How a component becomes artifacts.
     loader: Loader,
+    /// How one of a plugin's MCP tools is run, when this host runs plugins at
+    /// all.
+    caller: Option<ToolCaller>,
     /// The commands every loaded plugin contributes.
     commands: PluginCommandRegistry,
     /// What each loaded plugin contributed.
@@ -982,10 +1037,22 @@ impl DevHost {
         Self {
             registry,
             loader,
+            caller: None,
             commands: PluginCommandRegistry::new(),
             loaded: BTreeMap::new(),
             statuses: BTreeMap::new(),
         }
+    }
+
+    /// The same host, running a plugin's MCP tools with `caller`.
+    ///
+    /// Without one the host still installs, loads and lists plugins and their
+    /// tools; it just answers `core.unimplemented` to a call, because a
+    /// process that manages plugins is not necessarily one that runs them.
+    #[must_use]
+    pub fn with_tool_caller(mut self, caller: ToolCaller) -> Self {
+        self.caller = Some(caller);
+        self
     }
 
     /// The registry it installs into and scans.
@@ -1074,6 +1141,72 @@ impl DevHost {
                 Err(error)
             }
         }
+    }
+
+    /// Runs one of an installed plugin's MCP tools.
+    ///
+    /// This is where the MCP bridge's forwarding lands (docs/PLAN.md §6.4): a
+    /// prefixed tool name has already been routed to a plugin id and a
+    /// plugin-local name, and what is left is to check the arguments and enter
+    /// the component. The order matters — a plugin that is not loaded yet is
+    /// loaded first, the arguments are validated against the *manifest's*
+    /// schema, and only then does the plugin see them.
+    ///
+    /// It takes `&mut self` and, served over the Command API, holds the host's
+    /// lock for the length of the call, so plugin tool calls are serialised
+    /// against each other and against reloads: a reload cannot swap a
+    /// catalogue out from under a call in flight. The plugin reaches the
+    /// project through the caller's own [`Dispatcher`], not through this host,
+    /// so nothing here waits on the engine.
+    ///
+    /// # Errors
+    ///
+    /// [`codes::NOT_INSTALLED`] when no plugin is installed under `id` and
+    /// whatever [`DevHost::reload`] returns for one that will not load;
+    /// [`codes::UNDECLARED_TOOL`] when the plugin declares no such tool and
+    /// [`codes::INVALID_TOOL_ARGUMENTS`] when the arguments do not match its
+    /// schema; `core.unimplemented` when this host runs no plugins; and the
+    /// plugin's own error or a termination code from the call itself.
+    pub fn call_tool(&mut self, id: &PluginId, tool: &str, arguments: &Value) -> SubResult<Value> {
+        if !self.loaded.contains_key(id) {
+            self.reload(id)?;
+        }
+        let args_json = serde_json::to_string(arguments).map_err(|err| {
+            SubError::wrap(
+                sub_core::codes::INTERNAL,
+                "the tool arguments could not be serialised",
+                &err,
+            )
+        })?;
+        let catalog = self.tools(id).ok_or_else(|| {
+            SubError::new(codes::NOT_INSTALLED, "no plugin is loaded under that id")
+                .with_detail("id", id.as_str())
+        })?;
+        catalog.validate_arguments(tool, &args_json)?;
+
+        let caller = self.caller.clone().ok_or_else(|| {
+            SubError::new(
+                sub_core::codes::UNIMPLEMENTED,
+                "this host manages plugins but does not run them",
+            )
+            .with_detail("id", id.as_str())
+            .with_detail("tool", tool.to_owned())
+        })?;
+        let scan = self.registry.scan()?;
+        let plugin = scan
+            .get(id)
+            .ok_or_else(|| {
+                SubError::new(codes::NOT_INSTALLED, "no plugin is installed under that id")
+                    .with_detail("id", id.as_str())
+            })?
+            .clone();
+        let wasm = plugin.directory.join(WASM_FILE_NAME);
+        let answer = caller(&plugin, &wasm, tool, &args_json)?;
+        // A tool's output is documented as JSON, but a plugin that answers
+        // something else is reported as the string it sent rather than as an
+        // error: the agent can still read it, and blaming the plugin for its
+        // punctuation would hide whatever it was trying to say.
+        Ok(serde_json::from_str(&answer).unwrap_or(Value::String(answer)))
     }
 
     /// Forgets a plugin: its commands, effects and tools are unregistered.
@@ -1185,6 +1318,8 @@ pub const PLUGIN_INSTALL: &str = "plugin.install";
 pub const PLUGIN_RELOAD: &str = "plugin.reload";
 /// `plugin.status`: what each plugin's last load did.
 pub const PLUGIN_STATUS: &str = "plugin.status";
+/// `plugin.call_tool`: run one MCP tool a plugin contributes.
+pub const PLUGIN_CALL_TOOL: &str = "plugin.call_tool";
 
 /// The parameters of `plugin.install`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1214,6 +1349,38 @@ pub struct ReloadParams {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StatusParams {}
+
+/// The parameters of `plugin.call_tool`.
+///
+/// The MCP bridge publishes a plugin's tools under a prefixed name and keeps
+/// the route behind it, so what arrives here is already split into the plugin
+/// and its own tool name; nothing has to parse a prefix back apart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CallToolParams {
+    /// The plugin's reverse-DNS id.
+    pub id: PluginId,
+    /// The plugin-local tool name, without the plugin-id prefix.
+    pub tool: String,
+    /// The tool's arguments, validated against the manifest's schema before
+    /// the plugin sees them.
+    #[serde(default)]
+    #[schemars(with = "serde_json::Map<String, Value>")]
+    pub arguments: Value,
+}
+
+/// The result of `plugin.call_tool`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolAnswer {
+    /// The plugin that answered.
+    pub plugin: PluginId,
+    /// The plugin-local tool that ran.
+    pub tool: String,
+    /// What it returned: its JSON output, or the string it sent when that was
+    /// not JSON.
+    #[schemars(with = "Value")]
+    pub answer: Value,
+}
 
 /// The result of `plugin.status`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
@@ -1258,13 +1425,29 @@ pub fn register_methods(dispatcher: &mut Dispatcher, host: Arc<Mutex<DevHost>>) 
         },
     )?;
 
+    let statusing = Arc::clone(&host);
     dispatcher.register::<StatusParams, Statuses, _>(
         PLUGIN_STATUS,
         "Report what each plugin's last load did, including the error of one that failed.",
         move |_, params| {
             typed::<StatusParams>(params)?;
             to_value(&Statuses {
-                plugins: locked(&host)?.statuses(),
+                plugins: locked(&statusing)?.statuses(),
+            })
+        },
+    )?;
+
+    dispatcher.register::<CallToolParams, ToolAnswer, _>(
+        PLUGIN_CALL_TOOL,
+        "Run one MCP tool an installed plugin contributes, with arguments the host validates \
+         against the tool's declared schema.",
+        move |_, params| {
+            let params: CallToolParams = typed(params)?;
+            let answer = locked(&host)?.call_tool(&params.id, &params.tool, &params.arguments)?;
+            to_value(&ToolAnswer {
+                plugin: params.id,
+                tool: params.tool,
+                answer,
             })
         },
     )
@@ -1310,8 +1493,8 @@ pub(crate) mod schema {
     use serde_json::Value;
 
     use super::{
-        DevInstall, InstallParams, PLUGIN_INSTALL, PLUGIN_RELOAD, PLUGIN_STATUS, ReloadParams,
-        ReloadStatus, StatusParams, Statuses,
+        CallToolParams, DevInstall, InstallParams, PLUGIN_CALL_TOOL, PLUGIN_INSTALL, PLUGIN_RELOAD,
+        PLUGIN_STATUS, ReloadParams, ReloadStatus, StatusParams, Statuses, ToolAnswer,
     };
 
     /// One method's entry, built the way `registry::schema` builds one.
@@ -1329,9 +1512,15 @@ pub(crate) mod schema {
         })
     }
 
-    /// The three dev methods, in name order.
+    /// The dev and tool-call methods, in name order.
     pub(crate) fn methods(generator: &mut SchemaGenerator) -> Vec<Value> {
         vec![
+            method::<CallToolParams, ToolAnswer>(
+                generator,
+                PLUGIN_CALL_TOOL,
+                "Run one MCP tool an installed plugin contributes, with arguments the host \
+                 validates against the tool's declared schema.",
+            ),
             method::<InstallParams, DevInstall>(
                 generator,
                 PLUGIN_INSTALL,
@@ -1625,5 +1814,114 @@ mod tests {
         });
         let error = host.reload(&id()).expect_err("nothing is installed");
         assert_eq!(error.code, codes::NOT_INSTALLED);
+    }
+
+    /// The one tool the tool-call fixtures declare.
+    fn tool() -> crate::mcp::ToolDeclaration {
+        crate::mcp::ToolDeclaration::new(
+            "cut_silence",
+            "Cut the quiet bits",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "threshold_db": { "type": "number" } },
+                "required": ["threshold_db"],
+            }),
+        )
+        .expect("a declaration")
+    }
+
+    /// A host over a fresh install whose loader contributes [`tool`].
+    fn tool_host(name: &str) -> (DevHost, PluginId) {
+        let (source, user) = scratch(name);
+        let installed = install(&PluginDirs::new(&user), None, &source, false).expect("installed");
+        let host = DevHost::new(registry(&user), |_: &_, _: &Path| {
+            Ok(PluginArtifacts {
+                tools: vec![tool()],
+                ..PluginArtifacts::default()
+            })
+        });
+        (host, installed.id)
+    }
+
+    #[test]
+    fn a_tool_call_is_validated_before_the_plugin_is_entered() {
+        let (mut host, id) = tool_host("call-validated");
+        // The arguments are wrong, so the call is refused before it can reach a
+        // caller this host does not even have.
+        let error = host
+            .call_tool(&id, "cut_silence", &serde_json::json!({}))
+            .expect_err("the schema requires threshold_db");
+        assert_eq!(error.code, codes::INVALID_TOOL_ARGUMENTS);
+
+        let unknown = host
+            .call_tool(&id, "absent", &serde_json::json!({}))
+            .expect_err("no such tool");
+        assert_eq!(unknown.code, codes::UNDECLARED_TOOL);
+    }
+
+    #[test]
+    fn a_host_that_runs_no_plugins_says_so_rather_than_pretending() {
+        let (mut host, id) = tool_host("call-unimplemented");
+        let error = host
+            .call_tool(
+                &id,
+                "cut_silence",
+                &serde_json::json!({ "threshold_db": -40 }),
+            )
+            .expect_err("this host has no caller");
+        assert_eq!(error.code, sub_core::codes::UNIMPLEMENTED);
+    }
+
+    #[test]
+    fn a_tool_call_reaches_the_caller_with_the_plugin_and_its_arguments() {
+        let (host, id) = tool_host("call-forwarded");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let mut host = host.with_tool_caller(Arc::new(
+            move |plugin: &crate::registry::InstalledPlugin,
+                  wasm: &Path,
+                  tool: &str,
+                  args: &str| {
+                recorded.lock().expect("the record").push((
+                    plugin.id.as_str().to_owned(),
+                    wasm.file_name()
+                        .map(|name| name.to_string_lossy().into_owned()),
+                    tool.to_owned(),
+                    args.to_owned(),
+                ));
+                Ok(r#"{"cut":3}"#.to_owned())
+            },
+        ));
+
+        let answer = host
+            .call_tool(
+                &id,
+                "cut_silence",
+                &serde_json::json!({ "threshold_db": -40 }),
+            )
+            .expect("the tool answered");
+        assert_eq!(answer, serde_json::json!({ "cut": 3 }));
+        let seen = seen.lock().expect("the record");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "com.example.one");
+        assert_eq!(seen[0].1.as_deref(), Some(WASM_FILE_NAME));
+        assert_eq!(seen[0].2, "cut_silence");
+        assert_eq!(seen[0].3, r#"{"threshold_db":-40}"#);
+    }
+
+    #[test]
+    fn an_answer_that_is_not_json_comes_back_as_the_text_it_was() {
+        let (host, id) = tool_host("call-text");
+        let mut host = host.with_tool_caller(Arc::new(|_: &_, _: &Path, _: &str, _: &str| {
+            Ok("not json".to_owned())
+        }));
+        let answer = host
+            .call_tool(
+                &id,
+                "cut_silence",
+                &serde_json::json!({ "threshold_db": 0 }),
+            )
+            .expect("the tool answered");
+        assert_eq!(answer, serde_json::json!("not json"));
     }
 }

@@ -5,6 +5,31 @@
       "pattern": "^\\d+\\.\\d+$",
       "type": "string"
     },
+    "CallToolParams": {
+      "additionalProperties": false,
+      "description": "The parameters of `plugin.call_tool`.\n\nThe MCP bridge publishes a plugin's tools under a prefixed name and keeps\nthe route behind it, so what arrives here is already split into the plugin\nand its own tool name; nothing has to parse a prefix back apart.",
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "default": null,
+          "description": "The tool's arguments, validated against the manifest's schema before\nthe plugin sees them.",
+          "type": "object"
+        },
+        "id": {
+          "$ref": "#/$defs/PluginId",
+          "description": "The plugin's reverse-DNS id."
+        },
+        "tool": {
+          "description": "The plugin-local tool name, without the plugin-id prefix.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "tool"
+      ],
+      "type": "object"
+    },
     "Capabilities": {
       "additionalProperties": false,
       "description": "`[capabilities]`: everything the sandbox opens only on request.\n\nThe manifest only *declares* these. Granting them is the install-time\napproval step and enforcement is the host's, both in the crate's\n`capability` module: an approval store records what the user approved, and\nresolving it expands the roots into the sandbox's WASI preopens. Absent\nkeys mean \"not requested\", which is why parsing rejects unknown ones.",
@@ -308,6 +333,51 @@
       "required": [
         "description",
         "schema"
+      ],
+      "type": "object"
+    },
+    "NewParams": {
+      "additionalProperties": false,
+      "description": "The parameters of `plugin.new`.",
+      "properties": {
+        "force": {
+          "default": false,
+          "description": "Whether an existing directory may be written into.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "The reverse-DNS plugin id, defaulting to `com.example.<name>`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The plugin's name, which is also its crate and directory name:\nlowercase letters, digits and single hyphens, e.g. `cut-silence`.",
+          "type": "string"
+        },
+        "parent": {
+          "description": "Where the crate directory goes. The server's working directory by\ndefault, so an agent that wants it somewhere in particular says so.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sdk_path": {
+          "description": "A local `subordinate-sdk` checkout to depend on by path, instead of the\npublished version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "world": {
+          "$ref": "#/$defs/World",
+          "description": "The WIT world the plugin implements. Not every world has a template;\none that has none is refused with `core.invalid_argument` listing the\nones that do."
+        }
+      },
+      "required": [
+        "name",
+        "world"
       ],
       "type": "object"
     },
@@ -628,6 +698,57 @@
       ],
       "type": "object"
     },
+    "TestParams": {
+      "additionalProperties": false,
+      "description": "The parameters of `plugin.test`.",
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "description": "The arguments handed to a command plugin's `run` and to every MCP tool\ncall. An empty object by default.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "fixture": {
+          "description": "A project to run the plugin against, overriding the plugin's own\nfixture.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/PluginId",
+          "description": "The installed plugin's reverse-DNS id."
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "ToolAnswer": {
+      "description": "The result of `plugin.call_tool`.",
+      "properties": {
+        "answer": {
+          "description": "What it returned: its JSON output, or the string it sent when that was\nnot JSON."
+        },
+        "plugin": {
+          "$ref": "#/$defs/PluginId",
+          "description": "The plugin that answered."
+        },
+        "tool": {
+          "description": "The plugin-local tool that ran.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "plugin",
+        "tool",
+        "answer"
+      ],
+      "type": "object"
+    },
     "ToolFailure": {
       "description": "One plugin whose declared tools could not be published.\n\nReported per plugin, like a [`LoadFailure`]: a plugin with an unreadable or\nuncompilable tool schema hides its own tools and nobody else's.",
       "properties": {
@@ -734,6 +855,17 @@
   "description": "The plugin management methods of the Subordinate Command API (docs/PLAN.md §6.4). Generated from the Rust registry types; do not edit by hand.",
   "methods": [
     {
+      "description": "Run one MCP tool an installed plugin contributes, with arguments the host validates against the tool's declared schema.",
+      "kind": "query",
+      "name": "plugin.call_tool",
+      "params": {
+        "$ref": "#/$defs/CallToolParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ToolAnswer"
+      }
+    },
+    {
       "description": "Switch an installed plugin off without removing it.",
       "kind": "query",
       "name": "plugin.disable",
@@ -778,6 +910,17 @@
       }
     },
     {
+      "description": "Scaffold a plugin crate for one WIT world, with its manifest, CLAUDE.md, source template and fixture project.",
+      "kind": "query",
+      "name": "plugin.new",
+      "params": {
+        "$ref": "#/$defs/NewParams"
+      },
+      "result": {
+        "type": "object"
+      }
+    },
+    {
       "description": "Load an installed plugin again, re-registering its commands, effects and tools.",
       "kind": "query",
       "name": "plugin.reload",
@@ -808,6 +951,17 @@
       },
       "result": {
         "$ref": "#/$defs/Statuses"
+      }
+    },
+    {
+      "description": "Run the headless test harness over an installed plugin: every check its declared worlds call for, against a fixture project.",
+      "kind": "query",
+      "name": "plugin.test",
+      "params": {
+        "$ref": "#/$defs/TestParams"
+      },
+      "result": {
+        "type": "object"
       }
     },
     {

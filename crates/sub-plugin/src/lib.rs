@@ -196,6 +196,7 @@
 
 pub mod analyzer;
 pub mod audio;
+pub mod authoring;
 pub mod bindings;
 pub mod capability;
 mod convert;
@@ -219,6 +220,7 @@ pub use capability::{
 pub use manifest::{MANIFEST_FILE_NAME, Manifest, PluginId, World};
 
 pub use analyzer::{AnalysisContext, AnalysisJobs, Analyzer};
+pub use authoring::{NewParams, Scaffolder, TestParams, Tester};
 pub use bindings::Command;
 pub use bindings::analyzer::Analyzer as AnalyzerWorld;
 pub use bindings::analyzer::subordinate::plugin::analysis;
@@ -276,7 +278,7 @@ pub use convert::{
 };
 pub use dev::{
     DevHost, DevInstall, DevSource, DevWatcher, LinkMode, PluginArtifacts, ReloadError,
-    ReloadStatus, WatchHandle,
+    ReloadStatus, ToolAnswer, ToolCaller, WatchHandle,
 };
 pub use errors::{HINT, PluginErrorExt, WIT};
 pub use harness::{Check, CheckStatus, Harness, HarnessHost, TestReport};
@@ -462,4 +464,21 @@ pub mod codes {
     /// The directory a plugin would be installed into already holds a
     /// different plugin.
     pub const INSTALL_CONFLICT: ErrorCode = ErrorCode::from_static("plugin.install_conflict");
+}
+
+/// The WASM guest components this crate's build script compiles, for the tests
+/// that need one.
+///
+/// Only present under the `test-guests` feature, which is a test-only feature:
+/// the crate turns it on for its own tests, and a downstream crate whose tests
+/// need a real plugin — the MCP bridge's, which installs one and calls its tool
+/// (TASK-96) — turns it on in a dev-dependency. Each constant is `None` when
+/// the `wasm32-wasip2` standard library is not installed, so a test that needs
+/// a component can say so and skip rather than fail.
+#[cfg(feature = "test-guests")]
+pub mod guests {
+    /// A `command` plugin that edits the project it is given.
+    pub const EDITOR: Option<&str> = option_env!("SUB_PLUGIN_GUEST_EDITOR");
+    /// An `mcp-tools` plugin contributing one tool that creates a bin.
+    pub const TOOLBOX: Option<&str> = option_env!("SUB_PLUGIN_GUEST_TOOLBOX");
 }

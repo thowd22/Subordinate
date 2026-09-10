@@ -332,6 +332,19 @@ impl ToolCatalog {
         self.tools.get(tool).map(|compiled| &compiled.declaration)
     }
 
+    /// Every declaration in this catalogue, in name order.
+    ///
+    /// A loader that builds the catalogue from a manifest hands these back as
+    /// the load's [`crate::dev::PluginArtifacts::tools`], so the host rebuilds
+    /// exactly the catalogue the manifest describes rather than a second one
+    /// read from disk again.
+    pub fn declarations(&self) -> Vec<ToolDeclaration> {
+        self.tools
+            .values()
+            .map(|compiled| compiled.declaration.clone())
+            .collect()
+    }
+
     /// Every tool as the bridge should publish it, in name order.
     pub fn descriptors(&self) -> Vec<ToolDescriptor> {
         self.tools

@@ -21,9 +21,11 @@ use sub_command::Dispatcher;
 use sub_command::endpoint::{DEFAULT_INSTANCE, Endpoint};
 use sub_command::transport::Server;
 use sub_core::{ResultExt, SubResult, codes};
-use sub_edit::Engine;
+use sub_edit::{Engine, EngineHandle};
 use sub_model::{Project, json as project_json};
-use sub_plugin::dev::{self, DevHost, POLL_INTERVAL, WatchHandle};
+use sub_plugin::authoring;
+use sub_plugin::dev::{self, DevHost, POLL_INTERVAL, ToolCaller, WatchHandle};
+use sub_plugin::harness::Harness;
 use sub_plugin::registry::{self, PluginDirs, PluginRegistry};
 use sub_plugin::runtime::PluginRuntime;
 
@@ -74,7 +76,7 @@ pub fn serve(options: &Options, ready: impl FnOnce(&Value)) -> SubResult<Value> 
     let mut dispatcher = Dispatcher::new(engine.handle().clone());
     // The watcher lives as long as the server does: dropping the handle stops
     // the thread, so it is held here and not inside the setup.
-    let watching = install_plugin_methods(&mut dispatcher, options)?;
+    let watching = install_plugin_methods(&mut dispatcher, engine.handle(), options)?;
     let dispatcher = Arc::new(dispatcher);
     let served = run(options, &dispatcher, &name, ready);
     drop(watching);
@@ -87,20 +89,29 @@ pub fn serve(options: &Options, ready: impl FnOnce(&Value)) -> SubResult<Value> 
 /// Puts the plugin management methods on the dispatcher, so an agent manages
 /// plugins through the MCP bridge exactly as a user does through the CLI
 /// (docs/PLAN.md §6.4): `plugin.list`, `plugin.enable`, `plugin.disable` and
-/// `plugin.remove` from the registry, and `plugin.install`, `plugin.reload`
-/// and `plugin.status` from a [`DevHost`].
+/// `plugin.remove` from the registry, `plugin.install`, `plugin.reload`,
+/// `plugin.status` and `plugin.call_tool` from a [`DevHost`], and `plugin.new`
+/// and `plugin.test` from this crate's own scaffolder and test harness. That is
+/// the whole developer loop — scaffold, install, test, call — reachable from a
+/// conversation without a shell.
 ///
 /// It also starts watching whatever is dev-installed, so a rebuild while this
 /// server is up is picked up within a second without anyone asking for it; the
-/// returned handle stops that thread when it is dropped. This process runs no
-/// plugins, so its loader only compiles the component — enough to answer the
-/// caller with the structured error of a component that will not load.
+/// returned handle stops that thread when it is dropped. The loader compiles
+/// the component and takes the manifest's MCP tools, so `plugin.tools` lists
+/// what an agent may call and a call is validated before the plugin sees it;
+/// the component itself is entered only by `plugin.call_tool`.
+///
+/// A plugin tool runs against a dispatcher of its own, holding the engine's
+/// methods and *not* the plugin management ones: a plugin edits the project
+/// like any other client, and installs, removes or reloads nothing.
 ///
 /// A machine with no per-user data directory is served without any of them
 /// rather than not served at all: nothing else the Command API does depends on
 /// the plugin directories.
 fn install_plugin_methods(
     dispatcher: &mut Dispatcher,
+    engine: &EngineHandle,
     options: &Options,
 ) -> SubResult<Option<WatchHandle>> {
     let user = match options.plugin_dir.clone() {
@@ -124,9 +135,23 @@ fn install_plugin_methods(
     };
     let registry = Arc::new(PluginRegistry::new(dirs));
     registry::register_methods(dispatcher, Arc::clone(&registry))?;
+    install_authoring_methods(dispatcher, options);
 
     let host = match PluginRuntime::new() {
-        Ok(runtime) => DevHost::with_loader(registry, dev::compile_only_loader(runtime)),
+        Ok(runtime) => {
+            let host = DevHost::with_loader(registry, dev::manifest_tools_loader(runtime));
+            match tool_caller(engine) {
+                Ok(caller) => host.with_tool_caller(caller),
+                Err(error) => {
+                    tracing::warn!(
+                        code = error.code.as_str(),
+                        "plugin tools are listed but cannot be called: {}",
+                        error.message,
+                    );
+                    host
+                }
+            }
+        }
         Err(error) => {
             // A build with no wasm compiler still installs and lists plugins;
             // it just cannot check a component before handing it on.
@@ -141,6 +166,59 @@ fn install_plugin_methods(
     let host = Arc::new(Mutex::new(host));
     dev::register_methods(dispatcher, Arc::clone(&host))?;
     Ok(Some(dev::watch_and_reload(host, POLL_INTERVAL)))
+}
+
+/// The [`ToolCaller`] a plugin tool call runs through.
+///
+/// It is a [`Harness`] over a dispatcher of its own: the engine's methods, and
+/// nothing from the plugin management surface, so a plugin tool can edit the
+/// project — as ordinary undoable commands — but cannot install, reload or
+/// remove a plugin, its own included.
+///
+/// # Errors
+///
+/// `plugin.engine_failed` when this build has no wasm compiler.
+fn tool_caller(engine: &EngineHandle) -> SubResult<ToolCaller> {
+    let plugin_facing = Arc::new(Dispatcher::new(engine.clone()));
+    let harness = Harness::new(engine.clone(), plugin_facing)?;
+    Ok(dev::harness_tool_caller(Arc::new(harness)))
+}
+
+/// Puts `plugin.new` and `plugin.test` on the dispatcher, served by the same
+/// scaffolder and harness runner the `plugin new` and `plugin test`
+/// subcommands use.
+///
+/// A registration that fails is logged and skipped rather than fatal: an
+/// editor that cannot scaffold is still an editor, and the failure can only be
+/// a duplicate method name, which is a bug here.
+fn install_authoring_methods(dispatcher: &mut Dispatcher, options: &Options) {
+    let dirs = crate::plugin::Options {
+        user_dir: options.plugin_dir.clone(),
+        project: options.project.clone(),
+    };
+    let registered = authoring::register_methods(
+        dispatcher,
+        Arc::new(|params: &authoring::NewParams| {
+            crate::scaffold::new(&crate::scaffold::Options::from_params(params)?)
+        }),
+        Arc::new(move |params: &authoring::TestParams| {
+            crate::plugin_test::run(
+                params.id.as_str(),
+                &dirs,
+                &crate::plugin_test::Options {
+                    fixture: params.fixture.clone(),
+                    args: Some(params.args_json()?),
+                },
+            )
+        }),
+    );
+    if let Err(error) = registered {
+        tracing::warn!(
+            code = error.code.as_str(),
+            "plugin authoring is not served: {}",
+            error.message,
+        );
+    }
 }
 
 /// Binds the endpoint, announces it, waits for stdin to close and shuts down.
