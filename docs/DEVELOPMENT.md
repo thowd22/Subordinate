@@ -643,6 +643,34 @@ crates, `3` for dependencies, full debuginfo).
   adding a second compilation cache to any job, budget the Actions cache
   first — `gh api repos/thowd22/Subordinate/actions/cache/usage` reports the
   live total, and `gh cache list` shows what is filling it.
+- **The workspace's own crates are cached too (TASK-126).**
+  `Swatinem/rust-cache` by default strips this repository's crates out of
+  `target/` before saving and keeps only third-party dependencies, so a warm
+  no-change run still recompiled every workspace member and every test binary:
+  184 s of Build and 48 s of Clippy inside a 10m47s Linux job on rerun
+  34495825617. `cache-workspace-crates: true` keeps them, and `workspaces:`
+  adds `plugins/gain` — the reference plugin is its own one-package workspace,
+  so the root entry never covered its target directory. Cargo's fingerprints
+  still decide what is stale, so this only ever saves work; the cost is a
+  larger archive per OS, which removing sccache made room for. Watch it: the
+  three archives were 1.5 GB (Linux) and 1.25 GB (Windows) without the
+  workspace crates, and the budget is 10 GB for the whole repository. A
+  dependency bump changes the key and leaves the previous archive behind, but
+  a stale key is never restored from again, so it is the least recently used
+  entry and Actions evicts it first. Check
+  `gh api repos/thowd22/Subordinate/actions/cache/usage` if jobs start coming
+  up cold.
+- **Generated fixtures are cached (TASK-126).** `scripts/gen-fixtures.sh` is
+  pure x264 encode time — 16 s for the short set, another 129 s for the
+  10-minute long-GOP clip the A/V sync harness needs — and its output depends
+  on nothing but the script and the GStreamer version. One `actions/cache`
+  entry per OS, keyed on `runner.os`, `GST_VERSION` and
+  `hashFiles('scripts/gen-fixtures.sh')`, holds both sets; the save half is
+  gated on `main` and skipped on an exact hit, so pull requests restore and
+  never write. A partial restore is safe: the script keeps whatever files are
+  already on disk, regenerates only what is missing and always rewrites
+  `manifest.json`. Change the catalogue or a pipeline and the hash changes,
+  which regenerates everything once.
 - **Windows Defender.** A Windows-only step adds the workspace, `~/.cargo` and
   `~/.rustup` to the Defender exclusion list, plus `rustc.exe` and `link.exe`
   as processes. Hosted runners run as administrator, so this succeeds; it is
@@ -654,6 +682,15 @@ of the Build step together with the "cache hit"/"cache miss" line that
 had been raised to 60 as a stopgap. If a run ever approaches that again, check
 the cache usage total first — a repository over the 10 GB budget means the
 cache backend, not the code, is the problem.
+
+Where the Linux job's time went on rerun 34495825617, before the two caches
+above (10m47s in total): Build 184 s, long-fixture generation 129 s, Clippy
+48 s, Test 45 s, benchmark 36 s, GUI smoke 33 s, apt install 33 s, rust-cache
+restore 36 s, reference plugin 30 s, short fixtures 16 s, A/V sync 12 s, the
+rest under 10 s each. Read those numbers off any run with
+`gh api repos/thowd22/Subordinate/actions/runs/<id>/jobs` and the per-step
+`started_at`/`completed_at` pairs before optimising anything — the two steps
+worth attacking were not the ones the job's shape suggested.
 
 ## GPU CI (RunsOn)
 

@@ -78,10 +78,27 @@ jobs:
       # `save-if` restricts writes to main: pull requests restore main's
       # archive but never add an entry of their own, so the entry count stays
       # at one archive per OS instead of one per branch per OS.
+      #
+      # `cache-workspace-crates` is not the default and is deliberate. Left off,
+      # rust-cache strips this repository's own crates out of `target/` before
+      # saving and keeps only third-party dependencies, so a warm no-change run
+      # still recompiled all twenty-odd workspace members plus their test
+      # binaries: 184 s of Build and 48 s of Clippy out of a 10m47s Linux job on
+      # rerun 34495825617. Cargo's fingerprints decide what is stale, so keeping
+      # the workspace artifacts is safe; it costs a larger archive per OS, which
+      # the sccache removal above freed up room for.
+      #
+      # `workspaces` adds plugins/gain, the reference plugin's own one-package
+      # workspace, whose target directory the default (repository root) entry
+      # never covered.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-${{ matrix.os }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
+          workspaces: |
+            .
+            plugins/gain
 
       # Defender scans every object file cargo and the MSVC linker write under
       # target\, which is the other half of the Windows penalty. The hosted
@@ -184,8 +201,26 @@ jobs:
       # -------------------------------------------------------
 
       # ---------------- Test media fixtures (TASK-10) ----------------
-      # Fixtures are synthesised, never committed. The 10-minute long-GOP clip
-      # is deliberately not generated here; pass --long locally for that one.
+      # Fixtures are synthesised, never committed, and synthesising them is
+      # pure x264 encode time: 16 s for the short set and a further 129 s for
+      # the 10-minute long-GOP clip on Linux, measured on rerun 34495825617.
+      # Nothing about that output depends on the commit, only on the generator
+      # script and the GStreamer version, so both go in one cache entry per OS
+      # keyed on exactly those two things (TASK-126). A `--long` run on Linux
+      # puts the long clip in the same entry; Windows and macOS never generate
+      # it, and `runner.os` keeps their entries separate.
+      #
+      # Restore-only on pull requests, mirroring rust-cache above: one archive
+      # per OS, never one per branch per OS. A partial or empty restore is
+      # safe -- gen-fixtures.sh keeps whatever is already on disk and
+      # regenerates only what is missing, and always rewrites manifest.json.
+      - name: Restore the fixture cache
+        id: fixture-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: fixtures
+          key: fixtures-${{ runner.os }}-${{ env.GST_VERSION }}-${{ hashFiles('scripts/gen-fixtures.sh') }}
+
       - name: Generate test fixtures
         shell: bash
         run: ./scripts/gen-fixtures.sh
@@ -375,6 +410,16 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: ./scripts/gen-fixtures.sh --long
+
+      # Written here rather than at the end of the job so the entry covers the
+      # long clip too, and skipped entirely when the restore above was an exact
+      # hit (there would be nothing new to store).
+      - name: Save the fixture cache
+        if: github.ref == 'refs/heads/main' && steps.fixture-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: fixtures
+          key: ${{ steps.fixture-cache.outputs.cache-primary-key }}
 
       - name: A/V sync and drift harness (Linux)
         if: runner.os == 'Linux'
