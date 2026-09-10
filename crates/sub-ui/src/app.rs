@@ -29,6 +29,7 @@ use crate::diagnostics::DiagnosticsPanel;
 use crate::dock::{DockLayout, Panel, layout_menu_ui};
 use crate::keymap::LoadedKeymap;
 use crate::media_bin::MediaBinPanel;
+use crate::popout::{PopoutViewer, popout_menu_ui};
 use crate::shortcuts::{Action, ShortcutMap, ShortcutsWindow};
 use crate::timeline_panel::TimelinePanel;
 use crate::viewer::{TransportAction, ViewerAction, ViewerFrame, ViewerPanel};
@@ -88,6 +89,9 @@ pub struct SubordinateApp {
     compositor: Compositor,
     /// The viewer panel: picture, scrub bar and timecode.
     viewer: ViewerPanel,
+    /// The viewer's pop-out window, for a preview on a second display. It
+    /// paints the same compositor texture the docked panel does.
+    popout: PopoutViewer,
     /// The playback clock behind J, K, L and the space bar. It owns the
     /// playhead while playback runs; the viewer owns it the rest of the time,
     /// and the two are synchronised once a frame.
@@ -169,6 +173,7 @@ impl SubordinateApp {
             sequence,
             compositor,
             viewer,
+            popout: PopoutViewer::new(),
             scheduler,
             project: Project::new("Untitled"),
             media_bin: MediaBinPanel::new(),
@@ -228,6 +233,31 @@ impl SubordinateApp {
     /// The viewer panel, which owns the playhead.
     pub fn viewer(&mut self) -> &mut ViewerPanel {
         &mut self.viewer
+    }
+
+    /// The viewer's pop-out window.
+    pub fn popout(&mut self) -> &mut PopoutViewer {
+        &mut self.popout
+    }
+
+    /// Runs the pop-out window for this frame and applies what it saw.
+    ///
+    /// The pop-out shares the compositor's texture rather than compositing
+    /// again, so all that crosses back is the picture's handle one way and
+    /// the playback keys the other. Returns whether the playhead moved.
+    fn run_popout(&mut self, ctx: &egui::Context, preview: ViewerFrame) -> bool {
+        self.popout.publish(preview);
+        let open = self.popout.show(ctx, &self.keymap.map);
+        self.viewer.popped_out = open;
+        let mut moved = false;
+        for action in self.popout.take_actions() {
+            if let Some(viewer_action) = ViewerAction::for_action(action) {
+                moved |= self.viewer.state.apply(viewer_action);
+            } else if let Some(transport) = TransportAction::for_action(action) {
+                transport.apply(&mut self.scheduler);
+            }
+        }
+        moved
     }
 
     /// The keyboard map in force, after any `keymap.toml` overrides.
@@ -419,6 +449,7 @@ impl eframe::App for SubordinateApp {
             ));
             ui.menu_button("View", |ui| {
                 layout_menu_ui(ui, &mut self.layout);
+                popout_menu_ui(ui, &mut self.popout);
             });
             if ui.button("Hardware diagnostics").clicked() {
                 self.diagnostics.open = !self.diagnostics.open;
@@ -458,6 +489,11 @@ impl eframe::App for SubordinateApp {
         }
 
         let preview = self.composite();
+        // The pop-out runs before the dock, so the panel knows on this frame
+        // whether the picture is its to paint.
+        if self.run_popout(ui.ctx(), preview) {
+            self.needs_composite = true;
+        }
         if self.dock_ui(ui, preview) {
             self.needs_composite = true;
         }

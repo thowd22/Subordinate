@@ -16,6 +16,7 @@ pub mod media_bin;
 pub mod media_import;
 pub mod meter;
 pub mod plugins;
+pub mod popout;
 pub mod relink_dialog;
 pub mod sequence_tabs;
 pub mod shortcuts;
@@ -48,6 +49,10 @@ pub use meter::{
     PEAK_HOLD_SECONDS, WARN_COLOR, amplitude_fraction, amplitude_to_db, db_fraction,
 };
 pub use plugins::{EMPTY_LABEL, MENU_TITLE, PluginMenu, PluginMenuEntry, plugins_menu_ui};
+pub use popout::{
+    CLOSE_LABEL, OPEN_LABEL, POPOUT_TITLE, PopoutShared, PopoutViewer, is_playback_action,
+    playback_shortcuts, popout_content_ui, popout_menu_ui, popout_viewport_id, popout_viewport_ui,
+};
 pub use relink_dialog::{
     RELINK_JOB_KIND, RelinkDialog, is_certain, pick_replacement_file, pick_search_folder,
 };
@@ -68,7 +73,10 @@ pub use timeline_panel::{
     TrimmedEdges, WheelInput, clip_edits_allowed, strip_tiles,
 };
 pub use track_header::{HeaderLayout, MenuChoice, MenuEntry, TrackAction, TrackHeaderState};
-pub use viewer::{ViewerAction, ViewerFit, ViewerFrame, ViewerPanel, ViewerState};
+pub use viewer::{
+    POPPED_OUT_LABEL, TransportAction, ViewerAction, ViewerFit, ViewerFrame, ViewerPanel,
+    ViewerState, paint_picture,
+};
 pub use waveform::{
     CHANNEL_TEXELS, ClipWaveform, MAX_TEXTURE_TEXELS, WaveformCache, frames_per_pixel,
     level_for_zoom, waveform_image,
