@@ -48,12 +48,14 @@
 //! ```
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use sub_core::{SubError, SubResult};
-use sub_model::Project;
+use sub_model::{Project, SequenceId};
+use sub_time::{Rational, RationalTime, TimeRange};
 
 use crate::bus::{DEFAULT_EVENT_CAPACITY, EventBus, EventReceiver};
 use crate::codes;
@@ -61,6 +63,7 @@ use crate::command::{BoxedCommand, Command, CommandEnvelope, CommandRegistry};
 use crate::commands;
 use crate::event::{ChangeEvent, ChangeOrigin};
 use crate::history::{DEFAULT_DEPTH, History};
+use crate::playback::{PlaybackScheduler, PlayheadEvent, ShuttleSpeed};
 
 /// How the engine thread is set up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +116,66 @@ pub struct HistorySummary {
     pub in_group: bool,
 }
 
+/// One transport operation, as submitted to the engine.
+///
+/// Playback is engine state rather than project state, so these are requests
+/// on the queue instead of commands: nothing here is undoable and nothing here
+/// changes the project (docs/PLAN.md §5.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackOp {
+    /// L: play forward, shuttling faster on every repeat.
+    PlayForward,
+    /// J: play backwards, shuttling faster on every repeat.
+    PlayBackward,
+    /// K: stop where the playhead stands.
+    Pause,
+    /// Space: play at 1x forward, or pause if anything is playing.
+    Toggle,
+    /// Run at exactly this speed.
+    SetSpeed(ShuttleSpeed),
+    /// Move the playhead, without stopping playback.
+    Seek(RationalTime),
+    /// Set or clear the loop range.
+    SetLoopRange(Option<TimeRange>),
+    /// Set the timebase and the length the clock runs over.
+    SetTimebase {
+        /// The sequence timebase.
+        rate: Rational,
+        /// How long the sequence is.
+        duration: RationalTime,
+    },
+    /// Take the timebase and the length from a sequence of the project.
+    FollowSequence(SequenceId),
+    /// Ask for the transport state without changing it.
+    Status,
+}
+
+/// Where the transport is, as a caller or a transport bar reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackStatus {
+    /// Where the playhead is.
+    pub position: RationalTime,
+    /// How long the sequence being played is.
+    pub duration: RationalTime,
+    /// The shuttle speed.
+    pub speed: ShuttleSpeed,
+    /// Whether playback is running.
+    pub playing: bool,
+    /// The loop range in force, if any.
+    pub loop_range: Option<TimeRange>,
+    /// Frames dropped in this run of playback.
+    pub dropped_frames: u64,
+}
+
+/// The clock a new engine starts with: the first sequence of the project, or
+/// an empty one at 24 fps when the project has none yet.
+fn initial_scheduler(project: &Project) -> PlaybackScheduler {
+    project.sequences.first().map_or_else(
+        || PlaybackScheduler::new(Rational::FPS_24),
+        PlaybackScheduler::for_sequence,
+    )
+}
+
 /// The reply channel of one request.
 type Reply<T> = SyncSender<SubResult<T>>;
 
@@ -146,6 +209,10 @@ enum Request {
     History {
         reply: Reply<HistorySummary>,
     },
+    Playback {
+        op: PlaybackOp,
+        reply: Reply<PlaybackStatus>,
+    },
     Shutdown {
         reply: Reply<()>,
     },
@@ -158,6 +225,7 @@ struct Published {
     snapshot: Mutex<Arc<Project>>,
     revision: AtomicU64,
     bus: EventBus,
+    playhead: EventBus<PlayheadEvent>,
 }
 
 impl Published {
@@ -224,6 +292,7 @@ impl Engine {
             snapshot: Mutex::new(Arc::clone(&project)),
             revision: AtomicU64::new(0),
             bus: EventBus::new(config.event_capacity)?,
+            playhead: EventBus::new(config.event_capacity)?,
         });
 
         let (sender, receiver) = mpsc::channel();
@@ -232,11 +301,13 @@ impl Engine {
             .name("sub-engine".to_owned())
             .spawn(move || {
                 EngineThread {
+                    scheduler: initial_scheduler(&project),
                     project,
                     history,
                     registry,
                     published: thread_published,
                     group_events: Vec::new(),
+                    last_tick: None,
                 }
                 .run(&receiver);
             })
@@ -437,6 +508,103 @@ impl EngineHandle {
     }
 
     /// Sends one request and waits for its reply.
+    /// Subscribes to the playhead.
+    ///
+    /// This is a separate stream from [`EngineHandle::subscribe`]: playback
+    /// moves the playhead many times a second and none of those moves is a
+    /// project change, so an editing subscriber never has to filter them out.
+    #[must_use]
+    pub fn subscribe_playhead(&self) -> EventReceiver<PlayheadEvent> {
+        self.published.playhead.subscribe()
+    }
+
+    /// Runs one transport operation and returns the transport state.
+    ///
+    /// # Errors
+    ///
+    /// - `edit.engine_stopped` when the engine thread is gone.
+    /// - `edit.invalid_time` when a loop range covers no frames.
+    /// - `edit.sequence_not_found` when following a sequence the project does
+    ///   not hold.
+    pub fn playback(&self, op: PlaybackOp) -> SubResult<PlaybackStatus> {
+        self.request(|reply| Request::Playback { op, reply })
+    }
+
+    /// L: play forward, shuttling faster on every repeat.
+    ///
+    /// # Errors
+    ///
+    /// Returns `edit.engine_stopped` when the engine thread is gone.
+    pub fn play_forward(&self) -> SubResult<PlaybackStatus> {
+        self.playback(PlaybackOp::PlayForward)
+    }
+
+    /// J: play backwards, shuttling faster on every repeat.
+    ///
+    /// # Errors
+    ///
+    /// Returns `edit.engine_stopped` when the engine thread is gone.
+    pub fn play_backward(&self) -> SubResult<PlaybackStatus> {
+        self.playback(PlaybackOp::PlayBackward)
+    }
+
+    /// K: stop where the playhead stands.
+    ///
+    /// # Errors
+    ///
+    /// Returns `edit.engine_stopped` when the engine thread is gone.
+    pub fn pause_playback(&self) -> SubResult<PlaybackStatus> {
+        self.playback(PlaybackOp::Pause)
+    }
+
+    /// Space: play at 1x forward, or pause if anything is playing.
+    ///
+    /// # Errors
+    ///
+    /// Returns `edit.engine_stopped` when the engine thread is gone.
+    pub fn toggle_playback(&self) -> SubResult<PlaybackStatus> {
+        self.playback(PlaybackOp::Toggle)
+    }
+
+    /// Moves the playhead without stopping playback.
+    ///
+    /// # Errors
+    ///
+    /// Returns `edit.engine_stopped` when the engine thread is gone.
+    pub fn seek(&self, position: RationalTime) -> SubResult<PlaybackStatus> {
+        self.playback(PlaybackOp::Seek(position))
+    }
+
+    /// Sets or clears the loop range playback wraps around.
+    ///
+    /// # Errors
+    ///
+    /// - `edit.invalid_time` when the range covers no frames.
+    /// - `edit.engine_stopped` when the engine thread is gone.
+    pub fn set_loop_range(&self, range: Option<TimeRange>) -> SubResult<PlaybackStatus> {
+        self.playback(PlaybackOp::SetLoopRange(range))
+    }
+
+    /// Points the clock at a sequence of the project, taking its timebase and
+    /// its length.
+    ///
+    /// # Errors
+    ///
+    /// - `edit.sequence_not_found` when the project holds no such sequence.
+    /// - `edit.engine_stopped` when the engine thread is gone.
+    pub fn follow_sequence(&self, sequence: SequenceId) -> SubResult<PlaybackStatus> {
+        self.playback(PlaybackOp::FollowSequence(sequence))
+    }
+
+    /// Where the transport is, without changing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `edit.engine_stopped` when the engine thread is gone.
+    pub fn playback_status(&self) -> SubResult<PlaybackStatus> {
+        self.playback(PlaybackOp::Status)
+    }
+
     fn request<T>(&self, build: impl FnOnce(Reply<T>) -> Request) -> SubResult<T> {
         let (reply, replies) = sync_channel(1);
         self.requests.send(build(reply)).map_err(|_| stopped())?;
@@ -459,18 +627,112 @@ struct EngineThread {
     registry: CommandRegistry,
     published: Arc<Published>,
     group_events: Vec<ChangeEvent>,
+    /// The playback clock. It is engine state but not project state: the
+    /// playhead is where the user is looking, so it is not a command and is
+    /// never undone.
+    scheduler: PlaybackScheduler,
+    /// When the clock was last advanced, so a wake-up knows how much wall
+    /// time it has to account for.
+    last_tick: Option<Instant>,
 }
 
 impl EngineThread {
     /// Serves requests until a shutdown or until every handle is dropped, then
     /// closes the event bus so subscribers stop waiting.
     fn run(mut self, requests: &Receiver<Request>) {
-        while let Ok(request) = requests.recv() {
-            if self.serve(request) {
+        loop {
+            // While playing, the thread waits only until the next frame is
+            // due; the tick that follows accounts for however long it really
+            // waited, so a late wake-up drops frames instead of slowing the
+            // clock down.
+            let request = match self.scheduler.time_until_next_frame() {
+                Some(wait) => match requests.recv_timeout(wait) {
+                    Ok(request) => Some(request),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                },
+                None => match requests.recv() {
+                    Ok(request) => Some(request),
+                    Err(mpsc::RecvError) => break,
+                },
+            };
+            self.tick();
+            if let Some(request) = request
+                && self.serve(request)
+            {
                 break;
             }
         }
         self.published.bus.close();
+        self.published.playhead.close();
+    }
+
+    /// Advances the playback clock by the wall time since the last wake-up and
+    /// publishes the playhead when it moved.
+    fn tick(&mut self) {
+        let now = Instant::now();
+        let previous = self.last_tick.replace(now);
+        if !self.scheduler.is_playing() {
+            return;
+        }
+        let elapsed = previous.map_or(Duration::ZERO, |then| now.saturating_duration_since(then));
+        if let Some(tick) = self.scheduler.advance(elapsed) {
+            self.publish_playhead(tick.wrapped);
+        }
+    }
+
+    /// Applies one transport operation and reports the transport state.
+    fn playback(&mut self, op: PlaybackOp) -> SubResult<PlaybackStatus> {
+        match op {
+            PlaybackOp::Status => return Ok(self.playback_status()),
+            PlaybackOp::PlayForward => self.scheduler.play_forward(),
+            PlaybackOp::PlayBackward => self.scheduler.play_backward(),
+            PlaybackOp::Pause => self.scheduler.pause(),
+            PlaybackOp::Toggle => self.scheduler.toggle(),
+            PlaybackOp::SetSpeed(speed) => self.scheduler.set_speed(speed),
+            PlaybackOp::Seek(position) => self.scheduler.seek(position),
+            PlaybackOp::SetLoopRange(range) => self.scheduler.set_loop_range(range)?,
+            PlaybackOp::SetTimebase { rate, duration } => {
+                self.scheduler.set_rate(rate);
+                self.scheduler.set_duration(duration);
+            }
+            PlaybackOp::FollowSequence(id) => {
+                let sequence = self
+                    .project
+                    .sequences
+                    .iter()
+                    .find(|sequence| sequence.id == id)
+                    .ok_or_else(|| {
+                        SubError::new(codes::SEQUENCE_NOT_FOUND, "no such sequence")
+                            .with_detail("sequence", id.to_string())
+                    })?;
+                self.scheduler.follow_sequence(sequence);
+            }
+        }
+        // The clock starts from this moment, not from whenever the thread
+        // last woke, so pressing play does not immediately drop frames.
+        self.last_tick = Some(Instant::now());
+        self.publish_playhead(false);
+        Ok(self.playback_status())
+    }
+
+    /// The transport state, as a caller reads it back.
+    fn playback_status(&self) -> PlaybackStatus {
+        PlaybackStatus {
+            position: self.scheduler.position(),
+            duration: self.scheduler.duration(),
+            speed: self.scheduler.speed(),
+            playing: self.scheduler.is_playing(),
+            loop_range: self.scheduler.loop_range(),
+            dropped_frames: self.scheduler.dropped_frames(),
+        }
+    }
+
+    /// Broadcasts where the playhead is now.
+    fn publish_playhead(&self, wrapped: bool) {
+        self.published
+            .playhead
+            .publish([self.scheduler.event(wrapped)]);
     }
 
     /// Handles one request, returning true when the engine should stop.
@@ -513,6 +775,10 @@ impl EngineThread {
             Request::History { reply } => {
                 let summary = self.summary();
                 send(&reply, Ok(summary));
+            }
+            Request::Playback { op, reply } => {
+                let result = self.playback(op);
+                send(&reply, result);
             }
             Request::Shutdown { reply } => {
                 send(&reply, Ok(()));
@@ -693,6 +959,136 @@ mod tests {
             kind: TrackKind::Video,
             index: None,
         }
+    }
+
+    #[test]
+    fn the_transport_shuttles_and_reports_where_it_is() {
+        let (project, sequence) = fixture();
+        let engine = Engine::spawn(project).unwrap();
+        let handle = engine.handle();
+        // Following the sequence takes its timebase; it is empty, so the
+        // length is set explicitly afterwards.
+        handle.follow_sequence(sequence).unwrap();
+        handle
+            .playback(PlaybackOp::SetTimebase {
+                rate: Rational::FPS_24,
+                duration: RationalTime::new(240, Rational::FPS_24),
+            })
+            .unwrap();
+
+        let status = handle.play_forward().unwrap();
+        assert_eq!(status.speed, ShuttleSpeed::Forward1x);
+        assert!(status.playing);
+        assert_eq!(
+            handle.play_forward().unwrap().speed,
+            ShuttleSpeed::Forward2x
+        );
+        assert_eq!(
+            handle.play_backward().unwrap().speed,
+            ShuttleSpeed::Reverse1x
+        );
+
+        let status = handle.pause_playback().unwrap();
+        assert!(!status.playing);
+        assert_eq!(handle.playback_status().unwrap(), status);
+
+        let status = handle
+            .seek(RationalTime::new(48, Rational::FPS_24))
+            .unwrap();
+        assert_eq!(status.position, RationalTime::new(48, Rational::FPS_24));
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn the_playhead_is_published_as_an_engine_event() {
+        let (project, _) = fixture();
+        let engine = Engine::spawn(project).unwrap();
+        let handle = engine.handle();
+        let playhead = handle.subscribe_playhead();
+        let edits = handle.subscribe();
+
+        handle
+            .playback(PlaybackOp::SetTimebase {
+                rate: Rational::FPS_24,
+                duration: RationalTime::new(240, Rational::FPS_24),
+            })
+            .unwrap();
+        let event = playhead.recv().unwrap();
+        assert_eq!(event.position, RationalTime::new(0, Rational::FPS_24));
+        assert!(!event.playing);
+
+        handle.play_forward().unwrap();
+        assert!(playhead.recv().unwrap().playing);
+
+        // The clock runs on the engine thread: a few frames later the
+        // playhead has moved on its own, and nothing about it was a project
+        // change, so the editing stream stayed silent.
+        let moved = playhead
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the clock should publish a frame");
+        assert!(moved.position.value() > 0, "{moved:?}");
+        assert_eq!(moved.speed, ShuttleSpeed::Forward1x);
+        assert_eq!(edits.try_recv(), None);
+
+        handle.pause_playback().unwrap();
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn playing_off_the_end_stops_and_looping_wraps() {
+        let (project, _) = fixture();
+        let engine = Engine::spawn(project).unwrap();
+        let handle = engine.handle();
+        handle
+            .playback(PlaybackOp::SetTimebase {
+                rate: Rational::FPS_24,
+                duration: RationalTime::new(2, Rational::FPS_24),
+            })
+            .unwrap();
+        handle.play_forward().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let stopped = loop {
+            let status = handle.playback_status().unwrap();
+            if !status.playing {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "playback never reached the end");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(stopped.position, RationalTime::new(1, Rational::FPS_24));
+
+        let range = TimeRange::from_start_end(
+            RationalTime::new(0, Rational::FPS_24),
+            RationalTime::new(2, Rational::FPS_24),
+        )
+        .unwrap();
+        let status = handle.set_loop_range(Some(range)).unwrap();
+        assert_eq!(status.loop_range, Some(range));
+        handle.seek(RationalTime::new(0, Rational::FPS_24)).unwrap();
+        handle.play_forward().unwrap();
+        thread::sleep(Duration::from_millis(300));
+        // With a loop range in force it is still running several seconds of
+        // frames later, rather than having stopped at the end.
+        assert!(handle.playback_status().unwrap().playing);
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn an_empty_loop_range_and_an_unknown_sequence_are_refused() {
+        let (project, _) = fixture();
+        let engine = Engine::spawn(project).unwrap();
+        let handle = engine.handle();
+        let empty = TimeRange::empty_at(RationalTime::new(0, Rational::FPS_24));
+        assert_eq!(
+            handle.set_loop_range(Some(empty)).unwrap_err().code,
+            codes::INVALID_TIME
+        );
+        assert_eq!(
+            handle.follow_sequence(SequenceId::new()).unwrap_err().code,
+            codes::SEQUENCE_NOT_FOUND
+        );
+        engine.shutdown().unwrap();
     }
 
     #[test]
