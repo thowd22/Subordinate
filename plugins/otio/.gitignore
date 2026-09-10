@@ -1,0 +1,3 @@
+# The built component, copied next to its manifest so `plugin install <dir>`
+# finds the pair. See README.md.
+otio-*/plugin.wasm

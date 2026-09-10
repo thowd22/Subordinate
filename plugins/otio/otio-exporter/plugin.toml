@@ -1,0 +1,15 @@
+# What the host reads before any of this plugin's code runs (docs/PLAN.md §6.3).
+[plugin]
+id = "com.subordinate.otio-export"
+name = "OpenTimelineIO Export"
+version = "0.1.0"
+api = "0.1"
+# The `command` world, not `exporter`: `exporter` contributes encoder presets,
+# and writing an OTIO document encodes nothing. See src/lib.rs.
+worlds = ["command"]
+
+[capabilities]
+# It writes the document into the open project's folder, which the host mounts
+# at /project. No network, no shaders.
+fs_write = ["$PROJECT"]
+network = false

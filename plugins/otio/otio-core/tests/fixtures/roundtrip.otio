@@ -1,0 +1,293 @@
+{
+  "OTIO_SCHEMA": "Timeline.1",
+  "name": "Edit",
+  "global_start_time": {
+    "OTIO_SCHEMA": "RationalTime.1",
+    "rate": 23.976023976023978,
+    "value": 0.0
+  },
+  "tracks": {
+    "OTIO_SCHEMA": "Stack.1",
+    "name": "tracks",
+    "children": [
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "name": "V1",
+        "kind": "Video",
+        "source_range": {
+          "OTIO_SCHEMA": "TimeRange.1",
+          "start_time": {
+            "OTIO_SCHEMA": "RationalTime.1",
+            "rate": 23.976023976023978,
+            "value": 0.0
+          },
+          "duration": {
+            "OTIO_SCHEMA": "RationalTime.1",
+            "rate": 23.976023976023978,
+            "value": 208.0
+          }
+        },
+        "children": [
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "Wide",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976023976023978,
+                "value": 0.0
+              },
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976023976023978,
+                "value": 48.0
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "footage/wide.mov"
+            },
+            "enabled": true,
+            "metadata": {
+              "subordinate": {
+                "clip_id": "018f3c2e-0000-7000-8000-000000006001",
+                "media_id": "018f3c2e-0000-7000-8000-000000002001"
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Transition.1",
+            "name": "Crossfade",
+            "transition_type": "SMPTE_Dissolve",
+            "in_offset": {
+              "OTIO_SCHEMA": "RationalTime.1",
+              "rate": 23.976023976023978,
+              "value": 12.0
+            },
+            "out_offset": {
+              "OTIO_SCHEMA": "RationalTime.1",
+              "rate": 23.976023976023978,
+              "value": 12.0
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "Close",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976023976023978,
+                "value": 24.0
+              },
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976023976023978,
+                "value": 96.0
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "footage/close.mov"
+            },
+            "markers": [
+              {
+                "OTIO_SCHEMA": "Marker.2",
+                "name": "eyeline",
+                "marked_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "start_time": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 23.976023976023978,
+                    "value": 40.0
+                  },
+                  "duration": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 23.976023976023978,
+                    "value": 0.0
+                  }
+                },
+                "color": "RED",
+                "comment": "check the eyeline against the wide",
+                "metadata": {
+                  "subordinate": {
+                    "marker_id": "018f3c2e-0000-7000-8000-000000007001"
+                  }
+                }
+              }
+            ],
+            "enabled": true,
+            "metadata": {
+              "subordinate": {
+                "clip_id": "018f3c2e-0000-7000-8000-000000006002",
+                "media_id": "018f3c2e-0000-7000-8000-000000002002"
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Gap.1",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976023976023978,
+                "value": 0.0
+              },
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976023976023978,
+                "value": 24.0
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "Wide (tail)",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976023976023978,
+                "value": 100.0
+              },
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976023976023978,
+                "value": 40.0
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "footage/wide.mov"
+            },
+            "enabled": true,
+            "metadata": {
+              "subordinate": {
+                "clip_id": "018f3c2e-0000-7000-8000-000000006003",
+                "media_id": "018f3c2e-0000-7000-8000-000000002001"
+              }
+            }
+          }
+        ],
+        "enabled": true,
+        "metadata": {
+          "subordinate": {
+            "locked": false,
+            "track_id": "018f3c2e-0000-7000-8000-000000005001"
+          }
+        }
+      },
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "name": "A1",
+        "kind": "Audio",
+        "source_range": {
+          "OTIO_SCHEMA": "TimeRange.1",
+          "start_time": {
+            "OTIO_SCHEMA": "RationalTime.1",
+            "rate": 23.976023976023978,
+            "value": 0.0
+          },
+          "duration": {
+            "OTIO_SCHEMA": "RationalTime.1",
+            "rate": 23.976023976023978,
+            "value": 212.0
+          }
+        },
+        "children": [
+          {
+            "OTIO_SCHEMA": "Gap.1",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976023976023978,
+                "value": 0.0
+              },
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976023976023978,
+                "value": 12.0
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "Room tone",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976023976023978,
+                "value": 0.0
+              },
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976023976023978,
+                "value": 200.0
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "audio/room-tone.wav"
+            },
+            "enabled": true,
+            "metadata": {
+              "subordinate": {
+                "clip_id": "018f3c2e-0000-7000-8000-000000006004",
+                "media_id": "018f3c2e-0000-7000-8000-000000002003"
+              }
+            }
+          }
+        ],
+        "enabled": false,
+        "metadata": {
+          "subordinate": {
+            "locked": false,
+            "track_id": "018f3c2e-0000-7000-8000-000000005002"
+          }
+        }
+      }
+    ],
+    "markers": [
+      {
+        "OTIO_SCHEMA": "Marker.2",
+        "name": "act one",
+        "marked_range": {
+          "OTIO_SCHEMA": "TimeRange.1",
+          "start_time": {
+            "OTIO_SCHEMA": "RationalTime.1",
+            "rate": 23.976023976023978,
+            "value": 0.0
+          },
+          "duration": {
+            "OTIO_SCHEMA": "RationalTime.1",
+            "rate": 23.976023976023978,
+            "value": 48.0
+          }
+        },
+        "color": "RED",
+        "comment": "",
+        "metadata": {
+          "subordinate": {
+            "marker_id": "018f3c2e-0000-7000-8000-000000007002"
+          }
+        }
+      }
+    ],
+    "enabled": true
+  },
+  "metadata": {
+    "subordinate": {
+      "project_id": "018f3c2e-0000-7000-8000-000000001001",
+      "project_name": "Demo",
+      "resolution": {
+        "height": 1080,
+        "width": 1920
+      },
+      "sample_rate": 48000,
+      "sequence_id": "018f3c2e-0000-7000-8000-000000004001"
+    }
+  }
+}
