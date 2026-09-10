@@ -17,5 +17,13 @@ schemars = "1"
 tracing = "0.1"
 interprocess = { version = "2", default-features = false }
 
+# The phase 2 exit criterion (tests/end_to_end_edit.rs) assembles an edit over
+# the Command API and then renders a frame of it, so the test build takes the
+# compositor and the wgpu types a frame source is built from.
+[dev-dependencies]
+sub-render = { path = "../sub-render" }
+sub-time = { path = "../sub-time" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan", "metal", "dx12", "webgpu"] }
+
 [lints]
 workspace = true
