@@ -22,7 +22,7 @@ use sub_model::ClipId;
 use sub_model::params::{Fixed6, Point2, Scale2};
 use sub_model::{
     Clip, Gap, MediaId, Opacity, Resolution, Sequence, SequenceSettings, Track, TrackKind,
-    Transform,
+    Transform, Transition,
 };
 use sub_render::{Compositor, FrameSummary, RenderContext, RenderError, ResolvedClip, SourceFrame};
 use sub_time::{Rational, RationalTime, TimeRange};
@@ -666,4 +666,97 @@ fn the_target_is_both_sampleable_and_readable() {
 
     let error = pollster::block_on(error_scope.pop());
     assert!(error.is_none(), "sharing the target raised {error:?}");
+}
+
+/// A one-track sequence of a red clip and a green one, butt-joined at frame
+/// 10 with a four-frame crossfade over the cut, composited at `frame`.
+///
+/// Both clips are cut from the middle of their sources, so each has handle
+/// for the blend to read into; the frame source keys on the clip, so each side
+/// of the blend gets its own solid colour whatever source time is asked for.
+fn composite_crossfade(context: &RenderContext, frame: i64) -> (Vec<u8>, FrameSummary) {
+    let settings = SequenceSettings::new(
+        Resolution::new(64, 64).expect("the test canvas is non-zero"),
+        Rational::FPS_24,
+        48_000,
+        sub_model::ColorTags::REC709,
+    )
+    .expect("48 kHz is a valid sample rate");
+    let frames = |value| RationalTime::new(value, Rational::FPS_24);
+    let source_range =
+        |start| TimeRange::new(frames(start), frames(10)).expect("ten frames is a valid range");
+
+    let outgoing = Clip::new("a", MediaId::new(), source_range(20));
+    let incoming = Clip::new("b", MediaId::new(), source_range(80));
+    let pictures = [
+        (outgoing.id, solid_source(context, RED)),
+        (incoming.id, solid_source(context, GREEN)),
+    ];
+
+    let mut track = Track::new("V1", TrackKind::Video);
+    track.items.push(outgoing.into());
+    track
+        .items
+        .push(Transition::crossfade(frames(2), frames(2)).into());
+    track.items.push(incoming.into());
+    let mut sequence = Sequence::new("Main", settings);
+    sequence.tracks.push(track);
+
+    let device = context.device();
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut compositor = Compositor::for_sequence(context.clone(), &sequence);
+    let mut source = |resolved: &ResolvedClip<'_>| {
+        pictures
+            .iter()
+            .find(|(id, _)| *id == resolved.clip_id())
+            .map(|(_, view)| SourceFrame::new(view.clone(), 64, 64))
+    };
+    let summary = compositor.render(&sequence, frames(frame), &mut source);
+    let pixels = compositor.read_rgba();
+    let error = pollster::block_on(error_scope.pop());
+    assert!(
+        error.is_none(),
+        "compositing the crossfade raised {error:?}"
+    );
+    (pixels, summary)
+}
+
+#[test]
+fn a_crossfade_dissolves_one_clip_into_the_other() {
+    let Some((_driver, context)) = context_or_skip() else {
+        return;
+    };
+
+    // Before the blend: the outgoing clip alone, at its own source time.
+    let (pixels, summary) = composite_crossfade(&context, 7);
+    assert_eq!(summary.drawn(), 1, "one clip outside the blend");
+    assert_pixel(&pixels, 64, 32, 32, RED, "before the dissolve");
+
+    // At the cut, half way through: both clips are drawn, the incoming one at
+    // half weight. Half of linear 1.0 is what the sRGB target encodes as 188,
+    // the same half the opacity test above reads back.
+    let (pixels, summary) = composite_crossfade(&context, 10);
+    assert_eq!(summary.layers.len(), 2, "both sides of the cut are drawn");
+    assert_eq!(summary.drawn(), 2);
+    let opacities: Vec<f32> = summary.layers.iter().map(|layer| layer.opacity).collect();
+    assert!(
+        (opacities[0] - 1.0).abs() < 0.001 && (opacities[1] - 0.5).abs() < 0.001,
+        "the outgoing clip stays whole and the incoming one is half way in: {opacities:?}"
+    );
+    assert_pixel(&pixels, 64, 32, 32, [188, 188, 0, 255], "half way through");
+
+    // Each side reads through its own placement while the blend runs: at the
+    // cut the outgoing clip is two frames past its out point, into its tail
+    // handle, and the incoming one is at its own in point.
+    let sources: Vec<i64> = summary
+        .layers
+        .iter()
+        .map(|layer| layer.source_time.value())
+        .collect();
+    assert_eq!(sources, vec![30, 80]);
+
+    // Past the blend: the incoming clip alone.
+    let (pixels, summary) = composite_crossfade(&context, 12);
+    assert_eq!(summary.drawn(), 1, "one clip again");
+    assert_pixel(&pixels, 64, 32, 32, GREEN, "after the dissolve");
 }

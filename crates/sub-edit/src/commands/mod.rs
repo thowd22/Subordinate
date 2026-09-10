@@ -29,6 +29,7 @@ pub mod media;
 pub mod params;
 pub mod sequence;
 pub mod track;
+pub mod transition;
 
 use sub_core::{SubError, SubResult};
 use sub_model::{
@@ -50,6 +51,7 @@ pub use sequence::{
 pub use track::{
     AddTrack, InsertTrack, RemoveTrack, RenameTrack, ReorderTrack, SetTrackLocked, SetTrackMuted,
 };
+pub use transition::{AddTransition, RemoveTransition, fit_crossfade};
 
 use crate::CommandRegistry;
 
@@ -106,6 +108,8 @@ pub fn register_builtin(registry: &mut CommandRegistry) -> SubResult<()> {
     registry.register::<RenameBin>()?;
     registry.register::<MoveToBin>()?;
     registry.register::<MoveBin>()?;
+    registry.register::<AddTransition>()?;
+    registry.register::<RemoveTransition>()?;
     Ok(())
 }
 
@@ -393,6 +397,8 @@ mod tests {
                 "track.reorder",
                 "track.set_locked",
                 "track.set_muted",
+                "transition.add",
+                "transition.remove",
             ]
         );
 

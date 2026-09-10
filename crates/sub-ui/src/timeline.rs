@@ -476,6 +476,27 @@ pub struct ClipPlacement {
     pub range: TimeRange,
 }
 
+/// Where one crossfade sits: the cut it blends across, and the span of
+/// sequence time it covers.
+///
+/// A transition occupies no track time of its own — it overlaps the clips
+/// either side of the cut — so unlike a [`ClipPlacement`] its range is not
+/// the item's own duration but the blend the compositor performs, from
+/// `cut - in_offset` to `cut + out_offset`. That is the region the timeline
+/// draws and the region a drag on it grabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransitionPlacement {
+    /// The clip the blend fades into, which is how the commands address the
+    /// cut ([`sub_edit::commands::AddTransition`]).
+    pub clip: ClipId,
+    /// The transition's position in [`Track::items`].
+    pub item_index: usize,
+    /// The cut the blend is centred on.
+    pub cut: RationalTime,
+    /// The span the blend covers in sequence time.
+    pub range: TimeRange,
+}
+
 /// A track's clips indexed by the time they occupy, so a viewport query is a
 /// binary search rather than a walk.
 ///
@@ -489,6 +510,10 @@ pub struct ClipPlacement {
 pub struct TrackLayout {
     /// Every clip on the track, ordered by start, spans never overlapping.
     placements: Vec<ClipPlacement>,
+    /// Every crossfade on the track, ordered by the cut it sits on. There
+    /// are far fewer of these than clips, and they overlap the clips either
+    /// side, so they are kept beside the clip index rather than in it.
+    transitions: Vec<TransitionPlacement>,
 }
 
 impl TrackLayout {
@@ -499,18 +524,69 @@ impl TrackLayout {
     /// never a second copy of the truth.
     #[must_use]
     pub fn build(track: &Track, rate: Rational) -> Self {
-        let placements = track
-            .placements(rate)
+        let items: Vec<_> = track.placements(rate).collect();
+        let placements = items
+            .iter()
             .enumerate()
             .filter_map(|(item_index, (item, range))| {
                 item.as_clip().map(|clip| ClipPlacement {
                     clip: clip.id,
                     item_index,
-                    range,
+                    range: *range,
                 })
             })
             .collect();
-        Self { placements }
+        let transitions = items
+            .iter()
+            .enumerate()
+            .filter_map(|(item_index, (item, range))| {
+                let transition = item.as_transition()?;
+                // A transition addresses the clip it fades into, which is the
+                // next item along; one with nothing after it blends nothing
+                // and is not drawn.
+                let clip = items.get(item_index + 1)?.0.as_clip()?;
+                let cut = range.start();
+                let span = TimeRange::from_start_end(
+                    cut.checked_sub(transition.in_offset())?,
+                    cut.checked_add(transition.out_offset())?,
+                )?;
+                Some(TransitionPlacement {
+                    clip: clip.id,
+                    item_index,
+                    cut,
+                    range: span,
+                })
+            })
+            .collect();
+        Self {
+            placements,
+            transitions,
+        }
+    }
+
+    /// Every crossfade on the track, in track order.
+    #[must_use]
+    pub fn transitions(&self) -> &[TransitionPlacement] {
+        &self.transitions
+    }
+
+    /// The crossfade covering `time`, if the track has one there.
+    ///
+    /// Half-open like every other span here: a blend ending exactly at `time`
+    /// no longer covers it.
+    #[must_use]
+    pub fn transition_at(&self, time: RationalTime) -> Option<&TransitionPlacement> {
+        self.transitions
+            .iter()
+            .find(|placement| placement.range.contains(time))
+    }
+
+    /// The crossfade at the cut before the clip `clip`, if there is one.
+    #[must_use]
+    pub fn transition_of(&self, clip: ClipId) -> Option<&TransitionPlacement> {
+        self.transitions
+            .iter()
+            .find(|placement| placement.clip == clip)
     }
 
     /// Every indexed clip, in track order.

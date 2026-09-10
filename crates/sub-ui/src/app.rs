@@ -877,6 +877,19 @@ impl SubordinateApp {
                         group.len()
                     );
                 }
+                if let Some(refusal) = response.transition_refused {
+                    log::debug!("crossfade drag refused: {}", refusal.id());
+                }
+                if let Some(drag) = response.transition {
+                    // Planned, not applied, like every other edit here: it
+                    // goes through `transition::apply_transition` so changing
+                    // a crossfade's duration is one entry in the undo stack.
+                    log::debug!(
+                        "crossfade is not wired up yet: {} ({})",
+                        drag.label(),
+                        drag.fitted.duration()
+                    );
+                }
                 if let Some(refusal) = response.split_refused {
                     log::debug!("clip split refused: {}", refusal.id());
                 }
