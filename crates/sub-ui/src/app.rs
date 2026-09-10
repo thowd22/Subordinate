@@ -10,6 +10,7 @@ use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
 use sub_core::SubError;
+use sub_edit::playback::PlaybackScheduler;
 use sub_model::sequence::{Resolution, Sequence, SequenceSettings};
 use sub_render::{
     Compositor, RenderContext, RenderError, ResolvedClip, SourceFrame, describe_adapter,
@@ -17,6 +18,7 @@ use sub_render::{
 };
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use sub_audio::mixer::{MixGraphBuilder, MixerConfig, mixer};
 use sub_audio::{AudioOutput, CpalBackend, MeterBank, OutputOptions};
@@ -25,7 +27,7 @@ use crate::audio_settings::{AudioSettingsAction, AudioSettingsPanel};
 use crate::diagnostics::DiagnosticsPanel;
 use crate::keymap::LoadedKeymap;
 use crate::shortcuts::{Action, ShortcutMap, ShortcutsWindow};
-use crate::viewer::{ViewerAction, ViewerFrame, ViewerPanel};
+use crate::viewer::{TransportAction, ViewerAction, ViewerFrame, ViewerPanel};
 
 /// How many tracks the shared meter bank has room for. A sequence with more
 /// audio tracks than this still plays; the tracks past it are unmetered.
@@ -82,6 +84,10 @@ pub struct SubordinateApp {
     compositor: Compositor,
     /// The viewer panel: picture, scrub bar and timecode.
     viewer: ViewerPanel,
+    /// The playback clock behind J, K, L and the space bar. It owns the
+    /// playhead while playback runs; the viewer owns it the rest of the time,
+    /// and the two are synchronised once a frame.
+    scheduler: PlaybackScheduler,
     /// The compositor output as egui knows it, and the canvas it was
     /// registered at, so a resolution change re-registers rather than
     /// stretching a texture that no longer exists.
@@ -129,6 +135,7 @@ impl SubordinateApp {
         let sequence = Sequence::new("Sequence", SequenceSettings::default());
         let compositor = Compositor::for_sequence(render.clone(), &sequence);
         let viewer = ViewerPanel::for_sequence(&sequence);
+        let scheduler = PlaybackScheduler::for_sequence(&sequence);
         let meters = Arc::new(MeterBank::new(METERED_TRACKS));
         let audio = audio_output(sequence.settings.sample_rate, Arc::clone(&meters));
         Ok(Self {
@@ -144,6 +151,7 @@ impl SubordinateApp {
             sequence,
             compositor,
             viewer,
+            scheduler,
             preview: None,
             needs_composite: true,
             keymap,
@@ -220,6 +228,9 @@ impl SubordinateApp {
         for action in self.keymap.map.poll(ctx) {
             if let Some(viewer_action) = ViewerAction::for_action(action) {
                 moved |= self.viewer.state.apply(viewer_action);
+            } else if let Some(transport) = TransportAction::for_action(action) {
+                transport.apply(&mut self.scheduler);
+                log::debug!("transport now {}", self.scheduler.speed().label());
             } else if action == Action::ShowShortcutHelp {
                 self.shortcuts_window.toggle();
             } else {
@@ -229,11 +240,40 @@ impl SubordinateApp {
         moved
     }
 
+    /// Runs the playback clock for this frame and returns whether the
+    /// playhead moved.
+    ///
+    /// The clock is the master while it plays: it is advanced by the wall time
+    /// egui reports for the frame, and whichever frame it lands on becomes the
+    /// viewer's playhead. Any other move — a scrub, a frame step — is fed the
+    /// other way, so playback resumes from wherever the user left the
+    /// playhead. Frames the clock skips because a frame took too long are
+    /// dropped and counted by the scheduler rather than slowing playback down.
+    fn run_transport(&mut self, ctx: &egui::Context, elapsed: Duration) -> bool {
+        self.scheduler.set_duration(self.viewer.state.duration());
+        if !self.scheduler.is_playing() {
+            self.scheduler.seek(self.viewer.state.playhead());
+            return false;
+        }
+        if self.scheduler.position() != self.viewer.state.playhead() {
+            // The user scrubbed or stepped while playing; carry on from there.
+            self.scheduler.seek(self.viewer.state.playhead());
+        }
+        let moved = self
+            .scheduler
+            .advance(elapsed)
+            .is_some_and(|tick| self.viewer.state.seek_to(tick.position));
+        // Playback only looks like playback if the next frame is asked for.
+        ctx.request_repaint();
+        moved
+    }
+
     /// Composites the sequence at the playhead, if the playhead has moved,
     /// and returns the picture the viewer should sample.
     ///
-    /// The frame source is empty until the playback scheduler (TASK-23)
-    /// supplies decoded pictures, so today every clip resolves to "no picture
+    /// The playback clock now moves the playhead, but nothing feeds decoded
+    /// pictures to the compositor yet: the frame source stays empty until the
+    /// decode path is wired to it, so every clip resolves to "no picture
     /// ready" and the composite is the bare black canvas. The output texture
     /// is registered with egui once and re-registered only when the canvas
     /// size changes, because [`Compositor::render`] otherwise keeps drawing
@@ -320,6 +360,15 @@ impl eframe::App for SubordinateApp {
         let elapsed = ui.input(|input| input.stable_dt);
         self.viewer
             .update_master_meter(self.meters.master(), elapsed);
+
+        // The clock runs after the keyboard, so a press this frame takes
+        // effect on this frame's advance rather than the next one.
+        // egui reports the frame delta as float seconds; that is the one
+        // place a float enters, and it becomes whole nanoseconds before the
+        // clock does any arithmetic with it.
+        if self.run_transport(ui.ctx(), Duration::from_secs_f32(elapsed.max(0.0))) {
+            self.needs_composite = true;
+        }
 
         let preview = self.composite();
         if self.viewer.ui(ui, Some(preview)) {

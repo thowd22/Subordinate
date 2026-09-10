@@ -1,7 +1,10 @@
 //! The change event broadcast bus.
 //!
 //! One [`EventBus`] fans every [`ChangeEvent`] the engine produces out to every
-//! subscriber: the UI, the Command API's subscriptions, the MCP bridge. Two
+//! subscriber: the UI, the Command API's subscriptions, the MCP bridge. The bus
+//! is generic over what it carries and defaults to [`ChangeEvent`], so the
+//! engine runs a second one for the playhead
+//! ([`crate::playback::PlayheadEvent`]) without a second implementation. Two
 //! properties matter more than throughput here:
 //!
 //! - **The engine never blocks on a subscriber.** Each subscriber has a bounded
@@ -37,24 +40,24 @@ pub const DEFAULT_EVENT_CAPACITY: usize = 1024;
 
 /// The queue behind one subscriber.
 #[derive(Debug)]
-struct Queue {
-    events: VecDeque<ChangeEvent>,
+struct Queue<E> {
+    events: VecDeque<E>,
     lagged: u64,
     closed: bool,
 }
 
 /// The state one subscriber and the bus share.
 #[derive(Debug)]
-struct Shared {
-    queue: Mutex<Queue>,
+struct Shared<E> {
+    queue: Mutex<Queue<E>>,
     ready: Condvar,
     capacity: usize,
 }
 
-impl Shared {
+impl<E> Shared<E> {
     /// Pushes one event, dropping the oldest and counting the loss when the
     /// subscriber is not keeping up. Never blocks.
-    fn push(&self, event: ChangeEvent) {
+    fn push(&self, event: E) {
         let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
         if queue.closed {
             return;
@@ -79,12 +82,12 @@ impl Shared {
 
 /// A broadcast channel from the engine to any number of subscribers.
 #[derive(Debug)]
-pub struct EventBus {
-    subscribers: Mutex<Vec<Weak<Shared>>>,
+pub struct EventBus<E = ChangeEvent> {
+    subscribers: Mutex<Vec<Weak<Shared<E>>>>,
     capacity: usize,
 }
 
-impl Default for EventBus {
+impl<E> Default for EventBus<E> {
     fn default() -> Self {
         Self {
             subscribers: Mutex::new(Vec::new()),
@@ -93,7 +96,7 @@ impl Default for EventBus {
     }
 }
 
-impl EventBus {
+impl<E: Clone> EventBus<E> {
     /// A bus giving every subscriber a queue `capacity` events deep.
     ///
     /// # Errors
@@ -115,7 +118,7 @@ impl EventBus {
 
     /// Adds a subscriber. Events published before this call are not delivered.
     #[must_use]
-    pub fn subscribe(&self) -> EventReceiver {
+    pub fn subscribe(&self) -> EventReceiver<E> {
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue {
                 events: VecDeque::new(),
@@ -136,7 +139,7 @@ impl EventBus {
     }
 
     /// Delivers `events` to every live subscriber, in order, without blocking.
-    pub fn publish(&self, events: impl IntoIterator<Item = ChangeEvent>) {
+    pub fn publish(&self, events: impl IntoIterator<Item = E>) {
         let mut subscribers = self
             .subscribers
             .lock()
@@ -185,14 +188,14 @@ impl EventBus {
 /// Dropping it unsubscribes. It is `Send` but not `Clone`: each listener holds
 /// its own queue so a slow one cannot make another lose events.
 #[derive(Debug)]
-pub struct EventReceiver {
-    shared: Arc<Shared>,
+pub struct EventReceiver<E = ChangeEvent> {
+    shared: Arc<Shared<E>>,
 }
 
-impl EventReceiver {
+impl<E> EventReceiver<E> {
     /// Takes the next event if one is already queued.
     #[must_use]
-    pub fn try_recv(&self) -> Option<ChangeEvent> {
+    pub fn try_recv(&self) -> Option<E> {
         let mut queue = self
             .shared
             .queue
@@ -204,7 +207,7 @@ impl EventReceiver {
     /// Waits for the next event, returning `None` once the bus is closed and
     /// the queue is empty.
     #[must_use]
-    pub fn recv(&self) -> Option<ChangeEvent> {
+    pub fn recv(&self) -> Option<E> {
         let mut queue = self
             .shared
             .queue
@@ -230,7 +233,7 @@ impl EventReceiver {
     /// Returns `None` on timeout as well as on close, so a caller that must
     /// tell them apart checks [`EventReceiver::is_closed`].
     #[must_use]
-    pub fn recv_timeout(&self, timeout: Duration) -> Option<ChangeEvent> {
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<E> {
         let deadline = Instant::now() + timeout;
         let mut queue = self
             .shared
@@ -315,7 +318,7 @@ mod tests {
 
     #[test]
     fn capacity_must_not_be_zero() {
-        let err = EventBus::new(0).unwrap_err();
+        let err = EventBus::<ChangeEvent>::new(0).unwrap_err();
         assert_eq!(err.code, core_codes::INVALID_ARGUMENT);
     }
 
@@ -375,7 +378,7 @@ mod tests {
 
     #[test]
     fn recv_timeout_gives_up() {
-        let bus = EventBus::new(4).unwrap();
+        let bus = EventBus::<ChangeEvent>::new(4).unwrap();
         let receiver = bus.subscribe();
         assert_eq!(receiver.recv_timeout(Duration::from_millis(10)), None);
         assert!(!receiver.is_closed());

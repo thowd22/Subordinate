@@ -25,6 +25,9 @@
 //!   [`EventBus`] broadcasts what changed.
 //! - [`autosave`] — the background snapshot history in the project's sidecar
 //!   directory, and the recovery check an open makes against it.
+//! - [`playback`] — the playback scheduler and its clock: play, pause, JKL
+//!   shuttling, a loop range, and the frame dropping that keeps playback in
+//!   time when decode falls behind.
 //! - [`relink`] — finding a moved source file by content hash, then by name,
 //!   and relinking every offline item it accounts for as one undo step.
 //!
@@ -78,6 +81,7 @@ pub mod commands;
 pub mod engine;
 pub mod event;
 pub mod history;
+pub mod playback;
 pub mod relink;
 
 pub use autosave::{
@@ -90,9 +94,12 @@ pub use clip::{
 };
 pub use command::{AnyCommand, BoxedCommand, Command, CommandEnvelope, CommandRegistry, Inverse};
 pub use commands::{builtin_registry, register_builtin};
-pub use engine::{Applied, Engine, EngineConfig, EngineHandle, HistorySummary};
+pub use engine::{
+    Applied, Engine, EngineConfig, EngineHandle, HistorySummary, PlaybackOp, PlaybackStatus,
+};
 pub use event::{ChangeEvent, ChangeOrigin, ChangeType, EntityKind};
 pub use history::{DEFAULT_DEPTH, History, HistoryEntry};
+pub use playback::{PlaybackScheduler, PlayheadEvent, ShuttleSpeed, Tick};
 pub use relink::{
     MatchKind, RelinkMatch, RelinkPlan, RelinkTarget, SearchOptions, match_chosen, match_offline,
     match_targets, scan_folder,

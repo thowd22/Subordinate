@@ -34,6 +34,7 @@
 
 use eframe::egui;
 use sub_audio::MeterLevels;
+use sub_edit::playback::PlaybackScheduler;
 use sub_model::sequence::Sequence;
 use sub_time::{Rational, RationalTime, Rounding, Timecode, TimecodeRate};
 
@@ -189,6 +190,47 @@ impl ViewerAction {
             Action::GoToStart => Some(Self::GoToStart),
             Action::GoToEnd => Some(Self::GoToEnd),
             _ => None,
+        }
+    }
+}
+
+/// Something the keyboard map asks of the playback transport.
+///
+/// Like [`ViewerAction`], it is the pure translation from a bound action to
+/// what the transport should do, so the mapping is testable without egui and
+/// without a running clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportAction {
+    /// L: play forward, shuttling faster on every repeat.
+    PlayForward,
+    /// J: play backwards, shuttling faster on every repeat.
+    PlayBackward,
+    /// K: stop where the playhead stands.
+    Pause,
+    /// Space: play at 1x forward, or pause if anything is playing.
+    Toggle,
+}
+
+impl TransportAction {
+    /// The transport move `action` asks for, if it asks for one at all.
+    #[must_use]
+    pub const fn for_action(action: Action) -> Option<Self> {
+        match action {
+            Action::PlayForward => Some(Self::PlayForward),
+            Action::PlayBackward => Some(Self::PlayBackward),
+            Action::PausePlayback => Some(Self::Pause),
+            Action::TogglePlayback => Some(Self::Toggle),
+            _ => None,
+        }
+    }
+
+    /// Runs this action on `scheduler`.
+    pub fn apply(self, scheduler: &mut PlaybackScheduler) {
+        match self {
+            Self::PlayForward => scheduler.play_forward(),
+            Self::PlayBackward => scheduler.play_backward(),
+            Self::Pause => scheduler.pause(),
+            Self::Toggle => scheduler.toggle(),
         }
     }
 }
@@ -695,9 +737,14 @@ fn pixel_offset(offset: f32) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ViewerAction, ViewerFit, ViewerFrame, ViewerPanel, ViewerState, action_for_key};
+    use super::{
+        TransportAction, ViewerAction, ViewerFit, ViewerFrame, ViewerPanel, ViewerState,
+        action_for_key,
+    };
+    use crate::shortcuts::Action;
     use eframe::egui;
     use sub_audio::MeterLevels;
+    use sub_edit::playback::{PlaybackScheduler, ShuttleSpeed};
     use sub_model::sequence::{Sequence, SequenceSettings};
     use sub_time::{Rational, RationalTime};
 
@@ -1241,5 +1288,39 @@ mod tests {
         assert!(moved, "the drag moved the playhead");
         // 400 pixels along an 800-pixel bar over 240 frames is frame 120.
         assert_eq!(panel.state.playhead_frame(), 120);
+    }
+
+    #[test]
+    fn the_transport_keys_drive_the_playback_clock() {
+        assert_eq!(
+            TransportAction::for_action(Action::PlayForward),
+            Some(TransportAction::PlayForward)
+        );
+        assert_eq!(
+            TransportAction::for_action(Action::PlayBackward),
+            Some(TransportAction::PlayBackward)
+        );
+        assert_eq!(
+            TransportAction::for_action(Action::PausePlayback),
+            Some(TransportAction::Pause)
+        );
+        assert_eq!(
+            TransportAction::for_action(Action::TogglePlayback),
+            Some(TransportAction::Toggle)
+        );
+        // The playhead moves are the viewer's, not the transport's.
+        assert_eq!(TransportAction::for_action(Action::StepForward), None);
+
+        let mut scheduler = PlaybackScheduler::new(Rational::FPS_24);
+        TransportAction::PlayForward.apply(&mut scheduler);
+        assert_eq!(scheduler.speed(), ShuttleSpeed::Forward1x);
+        TransportAction::PlayForward.apply(&mut scheduler);
+        assert_eq!(scheduler.speed(), ShuttleSpeed::Forward2x);
+        TransportAction::PlayBackward.apply(&mut scheduler);
+        assert_eq!(scheduler.speed(), ShuttleSpeed::Reverse1x);
+        TransportAction::Pause.apply(&mut scheduler);
+        assert_eq!(scheduler.speed(), ShuttleSpeed::Paused);
+        TransportAction::Toggle.apply(&mut scheduler);
+        assert_eq!(scheduler.speed(), ShuttleSpeed::Forward1x);
     }
 }

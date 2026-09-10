@@ -4859,6 +4859,7 @@ dependencies = [
  "sub-core",
  "sub-model",
  "sub-time",
+ "tracing",
 ]
 
 [[package]]
