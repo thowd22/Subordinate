@@ -29,6 +29,7 @@ pub mod thumbnails;
 pub mod timeline;
 pub mod timeline_panel;
 pub mod track_header;
+pub mod trim;
 pub mod viewer;
 pub mod waveform;
 
@@ -97,10 +98,12 @@ pub use thumbnails::{
 };
 pub use timeline::{ClipPlacement, TimelineView, TrackLayout, ZoomLevel};
 pub use timeline_panel::{
-    ClipMediaKind, MARKER_FLAG_HEIGHT, MARKER_FLAG_WIDTH, PanelLayout, StripTiles, TimelineMetrics,
-    TimelinePanel, TimelineResponse, TrimmedEdges, WheelInput, clip_edits_allowed, strip_tiles,
+    ClipMediaKind, MARKER_FLAG_HEIGHT, MARKER_FLAG_WIDTH, PanelLayout, StripTiles, TRIM_HANDLE_PX,
+    TimelineMetrics, TimelinePanel, TimelineResponse, TrimmedEdges, WheelInput, clip_edits_allowed,
+    strip_tiles,
 };
 pub use track_header::{HeaderLayout, MenuChoice, MenuEntry, TrackAction, TrackHeaderState};
+pub use trim::{TrimEdge, TrimGroup, TrimRefusal, TrimStep, apply_trim, plan_trim};
 pub use viewer::{
     POPPED_OUT_LABEL, TransportAction, ViewerAction, ViewerFit, ViewerFrame, ViewerPanel,
     ViewerState, paint_picture,
@@ -163,6 +166,12 @@ pub mod codes {
     /// into a track of another kind, or touch a locked track. The `reason`
     /// detail carries the [`MoveRefusal`](crate::selection::MoveRefusal) id.
     pub const CLIP_MOVE_REFUSED: ErrorCode = ErrorCode::from_static("ui.clip_move_refused");
+
+    /// A clip trim drag cannot become an edit: the clip is on a locked track
+    /// or has left the sequence. Running out of source is not here — a trim is
+    /// clamped to the source rather than refused. The `reason` detail carries
+    /// the [`TrimRefusal`](crate::trim::TrimRefusal) id.
+    pub const CLIP_TRIM_REFUSED: ErrorCode = ErrorCode::from_static("ui.clip_trim_refused");
 
     /// A plugin's install directory could not be handed to the platform's
     /// file manager.
