@@ -12,7 +12,12 @@ repository.workspace = true
 # they pull reqwest and rustls to resolve remote `$ref`s, and a plugin's tool
 # schema must be self-contained, never fetched from the network at call time.
 jsonschema = { version = "0.55", default-features = false }
+schemars = "1"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
+thiserror = "2"
+toml = { version = "1", default-features = false, features = ["parse", "display", "serde"] }
 sub-core = { version = "0.1.0", path = "../sub-core" }
 sub-edit = { version = "0.1.0", path = "../sub-edit" }
 sub-model = { version = "0.1.0", path = "../sub-model" }

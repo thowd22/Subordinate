@@ -1,0 +1,202 @@
+{
+  "$defs": {
+    "ApiVersion": {
+      "description": "The major.minor version of the subordinate:plugin interface the plugin was built against, e.g. \"0.1\".",
+      "pattern": "^\\d+\\.\\d+$",
+      "type": "string"
+    },
+    "Capabilities": {
+      "additionalProperties": false,
+      "description": "`[capabilities]`: everything the sandbox opens only on request.\n\nThe manifest only *declares* these; granting them is the install-time\napproval step, and enforcement is the host's (TASK-83, TASK-84). Absent\nkeys mean \"not requested\", which is why parsing rejects unknown ones.",
+      "properties": {
+        "fs_read": {
+          "description": "Roots the plugin may read, as `$PROJECT`-style roots or paths under\nthem.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fs_write": {
+          "description": "Roots the plugin may write.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "network": {
+          "default": false,
+          "description": "Whether the plugin may open network connections.",
+          "type": "boolean"
+        },
+        "shaders": {
+          "default": false,
+          "description": "Whether the plugin may have its WGSL shaders compiled and run.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "McpSection": {
+      "additionalProperties": false,
+      "description": "`[mcp]`: the MCP tools the plugin contributes.",
+      "properties": {
+        "tools": {
+          "additionalProperties": {
+            "$ref": "#/$defs/McpTool"
+          },
+          "description": "Tools by name, as they appear to an agent.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "McpTool": {
+      "additionalProperties": false,
+      "description": "One `[mcp.tools.<name>]` entry.",
+      "properties": {
+        "description": {
+          "description": "What the tool does, used verbatim as the MCP tool description.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "The tool's input JSON Schema, relative to the plugin directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "schema"
+      ],
+      "type": "object"
+    },
+    "PluginId": {
+      "description": "Reverse-DNS plugin identity, e.g. \"com.example.silence-cutter\".",
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$",
+      "type": "string"
+    },
+    "PluginSection": {
+      "additionalProperties": false,
+      "description": "`[plugin]`: who the plugin is and what it implements.",
+      "properties": {
+        "api": {
+          "$ref": "#/$defs/ApiVersion",
+          "description": "The `subordinate:plugin` interface version it was built against."
+        },
+        "authors": {
+          "description": "Free-form author lines, e.g. `Ada <ada@example.com>`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "description": "One-sentence description, shown in the plugins panel.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/PluginId",
+          "description": "Reverse-DNS identity, e.g. `com.example.silence-cutter`."
+        },
+        "name": {
+          "description": "Human-readable display name.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The plugin's own version, semver.",
+          "type": "string"
+        },
+        "worlds": {
+          "description": "The WIT worlds it implements.",
+          "items": {
+            "$ref": "#/$defs/World"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "version",
+        "api",
+        "worlds"
+      ],
+      "type": "object"
+    },
+    "World": {
+      "description": "A WIT world a plugin can implement (docs/PLAN.md §6.2).",
+      "oneOf": [
+        {
+          "const": "effect",
+          "description": "Parameters plus WGSL shaders, with an optional CPU fallback.",
+          "type": "string"
+        },
+        {
+          "const": "audio-effect",
+          "description": "Block-based f32 audio processing under a real-time budget.",
+          "type": "string"
+        },
+        {
+          "const": "importer",
+          "description": "Turns a file or URL into media items or a sequence.",
+          "type": "string"
+        },
+        {
+          "const": "exporter",
+          "description": "Encoder presets or a whole custom export target.",
+          "type": "string"
+        },
+        {
+          "const": "analyzer",
+          "description": "Background jobs producing metadata.",
+          "type": "string"
+        },
+        {
+          "const": "command",
+          "description": "New editing commands built from Command API primitives.",
+          "type": "string"
+        },
+        {
+          "const": "panel",
+          "description": "A declarative UI panel (post-MVP).",
+          "type": "string"
+        },
+        {
+          "const": "mcp-tools",
+          "description": "Extra MCP tools the core forwards calls to.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The data model of a Subordinate plugin's plugin.toml (docs/PLAN.md §6.3). Generated from the Rust manifest types; do not edit by hand.",
+  "properties": {
+    "capabilities": {
+      "$ref": "#/$defs/Capabilities",
+      "default": {
+        "network": false,
+        "shaders": false
+      },
+      "description": "What the plugin asks to be allowed to do. Empty when absent."
+    },
+    "mcp": {
+      "$ref": "#/$defs/McpSection",
+      "default": {},
+      "description": "The MCP tools the plugin contributes. Empty when absent."
+    },
+    "plugin": {
+      "$ref": "#/$defs/PluginSection",
+      "description": "Identity, interface version and the worlds implemented."
+    }
+  },
+  "required": [
+    "plugin"
+  ],
+  "title": "Subordinate plugin manifest",
+  "type": "object"
+}
