@@ -545,6 +545,60 @@ below). They are billed by the hour, and routing a panel snapshot through one
 buys nothing: the software adapters render the same egui output. If a panel
 test seems to need a GPU, the test is wrong.
 
+## Window smoke test (Xvfb screenshots)
+
+`egui_kittest` renders panels; it never creates a window. The window smoke test
+is the other half: the real `subordinate` binary, the window eframe asks the
+platform for, the wgpu adapter it picks, the dock as assembled, and the pop-out
+viewer in a second window on a second monitor. It runs as two steps of the
+Linux CI job — no GPU, no seat, no hourly runner — and leaves a PNG of each
+monitor behind.
+
+`scripts/ui-smoke.sh` does the work:
+
+1. starts `Xvfb :99` with two screens joined by `+xinerama`, so the two
+   screens are one desktop a window can be placed across;
+2. reads the head geometry back with `xdpyinfo -ext XINERAMA` rather than
+   assuming a side-by-side layout — and where a server joins both screens at
+   the same origin, splits the first screen into two RandR monitors with
+   `xrandr --setmonitor` instead, so there are always two monitors at two
+   different origins;
+3. launches `subordinate --ui-smoke --popout-position <head 1 origin>
+   <sample project>`, which opens the committed
+   `crates/sub-model/tests/fixtures/sample-project.sub`, pops the viewer out
+   onto the second head and holds both windows up for 25 seconds (the hold is
+   insurance against a capture that never happens; the script closes the app
+   as soon as it has the pictures);
+4. waits for the app's `ui-smoke ready` line — printed once the editor window
+   *and* the pop-out have each painted a frame, so nothing is photographed
+   empty — and fails if the project did not load;
+5. captures the desktop once with `xwd` and crops one PNG per head.
+
+Run it locally the same way CI does:
+
+```bash
+cargo build -p subordinate
+./scripts/ui-smoke.sh --binary target/debug/subordinate
+ls target/ui-smoke     # screen-0.png, screen-1.png, app.log, screens.txt
+```
+
+Needs `Xvfb`, `xdpyinfo` (x11-utils), `xwd` (x11-apps), ImageMagick and, for
+the monitor-split fallback, `xrandr` (x11-xserver-utils).
+
+From CI, the screenshots and the app log come back as `ui-smoke-<sha>`, and
+the job summary lists each file with its dimensions:
+
+```bash
+gh run download <run-id> -n ui-smoke-$(git rev-parse HEAD) -D /tmp/ui-smoke
+ls /tmp/ui-smoke       # screen-0.png is the editor, screen-1.png the pop-out
+```
+
+Read the PNGs directly; that is the point of the job. The artifact is uploaded
+even when the step failed, because a screenshot of a broken window is the
+fastest way to see what went wrong. Windows and macOS skip it: there is no
+Xvfb there, and `--smoke-test` already proves the window comes up on each OS.
+Real multi-monitor presentation on real hardware is TASK-118, not this.
+
 ## CI build speed
 
 `windows-latest` used to dominate every wave of merges: run 34407960264 on

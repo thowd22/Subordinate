@@ -195,11 +195,16 @@ jobs:
       # enumerate a software Vulkan adapter, plus Xvfb to give winit a
       # display; Windows falls back to WARP through D3D12 and macOS runners
       # already provide Metal.
+      #
+      # x11-utils (xdpyinfo), x11-apps (xwd) and ImageMagick are what the
+      # window smoke test photographs the app with (TASK-123); they are small
+      # next to the GStreamer set above.
       - name: Install a software GPU and a virtual display (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get install -y --no-install-recommends \
-            mesa-vulkan-drivers libvulkan1 xvfb libxkbcommon-x11-0
+            mesa-vulkan-drivers libvulkan1 xvfb libxkbcommon-x11-0 \
+            x11-utils x11-apps x11-xserver-utils imagemagick
       # -----------------------------------------------
 
       - name: Build
@@ -278,6 +283,41 @@ jobs:
         env:
           RUST_LOG: info
         run: cargo run -p subordinate -- --smoke-test
+
+      # ---------------- Window smoke test (TASK-123) ----------------
+      # The assembled app rather than a panel in isolation: Xvfb gives it two
+      # screens joined with Xinerama, the app opens the committed sample
+      # project and puts its pop-out viewer on the second monitor, and one PNG
+      # per monitor is captured once both windows have painted. Steps of the
+      # Linux job rather than a job of their own, because a separate job would
+      # rebuild the whole workspace -- these reuse the debug binary the build
+      # step already produced, which is what keeps the cost near the 25-second
+      # hold plus the apt packages above. Windows and macOS skip it: there is
+      # no Xvfb there, and the GUI smoke test above already proves the window
+      # comes up on each OS.
+      - name: Window smoke test with screenshots (Linux)
+        if: runner.os == 'Linux'
+        env:
+          RUST_LOG: info
+        run: |
+          ./scripts/ui-smoke.sh --binary target/debug/subordinate
+          cat target/ui-smoke/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Uploaded even when the step failed: a screenshot of a broken window is
+      # exactly what an agent needs to see. `gh run download -n ui-smoke-<sha>`
+      # fetches the PNGs and the app log.
+      - name: Upload window screenshots (Linux)
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-smoke-${{ github.sha }}
+          path: |
+            target/ui-smoke/*.png
+            target/ui-smoke/*.log
+            target/ui-smoke/screens.txt
+          if-no-files-found: warn
+          retention-days: 14
+      # ---------------------------------------------------------------
 
       # ---------------- Performance harness (TASK-26) ----------------
       # Linux only, and on the same debug artifacts the test step already

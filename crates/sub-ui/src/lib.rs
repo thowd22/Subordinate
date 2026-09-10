@@ -30,7 +30,7 @@ pub mod track_header;
 pub mod viewer;
 pub mod waveform;
 
-pub use app::{AppOptions, SubordinateApp, run};
+pub use app::{AppOptions, ProjectState, SubordinateApp, UI_SMOKE_READY, run};
 pub use audio_settings::{AudioSettingsAction, AudioSettingsPanel, device_label, status_line};
 pub use diagnostics::DiagnosticsPanel;
 pub use dock::{DockLayout, LAYOUT_FILE_NAME, LAYOUT_VERSION, LoadedLayout, Panel, layout_menu_ui};
@@ -57,7 +57,8 @@ pub use plugins_panel::{
 };
 pub use popout::{
     CLOSE_LABEL, OPEN_LABEL, POPOUT_TITLE, PopoutShared, PopoutViewer, is_playback_action,
-    playback_shortcuts, popout_content_ui, popout_menu_ui, popout_viewport_id, popout_viewport_ui,
+    playback_shortcuts, popout_content_ui, popout_menu_ui, popout_viewport_builder,
+    popout_viewport_id, popout_viewport_ui,
 };
 // `duration_text` and the two label constants keep their module paths: the
 // media bin already exports a `duration_text` (a clip's length, not a wall
