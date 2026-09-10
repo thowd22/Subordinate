@@ -4,8 +4,9 @@
 //! one of these types. They are grouped by what they touch: [`track`] for the
 //! lanes of a sequence, [`sequence`] for the sequences of a project,
 //! [`params`] for a clip's inspector parameters, [`marker`] for annotations on
-//! sequences and clips, [`media`] for the sources a project references and
-//! [`bin`] for the folders they are filed in. The clip edits themselves live
+//! sequences and clips, [`analysis`] for what analyzer plugins found in a media
+//! item, [`media`] for the sources a project references and [`bin`] for the
+//! folders they are filed in. The clip edits themselves live
 //! in [`crate::clip`]; [`register_builtin`] registers those too, so the whole
 //! mutation surface is one registry.
 //!
@@ -21,6 +22,7 @@
 //!   commands validate through them before mutating anything, which is what
 //!   keeps them atomic.
 
+pub mod analysis;
 pub mod bin;
 pub mod marker;
 pub mod media;
@@ -34,6 +36,10 @@ use sub_model::{
     TrackItem,
 };
 
+pub use analysis::{
+    MarkersFromAnalysis, RemoveMediaAnalysis, ReplaceClipMarkers, ReplaceMediaAnalyses,
+    SetMediaAnalysis,
+};
 pub use bin::{CreateBin, InsertBin, MoveBin, MoveToBin, RemoveBin, RenameBin};
 pub use marker::{AddMarker, MarkerTarget, MoveMarker, RemoveMarker};
 pub use media::{Filing, ImportMedia, InsertMedia, RelinkMedia, RemoveMedia};
@@ -82,12 +88,17 @@ pub fn register_builtin(registry: &mut CommandRegistry) -> SubResult<()> {
     registry.register::<SetSequenceSettings>()?;
     registry.register::<SetClipParams>()?;
     registry.register::<AddMarker>()?;
+    registry.register::<MarkersFromAnalysis>()?;
+    registry.register::<ReplaceClipMarkers>()?;
     registry.register::<MoveMarker>()?;
     registry.register::<RemoveMarker>()?;
     registry.register::<ImportMedia>()?;
     registry.register::<InsertMedia>()?;
     registry.register::<RemoveMedia>()?;
     registry.register::<RelinkMedia>()?;
+    registry.register::<SetMediaAnalysis>()?;
+    registry.register::<RemoveMediaAnalysis>()?;
+    registry.register::<ReplaceMediaAnalyses>()?;
     registry.register::<CreateBin>()?;
     registry.register::<InsertBin>()?;
     registry.register::<RemoveBin>()?;
@@ -356,12 +367,17 @@ mod tests {
                 "clip.trim_out",
                 "edit.restore_track_items",
                 "marker.add",
+                "marker.from_analysis",
                 "marker.move",
                 "marker.remove",
+                "marker.replace_on_clip",
                 "media.import",
                 "media.insert",
                 "media.relink",
                 "media.remove",
+                "media.remove_analysis",
+                "media.replace_analyses",
+                "media.set_analysis",
                 "sequence.create",
                 "sequence.delete",
                 "sequence.insert",

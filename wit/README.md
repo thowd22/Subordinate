@@ -7,12 +7,21 @@ compatibility shims for older versions.
 
 | file | package | worlds |
 | --- | --- | --- |
-| `subordinate-plugin.wit` | `subordinate:plugin@0.1.0` | `command` |
+| `subordinate-plugin.wit` | `subordinate:plugin@0.1.0` | `command`, `analyzer` |
 
 `command` is the first and simplest world: a plugin that edits a project by
 calling back into the Command API host import (`command-api`), never by holding
-the model. The effect, audio-effect, importer, exporter, analyzer and mcp-tools
-worlds (TASK-75 to TASK-81) build on the same import.
+the model.
+
+`analyzer` is background analysis (TASK-79): it exports
+`analyze(media, options)` and adds the `analysis-host` import, the progress and
+cancellation channel of the job the host runs it as. It reports markers, ranges
+and metadata in media time and edits nothing; storing the findings and turning
+them into markers are ordinary undoable commands (`media.set_analysis`,
+`marker.from_analysis`).
+
+The effect, audio-effect, importer, exporter and mcp-tools worlds (TASK-76 to
+TASK-81) build on the same `command-api` import.
 
 Guests are plain `cargo build --target wasm32-wasip2` crates using
 `wit_bindgen::generate!`; that target emits a component directly, so no

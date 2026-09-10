@@ -286,9 +286,10 @@ interface command-api {
 /// The simplest plugin world: a plugin that registers nothing and just runs a
 /// command against a project when the host asks it to.
 ///
-/// Later worlds (effect, audio-effect, importer, exporter, analyzer, mcp-tools,
-/// and the richer command world with menu and shortcut registration) build on
-/// this same `command-api` import.
+/// Every other world builds on this same `command-api` import: `analyzer`
+/// below already does, and the ones still to come (effect, audio-effect,
+/// importer, exporter, mcp-tools, and the richer command world with menu and
+/// shortcut registration) will too.
 world command {
     use types.{error, project-id};
 
@@ -297,4 +298,103 @@ world command {
     /// Runs the plugin against `project`. `args` is a JSON object, the same
     /// encoding the Command API uses for parameters; so is the returned value.
     export run: func(project: project-id, args: string) -> result<string, error>;
+}
+
+/// Background analysis: the findings an analyzer reports about one media item,
+/// and the channel it reports progress on while it works (docs/PLAN.md §6.2).
+///
+/// An analyzer never edits the project. It reads a media item, thinks, and
+/// hands back findings; turning those into markers or cuts is a separate
+/// undoable command the host or an agent runs afterwards. That split is what
+/// makes an analysis re-runnable and its results reviewable before anything
+/// moves on the timeline.
+interface analysis {
+    use types.{detail, time-range};
+
+    /// A point or span the analyzer wants to call out, in *media* time: the
+    /// same timebase the file itself uses, not the timebase of any sequence a
+    /// clip of it happens to sit on.
+    ///
+    /// The host assigns the marker identifier when it stores the finding, so a
+    /// plugin never invents one.
+    record analysis-marker {
+        /// Display name, e.g. `silence`.
+        name: string,
+        /// Free-form note; empty when there is none.
+        note: string,
+        /// The span called out, in media time. A point has zero duration.
+        marked-range: time-range,
+    }
+
+    /// A labelled span of the media: silence, a scene, a spoken sentence.
+    ///
+    /// Ranges are separate from markers because they are the input to editing:
+    /// a cut-silence command consumes ranges, whereas markers are for a person
+    /// to look at.
+    record analysis-range {
+        /// What the span is, e.g. `silence` or `scene`. Analyzers should keep
+        /// a small, stable vocabulary: a command downstream matches on it.
+        label: string,
+        /// The span, in media time; never negative.
+        range: time-range,
+    }
+
+    /// Everything one analyzer run found.
+    ///
+    /// All three lists may be empty: an analyzer that only measures loudness
+    /// reports metadata alone.
+    record analysis-result {
+        /// Points and spans for a person to see.
+        markers: list<analysis-marker>,
+        /// Spans for a command to act on.
+        ranges: list<analysis-range>,
+        /// Scalar findings, each value a JSON fragment: WIT has no dynamic
+        /// JSON type, and the vocabulary is the analyzer's own.
+        metadata: list<detail>,
+    }
+}
+
+/// The progress and cancellation channel a running analyzer talks to.
+///
+/// The host runs every analyzer as a job on its background queue, so both
+/// halves of this interface are about that job: `report-progress` publishes a
+/// progress event, and `is-cancelled` is how cooperative cancellation reaches
+/// code inside the sandbox. An analyzer that never asks cannot be stopped
+/// before it returns, so long runs must ask between units of work.
+interface analysis-host {
+    /// Publishes progress for the job running this analyzer.
+    ///
+    /// `done` counts units finished out of `total`; a `total` of zero means
+    /// the size of the work is not known yet. Calls are cheap but not free:
+    /// report per unit of work, not per sample.
+    report-progress: func(done: u64, total: u64);
+
+    /// Whether the host has asked this run to stop.
+    ///
+    /// An analyzer that sees `true` should return promptly. Returning an error
+    /// whose code is `core.cancelled` and returning early with partial
+    /// findings are both accepted; the host discards the findings either way.
+    is-cancelled: func() -> bool;
+}
+
+/// Background analysis producing metadata, markers or ranges: scene detection,
+/// silence detection, transcripts, loudness (docs/PLAN.md §6.2).
+///
+/// The host picks the media item, so `analyze` receives an identifier rather
+/// than a path: the file itself is reached through the host, and a sandboxed
+/// plugin never learns where the project's media lives. `options` is a JSON
+/// object, the analyzer's own schema, the same encoding the Command API uses
+/// for parameters.
+world analyzer {
+    use types.{error, media-id};
+    use analysis.{analysis-result};
+
+    import command-api;
+    import analysis-host;
+
+    /// Analyses `media` and returns what it found.
+    ///
+    /// The whole run is one host job: it may be cancelled at any point, and it
+    /// should call `analysis-host.report-progress` as it goes.
+    export analyze: func(media: media-id, options: string) -> result<analysis-result, error>;
 }

@@ -147,6 +147,11 @@ pub mod codes {
     pub const DUPLICATE_SEQUENCE: ErrorCode = ErrorCode::from_static("edit.duplicate_sequence");
     /// A command names a marker the sequence or clip does not hold.
     pub const MARKER_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.marker_not_found");
+    /// A media item holds no findings from the analyzer a command named.
+    pub const ANALYSIS_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.analysis_not_found");
+    /// A command would leave a media item holding two analyses from one
+    /// analyzer.
+    pub const DUPLICATE_ANALYSIS: ErrorCode = ErrorCode::from_static("edit.duplicate_analysis");
     /// A marker would be added with an identifier its holder already uses.
     pub const DUPLICATE_MARKER: ErrorCode = ErrorCode::from_static("edit.duplicate_marker");
     /// A media item would be imported with an identifier the project already

@@ -24,10 +24,22 @@
 //! - `log(level, message)` — a line into the host's `tracing` subscriber,
 //!   tagged with the plugin id.
 //!
+//! # The analyzer world
+//!
+//! `analyzer` is the second world (docs/PLAN.md §6.2): it exports
+//! `analyze(media, options)` and adds one import, `analysis-host`, the progress
+//! and cancellation channel of the job the run is. [`analyzer`] is the host
+//! side of it — [`AnalysisJobs`] puts a run on the shared
+//! [`JobService`](sub_core::jobs::JobService), forwards progress, honours
+//! cancellation, and stores what was found on the media item by applying
+//! `media.set_analysis` through the engine, so findings arrive as an ordinary
+//! undoable command.
+//!
 //! [`bindings`] holds the generated host side of that world; [`convert`] maps
 //! its records onto [`sub_core::SubError`], [`sub_time::RationalTime`] and the
 //! `sub_model` identifiers, so an implementation of the generated `Host` trait
-//! (TASK-84) never hand-builds a record.
+//! (TASK-84) never hand-builds a record. `convert` is also where an analyzer's
+//! findings become a [`sub_model::Analysis`], marker identifiers and all.
 //!
 //! ```
 //! use sub_plugin::{WitError, WitRationalTime};
@@ -43,10 +55,19 @@
 //! assert_eq!(RationalTime::try_from(WitRationalTime::from(time)).unwrap(), time);
 //! ```
 
+pub mod analyzer;
 pub mod bindings;
 mod convert;
 
+pub use analyzer::{AnalysisContext, AnalysisJobs, Analyzer};
 pub use bindings::Command;
+pub use bindings::analyzer::Analyzer as AnalyzerWorld;
+pub use bindings::analyzer::subordinate::plugin::analysis;
+pub use bindings::analyzer::subordinate::plugin::analysis::{
+    AnalysisMarker as WitAnalysisMarker, AnalysisRange as WitAnalysisRange,
+    AnalysisResult as WitAnalysisResult,
+};
+pub use bindings::analyzer::subordinate::plugin::analysis_host;
 pub use bindings::subordinate::plugin::command_api;
 pub use bindings::subordinate::plugin::command_api::{
     ClipMetadata, LogLevel, MarkerMetadata, ProjectMetadata, Resolution as WitResolution,
@@ -60,7 +81,8 @@ pub use bindings::subordinate::plugin::types::{
     TrackId as WitTrackId,
 };
 pub use convert::{
-    marker_metadata, project_metadata, sequence_metadata, track_clip_metadata, track_metadata,
+    analysis as analysis_from_wit, marker_metadata, project_metadata, sequence_metadata,
+    track_clip_metadata, track_metadata,
 };
 
 /// Error codes this crate raises. The `plugin.*` domain belongs to the host;
@@ -78,4 +100,6 @@ pub mod codes {
     /// A time range crossing in from a plugin has a negative duration or two
     /// endpoints at different rates.
     pub const INVALID_TIME_RANGE: ErrorCode = ErrorCode::from_static("plugin.invalid_time_range");
+    /// An analysis metadata value is not JSON, or a key was reported twice.
+    pub const INVALID_METADATA: ErrorCode = ErrorCode::from_static("plugin.invalid_metadata");
 }

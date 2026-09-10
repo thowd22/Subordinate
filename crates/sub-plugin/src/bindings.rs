@@ -22,3 +22,22 @@ wasmtime::component::bindgen!({
     // hands a plugin.
     additional_derives: [PartialEq, Eq, Hash],
 });
+
+/// The `analyzer` world: background analysis producing markers, ranges or
+/// metadata (docs/PLAN.md §6.2, TASK-79).
+///
+/// A second expansion rather than a second crate, and `with` points its shared
+/// interfaces at the ones the `command` world already generated, so
+/// `command-api` is one type on both sides and a host implements each `Host`
+/// trait once.
+pub mod analyzer {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "analyzer",
+        additional_derives: [PartialEq, Eq, Hash],
+        with: {
+            "subordinate:plugin/types": super::subordinate::plugin::types,
+            "subordinate:plugin/command-api": super::subordinate::plugin::command_api,
+        },
+    });
+}

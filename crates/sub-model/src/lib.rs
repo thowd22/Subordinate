@@ -35,6 +35,7 @@
 //! project.sequences.push(sequence);
 //! ```
 
+pub mod analysis;
 pub mod content;
 pub mod ids;
 pub mod json;
@@ -46,6 +47,7 @@ pub mod project;
 pub mod sequence;
 pub mod track;
 
+pub use analysis::{Analysis, AnalysisRange};
 pub use content::{ContentHash, MediaPath};
 pub use ids::{BinId, ClipId, MarkerId, MediaId, ProjectId, SequenceId, TrackId};
 pub use json::{ProjectFile, SCHEMA_VERSION};
