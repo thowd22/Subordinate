@@ -31,7 +31,11 @@ use subordinate_mcp::bridge::Bridge;
 use subordinate_mcp::tools::ToolSet;
 
 /// The instance this test serves, kept out of the way of a real editor.
-const INSTANCE: &str = "mcp-plugin-tools-test";
+///
+/// Short on purpose: with the directory below it this becomes a Unix-domain
+/// socket path, and macOS temporary directories leave barely a hundred bytes
+/// for the whole thing.
+const INSTANCE: &str = "mcp-plugin";
 
 /// The plugin the guest is installed as, and the tool it contributes.
 const PLUGIN_ID: &str = "com.example.toolbox";
@@ -47,7 +51,8 @@ const SCHEMA: &str =
     r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#;
 
 /// A directory of this test's own for the socket, the lock file and the
-/// plugins.
+/// plugins. Kept short: the socket path built inside it has to fit in a
+/// `sockaddr_un`, which macOS caps at 104 bytes.
 fn workspace(name: &str) -> PathBuf {
     let directory = std::env::temp_dir().join(format!("sub-mcp-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -114,7 +119,7 @@ fn a_plugin_installed_over_mcp_contributes_a_tool_an_agent_can_call() {
         eprintln!("the wasm32-wasip2 target is not installed; skipping the plugin tool test");
         return;
     };
-    let directory = workspace("plugin-call");
+    let directory = workspace("pcall");
     let source = plugin_source(&directory, Path::new(component));
     let (engine, server) = editor(&directory);
 
