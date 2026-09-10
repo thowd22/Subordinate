@@ -69,6 +69,13 @@ pub enum Action {
     Disable(String),
     /// Delete one plugin from disk.
     Remove(String),
+    /// Run one installed plugin's declared tests against a fixture project.
+    Test {
+        /// The plugin to test.
+        id: String,
+        /// The fixture and the arguments the run uses.
+        options: crate::plugin_test::Options,
+    },
 }
 
 /// Which directories the subcommand looks in.
@@ -152,6 +159,9 @@ fn act(action: &Action, options: &Options) -> SubResult<Value> {
             report["project_dir"] = dirs.project().map_or(Value::Null, display);
             Ok(report)
         }
+        // Testing opens a project and spawns an engine of its own, so it takes
+        // the plugin directories rather than the registry built here.
+        Action::Test { id, options: test } => crate::plugin_test::run(id, options, test),
         Action::Enable(id) => value(&registry.set_enabled(&parse_id(id)?, true)?),
         Action::Disable(id) => value(&registry.set_enabled(&parse_id(id)?, false)?),
         Action::Remove(id) => value(&registry.remove(&parse_id(id)?)?),
@@ -200,7 +210,7 @@ fn value<T: Serialize>(answer: &T) -> SubResult<Value> {
 
 /// Parses an id from the command line, reporting a bad one with the stable
 /// code the host uses everywhere else.
-fn parse_id(id: &str) -> SubResult<PluginId> {
+pub(crate) fn parse_id(id: &str) -> SubResult<PluginId> {
     PluginId::parse(id).map_err(|err| {
         SubError::new(
             sub_plugin::codes::INVALID_PLUGIN_ID,
@@ -212,7 +222,7 @@ fn parse_id(id: &str) -> SubResult<PluginId> {
 
 /// What a caller is told when `plugin` names no subcommand.
 pub const NEEDS_ACTION: &str =
-    "plugin needs one of new, install, list, enable, disable, remove or reload";
+    "plugin needs one of new, install, test, list, enable, disable, remove or reload";
 
 #[cfg(test)]
 mod tests {

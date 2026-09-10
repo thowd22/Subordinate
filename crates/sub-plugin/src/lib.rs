@@ -203,6 +203,7 @@ pub mod dev;
 #[cfg(feature = "render")]
 pub mod effect;
 pub mod errors;
+pub mod harness;
 mod interchange;
 pub mod manifest;
 pub mod mcp;
@@ -278,6 +279,7 @@ pub use dev::{
     ReloadStatus, WatchHandle,
 };
 pub use errors::{HINT, PluginErrorExt, WIT};
+pub use harness::{Check, CheckStatus, Harness, HarnessHost, TestReport};
 pub use interchange::{CommandCall, ExportPreset, ImportTarget, export_presets, import_plan};
 pub use menu::{
     CommandContext, CommandDesc, PluginCommand, PluginCommandRegistry, QUALIFIED_SEPARATOR,

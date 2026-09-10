@@ -1,0 +1,22 @@
+[package]
+name = "sub-plugin-guest-editor"
+description = "TASK-91 test guest: edits the project through the Command API, so a harness run has state to assert"
+publish = false
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.61"
+
+[profile.release]
+opt-level = "s"
+strip = true
+
+# Its own workspace: the guest targets wasm32-wasip2 and must stay out of the
+# host workspace's build and lint graph, like the other test guests.
+[workspace]

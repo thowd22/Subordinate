@@ -13,6 +13,7 @@ pub mod effect;
 pub mod error;
 pub mod graph;
 pub mod nv12;
+pub mod probe;
 pub mod readback;
 
 pub use adapter::{
@@ -31,6 +32,7 @@ pub use graph::{
     resolve_layers_at,
 };
 pub use nv12::{Nv12Converter, Nv12Geometry, OUTPUT_FORMAT};
+pub use probe::{EffectProbe, PROBE_INPUT, PROBE_SIZE, probe_effect};
 pub use readback::{
     BYTES_PER_PIXEL, DEFAULT_DEPTH, FrameBuffer, FrameReadback, StagingRing, padded_row_bytes,
 };

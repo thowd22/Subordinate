@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use sub_plugin::registry::InstallLocation;
 
 mod plugin;
+mod plugin_test;
 mod project;
 mod scaffold;
 mod serve;
@@ -116,6 +117,14 @@ Usage:
                                watches and hot-reloads it
   subordinate-cli plugin reload <id>
                                load an installed plugin again
+  subordinate-cli plugin test <id> [--fixture <file>] [--args <json>]
+                        [--dir <dir>] [--project <file>]
+                               load an installed plugin headlessly and run the
+                               checks its declared worlds call for against a
+                               fixture project: a command plugin is run and the
+                               project state asserted afterwards, an effect
+                               plugin has a frame rendered with it. Exits
+                               non-zero when a check fails
   subordinate-cli plugin list [--dir <dir>] [--project <file>]
                                list installed plugins, load failures and
                                id conflicts
@@ -306,6 +315,7 @@ fn parse_plugin<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
     let mut id = None;
     let mut dev = false;
     let mut project_local = false;
+    let mut test = plugin_test::Options::default();
     while let Some(arg) = args.next() {
         match arg {
             "--compact" => pretty = false,
@@ -320,6 +330,20 @@ fn parse_plugin<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
                 Some(value) => options.project = Some(PathBuf::from(value)),
                 None => {
                     return Command::Incomplete("--project needs the path of a project".to_owned());
+                }
+            },
+            "--fixture" => match args.next() {
+                Some(value) => test.fixture = Some(PathBuf::from(value)),
+                None => {
+                    return Command::Incomplete(
+                        "--fixture needs the path of a project file".to_owned(),
+                    );
+                }
+            },
+            "--args" => match args.next() {
+                Some(value) => test.args = Some(value.to_owned()),
+                None => {
+                    return Command::Incomplete("--args needs a JSON object".to_owned());
                 }
             },
             other if id.is_none() && !other.starts_with('-') => id = Some(other.to_owned()),
@@ -341,6 +365,8 @@ fn parse_plugin<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
         }
         ("reload", Some(id)) => plugin::Action::Reload(id),
         ("reload", None) => return needs_id("reload"),
+        ("test", Some(id)) => plugin::Action::Test { id, options: test },
+        ("test", None) => return needs_id("test"),
         ("list", None) => plugin::Action::List,
         ("list", Some(extra)) => return Command::Unknown(extra),
         ("enable", Some(id)) => plugin::Action::Enable(id),
@@ -477,6 +503,27 @@ fn print_error(error: &sub_core::SubError, pretty: bool) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// Prints a plugin subcommand's answer, failing on a report that says the
+/// plugin did not pass.
+///
+/// `plugin test` answers a whole report whichever way the run went — a failed
+/// check is data, not an error — so the JSON is printed either way and the
+/// verdict it carries becomes the exit code, with its one-line summary on
+/// stderr so nothing has to be parsed to see that the run failed.
+fn plugin_report(result: sub_core::SubResult<serde_json::Value>, pretty: bool) -> ExitCode {
+    let Ok(value) = &result else {
+        return report(result, pretty);
+    };
+    let failed = value["ok"] == serde_json::Value::Bool(false);
+    let summary = value["summary"].as_str().unwrap_or("").to_owned();
+    let status = print_json(value, pretty);
+    if failed {
+        eprintln!("{summary}");
+        return ExitCode::FAILURE;
+    }
+    status
+}
+
 /// Generates the Command API JSON Schema and prints it.
 ///
 /// The document is produced by the code, never written by hand: a dispatcher
@@ -564,7 +611,7 @@ fn main() -> ExitCode {
             action,
             options,
             pretty,
-        } => report(plugin::run(&action, &options), pretty),
+        } => plugin_report(plugin::run(&action, &options), pretty),
         Command::Unknown(arg) => {
             eprintln!("unknown argument: {arg}\n\n{USAGE}");
             ExitCode::FAILURE
@@ -578,7 +625,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, InstallLocation, parse, plugin};
+    use super::{Command, InstallLocation, parse, plugin, plugin_test};
     use std::path::{Path, PathBuf};
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -868,6 +915,49 @@ mod tests {
             parse(&args(&["plugin", "list", "com.example.one"])),
             Command::Unknown("com.example.one".to_owned())
         );
+    }
+
+    #[test]
+    fn plugin_test_takes_an_id_a_fixture_and_arguments() {
+        let Command::Plugin {
+            action, options, ..
+        } = parse(&args(&[
+            "plugin",
+            "test",
+            "com.example.one",
+            "--fixture",
+            "/edits/demo.sub",
+            "--args",
+            "{\"threshold\":-40}",
+            "--dir",
+            "/data/plugins",
+        ]))
+        else {
+            panic!("plugin test did not parse");
+        };
+        assert_eq!(
+            action,
+            plugin::Action::Test {
+                id: "com.example.one".to_owned(),
+                options: plugin_test::Options {
+                    fixture: Some(PathBuf::from("/edits/demo.sub")),
+                    args: Some("{\"threshold\":-40}".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            options.user_dir.as_deref(),
+            Some(Path::new("/data/plugins"))
+        );
+
+        assert!(matches!(
+            parse(&args(&["plugin", "test"])),
+            Command::Incomplete(_)
+        ));
+        assert!(matches!(
+            parse(&args(&["plugin", "test", "com.example.one", "--fixture"])),
+            Command::Incomplete(_)
+        ));
     }
 
     #[test]

@@ -206,7 +206,7 @@ fn read(path: &Path) -> SubResult<String> {
 }
 
 /// Reads and loads a project file, migrating it if it is an older one.
-fn load(path: &Path) -> SubResult<(Project, sub_model::LoadReport)> {
+pub(crate) fn load(path: &Path) -> SubResult<(Project, sub_model::LoadReport)> {
     let text = read(path)?;
     load_text(path, &text)
 }
