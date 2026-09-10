@@ -535,47 +535,44 @@ crates, `3` for dependencies, full debuginfo).
   numbers in the `RUST_BACKTRACE=1` output the tests print on failure. Because
   these are environment variables and not a profile in `Cargo.toml`, they apply
   to CI and to nothing else.
-- **sccache, on Windows and macOS only.** `Mozilla-Actions/sccache-action` runs
-  before any cargo step and `RUSTC_WRAPPER=sccache` with
-  `SCCACHE_GHA_ENABLED=true` is set for those jobs, backed by the Actions
-  cache. `Swatinem/rust-cache` is keyed on `Cargo.lock`, which changes on
-  nearly every merge, so it misses constantly; sccache is keyed on the
-  individual compilation, so an unrelated lockfile edit no longer forces a
-  cold dependency build. `CARGO_INCREMENTAL=0` was already set, which sccache
-  requires. The wrapper deliberately stays set for the Clippy step too — cargo
-  folds the wrapper into its compiler fingerprint, so clearing it for one step
-  would invalidate every dependency and make clippy rebuild the world.
-- **One compilation cache per job (TASK-126).** Stacking sccache on top of
-  `Swatinem/rust-cache` made Linux worse, not better. The two store the same
-  artifacts in the same place — the 10 GB per-repository Actions cache — so
-  keeping both roughly doubled the number of entries competing for that budget
-  and entries started being evicted between runs. A warm no-change rerun of
-  34419018398 showed Linux restoring neither cache in full: 331 rustc
-  invocations, 164 sccache hits against 167 misses, 13 minutes against the 5
-  the same job took with rust-cache alone — and the wrapper overhead paid on
-  top of every one of those misses. Linux therefore keeps rust-cache only;
-  Windows and macOS keep sccache, which is where the MSVC link step and the
-  lockfile churn make a compilation-keyed cache worth its cost and where the
-  36m → 8m win was measured. The switch is the `sccache` flag on each matrix
-  entry: it drives the job-level `RUSTC_WRAPPER` (empty means no wrapper, which
-  is how cargo reads it) and gates both the setup and the stats step. Before
-  turning both caches on for one job again, budget the Actions cache first.
-- **Windows Defender.** A Windows-only step adds the workspace, `~/.cargo`,
-  `~/.rustup` and the sccache directory to the Defender exclusion list, plus
-  `sccache.exe`, `rustc.exe` and `link.exe` as processes. Hosted runners run as
-  administrator, so this succeeds; it is wrapped in `try`/`catch` and never
-  fails the job if Microsoft changes that.
+- **One compilation cache, and it is `Swatinem/rust-cache` (TASK-126).**
+  sccache was introduced on Windows and macOS by TASK-125 and has since been
+  removed from every OS. The two caches store the same artifacts in the same
+  backend — the 10 GB per-repository Actions cache — but they store them very
+  differently: rust-cache writes one large archive per OS, while sccache's
+  GitHub Actions backend writes one entry per compiled object. With both
+  running the repository held 1080 cache entries totalling 10.4 GB, of which
+  all but two were `sccache/...` objects a few MB each. Actions evicts
+  least-recently-used entries once a repository is over budget, so the large
+  rust-cache archives were the first things evicted and nearly every job
+  started with a cold `target/`: Linux went from about 5 minutes to 13 on a
+  warm no-change rerun of 34419018398 (331 rustc invocations, 164 sccache hits
+  against 167 misses), and after Linux alone was moved back to rust-cache,
+  Windows hit the 40-minute timeout on rerun 34451650066 for the same reason.
+  rust-cache alone is the configuration that measured 5 minutes on Linux, and
+  it keeps the whole repository inside a handful of entries. The `sccache/*`
+  entries left behind must be deleted once, by hand, or they keep occupying
+  the budget until Actions ages them out: list them with
+  `gh cache list -R thowd22/Subordinate --limit 100 --json id,key` and remove
+  each id with the matching `gh cache` delete subcommand, repeating until none
+  are left.
+  `save-if: github.ref == 'refs/heads/main'` restricts writes to `main`: pull
+  requests restore main's archive but never add an entry of their own, so the
+  count stays at one archive per OS instead of one per branch per OS. Before
+  adding a second compilation cache to any job, budget the Actions cache
+  first — `gh api repos/thowd22/Subordinate/actions/cache/usage` reports the
+  live total, and `gh cache list` shows what is filling it.
+- **Windows Defender.** A Windows-only step adds the workspace, `~/.cargo` and
+  `~/.rustup` to the Defender exclusion list, plus `rustc.exe` and `link.exe`
+  as processes. Hosted runners run as administrator, so this succeeds; it is
+  wrapped in `try`/`catch` and never fails the job if Microsoft changes that.
 
-The last step of each sccache job runs `sccache --show-stats` (with
-`if: always() && matrix.sccache`), so the cache hit rate for that run is in the
-job log. That is the quickest way to tell a genuinely cold run from a
-regression in caching; on Linux, where no wrapper runs, the equivalent signal
-is the wall time of the Build step.
-
-With this in place the job timeout is back to 40 minutes; it had been raised to
-60 as a stopgap. If a Windows run ever approaches that again, read the sccache
-stats first — a near-zero hit rate means the cache backend, not the code, is
-the problem.
+With no compiler wrapper anywhere, the signal for a cold run is the wall time
+of the Build step together with the "cache hit"/"cache miss" line that
+`Swatinem/rust-cache` prints in its own step. The job timeout is 40 minutes; it
+had been raised to 60 as a stopgap. If a run ever approaches that again, check
+the cache usage total first — a repository over the 10 GB budget means the
+cache backend, not the code, is the problem.
 
 ## GPU CI (RunsOn)
 
