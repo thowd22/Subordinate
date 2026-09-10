@@ -276,6 +276,39 @@ jobs:
           RUST_LOG: info
         run: cargo run -p subordinate -- --smoke-test
 
+      # ---------------- Performance harness (TASK-26) ----------------
+      # Linux only, and on the same debug artifacts the test step already
+      # built: the point is a repeatable number per commit, not an absolute
+      # one, and a release rebuild here would cost more than the measurement
+      # is worth. The runner has no GPU, so the texture stage runs on Mesa's
+      # lavapipe and every number is an upper bound -- the report says so.
+      # The harness never fails the job on an environment problem: a missing
+      # fixture or adapter is recorded as a skipped or decode-only scenario.
+      # Baselines and how to read them: docs/PERFORMANCE.md.
+      - name: Scrub and playback benchmark (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          xvfb-run -a cargo run -p subordinate-bench -- \
+            --out target/bench/perf.json | tee target/bench-summary.txt
+          {
+            echo '### Scrub and playback benchmark'
+            echo
+            echo '```'
+            cat target/bench-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark report
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-report
+          path: target/bench/perf.json
+          if-no-files-found: warn
+          retention-days: 30
+      # ---------------------------------------------------------------
+
       # Prints "Cache hits"/"Cache misses" and the hit rate for this job, which
       # is how a warm run is told apart from a cold one (TASK-125). Runs even
       # when an earlier step failed so the numbers are never lost.

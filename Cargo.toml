@@ -14,6 +14,7 @@ members = [
     "crates/sub-ui",
     "crates/sub-test-support",
     "bins/subordinate",
+    "bins/subordinate-bench",
     "bins/subordinate-cli",
     "bins/subordinate-mcp",
     "sdk/subordinate-sdk",

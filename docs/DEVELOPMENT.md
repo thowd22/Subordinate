@@ -227,6 +227,21 @@ let long = sub_test_support::try_fixture("longgop_720p_10min.mp4"); // Option
 workspace root. CI generates the small fixtures before building, so the media
 tests have their inputs on every runner.
 
+## Benchmarks
+
+`bins/subordinate-bench` measures decode-to-texture latency and sustained
+playback and scrub frame rates on the 1080p and 4K fixtures, writes a JSON
+report and prints a summary:
+
+```
+cargo run --release -p subordinate-bench          # target/bench/perf.json
+```
+
+It needs the fixtures above; without them (or without a wgpu adapter) it
+records skipped or decode-only scenarios instead of failing. CI runs it on
+Linux and uploads the report as the `perf-report` artifact. Baselines and how
+to read them: `docs/PERFORMANCE.md`.
+
 ## Errors and logging
 
 Both conventions live in `sub-core`, the lowest crate in the workspace. Every
