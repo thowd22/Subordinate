@@ -30,13 +30,16 @@
 //! [`ApprovalStatus::Changed`] and must be approved again before it loads.
 //!
 //! ```
-//! use std::path::Path;
+//! use std::path::PathBuf;
 //! use sub_plugin::capability::{Access, PathVars, ResolvedCapabilities};
 //! use sub_plugin::manifest::Capabilities;
 //!
-//! let vars = PathVars::new(Path::new("/home/e/.local/share/subordinate/plugins/x/data"))
+//! // Roots must be absolute, which on Windows means a drive prefix.
+//! let abs = |path: &str| PathBuf::from(format!("{}{path}", if cfg!(windows) { "C:" } else { "" }));
+//!
+//! let vars = PathVars::new(&abs("/home/e/.local/share/subordinate/plugins/x/data"))
 //!     .unwrap()
-//!     .with_project(Path::new("/projects/doc"))
+//!     .with_project(&abs("/projects/doc"))
 //!     .unwrap();
 //!
 //! let capabilities = Capabilities {
@@ -52,10 +55,10 @@
 //!
 //! // Reading inside it is allowed; writing it, or reading elsewhere, is not.
 //! resolved
-//!     .authorize_read(Path::new("/projects/doc/footage/a.mov"))
+//!     .authorize_read(&abs("/projects/doc/footage/a.mov"))
 //!     .unwrap();
-//! assert!(resolved.authorize_write(Path::new("/projects/doc/a.mov")).is_err());
-//! assert!(resolved.authorize_read(Path::new("/etc/passwd")).is_err());
+//! assert!(resolved.authorize_write(&abs("/projects/doc/a.mov")).is_err());
+//! assert!(resolved.authorize_read(&abs("/etc/passwd")).is_err());
 //! assert!(resolved.authorize_network().is_err());
 //! ```
 
@@ -830,10 +833,16 @@ impl ApprovalStore {
 mod tests {
     use super::*;
 
+    /// An absolute path for the current platform: Windows wants a drive prefix
+    /// before a rooted path, so the tests build every host path through this.
+    fn abs(path: &str) -> PathBuf {
+        PathBuf::from(format!("{}{path}", if cfg!(windows) { "C:" } else { "" }))
+    }
+
     fn vars() -> PathVars {
-        PathVars::new(Path::new("/data/plugins/x"))
+        PathVars::new(&abs("/data/plugins/x"))
             .unwrap()
-            .with_project(Path::new("/projects/doc"))
+            .with_project(&abs("/projects/doc"))
             .unwrap()
     }
 
@@ -848,11 +857,11 @@ mod tests {
     fn project_and_plugin_data_variables_expand() {
         let vars = vars();
         let read = vars.expand("$PROJECT/footage", Access::ReadOnly).unwrap();
-        assert_eq!(read.host_path(), Path::new("/projects/doc/footage"));
+        assert_eq!(read.host_path(), abs("/projects/doc/footage").as_path());
         assert_eq!(read.guest_path(), "/project/footage");
 
         let write = vars.expand("$PLUGIN_DATA", Access::ReadWrite).unwrap();
-        assert_eq!(write.host_path(), Path::new("/data/plugins/x"));
+        assert_eq!(write.host_path(), abs("/data/plugins/x").as_path());
         assert_eq!(write.guest_path(), "/plugin-data");
         assert_eq!(write.access(), Access::ReadWrite);
     }
@@ -889,7 +898,7 @@ mod tests {
 
     #[test]
     fn project_roots_need_an_open_project() {
-        let vars = PathVars::new(Path::new("/data/plugins/x")).unwrap();
+        let vars = PathVars::new(abs("/data/plugins/x").as_path()).unwrap();
         let err = vars.expand("$PROJECT", Access::ReadOnly).unwrap_err();
         assert_eq!(err.code.as_str(), "plugin.unset_path_variable");
         assert!(vars.expand("$PLUGIN_DATA", Access::ReadOnly).is_ok());
@@ -924,7 +933,7 @@ mod tests {
         assert!(!sandboxed.shaders());
         assert_eq!(
             sandboxed
-                .authorize_read(Path::new("/projects/doc/a.mov"))
+                .authorize_read(abs("/projects/doc/a.mov").as_path())
                 .unwrap_err()
                 .code
                 .as_str(),
@@ -945,14 +954,14 @@ mod tests {
         let resolved = ResolvedCapabilities::resolve(&capabilities, &vars()).unwrap();
 
         resolved
-            .authorize_read(Path::new("/projects/doc/a/b.mov"))
+            .authorize_read(abs("/projects/doc/a/b.mov").as_path())
             .unwrap();
         resolved
-            .authorize_write(Path::new("/data/plugins/x/cache/thumb.png"))
+            .authorize_write(abs("/data/plugins/x/cache/thumb.png").as_path())
             .unwrap();
         // Write access implies read access to the same root.
         resolved
-            .authorize_read(Path::new("/data/plugins/x/cache/thumb.png"))
+            .authorize_read(abs("/data/plugins/x/cache/thumb.png").as_path())
             .unwrap();
         resolved.authorize_network().unwrap();
         resolved.authorize_shaders().unwrap();
@@ -961,17 +970,17 @@ mod tests {
         // traversal is normalised before it is checked.
         assert!(
             resolved
-                .authorize_write(Path::new("/projects/doc/a.mov"))
+                .authorize_write(abs("/projects/doc/a.mov").as_path())
                 .is_err()
         );
         assert!(
             resolved
-                .authorize_read(Path::new("/data/plugins/x/other"))
+                .authorize_read(abs("/data/plugins/x/other").as_path())
                 .is_err()
         );
         assert!(
             resolved
-                .authorize_read(Path::new("/projects/doc/../../etc/passwd"))
+                .authorize_read(abs("/projects/doc/../../etc/passwd").as_path())
                 .is_err()
         );
         assert!(resolved.authorize_read(Path::new("relative/path")).is_err());

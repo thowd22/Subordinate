@@ -8,7 +8,7 @@
 //! away again until it is re-approved (TASK-83, docs/PLAN.md §6.1).
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use sub_plugin::capability::{
     Access, ApprovalStatus, ApprovalStore, PathVars, ResolvedCapabilities,
@@ -280,7 +280,11 @@ fn a_manifest_read_from_disk_carries_its_own_approval() {
 /// A stray absolute path in a manifest is not a way out of the sandbox.
 #[test]
 fn an_absolute_root_is_not_a_capability() {
-    let vars = PathVars::new(Path::new("/data/plugins/x")).unwrap();
+    let root = PathBuf::from(format!(
+        "{}/data/plugins/x",
+        if cfg!(windows) { "C:" } else { "" }
+    ));
+    let vars = PathVars::new(&root).unwrap();
     let err = vars.expand("/etc/shadow", Access::ReadOnly).unwrap_err();
     assert_eq!(err.code.as_str(), "plugin.invalid_capability_path");
 }
