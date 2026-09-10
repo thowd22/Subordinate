@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-09 17:29'
-updated_date: '2026-09-09 18:18'
+updated_date: '2026-09-10 00:03'
 labels:
   - infra
   - gpu
@@ -36,4 +36,6 @@ Every hosted macOS VM (GitHub arm64 runners, Tart-based providers) exposes Metal
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-09-09: user ruled out cloud Macs on cost. Blocked until a personal Apple Silicon Mac is available; agents must not provision EC2 mac instances.
+
+2026-09-10: user has bid on an M1 Mac mini (eBay). Back-burnered until it arrives; when it does, register it as a self-hosted runner the same way as box (see docs/DEVELOPMENT.md), label macos-vt, then wire the VideoToolbox job. M1 supports VideoToolbox H.264 and HEVC hardware encode.
 <!-- SECTION:NOTES:END -->
