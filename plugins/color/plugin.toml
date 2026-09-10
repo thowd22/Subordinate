@@ -1,0 +1,13 @@
+[plugin]
+id = "com.subordinate.color"
+name = "Colour Grade"
+version = "0.1.0"
+api = "0.1"
+worlds = ["effect"]
+description = "Tint, exposure and saturation as one WGSL shader."
+
+# The host compiles and runs a plugin's WGSL only where the shader capability
+# was granted, so an effect asks for it up front. Nothing else is wanted: the
+# plugin reads no files, opens no sockets and never edits the project.
+[capabilities]
+shaders = true

@@ -227,6 +227,40 @@ let long = sub_test_support::try_fixture("longgop_720p_10min.mp4"); // Option
 workspace root. CI generates the small fixtures before building, so the media
 tests have their inputs on every runner.
 
+## Reference plugins
+
+`plugins/` holds the first-party plugins. They are worked examples as much as
+they are shipped code: one per world that is worth a template, licensed
+MIT OR Apache-2.0 so their code may be copied into a plugin under any licence,
+and each with its own `CLAUDE.md` for whoever — human or agent — edits one
+next.
+
+| Plugin | World | What it shows |
+| --- | --- | --- |
+| `plugins/gain` | `audio-effect` | Block processing with a real-time budget: `process()` reuses its input buffer and holds a smoothing ramp between calls, and nothing in it locks or allocates. |
+| `plugins/color` | `effect` | The **effect template**: a tint, an exposure and a saturation declared as parameters plus one WGSL shader the host compiles, caches and runs (decision-6). |
+
+Each keeps a one-package workspace of its own, because it targets
+`wasm32-wasip2` and must stay out of the host workspace's build and lint graph.
+So they are built and tested from their own directory:
+
+```
+cd plugins/color
+cargo build --release --target wasm32-wasip2   # the component
+cargo test                                     # the parameter table and the grade, on the host triple
+```
+
+The effect template splits deliberately into three files: `src/grade.rs` (the
+parameter table and a CPU reference for the grade, with no WIT in it),
+`src/effect.wgsl` (the shader) and `src/lib.rs` (the lift from the first into
+the `effect-desc` that `describe` returns). That split is what lets the host's
+golden test, `crates/sub-render/tests/color_plugin_golden.rs`, pull in the
+plugin's own shader with `include_str!` and its own parameter table with
+`#[path]` — no dependency edge into the plugin's workspace — render the effect
+through the compositor and compare the readback with the plugin's own
+reference, in linear light. Rename a parameter or reorder the grade on one side
+only and that test fails.
+
 ## Benchmarks
 
 `bins/subordinate-bench` measures decode-to-texture latency and sustained

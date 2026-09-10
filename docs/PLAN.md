@@ -185,7 +185,7 @@ subordinate-cli plugin test my-plugin                  # runs against a fixture 
 ```
 Every one of these is also an MCP tool (`plugin.new`, `plugin.install`, `plugin.reload`, `plugin.test`), so the agent never leaves the conversation. Install with `--dev` watches the file and hot-reloads. Errors are structured JSON with WIT type names, not stack traces.
 
-The scaffold ships a `CLAUDE.md` describing the world's interface, host imports, and testing contract, plus a fixture project. First-party plugins in `plugins/` are the worked examples.
+The scaffold ships a `CLAUDE.md` describing the world's interface, host imports, and testing contract, plus a fixture project. First-party plugins in `plugins/` are the worked examples: `plugins/gain` for `audio-effect`, `plugins/color` (tint, exposure, saturation) for `effect`.
 
 ## 7. MCP server and automation
 

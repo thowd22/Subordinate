@@ -708,7 +708,12 @@ fn interface_section(world: World) -> &'static str {
              WGSL source and the name of its fragment entry point. The host derives \
              a uniform struct from the parameter list, so `src/effect.wgsl` reads \
              `params.<id>` for each one and declares neither the uniform, the input \
-             texture nor the sampler itself.\n"
+             texture nor the sampler itself.\n\n\
+             `plugins/color` in the Subordinate repository is the worked example: \
+             the same two files with a tint, an exposure and a saturation in them, \
+             and its parameter table kept in a third that carries no WIT so it can \
+             be unit-tested — and rendered by the host's golden test — without a \
+             component runtime.\n"
         }
         World::Analyzer => {
             "```rust\n\

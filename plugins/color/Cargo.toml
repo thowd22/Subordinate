@@ -1,0 +1,31 @@
+[package]
+name = "subordinate-plugin-color"
+description = "Reference effect plugin for Subordinate: colour tint, exposure and saturation"
+publish = false
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+# Reference plugin code is MIT OR Apache-2.0 like the WIT and the SDK, so a
+# plugin author may copy it under any licence.
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/thowd22/Subordinate"
+
+[lib]
+# `cdylib` is what wasm32-wasip2 turns into a component; `rlib` lets the grade
+# and the declaration be unit-tested on the host triple.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# One world per plugin, so one feature: `effect` generates the bindings this
+# crate implements and nothing else.
+subordinate-sdk = { path = "../../sdk/subordinate-sdk", default-features = false, features = [
+    "effect",
+] }
+
+[profile.release]
+opt-level = "s"
+strip = true
+
+# Its own workspace: the plugin targets wasm32-wasip2 and must stay out of the
+# host workspace's build and lint graph, exactly like `plugins/gain`.
+[workspace]
