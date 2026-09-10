@@ -66,6 +66,20 @@
 //! the check that the component's exports match them, and the argument
 //! validation a call passes before it reaches the plugin.
 //!
+//! # The audio-effect world
+//!
+//! `audio-effect` is the second world (docs/PLAN.md §6.2). A plugin exports
+//! `describe()`, which reports its identity, its parameters and the share of
+//! real time it claims, and `process(block, channels, rate, params)`, which
+//! maps one buffer of interleaved `f32` samples onto another of the same shape.
+//!
+//! The host half of that contract is [`audio`]: [`audio::BlockFormat`] fixes
+//! and checks the block shape, and [`audio::RealTimeBudget`] times every block
+//! against a fraction of the block's own wall-clock duration and bypasses the
+//! plugin once it misses that deadline — or fails outright — too many times in
+//! a row. Neither type allocates or locks. `plugins/gain` is the reference
+//! plugin for the world.
+//!
 //! [`bindings`] holds the generated host side of those worlds; [`convert`] maps
 //! its records onto [`sub_core::SubError`], [`sub_time::RationalTime`] and the
 //! `sub_model` identifiers, so an implementation of the generated `Host` trait
@@ -92,6 +106,7 @@
 //! capabilities it asks for and the MCP tools it contributes. [`schema`]
 //! exports its JSON Schema, committed at `docs/schema/plugin-manifest.json`.
 
+pub mod audio;
 pub mod bindings;
 mod convert;
 pub mod manifest;
@@ -102,6 +117,11 @@ pub mod schema;
 pub use manifest::{MANIFEST_FILE_NAME, Manifest, PluginId, World};
 
 pub use bindings::Command;
+pub use bindings::audio::AudioEffect;
+pub use bindings::audio::subordinate::plugin::audio as audio_types;
+pub use bindings::audio::subordinate::plugin::audio::{
+    EffectDescription, Param, ParamDescriptor, ParamUnit,
+};
 pub use bindings::effect::Effect;
 pub use bindings::effect::subordinate::plugin::effect_types;
 pub use bindings::effect::subordinate::plugin::effect_types::{
@@ -197,4 +217,17 @@ pub mod codes {
     pub const INVALID_MANIFEST: ErrorCode = ErrorCode::from_static("plugin.invalid_manifest");
     /// A `plugin.toml` could not be read from disk.
     pub const MANIFEST_UNREADABLE: ErrorCode = ErrorCode::from_static("plugin.manifest_unreadable");
+    /// An audio block format has a zero frame count, channel count or sample
+    /// rate.
+    pub const INVALID_BLOCK_FORMAT: ErrorCode =
+        ErrorCode::from_static("plugin.invalid_block_format");
+    /// An interleaved audio buffer is not `frames * channels` samples long,
+    /// either on the way into a plugin or on the way back out.
+    pub const INVALID_AUDIO_BLOCK: ErrorCode = ErrorCode::from_static("plugin.invalid_audio_block");
+    /// A real-time budget is zero, or is not between 1 and 100 percent of one
+    /// block's wall-clock duration.
+    pub const INVALID_BUDGET: ErrorCode = ErrorCode::from_static("plugin.invalid_budget");
+    /// An audio effect was bypassed after repeatedly missing its real-time
+    /// budget or failing outright.
+    pub const AUDIO_BYPASSED: ErrorCode = ErrorCode::from_static("plugin.audio_bypassed");
 }

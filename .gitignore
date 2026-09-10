@@ -5,3 +5,4 @@
 # fails; CI uploads them as artifacts, they are never committed.
 *.new.png
 *.diff.png
+/plugins/*/target/
