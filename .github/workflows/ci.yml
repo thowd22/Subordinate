@@ -285,8 +285,8 @@ jobs:
         run: cargo run -p subordinate -- --smoke-test
 
       # ---------------- Window smoke test (TASK-123) ----------------
-      # The assembled app rather than a panel in isolation: Xvfb gives it two
-      # screens joined with Xinerama, the app opens the committed sample
+      # The assembled app rather than a panel in isolation: Xvfb gives it one
+      # wide screen split into two RandR monitors, the app opens the sample
       # project and puts its pop-out viewer on the second monitor, and one PNG
       # per monitor is captured once both windows have painted. Steps of the
       # Linux job rather than a job of their own, because a separate job would

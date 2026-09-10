@@ -7,10 +7,12 @@
 # or a seat -- Mesa's lavapipe draws and Xvfb holds the display -- so it runs
 # on the free hosted Linux runner (TASK-123).
 #
-# The two monitors are two Xvfb screens joined with +xinerama, which is what
-# makes them one desktop the app can place a window across; the head geometry
-# is read back from the server rather than assumed, and each head is cropped
-# out of one root capture into its own PNG.
+# The two monitors are two RandR monitors carved out of one wide Xvfb screen,
+# which is what makes them one desktop the app can place a window across; a
+# second X screen joined with Xinerama looks the same but breaks window
+# coordinate translation under winit. The head geometry is read back from the
+# server rather than assumed, and each head is cropped out of one root capture
+# into its own PNG.
 #
 # Requires: Xvfb, xdpyinfo (x11-utils), xwd (x11-apps), ImageMagick.
 # Output: <out>/screen-0.png, <out>/screen-1.png, <out>/app.log,
@@ -96,9 +98,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "ui-smoke: starting Xvfb on $display with two $screen_size screens"
-Xvfb "$display" -screen 0 "$screen_size" -screen 1 "$screen_size" +xinerama \
-    -nolisten tcp >"$out_dir/xvfb.log" 2>&1 &
+# One screen, no +xinerama. Two Xvfb screens joined by Xinerama put the app's
+# window on a PanoramiX screen whose root XTranslateCoordinates refuses, which
+# winit unwraps -- the app panicked on its first paint before it could report a
+# frame. A single wide screen split into two RandR monitors below gives the
+# same two-head desktop on the server layout the plain GUI smoke test already
+# proves works.
+echo "ui-smoke: starting Xvfb on $display with one $screen_size screen"
+Xvfb "$display" -screen 0 "$screen_size" -nolisten tcp \
+    >"$out_dir/xvfb.log" 2>&1 &
 xvfb_pid=$!
 
 for _ in $(seq 1 50); do
