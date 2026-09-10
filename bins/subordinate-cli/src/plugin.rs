@@ -1,5 +1,10 @@
 //! The `plugin` subcommands: what is installed, and which of it is switched on.
 //!
+//! `plugin new` is the one that comes first (docs/PLAN.md §6.1, §6.4): it
+//! writes a whole plugin crate for one WIT world — sources, manifest,
+//! `CLAUDE.md` and a fixture project — and touches no plugin directory, so it
+//! works before anything is installed. [`crate::scaffold`] has the templates.
+//!
 //! `subordinate-cli plugin install|list|enable|disable|remove|reload` acts on the plugin
 //! directories directly (`sub_plugin::registry`), so it works with no editor
 //! running — the registry caches nothing and every call re-reads the disk, so
@@ -41,6 +46,8 @@ use sub_plugin::runtime::PluginRuntime;
 /// What `plugin` was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
+    /// Scaffold a new plugin crate for one WIT world.
+    New(Box<crate::scaffold::Options>),
     /// Install a plugin from a built component or a plugin directory.
     Install {
         /// The `.wasm` that was built, or the directory holding `plugin.toml`.
@@ -111,6 +118,12 @@ pub fn run(action: &Action, options: &Options) -> SubResult<Value> {
 
 /// The subcommand itself; [`run`] is this plus the error catalogue.
 fn act(action: &Action, options: &Options) -> SubResult<Value> {
+    // Scaffolding writes a crate and touches no plugin directory, so it is
+    // answered before one is even resolved: `plugin new` works on a machine
+    // where nothing is installed and no editor has ever run.
+    if let Action::New(scaffold) = action {
+        return crate::scaffold::new(scaffold);
+    }
     let dirs = options.dirs()?;
     let registry = Arc::new(PluginRegistry::new(dirs.clone()));
     match action {
@@ -142,6 +155,8 @@ fn act(action: &Action, options: &Options) -> SubResult<Value> {
         Action::Enable(id) => value(&registry.set_enabled(&parse_id(id)?, true)?),
         Action::Disable(id) => value(&registry.set_enabled(&parse_id(id)?, false)?),
         Action::Remove(id) => value(&registry.remove(&parse_id(id)?)?),
+        // Answered above, before the plugin directories were resolved.
+        Action::New(_) => unreachable!("plugin new is answered before the registry is built"),
     }
 }
 
@@ -197,7 +212,7 @@ fn parse_id(id: &str) -> SubResult<PluginId> {
 
 /// What a caller is told when `plugin` names no subcommand.
 pub const NEEDS_ACTION: &str =
-    "plugin needs one of install, list, enable, disable, remove or reload";
+    "plugin needs one of new, install, list, enable, disable, remove or reload";
 
 #[cfg(test)]
 mod tests {

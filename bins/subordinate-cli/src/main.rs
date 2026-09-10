@@ -11,6 +11,7 @@ use sub_plugin::registry::InstallLocation;
 
 mod plugin;
 mod project;
+mod scaffold;
 mod serve;
 
 /// What the arguments asked for.
@@ -102,6 +103,12 @@ Usage:
   subordinate-cli serve [--project <file>] [--instance <name>]
                         [--directory <dir>] [--plugin-dir <dir>]
                                serve the Command API until stdin closes
+  subordinate-cli plugin new --world <world> <name> [--output <dir>]
+                        [--id <id>] [--sdk-path <dir>] [--force]
+                               scaffold a plugin crate for one WIT world:
+                               Cargo.toml, src, plugin.toml, CLAUDE.md and a
+                               fixture project. Worlds: command, effect,
+                               analyzer, mcp-tools
   subordinate-cli plugin install <path> [--dev] [--project-local]
                         [--dir <dir>] [--project <file>]
                                install a built .wasm (or a plugin directory);
@@ -283,14 +290,19 @@ fn parse_serve<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
     Command::Serve { options, pretty }
 }
 
-/// Reads `plugin <list|enable|disable|remove> [<id>] [--dir <dir>]
-/// [--project <file>]`.
+/// Reads `plugin <new|list|enable|disable|remove> [<id>] [--dir <dir>]
+/// [--project <file>]`, plus the options `new` and `install` add.
 fn parse_plugin<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
     let mut pretty = true;
     let mut options = plugin::Options::default();
     let Some(word) = args.next() else {
         return Command::Incomplete(plugin::NEEDS_ACTION.to_owned());
     };
+    // Scaffolding takes options none of the other operations do, and none of
+    // theirs, so it reads its own arguments rather than sharing this loop.
+    if word == "new" {
+        return parse_plugin_new(args);
+    }
     let mut id = None;
     let mut dev = false;
     let mut project_local = false;
@@ -342,6 +354,77 @@ fn parse_plugin<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
         options,
         pretty,
     }
+}
+
+/// Reads `plugin new --world <world> <name> [--output <dir>] [--id <id>]
+/// [--sdk-path <dir>] [--force]`.
+fn parse_plugin_new<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
+    let mut pretty = true;
+    let mut name = None;
+    let mut chosen = None;
+    let mut scaffold = scaffold::Options::default();
+    while let Some(arg) = args.next() {
+        match arg {
+            "--compact" => pretty = false,
+            "--pretty" | "--json" => pretty = true,
+            "--force" => scaffold.force = true,
+            "--world" => match args.next() {
+                Some(value) => chosen = Some(value.to_owned()),
+                None => return Command::Incomplete(needs_world()),
+            },
+            "--output" | "-o" => match args.next() {
+                Some(value) => scaffold.parent = Some(PathBuf::from(value)),
+                None => return Command::Incomplete("--output needs a directory".to_owned()),
+            },
+            "--sdk-path" => match args.next() {
+                Some(value) => scaffold.sdk_path = Some(PathBuf::from(value)),
+                None => {
+                    return Command::Incomplete(
+                        "--sdk-path needs the path of a subordinate-sdk checkout".to_owned(),
+                    );
+                }
+            },
+            "--id" => match args.next() {
+                Some(value) => scaffold.id = Some(value.to_owned()),
+                None => {
+                    return Command::Incomplete("--id needs a reverse-DNS plugin id".to_owned());
+                }
+            },
+            other if name.is_none() && !other.starts_with('-') => name = Some(other.to_owned()),
+            other => return Command::Unknown(other.to_owned()),
+        }
+    }
+
+    let Some(name) = name else {
+        return Command::Incomplete("plugin new needs a name for the plugin".to_owned());
+    };
+    let Some(chosen) = chosen else {
+        return Command::Incomplete(needs_world());
+    };
+    match scaffold::parse_world(&chosen) {
+        Ok(chosen) => {
+            scaffold.world = chosen;
+            scaffold.name = name;
+            Command::Plugin {
+                action: plugin::Action::New(Box::new(scaffold)),
+                options: plugin::Options::default(),
+                pretty,
+            }
+        }
+        Err(error) => Command::Incomplete(error.message),
+    }
+}
+
+/// What a caller is told when `plugin new` names no world.
+fn needs_world() -> String {
+    format!(
+        "plugin new needs --world with one of {}",
+        scaffold::TEMPLATED_WORLDS
+            .iter()
+            .map(|world| world.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 /// Prints `value` as JSON, one line when `pretty` is false.
@@ -703,6 +786,55 @@ mod tests {
             parse(&args(&["plugin", "install"])),
             Command::Incomplete(_)
         ));
+    }
+
+    #[test]
+    fn plugin_new_takes_a_world_a_name_and_where_to_write_it() {
+        let Command::Plugin { action, .. } = parse(&args(&[
+            "plugin",
+            "new",
+            "--world",
+            "effect",
+            "tint",
+            "--output",
+            "/tmp/plugins",
+            "--id",
+            "com.example.tint",
+            "--sdk-path",
+            "/checkout/sdk/subordinate-sdk",
+            "--force",
+        ])) else {
+            panic!("plugin new did not parse");
+        };
+        assert_eq!(
+            action,
+            plugin::Action::New(Box::new(super::scaffold::Options {
+                world: sub_plugin::manifest::World::Effect,
+                name: "tint".to_owned(),
+                parent: Some(PathBuf::from("/tmp/plugins")),
+                id: Some("com.example.tint".to_owned()),
+                sdk_path: Some(PathBuf::from("/checkout/sdk/subordinate-sdk")),
+                force: true,
+            })),
+        );
+    }
+
+    #[test]
+    fn plugin_new_reports_a_missing_world_a_missing_name_and_an_untemplated_world() {
+        for incomplete in [
+            vec!["plugin", "new"],
+            vec!["plugin", "new", "demo"],
+            vec!["plugin", "new", "--world"],
+            vec!["plugin", "new", "--world", "panel", "demo"],
+            vec!["plugin", "new", "--world", "command", "demo", "--output"],
+            vec!["plugin", "new", "--world", "command", "demo", "--id"],
+            vec!["plugin", "new", "--world", "command", "demo", "--sdk-path"],
+        ] {
+            assert!(
+                matches!(parse(&args(&incomplete)), Command::Incomplete(_)),
+                "{incomplete:?} was accepted",
+            );
+        }
     }
 
     #[test]
