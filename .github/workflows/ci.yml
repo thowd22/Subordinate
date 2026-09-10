@@ -310,4 +310,42 @@ jobs:
           path: target/bench/perf.json
           if-no-files-found: warn
           retention-days: 30
+
+      # ---------------- A/V sync and drift (TASK-56) ----------------
+      # Phase 3's exit criterion: the picture stays inside one frame of the
+      # audio clock over the whole ten-minute fixture. That fixture is the one
+      # the earlier step deliberately skips, so it is generated here -- Linux
+      # only, and only for this measurement.
+      #
+      # Unlike the performance harness, this step is allowed to fail the job:
+      # drift of a whole frame or more exits non-zero, which is how the
+      # criterion is asserted. A missing fixture is still a skipped run, not a
+      # failure. Numbers and how to read them: docs/PERFORMANCE.md.
+      - name: Generate the long fixture (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: ./scripts/gen-fixtures.sh --long
+
+      - name: A/V sync and drift harness (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo run -p subordinate-bench -- --sync \
+            --out target/bench/av-sync.json | tee target/av-sync-summary.txt
+          {
+            echo '### A/V sync and drift'
+            echo
+            echo '```'
+            cat target/av-sync-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload A/V sync report
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: av-sync-report
+          path: target/bench/av-sync.json
+          if-no-files-found: warn
+          retention-days: 30
       # ---------------------------------------------------------------

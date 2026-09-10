@@ -9,7 +9,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+sub-audio = { version = "0.1.0", path = "../../crates/sub-audio" }
 sub-core = { version = "0.1.0", path = "../../crates/sub-core" }
+sub-edit = { version = "0.1.0", path = "../../crates/sub-edit" }
 sub-media = { version = "0.1.0", path = "../../crates/sub-media" }
 sub-render = { version = "0.1.0", path = "../../crates/sub-render" }
 sub-test-support = { version = "0.1.0", path = "../../crates/sub-test-support" }

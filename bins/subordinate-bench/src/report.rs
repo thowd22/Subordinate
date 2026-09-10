@@ -6,6 +6,7 @@
 //! every rate is in milli-frames per second (see [`crate::stats`]).
 
 use serde::{Deserialize, Serialize};
+use sub_time::Rational;
 
 use crate::stats::{Stats, format_milli_fps, format_millis, rate_milli_fps};
 
@@ -162,6 +163,143 @@ impl Scenario {
     }
 }
 
+/// What the A/V sync and drift harness measured (or why it could not run).
+///
+/// Drift is counted in milli-frames -- `1_000` is one whole frame -- so the
+/// phase 3 exit criterion, "under one frame", is an exact integer comparison
+/// and no number here is a float.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncSection {
+    /// Fixture file name, the ten-minute long-GOP clip.
+    pub fixture: String,
+    /// Whether numbers were produced.
+    pub status: ScenarioStatus,
+    /// Why a skipped run was skipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<String>,
+    /// The GStreamer decoder element the pipeline chose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decoder: Option<String>,
+    /// Numerator of the video timebase the drift is counted in frames of.
+    pub video_rate_num: u32,
+    /// Denominator of that timebase.
+    pub video_rate_den: u32,
+    /// Sequence sample rate the mixer rendered at.
+    pub sequence_sample_rate: u32,
+    /// Device sample rate the callback converted to.
+    pub device_sample_rate: u32,
+    /// Device frames per callback block.
+    pub block_frames: u64,
+    /// Seconds of timeline the run was asked to play.
+    pub seconds_requested: u64,
+    /// Seconds of timeline the audio clock actually reached.
+    pub seconds_played: u64,
+    /// How many one-second samples were taken.
+    pub samples: u64,
+    /// Frames put on screen over the run.
+    pub frames_shown: u64,
+    /// Frames the decoder delivered.
+    pub frames_decoded: u64,
+    /// Presentations the scheduler dropped because the master ran past them.
+    pub dropped_frames: u64,
+    /// The worst drift seen, in milli-frames: zero while the frame on screen
+    /// is the one the audible samples belong to, otherwise the signed
+    /// distance beyond that frame's own interval. Positive means the picture
+    /// lagged the sound.
+    pub max_drift_milli_frames: i64,
+    /// The raw offset at that sample: audible position minus the PTS of the
+    /// frame on screen, in milli-frames.
+    pub max_offset_milli_frames: i64,
+    /// Whole seconds into the run at which the worst sample was taken.
+    pub worst_at_seconds: u64,
+}
+
+impl SyncSection {
+    /// A run that could not happen on this machine.
+    pub fn skipped(fixture: &str, reason: impl Into<String>) -> Self {
+        Self {
+            fixture: fixture.to_owned(),
+            status: ScenarioStatus::Skipped,
+            skipped_reason: Some(reason.into()),
+            decoder: None,
+            video_rate_num: 0,
+            video_rate_den: 1,
+            sequence_sample_rate: 0,
+            device_sample_rate: 0,
+            block_frames: 0,
+            seconds_requested: 0,
+            seconds_played: 0,
+            samples: 0,
+            frames_shown: 0,
+            frames_decoded: 0,
+            dropped_frames: 0,
+            max_drift_milli_frames: 0,
+            max_offset_milli_frames: 0,
+            worst_at_seconds: 0,
+        }
+    }
+
+    /// A run about to be measured, carrying the shape it will run at.
+    pub fn measured(fixture: &str, video_rate: Rational, seconds: u64) -> Self {
+        Self {
+            status: ScenarioStatus::Measured,
+            skipped_reason: None,
+            video_rate_num: video_rate.numerator(),
+            video_rate_den: video_rate.denominator(),
+            sequence_sample_rate: crate::sync::SEQUENCE_RATE,
+            device_sample_rate: crate::sync::DEVICE_RATE,
+            block_frames: crate::sync::BLOCK_FRAMES as u64,
+            seconds_requested: seconds,
+            ..Self::skipped(fixture, "not measured")
+        }
+    }
+
+    /// True when the picture never got a whole frame away from the sound,
+    /// which is phase 3's exit criterion.
+    pub fn within_one_frame(&self) -> bool {
+        self.max_drift_milli_frames.abs() < crate::sync::FRAME_MILLI
+    }
+
+    /// The lines the summary prints for the sync run.
+    pub fn summary_lines(&self) -> Vec<String> {
+        if self.status == ScenarioStatus::Skipped {
+            return vec![format!(
+                "av-sync    {:<24} skipped: {}",
+                self.fixture,
+                self.skipped_reason.as_deref().unwrap_or("no reason given")
+            )];
+        }
+        vec![
+            format!(
+                "av-sync    {:<24} {} s played  {} samples  {} frames shown  {} dropped",
+                self.fixture,
+                self.seconds_played,
+                self.samples,
+                self.frames_shown,
+                self.dropped_frames
+            ),
+            format!(
+                "av-sync    max drift {} frames at {} s (offset {} frames){}",
+                format_milli_frames(self.max_drift_milli_frames),
+                self.worst_at_seconds,
+                format_milli_frames(self.max_offset_milli_frames),
+                if self.within_one_frame() {
+                    ""
+                } else {
+                    "  [OVER ONE FRAME]"
+                }
+            ),
+        ]
+    }
+}
+
+/// A milli-frame count as frames with three decimal places, sign included.
+pub fn format_milli_frames(milli: i64) -> String {
+    let sign = if milli < 0 { "-" } else { "" };
+    let magnitude = milli.unsigned_abs();
+    format!("{sign}{}.{:03}", magnitude / 1_000, magnitude % 1_000)
+}
+
 /// Everything one run of the harness measured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Report {
@@ -174,6 +312,9 @@ pub struct Report {
     pub gpu: Option<Gpu>,
     /// One entry per fixture and scenario kind, in a fixed order.
     pub scenarios: Vec<Scenario>,
+    /// What the A/V sync and drift harness measured, when it ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncSection>,
 }
 
 impl Report {
@@ -192,6 +333,7 @@ impl Report {
             },
             gpu,
             scenarios: Vec::new(),
+            sync: None,
         }
     }
 
@@ -216,6 +358,9 @@ impl Report {
             },
         ];
         lines.extend(self.scenarios.iter().map(Scenario::summary_line));
+        if let Some(sync) = &self.sync {
+            lines.extend(sync.summary_lines());
+        }
         lines
     }
 
@@ -224,6 +369,10 @@ impl Report {
         self.scenarios
             .iter()
             .any(|scenario| scenario.status == ScenarioStatus::Measured)
+            || self
+                .sync
+                .as_ref()
+                .is_some_and(|sync| sync.status == ScenarioStatus::Measured)
     }
 }
 
@@ -236,8 +385,25 @@ pub fn finish(scenario: &mut Scenario, frames: u64, wall_nanos: u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Gpu, REPORT_VERSION, Report, Scenario, ScenarioKind, ScenarioStatus, finish};
+    use super::{
+        Gpu, REPORT_VERSION, Report, Scenario, ScenarioKind, ScenarioStatus, SyncSection, finish,
+        format_milli_frames,
+    };
     use crate::stats::Samples;
+    use sub_time::Rational;
+
+    fn sync_section() -> SyncSection {
+        let rate = Rational::new(25, 1).expect("25 fps");
+        let mut section = SyncSection::measured("longgop_720p_10min.mp4", rate, 600);
+        section.decoder = Some("avdec_h264".to_owned());
+        section.seconds_played = 600;
+        section.samples = 600;
+        section.frames_shown = 15_000;
+        section.frames_decoded = 15_000;
+        section.max_offset_milli_frames = 750;
+        section.worst_at_seconds = 421;
+        section
+    }
 
     fn measured() -> Scenario {
         let mut samples = Samples::new();
@@ -320,5 +486,55 @@ mod tests {
         assert!(!report.measured_anything());
         let summary = report.summary_lines().join("\n");
         assert!(summary.contains("adapter      none"), "{summary}");
+    }
+
+    #[test]
+    fn a_sync_run_inside_its_frame_has_not_drifted() {
+        let section = sync_section();
+        assert!(section.within_one_frame());
+        let summary = section.summary_lines().join("\n");
+        assert!(summary.contains("600 s played"), "{summary}");
+        assert!(summary.contains("max drift 0.000 frames"), "{summary}");
+        assert!(!summary.contains("OVER ONE FRAME"), "{summary}");
+    }
+
+    #[test]
+    fn a_sync_run_a_whole_frame_out_is_flagged() {
+        let mut section = sync_section();
+        section.max_drift_milli_frames = 1_250;
+        assert!(!section.within_one_frame());
+        let summary = section.summary_lines().join("\n");
+        assert!(
+            summary.contains("max drift 1.250 frames at 421 s"),
+            "{summary}"
+        );
+        assert!(summary.contains("OVER ONE FRAME"), "{summary}");
+    }
+
+    #[test]
+    fn a_skipped_sync_run_says_why_and_measured_nothing() {
+        let mut report = Report::new(None);
+        report.sync = Some(SyncSection::skipped("longgop_720p_10min.mp4", "no file"));
+        assert!(!report.measured_anything());
+        let summary = report.summary_lines().join("\n");
+        assert!(summary.contains("skipped: no file"), "{summary}");
+    }
+
+    #[test]
+    fn a_sync_report_round_trips_through_json() {
+        let mut report = Report::new(None);
+        report.sync = Some(sync_section());
+        assert!(report.measured_anything());
+        let json = serde_json::to_string_pretty(&report).expect("the report serialises");
+        let parsed: Report = serde_json::from_str(&json).expect("the report parses back");
+        assert_eq!(parsed, report);
+        assert!(!json.contains("null"), "unexpected null in {json}");
+    }
+
+    #[test]
+    fn milli_frames_print_as_signed_frames() {
+        assert_eq!(format_milli_frames(0), "0.000");
+        assert_eq!(format_milli_frames(1_250), "1.250");
+        assert_eq!(format_milli_frames(-42), "-0.042");
     }
 }

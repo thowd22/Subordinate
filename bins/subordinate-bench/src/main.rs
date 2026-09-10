@@ -11,9 +11,17 @@
 //! Results are written as JSON (`--out`) and summarised on stdout, which is
 //! what the CI log shows. Baselines live in `docs/PERFORMANCE.md`.
 //!
+//! `--sync` runs a different measurement instead: the A/V sync and drift
+//! harness of [`sync`], which plays the ten-minute long fixture headlessly and
+//! reports how far the picture ever gets from the audio clock. It is the only
+//! mode that can fail a build on a number rather than on an environment
+//! problem: drift of a whole frame or more exits non-zero.
+//!
 //! ```text
 //! subordinate-bench [--out PATH] [--frames N] [--seeks N] [--warmup N]
 //!                   [--fixtures DIR] [--software] [--no-gpu]
+//! subordinate-bench --sync [--out PATH] [--seconds N] [--fixtures DIR]
+//!                   [--software]
 //! ```
 //!
 //! The harness never fails a build because of the machine it runs on: a
@@ -29,6 +37,7 @@ use sub_media::HardwarePreference;
 mod report;
 mod run;
 mod stats;
+mod sync;
 
 /// Stable [`sub_core::ErrorCode`] constants this binary returns.
 ///
@@ -46,10 +55,16 @@ pub mod codes {
     pub const FRAME_LAYOUT: ErrorCode = ErrorCode::from_static("bench.frame_layout");
     /// The GPU stopped responding while a frame was in flight.
     pub const GPU_LOST: ErrorCode = ErrorCode::from_static("bench.gpu_lost");
+    /// The picture drifted a whole frame or more from the audio clock, which
+    /// is phase 3's exit criterion failing.
+    pub const DRIFT_EXCEEDED: ErrorCode = ErrorCode::from_static("bench.drift_exceeded");
 }
 
 /// Where the report goes when `--out` is not given.
 const DEFAULT_OUT: &str = "target/bench/perf.json";
+
+/// Where the sync report goes when `--out` is not given.
+const DEFAULT_SYNC_OUT: &str = "target/bench/av-sync.json";
 
 /// The usage text, printed by `--help` and by a bad argument.
 const USAGE: &str = "\
@@ -66,6 +81,10 @@ Options:
   --fixtures DIR    read the fixtures from DIR instead of the usual location
   --software        keep hardware decoders out of the measurement
   --no-gpu          measure decode alone, with no texture upload
+  --sync            measure A/V sync and drift over the long fixture instead
+                    (default report: target/bench/av-sync.json); exits
+                    non-zero when the picture drifts a whole frame or more
+  --seconds N       with --sync, stop after N seconds of timeline
   -h, --help        print this text
 ";
 
@@ -81,6 +100,13 @@ enum Command {
         /// How the run is configured.
         options: run::Options,
     },
+    /// Measure A/V sync and drift instead, writing the report to this path.
+    Sync {
+        /// Where the JSON report goes.
+        out: PathBuf,
+        /// How the run is configured.
+        options: sync::Options,
+    },
 }
 
 /// Parses the command line.
@@ -90,8 +116,10 @@ enum Command {
 /// [`codes::BAD_ARGUMENT`] for an unknown option, a missing value, or a count
 /// that is not a positive integer.
 fn parse(args: &[String]) -> SubResult<Command> {
-    let mut out = PathBuf::from(DEFAULT_OUT);
+    let mut out: Option<PathBuf> = None;
     let mut options = run::Options::default();
+    let mut run_sync = false;
+    let mut seconds: Option<u64> = None;
     let mut index = 0;
 
     while index < args.len() {
@@ -101,7 +129,9 @@ fn parse(args: &[String]) -> SubResult<Command> {
             "-h" | "--help" => return Ok(Command::Help),
             "--software" => options.hardware = HardwarePreference::Software,
             "--no-gpu" => options.use_gpu = false,
-            "--out" => out = PathBuf::from(value(args, &mut index, arg)?),
+            "--sync" => run_sync = true,
+            "--seconds" => seconds = Some(count(args, &mut index, arg)?),
+            "--out" => out = Some(PathBuf::from(value(args, &mut index, arg)?)),
             "--fixtures" => {
                 options.fixtures_dir = Some(PathBuf::from(value(args, &mut index, arg)?));
             }
@@ -123,7 +153,26 @@ fn parse(args: &[String]) -> SubResult<Command> {
             }
         }
     }
-    Ok(Command::Measure { out, options })
+    if run_sync {
+        return Ok(Command::Sync {
+            out: out.unwrap_or_else(|| PathBuf::from(DEFAULT_SYNC_OUT)),
+            options: sync::Options {
+                fixtures_dir: options.fixtures_dir,
+                hardware: options.hardware,
+                seconds,
+            },
+        });
+    }
+    if seconds.is_some() {
+        return Err(SubError::new(
+            codes::BAD_ARGUMENT,
+            "--seconds only applies to --sync",
+        ));
+    }
+    Ok(Command::Measure {
+        out: out.unwrap_or_else(|| PathBuf::from(DEFAULT_OUT)),
+        options,
+    })
 }
 
 /// The value that follows an option, advancing past it.
@@ -172,6 +221,46 @@ fn measure(out: &std::path::Path, options: &run::Options) -> SubResult<()> {
     Ok(())
 }
 
+/// Runs the A/V sync harness, writes the report and prints the summary.
+///
+/// # Errors
+///
+/// [`codes::DRIFT_EXCEEDED`] when the picture drifted a whole frame or more
+/// from the audio clock — the number itself failing, which is the point of
+/// the harness — plus whatever the measurement or the report writer reports.
+/// A machine without the long fixture is a skipped section, not an error.
+fn measure_sync(out: &std::path::Path, options: &sync::Options) -> SubResult<()> {
+    let section = sync::run(options)?;
+    let mut report = report::Report::new(None);
+    report.sync = Some(section.clone());
+    write_report(out, &report)?;
+
+    for line in report.summary_lines() {
+        println!("{line}");
+    }
+    println!("report       {}", out.display());
+    if section.status == report::ScenarioStatus::Skipped {
+        println!(
+            "A/V sync was not measured: generate the long fixture with \
+             scripts/gen-fixtures.sh --long first"
+        );
+        return Ok(());
+    }
+    if !section.within_one_frame() {
+        return Err(SubError::new(
+            codes::DRIFT_EXCEEDED,
+            format!(
+                "the picture drifted {} frames from the audio clock, {} s into the run",
+                report::format_milli_frames(section.max_drift_milli_frames),
+                section.worst_at_seconds
+            ),
+        )
+        .with_detail("max_drift_milli_frames", section.max_drift_milli_frames)
+        .with_detail("worst_at_seconds", section.worst_at_seconds));
+    }
+    Ok(())
+}
+
 /// Writes the report as pretty JSON, creating the parent directory.
 fn write_report(out: &std::path::Path, report: &report::Report) -> SubResult<()> {
     if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
@@ -187,7 +276,9 @@ fn write_report(out: &std::path::Path, report: &report::Report) -> SubResult<()>
 }
 
 fn main() -> ExitCode {
-    let _ = sub_core::logging::init("subordinate_bench=info,sub_media=warn,sub_render=warn");
+    let _ = sub_core::logging::init(
+        "subordinate_bench=info,sub_media=warn,sub_render=warn,sub_audio=warn,sub_edit=warn",
+    );
     let args: Vec<String> = std::env::args().skip(1).collect();
     let outcome = parse(&args).and_then(|command| match command {
         Command::Help => {
@@ -195,6 +286,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         Command::Measure { out, options } => measure(&out, &options),
+        Command::Sync { out, options } => measure_sync(&out, &options),
     });
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -210,7 +302,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, DEFAULT_OUT, codes, parse};
+    use super::{Command, DEFAULT_OUT, DEFAULT_SYNC_OUT, codes, parse};
     use std::path::PathBuf;
     use sub_media::HardwarePreference;
 
@@ -221,7 +313,14 @@ mod tests {
     fn measure(values: &[&str]) -> (PathBuf, crate::run::Options) {
         match parse(&args(values)).expect("the arguments parse") {
             Command::Measure { out, options } => (out, options),
-            Command::Help => panic!("expected a measurement, got help"),
+            other => panic!("expected a measurement, got {other:?}"),
+        }
+    }
+
+    fn sync(values: &[&str]) -> (PathBuf, crate::sync::Options) {
+        match parse(&args(values)).expect("the arguments parse") {
+            Command::Sync { out, options } => (out, options),
+            other => panic!("expected a sync run, got {other:?}"),
         }
     }
 
@@ -258,6 +357,37 @@ mod tests {
         let (_, options) = measure(&["--software", "--no-gpu"]);
         assert_eq!(options.hardware, HardwarePreference::Software);
         assert!(!options.use_gpu);
+    }
+
+    #[test]
+    fn sync_measures_drift_into_its_own_report() {
+        let (out, options) = sync(&["--sync"]);
+        assert_eq!(out, PathBuf::from(DEFAULT_SYNC_OUT));
+        assert_eq!(options, crate::sync::Options::default());
+    }
+
+    #[test]
+    fn sync_takes_a_length_a_fixture_directory_and_software_decode() {
+        let (out, options) = sync(&[
+            "--sync",
+            "--seconds",
+            "30",
+            "--fixtures",
+            "/media",
+            "--software",
+            "--out",
+            "/tmp/av-sync.json",
+        ]);
+        assert_eq!(out, PathBuf::from("/tmp/av-sync.json"));
+        assert_eq!(options.seconds, Some(30));
+        assert_eq!(options.fixtures_dir, Some(PathBuf::from("/media")));
+        assert_eq!(options.hardware, HardwarePreference::Software);
+    }
+
+    #[test]
+    fn a_run_length_without_the_sync_mode_is_rejected() {
+        let error = parse(&args(&["--seconds", "30"])).expect_err("--seconds needs --sync");
+        assert_eq!(error.code, codes::BAD_ARGUMENT);
     }
 
     #[test]
