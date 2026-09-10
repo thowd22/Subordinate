@@ -225,6 +225,36 @@ jobs:
         shell: bash
         run: ./scripts/gen-fixtures.sh
 
+      # ---------------- Sample project media (TASK-109) ----------------
+      # examples/sample-project/demo.sub plays three CC0 clips from Wikimedia
+      # Commons, each pinned by URL, size and SHA-256. They are never committed
+      # and only ~4.7 MB together, but they come off the public internet, so
+      # they are cached exactly as the fixtures are: one entry per OS keyed on
+      # the fetch script, restore-only on pull requests. A partial restore is
+      # safe -- the script keeps a file whose hash already matches and
+      # re-downloads anything else.
+      #
+      # sub-ui's sample_project_render test decodes and composites this media;
+      # without it that test skips itself rather than failing, so a fetch that
+      # goes wrong is visible in this step rather than as a red test.
+      - name: Restore the sample media cache
+        id: sample-media-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: examples/sample-project/media
+          key: sample-media-${{ runner.os }}-${{ hashFiles('scripts/get-sample-media.sh') }}
+
+      - name: Fetch the sample project media (TASK-109)
+        shell: bash
+        run: ./scripts/get-sample-media.sh
+
+      - name: Save the sample media cache
+        if: github.ref == 'refs/heads/main' && steps.sample-media-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: examples/sample-project/media
+          key: ${{ steps.sample-media-cache.outputs.cache-primary-key }}
+
       # ---------------- GPU (TASK-19) ----------------
       # Hosted runners have no GPU. Linux gets Mesa's lavapipe so wgpu can
       # enumerate a software Vulkan adapter, plus Xvfb to give winit a

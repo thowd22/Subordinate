@@ -453,6 +453,37 @@ change is intended, regenerate the fixture and commit its diff:
 SUB_UPDATE_GOLDEN=1 cargo test -p sub-model --test golden
 ```
 
+### The sample project
+
+`examples/sample-project/demo.sub` is the ready-made project: two sequences,
+clips over three tracks, a crossfade, sequence and clip markers, and three real
+CC0 clips. It is what a new user (or an agent) opens to see the editor doing
+something, and what the CI render test renders.
+
+The media is never committed. Fetch it first — three files, about 4.7 MB, each
+pinned by URL, byte size and SHA-256:
+
+```bash
+./scripts/get-sample-media.sh          # scripts\get-sample-media.ps1 on Windows
+cargo run -p subordinate -- examples/sample-project/demo.sub
+```
+
+Every media path in the project is relative and forward-slashed, so it opens
+without a relink on any of the three OSes, and every media item records the
+content hash of the pinned download.
+
+Two test binaries cover it. `cargo test -p sub-model --test demo_project` holds
+the committed file to the builder that produced it (regenerate with
+`SUB_UPDATE_GOLDEN=1 cargo test -p sub-model --test demo_project`), round-trips
+it and checks the path rules; no media needed.
+`cargo test -p sub-ui --test sample_project_render` is the render test: it
+decodes the real media with `sub-media`, composites it through `sub-render`,
+and checks that the overlay stacks, that the dissolve blends and that the
+first-party `plugins/color` grade runs over a clip. It skips itself when the
+media has not been fetched or the machine has no wgpu adapter. CI fetches the
+media (cached per OS, as the fixtures are) before the test job, so there it
+really runs. `examples/sample-project/README.md` carries the media credits.
+
 ## UI tests (egui_kittest)
 
 **The rule: any task that touches `sub-ui` adds or updates a test here.** A

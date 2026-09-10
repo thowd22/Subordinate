@@ -1,0 +1,674 @@
+{
+  "project": {
+    "id": "0193a1b0-0000-7000-8000-000000000001",
+    "media": [
+      {
+        "color": {
+          "primaries": "bt709",
+          "space": "rec709",
+          "transfer": "bt709"
+        },
+        "hash": "dd9f1341ecb4f14ed39aaa7f498c8c166da0d70240869c8ff166d4e1fbd8f3c3",
+        "id": "0193a1b0-0001-7000-8000-000000000001",
+        "info": {
+          "audio": [
+            {
+              "channels": 2,
+              "sample_rate": 48000
+            }
+          ],
+          "duration": {
+            "rate": {
+              "denominator": 1,
+              "numerator": 1000000000
+            },
+            "value": 17173000000
+          },
+          "video": [
+            {
+              "color": {
+                "primaries": "bt709",
+                "space": "rec709",
+                "transfer": "bt709"
+              },
+              "frame_rate": {
+                "denominator": 1,
+                "numerator": 30
+              },
+              "height": 576,
+              "sample_aspect": {
+                "denominator": 15,
+                "numerator": 16
+              },
+              "width": 720
+            }
+          ]
+        },
+        "name": "Porters, Paris 1921",
+        "offline": false,
+        "path": "media/porters-paris-1921.webm",
+        "proxy": "none"
+      },
+      {
+        "color": {
+          "primaries": "bt709",
+          "space": "rec709",
+          "transfer": "bt709"
+        },
+        "hash": "e5baaa1a2bfc0ade53dd4a9efbcbc43f46dd0d0113310b64b3dd0920fa218e22",
+        "id": "0193a1b0-0001-7000-8000-000000000002",
+        "info": {
+          "audio": [
+            {
+              "channels": 2,
+              "sample_rate": 48000
+            }
+          ],
+          "duration": {
+            "rate": {
+              "denominator": 1,
+              "numerator": 1000000000
+            },
+            "value": 24248000000
+          },
+          "video": [
+            {
+              "color": {
+                "primaries": "bt709",
+                "space": "rec709",
+                "transfer": "bt709"
+              },
+              "frame_rate": {
+                "denominator": 3,
+                "numerator": 89
+              },
+              "height": 616,
+              "sample_aspect": {
+                "denominator": 1,
+                "numerator": 1
+              },
+              "width": 1010
+            }
+          ]
+        },
+        "name": "Crowned pigeon",
+        "offline": false,
+        "path": "media/crowned-pigeon.webm",
+        "proxy": "none"
+      },
+      {
+        "color": {
+          "primaries": "bt709",
+          "space": "rec709",
+          "transfer": "bt709"
+        },
+        "hash": "3f3ea88176e0177622e11f7997bec33ead16cc340e04d25382f3a91ac52e8b50",
+        "id": "0193a1b0-0001-7000-8000-000000000003",
+        "info": {
+          "audio": [
+            {
+              "channels": 1,
+              "sample_rate": 8000
+            }
+          ],
+          "duration": {
+            "rate": {
+              "denominator": 1,
+              "numerator": 1000000000
+            },
+            "value": 5197000000
+          },
+          "video": [
+            {
+              "color": {
+                "primaries": "bt709",
+                "space": "rec709",
+                "transfer": "bt709"
+              },
+              "frame_rate": {
+                "denominator": 3,
+                "numerator": 25
+              },
+              "height": 288,
+              "sample_aspect": {
+                "denominator": 1,
+                "numerator": 1
+              },
+              "width": 352
+            }
+          ]
+        },
+        "name": "Soneros en Xalapa",
+        "offline": false,
+        "path": "media/soneros-en-xalapa.webm",
+        "proxy": "none"
+      }
+    ],
+    "name": "Subordinate sample",
+    "root_bin": {
+      "children": [
+        {
+          "children": [],
+          "id": "0193a1b0-0002-7000-8000-000000000001",
+          "media": [
+            "0193a1b0-0001-7000-8000-000000000001",
+            "0193a1b0-0001-7000-8000-000000000002"
+          ],
+          "name": "Footage"
+        }
+      ],
+      "id": "0193a1b0-0000-7000-8000-000000000002",
+      "media": [
+        "0193a1b0-0001-7000-8000-000000000003"
+      ],
+      "name": "Subordinate sample"
+    },
+    "sequences": [
+      {
+        "id": "0193a1b0-0006-7000-8000-000000000001",
+        "markers": [
+          {
+            "id": "0193a1b0-0004-7000-8000-000000000002",
+            "marked_range": {
+              "duration": {
+                "rate": {
+                  "denominator": 1,
+                  "numerator": 25
+                },
+                "value": 24
+              },
+              "start": {
+                "rate": {
+                  "denominator": 1,
+                  "numerator": 25
+                },
+                "value": 138
+              }
+            },
+            "name": "dissolve",
+            "note": "one second of crossfade, centred on the cut"
+          }
+        ],
+        "name": "Main cut",
+        "settings": {
+          "color": {
+            "primaries": "bt709",
+            "space": "rec709",
+            "transfer": "bt709"
+          },
+          "frame_rate": {
+            "denominator": 1,
+            "numerator": 25
+          },
+          "resolution": {
+            "height": 720,
+            "width": 1280
+          },
+          "sample_rate": 48000
+        },
+        "tracks": [
+          {
+            "gain": 0,
+            "id": "0193a1b0-0005-7000-8000-000000000001",
+            "items": [
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 12
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "gain": 0,
+                  "id": "0193a1b0-0003-7000-8000-000000000001",
+                  "markers": [
+                    {
+                      "id": "0193a1b0-0004-7000-8000-000000000001",
+                      "marked_range": {
+                        "duration": {
+                          "rate": {
+                            "denominator": 1,
+                            "numerator": 25
+                          },
+                          "value": 0
+                        },
+                        "start": {
+                          "rate": {
+                            "denominator": 1,
+                            "numerator": 25
+                          },
+                          "value": 70
+                        }
+                      },
+                      "name": "wide shot",
+                      "note": "the two uniforms are both in frame here"
+                    }
+                  ],
+                  "media": "0193a1b0-0001-7000-8000-000000000001",
+                  "name": "Porters, wide",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 150
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 50
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              },
+              {
+                "transition": {
+                  "crossfade": {
+                    "in_offset": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 12
+                    },
+                    "out_offset": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 12
+                    }
+                  }
+                }
+              },
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 25
+                  },
+                  "gain": 0,
+                  "id": "0193a1b0-0003-7000-8000-000000000002",
+                  "markers": [],
+                  "media": "0193a1b0-0001-7000-8000-000000000002",
+                  "name": "Pigeon, fight",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 200
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 75
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              }
+            ],
+            "kind": "video",
+            "locked": false,
+            "muted": false,
+            "name": "V1",
+            "solo": false
+          },
+          {
+            "gain": 0,
+            "id": "0193a1b0-0005-7000-8000-000000000002",
+            "items": [
+              {
+                "gap": {
+                  "duration": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 100
+                  }
+                }
+              },
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "gain": 0,
+                  "id": "0193a1b0-0003-7000-8000-000000000003",
+                  "markers": [],
+                  "media": "0193a1b0-0001-7000-8000-000000000003",
+                  "name": "Soneros, corner",
+                  "opacity": 600000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 100
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 0
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 320000000,
+                      "y": -160000000
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 450000,
+                      "y": 450000
+                    }
+                  }
+                }
+              }
+            ],
+            "kind": "video",
+            "locked": false,
+            "muted": false,
+            "name": "V2",
+            "solo": false
+          },
+          {
+            "gain": 0,
+            "id": "0193a1b0-0005-7000-8000-000000000003",
+            "items": [
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 12
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 12
+                  },
+                  "gain": -6000000,
+                  "id": "0193a1b0-0003-7000-8000-000000000004",
+                  "markers": [],
+                  "media": "0193a1b0-0001-7000-8000-000000000003",
+                  "name": "Soneros, music bed",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 125
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 0
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              }
+            ],
+            "kind": "audio",
+            "locked": false,
+            "muted": false,
+            "name": "A1",
+            "solo": false
+          }
+        ]
+      },
+      {
+        "id": "0193a1b0-0006-7000-8000-000000000002",
+        "markers": [
+          {
+            "id": "0193a1b0-0004-7000-8000-000000000003",
+            "marked_range": {
+              "duration": {
+                "rate": {
+                  "denominator": 1,
+                  "numerator": 30
+                },
+                "value": 0
+              },
+              "start": {
+                "rate": {
+                  "denominator": 1,
+                  "numerator": 30
+                },
+                "value": 75
+              }
+            },
+            "name": "logo out",
+            "note": ""
+          }
+        ],
+        "name": "Titles",
+        "settings": {
+          "color": {
+            "primaries": "bt709",
+            "space": "rec709",
+            "transfer": "bt709"
+          },
+          "frame_rate": {
+            "denominator": 1,
+            "numerator": 30
+          },
+          "resolution": {
+            "height": 1080,
+            "width": 1920
+          },
+          "sample_rate": 48000
+        },
+        "tracks": [
+          {
+            "gain": 0,
+            "id": "0193a1b0-0005-7000-8000-000000000004",
+            "items": [
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 30
+                    },
+                    "value": 15
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 30
+                    },
+                    "value": 15
+                  },
+                  "gain": 0,
+                  "id": "0193a1b0-0003-7000-8000-000000000005",
+                  "markers": [],
+                  "media": "0193a1b0-0001-7000-8000-000000000002",
+                  "name": "Pigeon, title bed",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 30
+                      },
+                      "value": 90
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 30
+                      },
+                      "value": 360
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              }
+            ],
+            "kind": "video",
+            "locked": false,
+            "muted": false,
+            "name": "V1",
+            "solo": false
+          },
+          {
+            "gain": 0,
+            "id": "0193a1b0-0005-7000-8000-000000000005",
+            "items": [
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 30
+                    },
+                    "value": 0
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 30
+                    },
+                    "value": 0
+                  },
+                  "gain": -3000000,
+                  "id": "0193a1b0-0003-7000-8000-000000000006",
+                  "markers": [],
+                  "media": "0193a1b0-0001-7000-8000-000000000003",
+                  "name": "Soneros, sting",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 30
+                      },
+                      "value": 90
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 30
+                      },
+                      "value": 0
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              }
+            ],
+            "kind": "audio",
+            "locked": false,
+            "muted": false,
+            "name": "A1",
+            "solo": false
+          }
+        ]
+      }
+    ]
+  },
+  "schema_version": 1
+}

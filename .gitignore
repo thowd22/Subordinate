@@ -1,6 +1,8 @@
 /target
 *.sub.d/
 /fixtures/
+# The sample project's CC0 media, downloaded by scripts/get-sample-media.sh.
+/examples/sample-project/media/
 # egui_kittest writes these next to the committed references when a snapshot
 # fails; CI uploads them as artifacts, they are never committed.
 *.new.png
