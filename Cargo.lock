@@ -5063,7 +5063,9 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sub-audio",
  "sub-core",
+ "sub-edit",
  "sub-media",
  "sub-render",
  "sub-test-support",
