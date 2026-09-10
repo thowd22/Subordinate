@@ -32,6 +32,7 @@ use sub_audio::{AudioOutput, CpalBackend, MeterBank, OutputOptions};
 use crate::audio_settings::{AudioSettingsAction, AudioSettingsPanel};
 use crate::diagnostics::DiagnosticsPanel;
 use crate::dock::{DockLayout, Panel, layout_menu_ui};
+use crate::inspector::InspectorPanel;
 use crate::keymap::LoadedKeymap;
 use crate::media_bin::MediaBinPanel;
 use crate::popout::{PopoutViewer, popout_menu_ui};
@@ -194,6 +195,9 @@ pub struct SubordinateApp {
     media_bin: MediaBinPanel,
     /// The timeline panel.
     timeline: TimelinePanel,
+    /// The inspector panel: the parameters of whatever the timeline has
+    /// selected.
+    inspector: InspectorPanel,
     /// Where the panels are docked, as read from the user's `layout.json`.
     layout: DockLayout,
     /// The compositor output as egui knows it, and the canvas it was
@@ -300,6 +304,7 @@ impl SubordinateApp {
             project: Project::new("Untitled"),
             media_bin: MediaBinPanel::new(),
             timeline,
+            inspector: InspectorPanel::new(),
             layout: layout.layout,
             preview: None,
             needs_composite: true,
@@ -767,6 +772,7 @@ impl SubordinateApp {
             viewer,
             media_bin,
             timeline,
+            inspector,
             project,
             sequence,
             ..
@@ -821,7 +827,19 @@ impl SubordinateApp {
                 }
             }
             Panel::Inspector => {
-                ui.label("The inspector arrives with the parameter panel.");
+                let response = inspector.ui(ui, sequence, timeline.selection());
+                if !response.is_empty() {
+                    // The gesture is planned, not applied: applying it takes
+                    // the engine handle the app does not own yet, and it must
+                    // go through `inspector::apply_edit` so the whole drag is
+                    // one entry in the undo stack.
+                    log::debug!(
+                        "inspector edit is not wired up yet: begin={:?} commands={} commit={}",
+                        response.begin,
+                        response.commands.len(),
+                        response.commit
+                    );
+                }
             }
             Panel::Export => {
                 ui.label("The export panel arrives with TASK-62.");

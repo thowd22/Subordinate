@@ -11,6 +11,7 @@ pub mod audio_settings;
 pub mod diagnostics;
 pub mod dock;
 pub mod history_panel;
+pub mod inspector;
 pub mod keymap;
 pub mod markers;
 pub mod media_bin;
@@ -38,6 +39,9 @@ pub use diagnostics::DiagnosticsPanel;
 pub use dock::{DockLayout, LAYOUT_FILE_NAME, LAYOUT_VERSION, LoadedLayout, Panel, layout_menu_ui};
 pub use history_panel::{
     HistoryAction, HistoryList, HistoryPanel, ORIGINAL_STATE_LABEL, edit_menu_ui,
+};
+pub use inspector::{
+    InspectorField, InspectorPanel, InspectorResponse, apply_edit as apply_inspector_edit,
 };
 pub use keymap::{LoadedKeymap, chord_spec, config_dir, keymap_path, parse_chord};
 pub use markers::{
