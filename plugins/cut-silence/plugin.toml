@@ -1,0 +1,16 @@
+[plugin]
+id = "com.subordinate.cut-silence"
+name = "Cut Silence"
+version = "0.1.0"
+api = "0.1"
+# Two worlds, one component: `analyze` finds the silence and `run` removes it.
+# See wit/cut-silence.wit for the world that makes both exports one plugin.
+worlds = ["analyzer", "command"]
+description = "Find the silent spans of a media item and ripple them out of the timeline."
+authors = ["Subordinate"]
+
+[capabilities]
+# The analyzer is handed a media identifier, not a path, and reads the file the
+# host resolves it to under the project folder. Nothing is written: the edit
+# goes through the Command API, which needs no capability at all.
+fs_read = ["$PROJECT"]

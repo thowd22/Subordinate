@@ -626,7 +626,11 @@ fn claude_md(id: &PluginId, display: &str, world: World, crate_name: &str) -> St
          - SDK: `subordinate-sdk`, `default-features = false, features = \
          [\"{feature}\"]`. Exactly one world feature may be on.\n\
          - Target: `wasm32-wasip2`. The Rust toolchain emits a component \
-         directly, so there is no `cargo component` or `wasm-tools` step.\n\n\
+         directly, so there is no `cargo component` or `wasm-tools` step.\n\
+         - Worked example: `plugins/cut-silence` in the Subordinate repository \
+         is the first-party plugin this file is modelled on — an analyzer and \
+         the command that acts on what it found. Its `CLAUDE.md` answers what \
+         this one does not.\n\n\
          ## The interface\n\n\
          {interface}\n\
          ## Host imports\n\n\

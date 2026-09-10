@@ -1,0 +1,232 @@
+{
+  "project": {
+    "id": "01930000-0000-7000-8000-000000000001",
+    "media": [
+      {
+        "analyses": [
+          {
+            "analyzer": "com.subordinate.cut-silence",
+            "markers": [
+              {
+                "id": "01930000-0004-7000-8000-000000000001",
+                "marked_range": {
+                  "duration": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 48000
+                    },
+                    "value": 96000
+                  },
+                  "start": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 48000
+                    },
+                    "value": 192000
+                  }
+                },
+                "name": "silence",
+                "note": ""
+              },
+              {
+                "id": "01930000-0004-7000-8000-000000000002",
+                "marked_range": {
+                  "duration": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 48000
+                    },
+                    "value": 48000
+                  },
+                  "start": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 48000
+                    },
+                    "value": 384000
+                  }
+                },
+                "name": "silence",
+                "note": ""
+              }
+            ],
+            "metadata": {
+              "channels": 1,
+              "frames": 480000,
+              "minimum_seconds": 0.5,
+              "padding_seconds": 0.1,
+              "sample_rate": 48000,
+              "status": "analysed",
+              "threshold_db": -50.0,
+              "window_seconds": 0.02
+            },
+            "ranges": [
+              {
+                "id": "01930000-0004-7000-8000-000000000001",
+                "label": "silence",
+                "range": {
+                  "duration": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 48000
+                    },
+                    "value": 96000
+                  },
+                  "start": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 48000
+                    },
+                    "value": 192000
+                  }
+                }
+              },
+              {
+                "id": "01930000-0004-7000-8000-000000000002",
+                "label": "silence",
+                "range": {
+                  "duration": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 48000
+                    },
+                    "value": 48000
+                  },
+                  "start": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 48000
+                    },
+                    "value": 384000
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "color": {
+          "primaries": "bt709",
+          "space": "rec709",
+          "transfer": "bt709"
+        },
+        "hash": null,
+        "id": "01930000-0001-7000-8000-000000000001",
+        "info": {
+          "audio": [
+            {
+              "channels": 1,
+              "sample_rate": 48000
+            }
+          ],
+          "duration": {
+            "rate": {
+              "denominator": 1,
+              "numerator": 48000
+            },
+            "value": 480000
+          },
+          "video": []
+        },
+        "name": "dialogue.wav",
+        "offline": true,
+        "path": "audio/dialogue.wav",
+        "proxy": "none"
+      }
+    ],
+    "name": "Cut Silence fixture",
+    "root_bin": {
+      "children": [],
+      "id": "01930000-0000-7000-8000-000000000002",
+      "media": [
+        "01930000-0001-7000-8000-000000000001"
+      ],
+      "name": "Cut Silence fixture"
+    },
+    "sequences": [
+      {
+        "id": "01930000-0006-7000-8000-000000000001",
+        "markers": [],
+        "name": "Main",
+        "settings": {
+          "color": {
+            "primaries": "bt709",
+            "space": "rec709",
+            "transfer": "bt709"
+          },
+          "frame_rate": {
+            "denominator": 1,
+            "numerator": 25
+          },
+          "resolution": {
+            "height": 1080,
+            "width": 1920
+          },
+          "sample_rate": 48000
+        },
+        "tracks": [
+          {
+            "id": "01930000-0005-7000-8000-000000000001",
+            "items": [
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "gain": 0,
+                  "id": "01930000-0003-7000-8000-000000000001",
+                  "markers": [],
+                  "media": "01930000-0001-7000-8000-000000000001",
+                  "name": "dialogue",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 48000
+                      },
+                      "value": 480000
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 48000
+                      },
+                      "value": 0
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              }
+            ],
+            "kind": "audio",
+            "locked": false,
+            "muted": false,
+            "name": "A1"
+          }
+        ]
+      }
+    ]
+  },
+  "schema_version": 1
+}

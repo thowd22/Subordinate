@@ -1,0 +1,45 @@
+// The one world the cut-silence plugin implements.
+//
+// Licensed under MIT OR Apache-2.0, like `subordinate:plugin` itself, so a
+// plugin author may copy this file along with the rest of the plugin.
+//
+// A plugin is one component, and a component has one world; cut-silence needs
+// two entry points that live in two of the host's worlds:
+//
+//   - `analyze`, from `subordinate:plugin/analyzer`, which finds the silence;
+//   - `run`, from `subordinate:plugin/command`, which cuts it out.
+//
+// So the world below is the union of the two: the same export signatures, drawn
+// from the same interfaces, and `command-api` — the only way a plugin edits a
+// project — imported once. Because the signatures and their types are the
+// host's own, `plugin.wasm` instantiates against the host's `analyzer` bindings
+// and its `command` bindings alike, and `plugin.toml` honestly declares both
+// worlds.
+//
+// What is deliberately *not* imported is `subordinate:plugin/analysis-host`,
+// the analyzer world's progress and cancellation channel. A component only
+// instantiates when every import it declares is in the linker, and the host's
+// `command` world links `command-api` alone; importing `analysis-host` here
+// would make this component loadable as an analyzer but not as a command. The
+// cost is that one `analyze` call reports no progress and cannot be cancelled
+// before it returns, which is affordable only because this analyzer's work is
+// bounded: it reads one audio file once. An analyzer that thinks for minutes
+// should be its own component and import `analysis-host`.
+
+package subordinate:cut-silence@0.1.0;
+
+/// Silence detection and silence removal in one component.
+world cut-silence {
+    use subordinate:plugin/types@0.1.0.{error, media-id, project-id};
+    use subordinate:plugin/analysis@0.1.0.{analysis-result};
+
+    import subordinate:plugin/command-api@0.1.0;
+
+    /// `subordinate:plugin/analyzer`'s export: finds the silent spans of one
+    /// media item and reports them, in media time, without editing anything.
+    export analyze: func(media: media-id, options: string) -> result<analysis-result, error>;
+
+    /// `subordinate:plugin/command`'s export: removes the silence the analyzer
+    /// found from the clips `args` names, rippling each track, as one undo step.
+    export run: func(project: project-id, args: string) -> result<string, error>;
+}
