@@ -41,7 +41,7 @@ pub use analysis::{
     SetMediaAnalysis,
 };
 pub use bin::{CreateBin, InsertBin, MoveBin, MoveToBin, RemoveBin, RenameBin};
-pub use marker::{AddMarker, MarkerTarget, MoveMarker, RemoveMarker};
+pub use marker::{AddMarker, MarkerTarget, MoveMarker, RemoveMarker, RenameMarker};
 pub use media::{Filing, ImportMedia, InsertMedia, RelinkMedia, RemoveMedia};
 pub use params::SetClipParams;
 pub use sequence::{
@@ -92,6 +92,7 @@ pub fn register_builtin(registry: &mut CommandRegistry) -> SubResult<()> {
     registry.register::<ReplaceClipMarkers>()?;
     registry.register::<MoveMarker>()?;
     registry.register::<RemoveMarker>()?;
+    registry.register::<RenameMarker>()?;
     registry.register::<ImportMedia>()?;
     registry.register::<InsertMedia>()?;
     registry.register::<RemoveMedia>()?;
@@ -370,6 +371,7 @@ mod tests {
                 "marker.from_analysis",
                 "marker.move",
                 "marker.remove",
+                "marker.rename",
                 "marker.replace_on_clip",
                 "media.import",
                 "media.insert",

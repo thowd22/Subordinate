@@ -11,7 +11,7 @@
 use sub_edit::commands::{
     AddMarker, CreateBin, Filing, ImportMedia, InsertBin, InsertMedia, MarkerTarget, MoveBin,
     MoveMarker, MoveToBin, RelinkMedia, RemoveBin, RemoveMarker, RemoveMedia, RenameBin,
-    SetClipParams, SetTrackLocked, builtin_registry,
+    RenameMarker, SetClipParams, SetTrackLocked, builtin_registry,
 };
 use sub_edit::{AnyCommand, Command, CommandEnvelope, History, codes};
 use sub_model::{
@@ -263,6 +263,20 @@ fn sequence_markers_are_added_moved_and_removed_exactly() {
         moved
     );
 
+    round_trip(
+        &mut project,
+        RenameMarker::new(target, marker_id, "reshoot"),
+    );
+    assert_eq!(
+        project.sequences[0].marker(marker_id).unwrap().name,
+        "reshoot"
+    );
+    assert_eq!(
+        project.sequences[0].marker(marker_id).unwrap().marked_range,
+        moved,
+        "a rename touches the name and nothing else"
+    );
+
     round_trip(&mut project, RemoveMarker::new(target, marker_id));
     assert!(project.sequences[0].markers.is_empty());
 }
@@ -327,6 +341,12 @@ fn marker_commands_name_a_marker_the_target_holds() {
     let err = refused(
         &mut project,
         MoveMarker::new(target, MarkerId::new(), empty),
+    );
+    assert_eq!(err.code, codes::MARKER_NOT_FOUND);
+
+    let err = refused(
+        &mut project,
+        RenameMarker::new(target, MarkerId::new(), "nowhere"),
     );
     assert_eq!(err.code, codes::MARKER_NOT_FOUND);
 
@@ -647,6 +667,7 @@ fn every_new_kind_decodes_from_its_envelope() {
         "marker.add",
         "marker.move",
         "marker.remove",
+        "marker.rename",
         "media.import",
         "media.insert",
         "media.relink",
@@ -705,6 +726,10 @@ fn commands_carry_labels_for_the_undo_menu() {
     assert_eq!(
         MoveMarker::new(MarkerTarget::sequence(at.sequence), MarkerId::new(), empty).label(),
         "Move marker"
+    );
+    assert_eq!(
+        RenameMarker::new(MarkerTarget::sequence(at.sequence), MarkerId::new(), "cue").label(),
+        "Rename marker to cue"
     );
     assert_eq!(ImportMedia::new(item.clone()).label(), "Import broll.mp4");
     assert_eq!(InsertMedia::new(0, item, None).label(), "Restore broll.mp4");

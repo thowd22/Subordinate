@@ -12,6 +12,7 @@ pub mod diagnostics;
 pub mod dock;
 pub mod history_panel;
 pub mod keymap;
+pub mod markers;
 pub mod media_bin;
 pub mod media_import;
 pub mod meter;
@@ -38,6 +39,9 @@ pub use history_panel::{
     HistoryAction, HistoryList, HistoryPanel, ORIGINAL_STATE_LABEL, edit_menu_ui,
 };
 pub use keymap::{LoadedKeymap, chord_spec, config_dir, keymap_path, parse_chord};
+pub use markers::{
+    DEFAULT_MARKER_NAME, MARKER_PALETTE, MarkerAction, MarkerState, marker_color, moved_range,
+};
 pub use media_bin::{
     BinSelection, BinSort, BinViewMode, MediaBinAction, MediaBinPanel, SortColumn, bin_path,
     dropped_paths, duration_text, folder_name, frame_rate_text, pick_media_files, resolution_text,
@@ -87,8 +91,8 @@ pub use thumbnails::{
 };
 pub use timeline::{ClipPlacement, TimelineView, TrackLayout, ZoomLevel};
 pub use timeline_panel::{
-    ClipMediaKind, PanelLayout, StripTiles, TimelineMetrics, TimelinePanel, TimelineResponse,
-    TrimmedEdges, WheelInput, clip_edits_allowed, strip_tiles,
+    ClipMediaKind, MARKER_FLAG_HEIGHT, MARKER_FLAG_WIDTH, PanelLayout, StripTiles, TimelineMetrics,
+    TimelinePanel, TimelineResponse, TrimmedEdges, WheelInput, clip_edits_allowed, strip_tiles,
 };
 pub use track_header::{HeaderLayout, MenuChoice, MenuEntry, TrackAction, TrackHeaderState};
 pub use viewer::{
