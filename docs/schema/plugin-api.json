@@ -36,6 +36,62 @@
       },
       "type": "object"
     },
+    "DevInstall": {
+      "description": "What an install did.",
+      "properties": {
+        "dev": {
+          "description": "Whether it is a dev install: linked to its sources and watched.",
+          "type": "boolean"
+        },
+        "directory": {
+          "description": "The directory it now occupies.",
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/PluginId",
+          "description": "The plugin that was installed."
+        },
+        "location": {
+          "$ref": "#/$defs/InstallLocation",
+          "description": "Which of the two directories it went into."
+        },
+        "mode": {
+          "$ref": "#/$defs/LinkMode",
+          "description": "How its files point at the source tree. A plain install is a\n[`LinkMode::Copy`] snapshot that is never refreshed."
+        },
+        "source": {
+          "$ref": "#/$defs/DevSource",
+          "description": "Where its files came from."
+        }
+      },
+      "required": [
+        "id",
+        "location",
+        "directory",
+        "dev",
+        "mode",
+        "source"
+      ],
+      "type": "object"
+    },
+    "DevSource": {
+      "description": "Where a dev install's files came from.\n\n`root` is the directory holding `plugin.toml`; `wasm` is the built\ncomponent, which normally sits in a build directory well outside it.",
+      "properties": {
+        "root": {
+          "description": "The directory holding `plugin.toml`.",
+          "type": "string"
+        },
+        "wasm": {
+          "description": "The built component.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "wasm"
+      ],
+      "type": "object"
+    },
     "EnableChange": {
       "description": "What `plugin.enable` or `plugin.disable` did.",
       "properties": {
@@ -74,9 +130,44 @@
         }
       ]
     },
+    "InstallParams": {
+      "additionalProperties": false,
+      "description": "The parameters of `plugin.install`.",
+      "properties": {
+        "dev": {
+          "default": false,
+          "description": "Link the install to its sources and watch them, instead of copying\nonce.",
+          "type": "boolean"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InstallLocation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which plugin directory to install into. Defaults to the per-user one."
+        },
+        "path": {
+          "description": "The built `.wasm`, or the directory holding `plugin.toml`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
     "InstalledPlugin": {
       "description": "One installed plugin, as listed.",
       "properties": {
+        "dev": {
+          "default": false,
+          "description": "Whether it is a dev install: linked to a source tree, watched, and\nreloaded when that tree is rebuilt (see [`crate::dev`]).",
+          "type": "boolean"
+        },
         "directory": {
           "description": "The directory holding its `plugin.toml`.",
           "type": "string"
@@ -106,6 +197,21 @@
         "manifest"
       ],
       "type": "object"
+    },
+    "LinkMode": {
+      "description": "How a dev install's files point at the source tree.",
+      "oneOf": [
+        {
+          "const": "symlink",
+          "description": "Each file is a symlink, so a rebuild is visible with no further work.",
+          "type": "string"
+        },
+        {
+          "const": "copy",
+          "description": "Each file is a copy, because this platform refused the symlink. The\ncopies are refreshed before every reload.",
+          "type": "string"
+        }
+      ]
     },
     "ListParams": {
       "additionalProperties": false,
@@ -276,6 +382,105 @@
       ],
       "type": "object"
     },
+    "ReloadError": {
+      "description": "One error, flattened the way [`crate::registry::LoadFailure`] flattens one.",
+      "properties": {
+        "code": {
+          "description": "The stable error code, e.g. `plugin.load_failed`.",
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "description": "The error's details.",
+          "type": "object"
+        },
+        "message": {
+          "description": "The one-line message.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ReloadParams": {
+      "additionalProperties": false,
+      "description": "The parameters of `plugin.reload`.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/PluginId",
+          "description": "The plugin's reverse-DNS id."
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "ReloadStatus": {
+      "description": "What the last load of one plugin did.\n\nThis is the row a plugins panel shows (TASK-98) and what `plugin.reload`\nanswers. A failed reload keeps the counts of the version that is still\nloaded, because that is the version still answering.",
+      "properties": {
+        "commands": {
+          "description": "How many menu commands the loaded version registers.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dev": {
+          "description": "Whether it is a dev install.",
+          "type": "boolean"
+        },
+        "effects": {
+          "description": "How many effects it declares.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReloadError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why the last attempt failed, when it did. The counts above then still\ndescribe the previous version, which stayed loaded."
+        },
+        "generation": {
+          "description": "How many times it has loaded successfully in this process. A dev\ninstall's reloads are how a developer knows the rebuild landed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "$ref": "#/$defs/PluginId",
+          "description": "The plugin."
+        },
+        "ok": {
+          "description": "Whether the last attempt succeeded.",
+          "type": "boolean"
+        },
+        "tools": {
+          "description": "How many MCP tools it contributes.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "generation",
+        "ok",
+        "dev",
+        "commands",
+        "effects",
+        "tools"
+      ],
+      "type": "object"
+    },
     "Removal": {
       "description": "What `plugin.remove` deleted.",
       "properties": {
@@ -364,6 +569,27 @@
       ],
       "type": "object"
     },
+    "StatusParams": {
+      "additionalProperties": false,
+      "description": "The parameters of `plugin.status`: none.",
+      "type": "object"
+    },
+    "Statuses": {
+      "description": "The result of `plugin.status`.",
+      "properties": {
+        "plugins": {
+          "description": "One row per plugin that has been loaded in this process, in id order.",
+          "items": {
+            "$ref": "#/$defs/ReloadStatus"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "plugins"
+      ],
+      "type": "object"
+    },
     "World": {
       "description": "A WIT world a plugin can implement (docs/PLAN.md §6.2).",
       "oneOf": [
@@ -436,6 +662,17 @@
       }
     },
     {
+      "description": "Install a plugin from a built component or a plugin directory, optionally as a watched dev install.",
+      "kind": "query",
+      "name": "plugin.install",
+      "params": {
+        "$ref": "#/$defs/InstallParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DevInstall"
+      }
+    },
+    {
       "description": "List every installed plugin, with the ones that failed to load and the ones hidden by an id conflict.",
       "kind": "query",
       "name": "plugin.list",
@@ -447,6 +684,17 @@
       }
     },
     {
+      "description": "Load an installed plugin again, re-registering its commands, effects and tools.",
+      "kind": "query",
+      "name": "plugin.reload",
+      "params": {
+        "$ref": "#/$defs/ReloadParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ReloadStatus"
+      }
+    },
+    {
       "description": "Delete an installed plugin's directory from disk.",
       "kind": "query",
       "name": "plugin.remove",
@@ -455,6 +703,17 @@
       },
       "result": {
         "$ref": "#/$defs/Removal"
+      }
+    },
+    {
+      "description": "Report what each plugin's last load did, including the error of one that failed.",
+      "kind": "query",
+      "name": "plugin.status",
+      "params": {
+        "$ref": "#/$defs/StatusParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Statuses"
       }
     }
   ],

@@ -7,6 +7,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use sub_plugin::registry::InstallLocation;
+
 mod plugin;
 mod project;
 mod serve;
@@ -100,6 +102,13 @@ Usage:
   subordinate-cli serve [--project <file>] [--instance <name>]
                         [--directory <dir>] [--plugin-dir <dir>]
                                serve the Command API until stdin closes
+  subordinate-cli plugin install <path> [--dev] [--project-local]
+                        [--dir <dir>] [--project <file>]
+                               install a built .wasm (or a plugin directory);
+                               --dev links it to its sources so a running host
+                               watches and hot-reloads it
+  subordinate-cli plugin reload <id>
+                               load an installed plugin again
   subordinate-cli plugin list [--dir <dir>] [--project <file>]
                                list installed plugins, load failures and
                                id conflicts
@@ -281,10 +290,14 @@ fn parse_plugin<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
         return Command::Incomplete(plugin::NEEDS_ACTION.to_owned());
     };
     let mut id = None;
+    let mut dev = false;
+    let mut project_local = false;
     while let Some(arg) = args.next() {
         match arg {
             "--compact" => pretty = false,
             "--pretty" | "--json" => pretty = true,
+            "--dev" => dev = true,
+            "--project-local" => project_local = true,
             "--dir" => match args.next() {
                 Some(value) => options.user_dir = Some(PathBuf::from(value)),
                 None => return Command::Incomplete("--dir needs a path".to_owned()),
@@ -302,6 +315,18 @@ fn parse_plugin<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
 
     let needs_id = |what: &str| Command::Incomplete(format!("plugin {what} needs a plugin id"));
     let action = match (word, id) {
+        ("install", Some(path)) => plugin::Action::Install {
+            path: PathBuf::from(path),
+            dev,
+            location: project_local.then_some(InstallLocation::Project),
+        },
+        ("install", None) => {
+            return Command::Incomplete(
+                "plugin install needs the path of a built .wasm or a plugin directory".to_owned(),
+            );
+        }
+        ("reload", Some(id)) => plugin::Action::Reload(id),
+        ("reload", None) => return needs_id("reload"),
         ("list", None) => plugin::Action::List,
         ("list", Some(extra)) => return Command::Unknown(extra),
         ("enable", Some(id)) => plugin::Action::Enable(id),
@@ -462,8 +487,8 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, parse, plugin};
-    use std::path::Path;
+    use super::{Command, InstallLocation, parse, plugin};
+    use std::path::{Path, PathBuf};
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -634,6 +659,58 @@ mod tests {
     }
 
     #[test]
+    fn plugin_install_takes_a_path_and_the_dev_flag() {
+        let Command::Plugin { action, .. } = parse(&args(&[
+            "plugin",
+            "install",
+            "./target/wasm32-wasip2/release/one.wasm",
+            "--dev",
+        ])) else {
+            panic!("plugin install did not parse");
+        };
+        assert_eq!(
+            action,
+            plugin::Action::Install {
+                path: PathBuf::from("./target/wasm32-wasip2/release/one.wasm"),
+                dev: true,
+                location: None,
+            }
+        );
+
+        let Command::Plugin { action, .. } =
+            parse(&args(&["plugin", "install", "./plugin", "--project-local"]))
+        else {
+            panic!("plugin install did not parse");
+        };
+        assert_eq!(
+            action,
+            plugin::Action::Install {
+                path: PathBuf::from("./plugin"),
+                dev: false,
+                location: Some(InstallLocation::Project),
+            }
+        );
+
+        assert!(matches!(
+            parse(&args(&["plugin", "install"])),
+            Command::Incomplete(_)
+        ));
+    }
+
+    #[test]
+    fn plugin_reload_takes_an_id() {
+        let Command::Plugin { action, .. } = parse(&args(&["plugin", "reload", "com.example.one"]))
+        else {
+            panic!("plugin reload did not parse");
+        };
+        assert_eq!(action, plugin::Action::Reload("com.example.one".to_owned()));
+        assert!(matches!(
+            parse(&args(&["plugin", "reload"])),
+            Command::Incomplete(_)
+        ));
+    }
+
+    #[test]
     fn plugin_reports_a_missing_subcommand_or_id() {
         assert_eq!(
             parse(&args(&["plugin"])),
@@ -644,8 +721,8 @@ mod tests {
             Command::Incomplete(_)
         ));
         assert_eq!(
-            parse(&args(&["plugin", "install"])),
-            Command::Unknown("install".to_owned())
+            parse(&args(&["plugin", "publish"])),
+            Command::Unknown("publish".to_owned())
         );
         assert_eq!(
             parse(&args(&["plugin", "list", "com.example.one"])),

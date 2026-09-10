@@ -14,7 +14,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use sub_command::Dispatcher;
@@ -23,7 +23,9 @@ use sub_command::transport::Server;
 use sub_core::{ResultExt, SubResult, codes};
 use sub_edit::Engine;
 use sub_model::{Project, json as project_json};
+use sub_plugin::dev::{self, DevHost, POLL_INTERVAL, WatchHandle};
 use sub_plugin::registry::{self, PluginDirs, PluginRegistry};
+use sub_plugin::runtime::PluginRuntime;
 
 /// How `serve` was asked to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,23 +72,37 @@ pub fn serve(options: &Options, ready: impl FnOnce(&Value)) -> SubResult<Value> 
 
     let engine = Engine::spawn(project)?;
     let mut dispatcher = Dispatcher::new(engine.handle().clone());
-    install_plugin_methods(&mut dispatcher, options)?;
+    // The watcher lives as long as the server does: dropping the handle stops
+    // the thread, so it is held here and not inside the setup.
+    let watching = install_plugin_methods(&mut dispatcher, options)?;
     let dispatcher = Arc::new(dispatcher);
     let served = run(options, &dispatcher, &name, ready);
+    drop(watching);
     let stopped = engine.shutdown();
     let report = served?;
     stopped?;
     Ok(report)
 }
 
-/// Puts `plugin.list`, `plugin.enable`, `plugin.disable` and `plugin.remove` on
-/// the dispatcher, so an agent manages plugins through the MCP bridge exactly
-/// as a user does through the CLI (docs/PLAN.md §6.4).
+/// Puts the plugin management methods on the dispatcher, so an agent manages
+/// plugins through the MCP bridge exactly as a user does through the CLI
+/// (docs/PLAN.md §6.4): `plugin.list`, `plugin.enable`, `plugin.disable` and
+/// `plugin.remove` from the registry, and `plugin.install`, `plugin.reload`
+/// and `plugin.status` from a [`DevHost`].
 ///
-/// A machine with no per-user data directory is served without them rather
-/// than not served at all: nothing else the Command API does depends on the
-/// plugin directories.
-fn install_plugin_methods(dispatcher: &mut Dispatcher, options: &Options) -> SubResult<()> {
+/// It also starts watching whatever is dev-installed, so a rebuild while this
+/// server is up is picked up within a second without anyone asking for it; the
+/// returned handle stops that thread when it is dropped. This process runs no
+/// plugins, so its loader only compiles the component — enough to answer the
+/// caller with the structured error of a component that will not load.
+///
+/// A machine with no per-user data directory is served without any of them
+/// rather than not served at all: nothing else the Command API does depends on
+/// the plugin directories.
+fn install_plugin_methods(
+    dispatcher: &mut Dispatcher,
+    options: &Options,
+) -> SubResult<Option<WatchHandle>> {
     let user = match options.plugin_dir.clone() {
         Some(dir) => dir,
         None => match registry::default_user_dir() {
@@ -97,7 +113,7 @@ fn install_plugin_methods(dispatcher: &mut Dispatcher, options: &Options) -> Sub
                     "plugin management is not served: {}",
                     error.message,
                 );
-                return Ok(());
+                return Ok(None);
             }
         },
     };
@@ -106,7 +122,25 @@ fn install_plugin_methods(dispatcher: &mut Dispatcher, options: &Options) -> Sub
         Some(project) => dirs.with_project_file(project),
         None => dirs,
     };
-    registry::register_methods(dispatcher, Arc::new(PluginRegistry::new(dirs)))
+    let registry = Arc::new(PluginRegistry::new(dirs));
+    registry::register_methods(dispatcher, Arc::clone(&registry))?;
+
+    let host = match PluginRuntime::new() {
+        Ok(runtime) => DevHost::with_loader(registry, dev::compile_only_loader(runtime)),
+        Err(error) => {
+            // A build with no wasm compiler still installs and lists plugins;
+            // it just cannot check a component before handing it on.
+            tracing::warn!(
+                code = error.code.as_str(),
+                "plugins are installed unchecked: {}",
+                error.message,
+            );
+            DevHost::new(registry, |_, _| Ok(dev::PluginArtifacts::default()))
+        }
+    };
+    let host = Arc::new(Mutex::new(host));
+    dev::register_methods(dispatcher, Arc::clone(&host))?;
+    Ok(Some(dev::watch_and_reload(host, POLL_INTERVAL)))
 }
 
 /// Binds the endpoint, announces it, waits for stdin to close and shuts down.

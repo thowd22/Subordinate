@@ -156,6 +156,19 @@
 //! `plugin.disable` and `plugin.remove` on the Command API, so the CLI, the
 //! GUI and an agent over MCP manage plugins through one surface.
 //!
+//! # Hot reload and the developer loop
+//!
+//! [`dev`] is what makes `subordinate-cli plugin install --dev` a loop rather
+//! than a step (docs/PLAN.md §6.4): the install links a plugin's source tree
+//! and its built component into a plugin directory and records where they came
+//! from, [`DevWatcher`] polls those sources, and [`DevHost`] runs the host's
+//! loader again and swaps that plugin's commands, effects and MCP tools for
+//! the new ones. A reload never touches the engine, the project or the undo
+//! stack, and one that fails leaves the running version registered, records a
+//! [`ReloadStatus`] for a plugins panel to show and returns the
+//! [`SubError`](sub_core::SubError) to whoever asked. `plugin.install`,
+//! `plugin.reload` and `plugin.status` put the same three on the Command API.
+//!
 //! # The capability model
 //!
 //! A manifest only *asks*. [`capability`] is what the asking turns into
@@ -171,6 +184,7 @@ pub mod audio;
 pub mod bindings;
 pub mod capability;
 mod convert;
+pub mod dev;
 #[cfg(feature = "render")]
 pub mod effect;
 mod interchange;
@@ -242,6 +256,10 @@ pub use bindings::subordinate::plugin::types::{
 pub use convert::{
     analysis as analysis_from_wit, marker_metadata, project_metadata, sequence_metadata,
     track_clip_metadata, track_metadata,
+};
+pub use dev::{
+    DevHost, DevInstall, DevSource, DevWatcher, LinkMode, PluginArtifacts, ReloadError,
+    ReloadStatus, WatchHandle,
 };
 pub use interchange::{CommandCall, ExportPreset, ImportTarget, export_presets, import_plan};
 pub use menu::{
@@ -412,4 +430,13 @@ pub mod codes {
         ErrorCode::from_static("plugin.registry_state_unwritable");
     /// An installed plugin's directory could not be deleted.
     pub const REMOVE_FAILED: ErrorCode = ErrorCode::from_static("plugin.remove_failed");
+    /// What `plugin install` was pointed at is not a plugin: it does not
+    /// exist, no `plugin.toml` was found beside the component or above it, or
+    /// the directory holds no single `.wasm` to install.
+    pub const DEV_SOURCE_INVALID: ErrorCode = ErrorCode::from_static("plugin.dev_source_invalid");
+    /// A plugin's files could not be written into the plugin directory.
+    pub const INSTALL_FAILED: ErrorCode = ErrorCode::from_static("plugin.install_failed");
+    /// The directory a plugin would be installed into already holds a
+    /// different plugin.
+    pub const INSTALL_CONFLICT: ErrorCode = ErrorCode::from_static("plugin.install_conflict");
 }

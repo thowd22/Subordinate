@@ -215,6 +215,10 @@ pub struct InstalledPlugin {
     pub directory: PathBuf,
     /// Whether it is switched on. Everything is on until switched off.
     pub enabled: bool,
+    /// Whether it is a dev install: linked to a source tree, watched, and
+    /// reloaded when that tree is rebuilt (see [`crate::dev`]).
+    #[serde(default)]
+    pub dev: bool,
     /// Its whole parsed manifest, so a listing can show what it asks for
     /// without reading the file again.
     pub manifest: Manifest,
@@ -498,11 +502,13 @@ impl PluginRegistry {
                 };
                 let id = manifest.plugin.id.clone();
                 let enabled = !disabled.contains(&id);
+                let dev = directory.join(crate::dev::DEV_FILE_NAME).is_file();
                 let plugin = InstalledPlugin {
                     id: id.clone(),
                     location,
                     directory,
                     enabled,
+                    dev,
                     manifest,
                 };
                 if let Some(previous) = plugins.insert(id, plugin) {
@@ -885,6 +891,12 @@ pub mod schema {
                 "Delete an installed plugin's directory from disk.",
             ),
         ];
+        // The dev-install and hot-reload methods are served by the same host
+        // and belong in the same document, so an MCP bridge builds
+        // plugin_install, plugin_reload and plugin_status from it too.
+        let mut methods = methods;
+        methods.extend(crate::dev::schema::methods(&mut generator));
+        methods.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
         let defs = generator.take_definitions(true);
         sorted(serde_json::json!({
             "$schema": META_SCHEMA,
@@ -930,7 +942,7 @@ pub mod schema {
         use super::{COMMITTED_PATH, META_SCHEMA, TITLE, document, document_text};
 
         #[test]
-        fn the_document_lists_the_four_methods_in_name_order() {
+        fn the_document_lists_every_method_in_name_order() {
             let document = document();
             assert_eq!(document["$schema"], META_SCHEMA);
             assert_eq!(document["title"], TITLE);
@@ -945,8 +957,11 @@ pub mod schema {
                 [
                     "plugin.disable",
                     "plugin.enable",
+                    "plugin.install",
                     "plugin.list",
-                    "plugin.remove"
+                    "plugin.reload",
+                    "plugin.remove",
+                    "plugin.status",
                 ]
             );
         }
