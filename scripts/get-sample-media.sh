@@ -112,7 +112,25 @@ sha256_of() {
 # that fails either check is deleted, so a rerun cannot mistake it for good.
 fetch() {
     local target=$1 url=$2 want_sha=$3 want_bytes=$4
-    curl -fsSL -A "$user_agent" --retry 3 --retry-delay 2 -o "$target.part" "$url"
+    # Wikimedia rate-limits bursts from shared CI egress IPs with HTTP 429, and
+    # curl's own --retry backs off far too fast to clear one. Retry the whole
+    # transfer a handful of times with a growing delay instead; the sleeps are
+    # long enough that a rate limit has expired by the last attempt.
+    local attempt delay=5
+    for attempt in 1 2 3 4 5; do
+        if curl -fsSL -A "$user_agent" --retry 2 --retry-delay 3 --retry-all-errors \
+            -o "$target.part" "$url"; then
+            break
+        fi
+        rm -f "$target.part"
+        if [ "$attempt" -eq 5 ]; then
+            echo "get-sample-media: giving up on $(basename "$target") after 5 attempts" >&2
+            exit 1
+        fi
+        echo "get-sample-media: download of $(basename "$target") failed, retrying in ${delay}s" >&2
+        sleep "$delay"
+        delay=$((delay * 2))
+    done
     local got_bytes
     got_bytes=$(wc -c <"$target.part" | tr -d ' ')
     if [ "$got_bytes" != "$want_bytes" ]; then

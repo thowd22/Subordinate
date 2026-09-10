@@ -101,7 +101,25 @@ function Get-Sha256 {
 function Save-Media {
     param([string]$Target, [string]$Url, [string]$Sha, [long]$Bytes)
     $part = "$Target.part"
-    Invoke-WebRequest -Uri $Url -OutFile $part -UserAgent $userAgent -MaximumRetryCount 3 -RetryIntervalSec 2
+    # Wikimedia rate-limits bursts from shared CI egress IPs with HTTP 429, and
+    # the built-in retry backs off far too fast to clear one. Retry the whole
+    # transfer with a growing delay instead. Keep in sync with the shell script.
+    $delay = 5
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $part -UserAgent $userAgent `
+                -MaximumRetryCount 2 -RetryIntervalSec 3
+            break
+        } catch {
+            if (Test-Path $part) { Remove-Item -Force $part }
+            if ($attempt -eq 5) {
+                throw "get-sample-media: giving up on $(Split-Path -Leaf $Target) after 5 attempts: $_"
+            }
+            Write-Host "get-sample-media: download of $(Split-Path -Leaf $Target) failed, retrying in ${delay}s"
+            Start-Sleep -Seconds $delay
+            $delay *= 2
+        }
+    }
     $got = (Get-Item $part).Length
     if ($got -ne $Bytes) {
         Remove-Item -Force $part
