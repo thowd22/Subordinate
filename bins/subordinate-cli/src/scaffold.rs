@@ -61,6 +61,28 @@ pub struct Options {
     pub force: bool,
 }
 
+impl Options {
+    /// The same options as `plugin.new` takes them over the Command API.
+    ///
+    /// The wire type accepts every [`World`], because that is the manifest's
+    /// own type; only some have templates, so this is where one that has none
+    /// is refused — with the same error and the same list `--world` gives.
+    ///
+    /// # Errors
+    ///
+    /// `core.invalid_argument` when the world has no template.
+    pub fn from_params(params: &sub_plugin::authoring::NewParams) -> SubResult<Self> {
+        Ok(Self {
+            world: parse_world(params.world.as_str())?,
+            name: params.name.clone(),
+            parent: params.parent.clone(),
+            id: params.id.clone(),
+            sdk_path: params.sdk_path.clone(),
+            force: params.force,
+        })
+    }
+}
+
 impl Default for Options {
     fn default() -> Self {
         Self {

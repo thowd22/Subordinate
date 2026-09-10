@@ -303,9 +303,10 @@ fn a_plugins_tools_are_offered_under_its_id_and_route_back_to_it() {
     assert_eq!(route.tool, "cut_silence");
 
     // Calling it is a call this bridge routes rather than refuses: it goes out
-    // as plugin.call_tool, which this editor does not serve yet (TASK-96), so
-    // the answer is the Command API's own stable code and not a protocol
-    // error.
+    // as plugin.call_tool, which this editor does not serve — it registered the
+    // registry's methods and no plugin host — so the answer is the Command
+    // API's own stable code and not a protocol error. `tests/plugin_tools.rs`
+    // is the same call against an editor that does serve it.
     let forwarded = bridge
         .call(call(
             "com_example_demo_cut_silence",

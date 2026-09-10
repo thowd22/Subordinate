@@ -335,3 +335,129 @@ fn the_binary_serves_the_project_as_resources_and_says_when_they_change() {
     engine.shutdown().expect("the engine stops");
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// The plugin the reload test installs.
+const PLUGIN_ID: &str = "com.example.toolbox";
+
+/// The manifest of that plugin, with `description` for its one tool.
+fn toolbox_manifest(description: &str) -> String {
+    format!(
+        "[plugin]\nid = \"{PLUGIN_ID}\"\nname = \"Toolbox\"\nversion = \"0.1.0\"\n\
+         api = \"0.1\"\nworlds = [\"mcp-tools\"]\n\n\
+         [mcp.tools.create_bin]\ndescription = \"{description}\"\n\
+         schema = \"create_bin.json\"\n"
+    )
+}
+
+/// Installing a plugin and reloading it both move the tool list under a client
+/// that is already holding one, so both must be announced (TASK-96).
+#[test]
+fn installing_and_reloading_a_plugin_tells_the_client_its_tools_changed() {
+    let Some(component) = sub_plugin::guests::TOOLBOX else {
+        eprintln!("the wasm32-wasip2 target is not installed; skipping the reload notice test");
+        return;
+    };
+    let directory = std::env::temp_dir().join(format!("sub-mcp-reload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a test directory");
+
+    // A plugin source tree the agent will point `plugin_install` at.
+    let source = directory.join("src-toolbox");
+    std::fs::create_dir_all(&source).expect("a source directory");
+    std::fs::write(
+        source.join("plugin.toml"),
+        toolbox_manifest("Create a bin."),
+    )
+    .expect("a manifest");
+    std::fs::write(
+        source.join("create_bin.json"),
+        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#,
+    )
+    .expect("a tool schema");
+    std::fs::copy(component, source.join("plugin.wasm")).expect("the built component");
+
+    // The editor side: the engine's methods, the registry's and the plugin
+    // host's, which is what `subordinate-cli serve` puts on one dispatcher.
+    let engine = Engine::spawn(Project::new("Doc cut")).expect("an engine");
+    let endpoint = Endpoint::in_directory(directory.clone(), INSTANCE).expect("an endpoint");
+    let mut dispatcher = Dispatcher::new(engine.handle().clone());
+    let registry = Arc::new(sub_plugin::registry::PluginRegistry::new(
+        sub_plugin::registry::PluginDirs::new(directory.join("plugins")),
+    ));
+    sub_plugin::registry::register_methods(&mut dispatcher, Arc::clone(&registry))
+        .expect("registry methods");
+    let runtime = sub_plugin::runtime::PluginRuntime::new().expect("a wasm engine");
+    let host = sub_plugin::dev::DevHost::with_loader(
+        registry,
+        sub_plugin::dev::manifest_tools_loader(runtime),
+    );
+    sub_plugin::dev::register_methods(&mut dispatcher, Arc::new(std::sync::Mutex::new(host)))
+        .expect("dev methods");
+    let server = Server::bind(endpoint, Arc::new(dispatcher)).expect("a bound server");
+
+    let mut client = Client::start(&directory);
+    let initialized = client.initialize();
+    assert_eq!(
+        initialized["capabilities"]["tools"]["listChanged"],
+        json!(true),
+        "a client must be told the tool list can change",
+    );
+
+    // The client lists once, so it now holds a listing with no plugin tools in
+    // it. That listing is what the notifications below are about.
+    let before = client.request("tools/list", &json!({}));
+    let count = before["tools"].as_array().expect("a tool list").len();
+
+    // Installing the plugin adds its tool, so the held listing is stale.
+    let installed = client.request(
+        "tools/call",
+        &json!({
+            "name": "plugin_install",
+            "arguments": { "path": source.display().to_string(), "dev": true },
+        }),
+    );
+    assert_ne!(installed["isError"], json!(true), "{installed}");
+    client.notified("notifications/tools/list_changed");
+
+    let after = client.request("tools/list", &json!({}));
+    let tools = after["tools"].as_array().expect("a tool list");
+    assert_eq!(tools.len(), count + 1);
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "com_example_toolbox_create_bin")
+        .expect("the plugin's tool is offered under its id");
+    assert_eq!(tool["description"], "Create a bin.");
+    // A listing that carries a plugin's tools is this user's alone.
+    assert_eq!(after["cacheScope"], "private");
+
+    // The developer loop: edit the plugin, reload it, and the client is told
+    // that what it is holding has moved on.
+    std::fs::write(
+        source.join("plugin.toml"),
+        toolbox_manifest("Create a bin, now with a better description."),
+    )
+    .expect("the edited manifest");
+    let reloaded = client.request(
+        "tools/call",
+        &json!({ "name": "plugin_reload", "arguments": { "id": PLUGIN_ID } }),
+    );
+    assert_ne!(reloaded["isError"], json!(true), "{reloaded}");
+    client.notified("notifications/tools/list_changed");
+
+    let after = client.request("tools/list", &json!({}));
+    let tool = after["tools"]
+        .as_array()
+        .expect("a tool list")
+        .iter()
+        .find(|tool| tool["name"] == "com_example_toolbox_create_bin")
+        .expect("the plugin's tool is still offered");
+    assert_eq!(
+        tool["description"],
+        "Create a bin, now with a better description.",
+    );
+
+    drop(client);
+    server.shutdown().expect("the server stops");
+    engine.shutdown().expect("the engine stops");
+    let _ = std::fs::remove_dir_all(&directory);
+}

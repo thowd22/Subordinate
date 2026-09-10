@@ -241,6 +241,43 @@ impl Bridge {
         )
     }
 
+    /// Re-reads the plugin tools and tells `peer` if the listing moved.
+    ///
+    /// A reload is the case this exists for: the agent rebuilds its plugin,
+    /// calls `plugin_reload`, and the tool it is about to use is the new one.
+    /// A client that cached `tools/list` would otherwise call the previous
+    /// version's tool, with the previous version's argument schema, until it
+    /// happened to list again.
+    async fn announce_tool_changes(&self, peer: &Peer<RoleServer>) {
+        let before = self.plugin_tools();
+        let bridge = self.clone();
+        let refreshed = tokio::task::spawn_blocking(move || bridge.refresh_plugin_tools()).await;
+        let after = match refreshed {
+            Ok(Ok(after)) => after,
+            Ok(Err(error)) => {
+                debug!(
+                    code = error.code.as_str(),
+                    "the editor listed no plugin tools after a plugin changed",
+                );
+                return;
+            }
+            Err(error) => {
+                warn!("the plugin tool refresh did not finish: {error}");
+                return;
+            }
+        };
+        if !before.differs_from(&after) {
+            return;
+        }
+        debug!(
+            tools = after.len(),
+            "the plugin tools changed; telling the client",
+        );
+        if let Err(error) = peer.notify_tool_list_changed().await {
+            debug!("the client was not told the tool list changed: {error}");
+        }
+    }
+
     /// A receiver of every resource update from now on.
     ///
     /// Starting the feed opens a connection and makes a call, so it happens on
@@ -318,6 +355,19 @@ async fn legacy_updates(
     }
 }
 
+/// Whether a Command API method can change which tools the plugins contribute.
+///
+/// Installing, reloading or removing a plugin changes the set outright, and
+/// switching one on or off changes whether its tools are published at all.
+/// Everything else — listing, scaffolding, testing — leaves it alone, and a
+/// spurious `list_changed` costs the client a round trip.
+fn changes_plugin_tools(method: &str) -> bool {
+    matches!(
+        method,
+        "plugin.install" | "plugin.reload" | "plugin.remove" | "plugin.enable" | "plugin.disable"
+    )
+}
+
 /// A protocol-level error carrying the engine's own structured error.
 ///
 /// A resource read has no place to put a tool-style error result, so the
@@ -354,6 +404,11 @@ impl ServerHandler for Bridge {
         let mut info = ServerInfo::new(
             ServerCapabilities::builder()
                 .enable_tools()
+                // Which tools there are depends on which plugins are installed
+                // and enabled, and an agent installs and reloads plugins from
+                // the same session (docs/PLAN.md §6.4), so the list changes
+                // under a client that is already holding one.
+                .enable_tool_list_changed()
                 .enable_resources()
                 .enable_resources_subscribe()
                 .enable_resources_list_changed()
@@ -530,8 +585,9 @@ impl ServerHandler for Bridge {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        let method = self.tools.method(&request.name).map(str::to_owned);
         let bridge = self.clone();
         // The Command API client is blocking, so the round trip leaves the
         // async runtime rather than holding it up.
@@ -540,15 +596,62 @@ impl ServerHandler for Bridge {
             .map_err(|error| {
                 McpError::internal_error(format!("the tool call did not finish: {error}"), None)
             })??;
+        if method.as_deref().is_some_and(changes_plugin_tools) && result.is_error != Some(true) {
+            self.announce_tool_changes(&context.peer).await;
+        }
         Ok(CallToolResponse::Complete(result))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{failure, success};
+    use super::{changes_plugin_tools, failure, success};
+    use crate::tools::PluginTools;
     use serde_json::json;
     use sub_core::{SubError, codes};
+
+    #[test]
+    fn only_the_methods_that_change_the_tool_set_announce_it() {
+        for method in [
+            "plugin.install",
+            "plugin.reload",
+            "plugin.remove",
+            "plugin.enable",
+            "plugin.disable",
+        ] {
+            assert!(changes_plugin_tools(method), "{method}");
+        }
+        for method in [
+            "plugin.list",
+            "plugin.tools",
+            "plugin.new",
+            "plugin.test",
+            "plugin.status",
+            "plugin.call_tool",
+            "bin.create",
+        ] {
+            assert!(!changes_plugin_tools(method), "{method}");
+        }
+    }
+
+    #[test]
+    fn a_listing_that_moved_is_what_a_client_is_told_about() {
+        let row = |description: &str| {
+            json!({ "tools": [{
+                "name": "a_b_tool",
+                "plugin": "a.b",
+                "tool": "tool",
+                "description": description,
+                "input_schema": { "type": "object" },
+            }] })
+        };
+        let before = PluginTools::from_listing(&row("first")).expect("a listing");
+        let same = PluginTools::from_listing(&row("first")).expect("a listing");
+        let changed = PluginTools::from_listing(&row("second")).expect("a listing");
+        assert!(!before.differs_from(&same));
+        assert!(before.differs_from(&changed), "a reload must be announced");
+        assert!(before.differs_from(&PluginTools::default()));
+    }
 
     #[test]
     fn a_result_is_readable_text_and_structured_content() {

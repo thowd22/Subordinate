@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The guests, by directory name under `tests/guests`.
-const GUESTS: [&str; 5] = ["looper", "hog", "counter", "editor", "tinter"];
+const GUESTS: [&str; 6] = ["looper", "hog", "counter", "editor", "tinter", "toolbox"];
 const TARGET: &str = "wasm32-wasip2";
 
 fn main() {
