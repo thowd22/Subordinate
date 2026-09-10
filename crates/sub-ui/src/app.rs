@@ -814,6 +814,19 @@ impl SubordinateApp {
                         group.len()
                     );
                 }
+                if let Some(refusal) = response.trim_refused {
+                    log::debug!("clip trim refused: {}", refusal.id());
+                }
+                if let Some(group) = response.clip_trim {
+                    // Planned, not applied, for the same reason as the move
+                    // above: it goes through `trim::apply_trim` so the trim
+                    // and everything a ripple carried are one undo entry.
+                    log::debug!(
+                        "clip trim is not wired up yet: {} ({} commands)",
+                        group.label,
+                        group.len()
+                    );
+                }
                 for action in response.marker_actions {
                     // Every marker gesture is one undoable command; they
                     // reach the engine with the rest of the panel's actions.

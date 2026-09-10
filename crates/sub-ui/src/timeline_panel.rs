@@ -17,8 +17,8 @@
 //! `Painter` demands screen coordinates.
 
 use eframe::egui::{
-    Align2, Color32, Context, CornerRadius, FontId, Key, Painter, Pos2, Rect, Response, Sense,
-    Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder, Vec2, Visuals, pos2,
+    Align2, Color32, Context, CornerRadius, CursorIcon, FontId, Key, Painter, Pos2, Rect, Response,
+    Sense, Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder, Vec2, Visuals, pos2,
 };
 use sub_model::{Clip, Marker, MarkerId, MediaItem, Project, Sequence, Track, TrackKind};
 use sub_time::{Rational, RationalTime, TimeRange, Timecode, TimecodeRate};
@@ -29,6 +29,7 @@ use crate::snapping::{self, SnapCandidate, SnapKind, SnapSettings};
 use crate::thumbnails::{ThumbnailCache, ZoomBucket, tile_time};
 use crate::timeline::{TimelineView, TrackLayout, ZoomLevel};
 use crate::track_header::{TrackAction, TrackHeaderState, empty_column_menu};
+use crate::trim::{TrimEdge, TrimGroup, TrimRefusal, plan_trim};
 use crate::waveform::WaveformCache;
 
 /// The narrowest a labelled ruler tick may be spaced, in points.
@@ -45,6 +46,19 @@ const MIN_NAME_WIDTH_PX: f32 = 26.0;
 
 /// How wide the bar marking a trimmed clip edge is, in points.
 const TRIM_BAR_WIDTH: f32 = 3.0;
+
+/// How far into a clip a press still counts as grabbing its edge, in points.
+///
+/// Wide enough to aim at with a mouse and narrow enough that the middle of
+/// even a short clip still starts a move; a clip narrower than twice this
+/// splits its width between the two handles rather than letting them overlap.
+pub const TRIM_HANDLE_PX: f32 = 6.0;
+
+/// How much of [`SELECTION_COLOR`] a trim handle is painted in at rest.
+const TRIM_HANDLE_ALPHA: u8 = 140;
+
+/// The narrowest clip that has room to be painted with trim handles.
+const MIN_HANDLE_WIDTH_PX: f32 = 3.0 * TRIM_HANDLE_PX;
 
 /// How far a waveform strip is inset from the top and bottom of its clip, in
 /// points, so the clip's name and outline stay readable over it.
@@ -573,6 +587,15 @@ pub struct TimelinePanel {
     /// preview it; `Err` is why it will not be, which is what makes a refused
     /// drag visible before the button comes up.
     drag_plan: Option<Result<MoveGroup, MoveRefusal>>,
+    /// What the trim drag in progress would do, recomputed each frame.
+    ///
+    /// The same shape as [`TimelinePanel::drag_plan`], and for the same
+    /// reason: `Ok` is the ghost and the commands, `Err` is why there are
+    /// none.
+    trim_plan: Option<Result<TrimGroup, TrimRefusal>>,
+    /// The clip edge under the pointer, which is what turns the cursor into a
+    /// trim cursor and paints the handle bright.
+    hovered_trim: Option<(ClipRef, TrimEdge)>,
     /// The ruler's markers: what is selected, dragged or being renamed.
     marker_state: MarkerState,
     /// Whether the pointer press in progress was claimed by a marker, in
@@ -607,6 +630,17 @@ enum Gesture {
         /// Where the pointer is now.
         current: Pos2,
     },
+    /// One clip's edge being dragged to a new time.
+    Trim {
+        /// Where the drag was pressed.
+        origin: Pos2,
+        /// Where the pointer is now.
+        current: Pos2,
+        /// The clip whose edge is held.
+        target: ClipRef,
+        /// The edge that is held.
+        edge: TrimEdge,
+    },
 }
 
 /// What one painted frame of the panel produced.
@@ -638,6 +672,15 @@ pub struct TimelineResponse {
     pub clip_move: Option<MoveGroup>,
     /// Why the drag under the pointer cannot become an edit, while it cannot.
     pub refused: Option<MoveRefusal>,
+    /// The trim a released edge drag asks for, as one undoable group.
+    ///
+    /// Like [`TimelineResponse::clip_move`], the panel has trimmed nothing: it
+    /// plans the drag and hands the plan over, for the caller to apply with
+    /// [`apply_trim`](crate::trim::apply_trim) so the trim and every clip a
+    /// ripple carried are one entry in the undo stack.
+    pub clip_trim: Option<TrimGroup>,
+    /// Why the trim under the pointer cannot become an edit, while it cannot.
+    pub trim_refused: Option<TrimRefusal>,
     /// The marker actions raised this frame, in the order they were raised.
     ///
     /// Every one of them is exactly one command
@@ -669,6 +712,8 @@ impl TimelinePanel {
             gesture: None,
             marquee_base: Vec::new(),
             drag_plan: None,
+            trim_plan: None,
+            hovered_trim: None,
             marker_state: MarkerState::new(),
             marker_press: false,
             marker_grab_offset: 0.0,
@@ -708,6 +753,34 @@ impl TimelinePanel {
     #[must_use]
     pub const fn is_dragging_clips(&self) -> bool {
         matches!(self.gesture, Some(Gesture::Move { .. }))
+    }
+
+    /// What the trim under the pointer would commit, while one is in progress
+    /// and legal.
+    #[must_use]
+    pub fn trim_preview(&self) -> Option<&TrimGroup> {
+        self.trim_plan.as_ref().and_then(|plan| plan.as_ref().ok())
+    }
+
+    /// Why the trim under the pointer would be refused, while one is.
+    #[must_use]
+    pub const fn trim_refusal(&self) -> Option<TrimRefusal> {
+        match self.trim_plan {
+            Some(Err(refusal)) => Some(refusal),
+            _ => None,
+        }
+    }
+
+    /// Whether a trim drag is under the pointer.
+    #[must_use]
+    pub const fn is_trimming(&self) -> bool {
+        matches!(self.gesture, Some(Gesture::Trim { .. }))
+    }
+
+    /// The clip edge the pointer is over, which shows the trim cursor.
+    #[must_use]
+    pub const fn hovered_trim(&self) -> Option<(ClipRef, TrimEdge)> {
+        self.hovered_trim
     }
 
     /// The rubber band under the pointer, while a marquee is in progress.
@@ -1112,12 +1185,13 @@ impl TimelinePanel {
         }
         let mut marker_actions = self.handle_markers(ui, &response, &layout, sequence);
         let seek = self.handle_scrub(&response, &layout, sequence);
-        let shift = ui.input(|input| input.modifiers.shift);
+        let (shift, alt) = ui.input(|input| (input.modifiers.shift, input.modifiers.alt));
         let lanes = if seek.is_some() {
             LaneOutcome::default()
         } else {
-            self.handle_lanes(&response, &layout, sequence, shift)
+            self.handle_lanes(&response, &layout, project, sequence, shift, alt)
         };
+        self.update_trim_hover(ui.ctx(), &response, &layout, sequence);
         self.prepare_waveforms(ui.ctx(), project, sequence, layout);
         let visuals = ui.visuals().clone();
         let painter = ui.painter().with_clip_rect(rect);
@@ -1148,6 +1222,8 @@ impl TimelinePanel {
             selection_changed: lanes.selection_changed,
             clip_move: lanes.clip_move,
             refused: lanes.refused,
+            clip_trim: lanes.clip_trim,
+            trim_refused: lanes.trim_refused,
             marker_actions,
         }
     }
@@ -1474,8 +1550,10 @@ impl TimelinePanel {
         &mut self,
         response: &Response,
         layout: &PanelLayout,
+        project: &Project,
         sequence: &Sequence,
         shift: bool,
+        alt: bool,
     ) -> LaneOutcome {
         let mut outcome = LaneOutcome::default();
         let held = response.is_pointer_button_down_on();
@@ -1499,6 +1577,37 @@ impl TimelinePanel {
                 if !held {
                     self.gesture = None;
                     self.marquee_base.clear();
+                }
+            }
+            Gesture::Trim {
+                origin,
+                current,
+                target,
+                edge,
+            } => {
+                let pos = pointer.unwrap_or(current);
+                self.gesture = Some(Gesture::Trim {
+                    origin,
+                    current: pos,
+                    target,
+                    edge,
+                });
+                let delta = self.trim_offset(origin, pos, layout);
+                match plan_trim(project, sequence, target, edge, delta, alt) {
+                    Ok(group) => {
+                        self.trim_plan = group.clone().map(Ok);
+                        if !held {
+                            outcome.clip_trim = group;
+                        }
+                    }
+                    Err(refusal) => {
+                        self.trim_plan = Some(Err(refusal));
+                        outcome.trim_refused = Some(refusal);
+                    }
+                }
+                if !held {
+                    self.gesture = None;
+                    self.trim_plan = None;
                 }
             }
             Gesture::Move { origin, current } => {
@@ -1542,6 +1651,18 @@ impl TimelinePanel {
         sequence: &Sequence,
         shift: bool,
     ) -> bool {
+        if let Some((target, edge)) = self.trim_target_at(pos, layout, sequence) {
+            // An edge is a trim, not a move: the press selects the clip so the
+            // gesture is visible, and takes hold of the edge.
+            let changed = self.selection.select_only(target);
+            self.gesture = Some(Gesture::Trim {
+                origin: pos,
+                current: pos,
+                target,
+                edge,
+            });
+            return changed;
+        }
         if let Some(item) = self.clip_at(pos, layout, sequence) {
             let changed = if shift {
                 self.selection.toggle(item)
@@ -1638,6 +1759,76 @@ impl TimelinePanel {
         (delta, isize::try_from(lanes).unwrap_or(0))
     }
 
+    /// How far a trim drag from `origin` to `current` moves an edge: an exact
+    /// time offset at the sequence timebase, positive to the right.
+    fn trim_offset(&self, origin: Pos2, current: Pos2, layout: &PanelLayout) -> RationalTime {
+        let rate = self.view.rate();
+        let left = layout.content.left();
+        let from = self.view.time_at_pixel(round_px(origin.x - left));
+        let to = self.view.time_at_pixel(round_px(current.x - left));
+        to.checked_sub(from)
+            .unwrap_or_else(|| RationalTime::zero(rate))
+    }
+
+    /// The clip edge under `pos`, when the pointer is close enough to one.
+    ///
+    /// A clip narrower than twice [`TRIM_HANDLE_PX`] splits its width between
+    /// its two handles rather than letting them overlap, so the edge that is
+    /// grabbed is always the nearer one.
+    fn trim_target_at(
+        &self,
+        pos: Pos2,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+    ) -> Option<(ClipRef, TrimEdge)> {
+        if !layout.content.contains(pos) {
+            return None;
+        }
+        let index = usize::try_from(self.lane_at(layout.content.top(), pos.y)).ok()?;
+        let track = sequence.tracks.get(index)?;
+        if !clip_edits_allowed(track) {
+            return None;
+        }
+        let time = self
+            .view
+            .time_at_pixel(round_px(pos.x - layout.content.left()));
+        let placement = self.layouts.get(index)?.at(time)?;
+        let rect = self.clip_rect(layout, index, placement.range);
+        let grip = (rect.width() / 2.0).min(TRIM_HANDLE_PX);
+        let item = ClipRef::new(track.id, placement.clip);
+        if pos.x <= rect.left() + grip {
+            Some((item, TrimEdge::In))
+        } else if pos.x >= rect.right() - grip {
+            Some((item, TrimEdge::Out))
+        } else {
+            None
+        }
+    }
+
+    /// Notes the clip edge under the pointer and asks for the trim cursor.
+    ///
+    /// The cursor is the whole of the hover affordance: a handle is painted on
+    /// every selected clip whatever the pointer is doing, and brightens when
+    /// the pointer is on it.
+    fn update_trim_hover(
+        &mut self,
+        ctx: &Context,
+        response: &Response,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+    ) {
+        self.hovered_trim = match self.gesture {
+            Some(Gesture::Trim { target, edge, .. }) => Some((target, edge)),
+            Some(_) => None,
+            None => response
+                .hover_pos()
+                .and_then(|pos| self.trim_target_at(pos, layout, sequence)),
+        };
+        if self.hovered_trim.is_some() {
+            ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
+        }
+    }
+
     /// The clip under `pos`, when it is on an editable track.
     fn clip_at(&self, pos: Pos2, layout: &PanelLayout, sequence: &Sequence) -> Option<ClipRef> {
         if !layout.content.contains(pos) {
@@ -1686,6 +1877,27 @@ impl TimelinePanel {
     /// so the refusal is on the clips the editor is looking at.
     fn paint_gesture(&self, painter: &Painter, layout: &PanelLayout, sequence: &Sequence) {
         let lanes = painter.with_clip_rect(layout.content);
+        if let Some(Ok(group)) = self.trim_plan.as_ref()
+            && let Some(index) = sequence
+                .tracks
+                .iter()
+                .position(|track| track.id == group.target.track)
+        {
+            // The ghost is the span the clip will occupy, painted over where
+            // it still is, so the edge reads as being dragged to a new time.
+            let rect = self.clip_rect(layout, index, group.range);
+            lanes.rect_filled(
+                rect,
+                CornerRadius::same(3),
+                tint(SELECTION_COLOR, GHOST_ALPHA),
+            );
+            lanes.rect_stroke(
+                rect,
+                CornerRadius::same(3),
+                Stroke::new(1.0, SELECTION_COLOR),
+                StrokeKind::Inside,
+            );
+        }
         match self.gesture {
             Some(Gesture::Marquee { origin, current }) => {
                 let band = Rect::from_two_pos(origin, current).intersect(layout.content);
@@ -1723,7 +1935,9 @@ impl TimelinePanel {
                     );
                 }
             }
-            None => {}
+            // The trimmed span's ghost is painted above, before the gesture
+            // is matched on, because it is the whole of what a trim previews.
+            Some(Gesture::Trim { .. }) | None => {}
         }
     }
 
@@ -1992,8 +2206,16 @@ impl TimelinePanel {
                 dimmed,
                 strip,
             );
-            if self.selection.contains(ClipRef::new(track.id, clip.id)) {
+            let item = ClipRef::new(track.id, clip.id);
+            if self.selection.contains(item) {
                 paint_selected(painter, rect, self.drag_refusal().is_some());
+            }
+            // Handles are drawn on the clip the pointer is over — the one a
+            // press would trim — and nowhere else, so a timeline at rest is
+            // not covered in grips.
+            if !dimmed && let Some((_, edge)) = self.hovered_trim.filter(|(held, _)| *held == item)
+            {
+                paint_trim_handles(painter, rect, edge);
             }
         }
     }
@@ -2051,6 +2273,40 @@ struct LaneOutcome {
     clip_move: Option<MoveGroup>,
     /// Why the drag under the pointer cannot become an edit.
     refused: Option<MoveRefusal>,
+    /// The trim a released edge drag asks for.
+    clip_trim: Option<TrimGroup>,
+    /// Why the trim under the pointer cannot become an edit.
+    trim_refused: Option<TrimRefusal>,
+}
+
+/// Paints the grips a trim drag takes hold of, at both ends of a clip.
+///
+/// The edge under the pointer is painted at full strength and the other at
+/// [`TRIM_HANDLE_ALPHA`], so which end a press will grab is visible before the
+/// button goes down. A clip too narrow to hold two handles and still show
+/// anything between them gets none: on one that small the whole rectangle is
+/// the edge, and a press anywhere in it trims.
+fn paint_trim_handles(painter: &Painter, rect: Rect, hovered: TrimEdge) {
+    if rect.width() < MIN_HANDLE_WIDTH_PX {
+        return;
+    }
+    let radius = CornerRadius::same(3);
+    for edge in [TrimEdge::In, TrimEdge::Out] {
+        let grip = match edge {
+            TrimEdge::In => {
+                Rect::from_min_max(rect.min, pos2(rect.left() + TRIM_HANDLE_PX, rect.bottom()))
+            }
+            TrimEdge::Out => {
+                Rect::from_min_max(pos2(rect.right() - TRIM_HANDLE_PX, rect.top()), rect.max)
+            }
+        };
+        let color = if hovered == edge {
+            SELECTION_COLOR
+        } else {
+            tint(SELECTION_COLOR, TRIM_HANDLE_ALPHA)
+        };
+        painter.rect_filled(grip, radius, color);
+    }
 }
 
 /// Marks a selected clip, and says when its drag is being refused.
