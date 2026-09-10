@@ -13,6 +13,7 @@ pub mod mixer;
 pub mod offline;
 pub mod output;
 pub mod resample;
+pub mod scrub;
 
 pub use clock::AudioClock;
 pub use decode::{AudioInfo, Block, FileDecoder, Pcm, decode_file, probe_audio};
@@ -27,6 +28,7 @@ pub use output::{
     OutputStream, StreamHandle, SupportedFormat, negotiate,
 };
 pub use resample::{PcmReader, PcmWriter, ResampleStage, Resampler, pcm_ring};
+pub use scrub::{ScrubControl, ScrubPlayer, ScrubSettings, scrub};
 
 /// Stable [`sub_core::ErrorCode`] constants this crate returns.
 ///

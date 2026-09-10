@@ -10,11 +10,12 @@
 
 use eframe::egui;
 
+use sub_audio::scrub::{MAX_GRAIN_MS, MIN_GRAIN_MS, ScrubSettings};
 use sub_audio::{OutputDeviceInfo, OutputDiagnostics};
 use sub_core::{SubError, SubResult};
 
 /// What the user asked the panel for this frame.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum AudioSettingsAction {
     /// Nothing was clicked.
     #[default]
@@ -23,6 +24,9 @@ pub enum AudioSettingsAction {
     Rescan,
     /// Play on this device, or on the system default when `None`.
     SelectDevice(Option<String>),
+    /// Scrub with these settings: whether dragging the playhead sounds at
+    /// all, and how long each grain is (`sub_audio::scrub`).
+    SetScrub(ScrubSettings),
 }
 
 /// The panel's state: the device list once it has been scanned, the device the
@@ -39,6 +43,8 @@ pub struct AudioSettingsPanel {
     diagnostics: Option<OutputDiagnostics>,
     /// Why the last device switch failed, when one did.
     last_error: Option<SubError>,
+    /// What scrubbing does, as the application last told the panel.
+    scrub: ScrubSettings,
     /// Whether the window is showing.
     pub open: bool,
 }
@@ -107,6 +113,17 @@ impl AudioSettingsPanel {
         self.last_error.as_ref()
     }
 
+    /// Tells the panel what scrubbing is actually set to, so the widgets show
+    /// what the audio stage applied rather than what was asked for.
+    pub fn set_scrub(&mut self, scrub: ScrubSettings) {
+        self.scrub = scrub;
+    }
+
+    /// The scrub settings the panel is showing.
+    pub fn scrub(&self) -> ScrubSettings {
+        self.scrub
+    }
+
     /// Draws the panel as a window, if it is open.
     pub fn show(&mut self, ctx: &egui::Context) -> AudioSettingsAction {
         if !self.open {
@@ -167,6 +184,22 @@ impl AudioSettingsPanel {
                 ui.visuals().error_fg_color,
                 format!("could not switch device: {error}"),
             );
+        }
+        ui.separator();
+        ui.label("Scrubbing");
+        let mut scrub = self.scrub;
+        let mut changed = ui
+            .checkbox(&mut scrub.enabled, "Play audio while scrubbing")
+            .changed();
+        let mut grain_ms = scrub.grain_ms();
+        changed |= ui
+            .add_enabled(
+                scrub.enabled,
+                egui::Slider::new(&mut grain_ms, MIN_GRAIN_MS..=MAX_GRAIN_MS).text("grain (ms)"),
+            )
+            .changed();
+        if changed {
+            action = AudioSettingsAction::SetScrub(scrub.with_grain_ms(grain_ms));
         }
         ui.separator();
         ui.label(status_line(self.diagnostics.as_ref()));
