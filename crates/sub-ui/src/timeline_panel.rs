@@ -23,6 +23,7 @@ use eframe::egui::{
 use sub_model::{Clip, Marker, MarkerId, MediaItem, Project, Sequence, Track, TrackKind};
 use sub_time::{Rational, RationalTime, TimeRange, Timecode, TimecodeRate};
 
+use crate::fade::{FadeEdge, FadeEdit, FadeRefusal, plan_fade};
 use crate::markers::{self, DEFAULT_MARKER_NAME, MarkerAction, MarkerState};
 use crate::media_bin::BinDrag;
 use crate::selection::{ClipRef, MoveGroup, MoveRefusal, Selection, clips_in_marquee, plan_move};
@@ -62,6 +63,28 @@ const TRIM_HANDLE_ALPHA: u8 = 140;
 
 /// The narrowest clip that has room to be painted with trim handles.
 const MIN_HANDLE_WIDTH_PX: f32 = 3.0 * TRIM_HANDLE_PX;
+
+/// How far from a fade handle a press still counts as grabbing it, in points.
+pub const FADE_HANDLE_PX: f32 = 6.0;
+
+/// How far down an audio clip the fade handles reach, in points.
+///
+/// The band is the top of the clip so that the rest of it, waveform and all,
+/// still starts a move; below the band a press near an edge is a trim, as it
+/// is on any other clip.
+pub const FADE_BAND_PX: f32 = 12.0;
+
+/// The size of the square drawn at a fade handle, in points.
+const FADE_GRIP_PX: f32 = 5.0;
+
+/// The narrowest audio clip that has room for two fade handles.
+const MIN_FADE_WIDTH_PX: f32 = 3.0 * FADE_HANDLE_PX;
+
+/// How much of [`FADE_COLOR`] a fade ramp is drawn in at rest.
+pub const FADE_ALPHA: u8 = 170;
+
+/// The colour a fade ramp and its handles are drawn in.
+pub const FADE_COLOR: Color32 = Color32::from_rgb(240, 236, 214);
 
 /// How far a waveform strip is inset from the top and bottom of its clip, in
 /// points, so the clip's name and outline stay readable over it.
@@ -649,6 +672,11 @@ pub struct TimelinePanel {
     /// The clip edge under the pointer, which is what turns the cursor into a
     /// trim cursor and paints the handle bright.
     hovered_trim: Option<(ClipRef, TrimEdge)>,
+    /// What the fade drag in progress would do, recomputed each frame, so the
+    /// ramp on screen is the fade the release will commit.
+    fade_plan: Option<Result<FadeEdit, FadeRefusal>>,
+    /// The fade handle under the pointer, which is painted bright.
+    hovered_fade: Option<(ClipRef, FadeEdge)>,
     /// The ruler's markers: what is selected, dragged or being renamed.
     marker_state: MarkerState,
     /// Whether the pointer press in progress was claimed by a marker, in
@@ -713,6 +741,17 @@ enum Gesture {
         /// Where the pointer is now.
         current: Pos2,
     },
+    /// One audio clip's fade handle being dragged.
+    Fade {
+        /// Where the drag was pressed.
+        origin: Pos2,
+        /// Where the pointer is now.
+        current: Pos2,
+        /// The clip whose handle is held.
+        target: ClipRef,
+        /// The handle that is held.
+        edge: FadeEdge,
+    },
     /// One clip's edge being dragged to a new time.
     Trim {
         /// Where the drag was pressed.
@@ -736,6 +775,16 @@ pub struct TimelineResponse {
     pub response: Response,
     /// The track actions raised this frame, in the order they were raised.
     pub actions: Vec<TrackAction>,
+    /// The label of the undo group the header gesture that began this frame
+    /// opens, when one began.
+    ///
+    /// A gain drag raises one action a frame so the mixer follows the pointer,
+    /// and they all belong to one entry in the undo stack; this and
+    /// [`TimelineResponse::actions_commit`] are that entry's brackets
+    /// ([`apply_actions`](crate::track_header::apply_actions) applies them).
+    pub actions_begin: Option<String>,
+    /// Whether the header gesture ended this frame, closing the group.
+    pub actions_commit: bool,
     /// Where the ruler was clicked or scrubbed to this frame, snapped.
     ///
     /// The panel has already moved its own playhead there so the frame it
@@ -764,6 +813,14 @@ pub struct TimelineResponse {
     pub clip_trim: Option<TrimGroup>,
     /// Why the trim under the pointer cannot become an edit, while it cannot.
     pub trim_refused: Option<TrimRefusal>,
+    /// The fade a released handle drag asks for, as one undoable command.
+    ///
+    /// Like the move and the trim, the panel has faded nothing: it plans the
+    /// drag and hands the plan over, for the caller to apply with
+    /// [`apply_fade`](crate::fade::apply_fade).
+    pub clip_fade: Option<FadeEdit>,
+    /// Why the fade under the pointer cannot become an edit, while it cannot.
+    pub fade_refused: Option<FadeRefusal>,
     /// The cut a razor click or `Ctrl+K` asks for, as one undoable group.
     ///
     /// The panel has cut nothing: it plans the cut and hands the plan over,
@@ -819,6 +876,8 @@ impl TimelinePanel {
             drag_plan: None,
             trim_plan: None,
             hovered_trim: None,
+            fade_plan: None,
+            hovered_fade: None,
             marker_state: MarkerState::new(),
             marker_press: false,
             marker_grab_offset: 0.0,
@@ -971,6 +1030,34 @@ impl TimelinePanel {
             Some(Err(refusal)) => Some(refusal),
             _ => None,
         }
+    }
+
+    /// What the fade under the pointer would commit, while a drag is in
+    /// progress and legal.
+    #[must_use]
+    pub fn fade_preview(&self) -> Option<&FadeEdit> {
+        self.fade_plan.as_ref().and_then(|plan| plan.as_ref().ok())
+    }
+
+    /// Why the fade under the pointer would be refused, while one is.
+    #[must_use]
+    pub const fn fade_refusal(&self) -> Option<FadeRefusal> {
+        match self.fade_plan {
+            Some(Err(refusal)) => Some(refusal),
+            _ => None,
+        }
+    }
+
+    /// Whether a fade drag is under the pointer.
+    #[must_use]
+    pub const fn is_fading(&self) -> bool {
+        matches!(self.gesture, Some(Gesture::Fade { .. }))
+    }
+
+    /// The fade handle the pointer is over.
+    #[must_use]
+    pub const fn hovered_fade(&self) -> Option<(ClipRef, FadeEdge)> {
+        self.hovered_fade
     }
 
     /// Whether a trim drag is under the pointer.
@@ -1430,11 +1517,13 @@ impl TimelinePanel {
         self.paint_drop_target(&painter, &layout);
         self.paint_markers(&painter, &layout, sequence);
         self.paint_playhead(&painter, &layout);
-        let actions = self.header_controls(ui, &layout, sequence);
+        let headers = self.header_controls(ui, &layout, sequence);
         marker_actions.extend(self.marker_rename_editor(ui, sequence));
         TimelineResponse {
             response,
-            actions,
+            actions: headers.actions,
+            actions_begin: headers.begin,
+            actions_commit: headers.commit,
             seek,
             snapped: if seek.is_some() { self.snapped } else { None },
             selection_changed: lanes.selection_changed,
@@ -1442,6 +1531,8 @@ impl TimelinePanel {
             refused: lanes.refused,
             clip_trim: lanes.clip_trim,
             trim_refused: lanes.trim_refused,
+            clip_fade: lanes.clip_fade,
+            fade_refused: lanes.fade_refused,
             clip_split: lanes.clip_split,
             split_refused: lanes.split_refused,
             marker_actions,
@@ -1914,6 +2005,22 @@ impl TimelinePanel {
                     self.marquee_base.clear();
                 }
             }
+            Gesture::Fade {
+                origin,
+                current,
+                target,
+                edge,
+            } => {
+                let pos = pointer.unwrap_or(current);
+                let grip = EdgeGrip {
+                    origin,
+                    pos,
+                    target,
+                    down: held,
+                    ripple: alt,
+                };
+                self.drag_fade(grip, edge, layout, sequence, &mut outcome);
+            }
             Gesture::Trim {
                 origin,
                 current,
@@ -1921,29 +2028,14 @@ impl TimelinePanel {
                 edge,
             } => {
                 let pos = pointer.unwrap_or(current);
-                self.gesture = Some(Gesture::Trim {
+                let grip = EdgeGrip {
                     origin,
-                    current: pos,
+                    pos,
                     target,
-                    edge,
-                });
-                let delta = self.trim_offset(origin, pos, layout);
-                match plan_trim(project, sequence, target, edge, delta, alt) {
-                    Ok(group) => {
-                        self.trim_plan = group.clone().map(Ok);
-                        if !held {
-                            outcome.clip_trim = group;
-                        }
-                    }
-                    Err(refusal) => {
-                        self.trim_plan = Some(Err(refusal));
-                        outcome.trim_refused = Some(refusal);
-                    }
-                }
-                if !held {
-                    self.gesture = None;
-                    self.trim_plan = None;
-                }
+                    down: held,
+                    ripple: alt,
+                };
+                self.drag_trim(grip, edge, layout, project, sequence, &mut outcome);
             }
             Gesture::Move { origin, current } => {
                 let pos = pointer.unwrap_or(current);
@@ -1971,6 +2063,83 @@ impl TimelinePanel {
             }
         }
         outcome
+    }
+
+    /// Carries a fade drag one frame further, and commits it when the button
+    /// comes up.
+    ///
+    /// The plan is remade every frame rather than accumulated, so the ramp on
+    /// screen and the command the release commits come from the same offset.
+    fn drag_fade(
+        &mut self,
+        grip: EdgeGrip,
+        edge: FadeEdge,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+        outcome: &mut LaneOutcome,
+    ) {
+        self.gesture = Some(Gesture::Fade {
+            origin: grip.origin,
+            current: grip.pos,
+            target: grip.target,
+            edge,
+        });
+        let delta = self.trim_offset(grip.origin, grip.pos, layout);
+        match plan_fade(sequence, grip.target, edge, delta) {
+            Ok(edit) => {
+                self.fade_plan = edit.map(Ok);
+                if !grip.down {
+                    outcome.clip_fade = edit;
+                }
+            }
+            Err(refusal) => {
+                self.fade_plan = Some(Err(refusal));
+                outcome.fade_refused = Some(refusal);
+            }
+        }
+        if !grip.down {
+            self.gesture = None;
+            self.fade_plan = None;
+        }
+    }
+
+    /// Carries a trim drag one frame further, and commits it when the button
+    /// comes up.
+    ///
+    /// [`EdgeGrip::ripple`] is the ripple modifier: it shifts the trimmed
+    /// clip's downstream neighbours by exactly what the edge moved.
+    fn drag_trim(
+        &mut self,
+        grip: EdgeGrip,
+        edge: TrimEdge,
+        layout: &PanelLayout,
+        project: &Project,
+        sequence: &Sequence,
+        outcome: &mut LaneOutcome,
+    ) {
+        self.gesture = Some(Gesture::Trim {
+            origin: grip.origin,
+            current: grip.pos,
+            target: grip.target,
+            edge,
+        });
+        let delta = self.trim_offset(grip.origin, grip.pos, layout);
+        match plan_trim(project, sequence, grip.target, edge, delta, grip.ripple) {
+            Ok(group) => {
+                self.trim_plan = group.clone().map(Ok);
+                if !grip.down {
+                    outcome.clip_trim = group;
+                }
+            }
+            Err(refusal) => {
+                self.trim_plan = Some(Err(refusal));
+                outcome.trim_refused = Some(refusal);
+            }
+        }
+        if !grip.down {
+            self.gesture = None;
+            self.trim_plan = None;
+        }
     }
 
     /// Turns a hover and a press in the lanes into a cut.
@@ -2103,6 +2272,19 @@ impl TimelinePanel {
         {
             self.target_track = index;
         }
+        if let Some((target, edge)) = self.fade_target_at(pos, layout, sequence) {
+            // A fade handle sits inside the clip's own edge, so it is asked
+            // about first: the press takes hold of the handle rather than
+            // trimming the clip under it.
+            let changed = self.selection.select_only(target);
+            self.gesture = Some(Gesture::Fade {
+                origin: pos,
+                current: pos,
+                target,
+                edge,
+            });
+            return changed;
+        }
         if let Some((target, edge)) = self.trim_target_at(pos, layout, sequence) {
             // An edge is a trim, not a move: the press selects the clip so the
             // gesture is visible, and takes hold of the edge.
@@ -2222,6 +2404,66 @@ impl TimelinePanel {
             .unwrap_or_else(|| RationalTime::zero(rate))
     }
 
+    /// The fade handle under `pos`, when the pointer is close enough to one.
+    ///
+    /// Only audio lanes carry fade handles, and only the band across the top
+    /// of a clip does: everything below it is still a move or a trim.
+    fn fade_target_at(
+        &self,
+        pos: Pos2,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+    ) -> Option<(ClipRef, FadeEdge)> {
+        if !layout.content.contains(pos) {
+            return None;
+        }
+        let index = usize::try_from(self.lane_at(layout.content.top(), pos.y)).ok()?;
+        let track = sequence.tracks.get(index)?;
+        if !matches!(track.kind, TrackKind::Audio) || !clip_edits_allowed(track) {
+            return None;
+        }
+        // A handle sitting on the clip's far edge is a pixel column past the
+        // last frame the clip covers, so the column just inside is asked
+        // about too rather than nothing being found there at all.
+        let index_layout = self.layouts.get(index)?;
+        let left = layout.content.left();
+        let placement = [pos.x, pos.x - FADE_HANDLE_PX]
+            .into_iter()
+            .find_map(|x| index_layout.at(self.view.time_at_pixel(round_px(x - left))))?;
+        let clip = track.clip(placement.clip)?;
+        let rect = self.clip_rect(layout, index, placement.range);
+        if rect.width() < MIN_FADE_WIDTH_PX || pos.y > rect.top() + FADE_BAND_PX {
+            return None;
+        }
+        let item = ClipRef::new(track.id, placement.clip);
+        let (head, tail) = self.fade_handle_x(rect, clip);
+        let to_head = (pos.x - head).abs();
+        let to_tail = (pos.x - tail).abs();
+        if to_head <= FADE_HANDLE_PX && to_head <= to_tail {
+            Some((item, FadeEdge::In))
+        } else if to_tail <= FADE_HANDLE_PX {
+            Some((item, FadeEdge::Out))
+        } else {
+            None
+        }
+    }
+
+    /// Where `clip`'s two fade handles sit along its rectangle, in points.
+    ///
+    /// A fade of nothing puts its handle on the clip's own edge, which is what
+    /// gives an editor something to grab on a clip that has never been faded.
+    fn fade_handle_x(&self, rect: Rect, clip: &Clip) -> (f32, f32) {
+        let rate = self.view.rate();
+        let head = self.view.pixel_of(clip.fade_in.rescaled_to(rate))
+            - self.view.pixel_of(RationalTime::zero(rate));
+        let tail = self.view.pixel_of(clip.fade_out.rescaled_to(rate))
+            - self.view.pixel_of(RationalTime::zero(rate));
+        (
+            (rect.left() + head).min(rect.right()),
+            (rect.right() - tail).max(rect.left()),
+        )
+    }
+
     /// The clip edge under `pos`, when the pointer is close enough to one.
     ///
     /// A clip narrower than twice [`TRIM_HANDLE_PX`] splits its width between
@@ -2279,7 +2521,20 @@ impl TimelinePanel {
                 .hover_pos()
                 .and_then(|pos| self.trim_target_at(pos, layout, sequence)),
         };
-        if self.hovered_trim.is_some() {
+        self.hovered_fade = match self.gesture {
+            _ if matches!(self.tool, Tool::Razor) => None,
+            Some(Gesture::Fade { target, edge, .. }) => Some((target, edge)),
+            Some(_) => None,
+            None => response
+                .hover_pos()
+                .and_then(|pos| self.fade_target_at(pos, layout, sequence)),
+        };
+        // A fade handle beats a trim edge under the same pointer, exactly as
+        // it does on a press.
+        if self.hovered_fade.is_some() {
+            self.hovered_trim = None;
+            ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
+        } else if self.hovered_trim.is_some() {
             ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
         }
     }
@@ -2392,9 +2647,10 @@ impl TimelinePanel {
             }
             // The trimmed span's ghost is painted above, before the gesture
             // is matched on, because it is the whole of what a trim previews.
+            // A fade previews itself: the clip's own ramp follows the drag.
             // The razor paints its own cut line; a press that has already cut
             // has nothing left to preview.
-            Some(Gesture::Trim { .. } | Gesture::Cut) | None => {}
+            Some(Gesture::Trim { .. } | Gesture::Fade { .. } | Gesture::Cut) | None => {}
         }
     }
 
@@ -2492,8 +2748,8 @@ impl TimelinePanel {
         ui: &mut Ui,
         layout: &PanelLayout,
         sequence: &Sequence,
-    ) -> Vec<TrackAction> {
-        let mut actions = Vec::new();
+    ) -> HeaderColumnOutcome {
+        let mut outcome = HeaderColumnOutcome::default();
         let count = sequence.tracks.len();
         let mut column = ui.new_child(
             eframe::egui::UiBuilder::new()
@@ -2512,9 +2768,10 @@ impl TimelinePanel {
                 Vec2::new(layout.headers.width(), self.metrics.track_height),
             );
             filled_to = filled_to.max(rect.bottom());
-            if let Some(action) = self.header_state.ui(&mut column, rect, track, index, count) {
-                actions.push(action);
-            }
+            let raised = self.header_state.ui(&mut column, rect, track, index, count);
+            outcome.actions.extend(raised.action);
+            outcome.begin = outcome.begin.or(raised.begin);
+            outcome.commit |= raised.commit;
         }
         let spare = Rect::from_min_max(
             pos2(layout.headers.left(), filled_to.max(layout.headers.top())),
@@ -2527,10 +2784,10 @@ impl TimelinePanel {
                 Sense::click_and_drag(),
             );
             if let Some(action) = empty_column_menu(&response, count) {
-                actions.push(action);
+                outcome.actions.push(action);
             }
         }
-        actions
+        outcome
     }
 
     /// Paints the timecode ruler and the grid lines that drop from it.
@@ -2664,6 +2921,23 @@ impl TimelinePanel {
                 strip,
             );
             let item = ClipRef::new(track.id, clip.id);
+            // An audio clip wears its fades: the ramps say how long they are,
+            // and the grips at their tops are what a drag takes hold of.
+            if matches!(track.kind, TrackKind::Audio) && !dimmed {
+                let dragged = self.fade_preview().filter(|edit| edit.target == item);
+                let (head, tail) = self.faded_lengths(clip, dragged);
+                let hovered = self
+                    .hovered_fade
+                    .filter(|(over, _)| *over == item)
+                    .map(|(_, edge)| edge);
+                paint_fades(
+                    painter,
+                    rect,
+                    self.pixels_of(head),
+                    self.pixels_of(tail),
+                    hovered,
+                );
+            }
             if self.selection.contains(item) {
                 paint_selected(painter, rect, self.drag_refusal().is_some());
             }
@@ -2675,6 +2949,34 @@ impl TimelinePanel {
                 paint_trim_handles(painter, rect, edge);
             }
         }
+    }
+
+    /// How long `clip`'s two fades are, with the drag in progress folded in.
+    ///
+    /// The ramp under the pointer follows the drag rather than the project, so
+    /// what is painted is the fade the release will commit.
+    fn faded_lengths(
+        &self,
+        clip: &Clip,
+        dragged: Option<&FadeEdit>,
+    ) -> (RationalTime, RationalTime) {
+        let rate = self.view.rate();
+        let head = clip.fade_in.rescaled_to(rate);
+        let tail = clip.fade_out.rescaled_to(rate);
+        match dragged {
+            Some(edit) => match edit.edge {
+                FadeEdge::In => (edit.duration, tail),
+                FadeEdge::Out => (head, edit.duration),
+            },
+            None => (head, tail),
+        }
+    }
+
+    /// How wide `duration` is on screen, in points.
+    fn pixels_of(&self, duration: RationalTime) -> f32 {
+        let rate = self.view.rate();
+        self.view.pixel_of(duration.rescaled_to(rate))
+            - self.view.pixel_of(RationalTime::zero(rate))
     }
 
     /// Draws the waveform strip inside one clip's rectangle.
@@ -2734,6 +3036,38 @@ struct DropOutcome {
     refused: Option<SourceRefusal>,
 }
 
+/// Where an edge gesture — a trim or a fade — has hold of a clip this frame.
+///
+/// The two drags carry the same things, so they travel together rather than as
+/// a row of loose arguments.
+#[derive(Debug, Clone, Copy)]
+struct EdgeGrip {
+    /// Where the drag was pressed.
+    origin: Pos2,
+    /// Where the pointer is now.
+    pos: Pos2,
+    /// The clip the gesture has hold of.
+    target: ClipRef,
+    /// Whether the button is still down.
+    down: bool,
+    /// Whether the ripple modifier is held, which only a trim reads.
+    ripple: bool,
+}
+
+/// What one painted frame of the header column raised.
+///
+/// The actions are in the order they were raised; the group brackets are the
+/// header's, so a gain drag across several frames is one undo entry.
+#[derive(Debug, Default)]
+struct HeaderColumnOutcome {
+    /// The actions the headers raised this frame.
+    actions: Vec<TrackAction>,
+    /// The label of the undo group a gesture opened this frame.
+    begin: Option<String>,
+    /// Whether a gesture ended this frame.
+    commit: bool,
+}
+
 #[derive(Debug, Default)]
 struct LaneOutcome {
     /// Whether the selection changed this frame.
@@ -2746,6 +3080,10 @@ struct LaneOutcome {
     clip_trim: Option<TrimGroup>,
     /// Why the trim under the pointer cannot become an edit.
     trim_refused: Option<TrimRefusal>,
+    /// The fade a released handle drag asks for.
+    clip_fade: Option<FadeEdit>,
+    /// Why the fade under the pointer cannot become an edit.
+    fade_refused: Option<FadeRefusal>,
     /// The cut a razor click asks for.
     clip_split: Option<SplitGroup>,
     /// Why the cut under the pointer cannot become an edit.
@@ -2779,6 +3117,49 @@ fn paint_trim_handles(painter: &Painter, rect: Rect, hovered: TrimEdge) {
             tint(SELECTION_COLOR, TRIM_HANDLE_ALPHA)
         };
         painter.rect_filled(grip, radius, color);
+    }
+}
+
+/// Draws an audio clip's two fade ramps and the grips that drag them.
+///
+/// A fade of nothing still draws its grip, on the clip's own edge, so there is
+/// always something to take hold of; the ramp itself only appears once the
+/// fade is long enough to see.
+fn paint_fades(painter: &Painter, rect: Rect, head: f32, tail: f32, hovered: Option<FadeEdge>) {
+    if rect.width() < MIN_FADE_WIDTH_PX {
+        return;
+    }
+    let head_x = (rect.left() + head.max(0.0)).min(rect.right());
+    let tail_x = (rect.right() - tail.max(0.0)).max(rect.left());
+    let ramp = Stroke::new(1.0, tint(FADE_COLOR, FADE_ALPHA));
+    if head_x > rect.left() + 1.0 {
+        painter.line_segment(
+            [pos2(rect.left(), rect.bottom()), pos2(head_x, rect.top())],
+            ramp,
+        );
+    }
+    if tail_x < rect.right() - 1.0 {
+        painter.line_segment(
+            [pos2(tail_x, rect.top()), pos2(rect.right(), rect.bottom())],
+            ramp,
+        );
+    }
+    for (edge, x) in [(FadeEdge::In, head_x), (FadeEdge::Out, tail_x)] {
+        let color = if hovered == Some(edge) {
+            FADE_COLOR
+        } else {
+            tint(FADE_COLOR, FADE_ALPHA)
+        };
+        let grip = Rect::from_min_size(
+            pos2(
+                (x - FADE_GRIP_PX / 2.0)
+                    .max(rect.left())
+                    .min(rect.right() - FADE_GRIP_PX),
+                rect.top(),
+            ),
+            Vec2::splat(FADE_GRIP_PX),
+        );
+        painter.rect_filled(grip, CornerRadius::same(1), color);
     }
 }
 

@@ -22,7 +22,9 @@ use sub_model::{Clip, MediaItem, MediaPath, Project, Sequence, Track, TrackItem,
 use sub_model::{ColorTags, media::StreamInfo, media::VideoStream};
 use sub_time::{Rational, RationalTime, TimeRange};
 use sub_ui::timeline_panel::TimelinePanel;
-use sub_ui::track_header::{HeaderLayout, TrackAction, TrackHeaderState};
+use sub_ui::track_header::{
+    HeaderLayout, HeaderOutcome, TrackAction, TrackHeaderState, apply_actions,
+};
 use sub_ui::{ClipMediaKind, clip_edits_allowed};
 
 /// The sequence timebase every test here uses.
@@ -58,6 +60,47 @@ fn scene(tracks: usize) -> (Project, Sequence) {
     }
     project.sequences.push(sequence.clone());
     (project, sequence)
+}
+
+/// A project with one audio track holding one clip.
+fn audio_scene() -> (Project, Sequence) {
+    let (mut project, mut sequence) = scene(1);
+    "A1".clone_into(&mut sequence.tracks[0].name);
+    sequence.tracks[0].kind = TrackKind::Audio;
+    project.sequences[0] = sequence.clone();
+    (project, sequence)
+}
+
+/// Runs one frame, feeding it `events`, and returns everything the header
+/// column raised: its actions and the undo group they belong to.
+fn frame_outcome(
+    ctx: &egui::Context,
+    panel: &mut TimelinePanel,
+    project: &Project,
+    sequence: &Sequence,
+    revision: u64,
+    events: Vec<egui::Event>,
+) -> Vec<HeaderOutcome> {
+    let input = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 600.0))),
+        events,
+        ..Default::default()
+    };
+    let mut raised = Vec::new();
+    let mut output = ctx.run_ui(input, |ui| {
+        panel.sync(sequence, revision);
+        let response = panel.ui(ui, project, sequence);
+        let begin = response.actions_begin.clone();
+        let commit = response.actions_commit;
+        raised = vec![HeaderOutcome {
+            action: response.actions.first().cloned(),
+            begin,
+            commit,
+        }];
+    });
+    output.shapes.clear();
+    output.textures_delta.clear();
+    raised
 }
 
 /// Runs one frame, feeding it `events`, and returns what the headers raised
@@ -188,7 +231,7 @@ fn clicking_the_mute_and_lock_toggles_raises_undoable_actions() {
     // something to hit.
     frame(&ctx, &mut panel, &project, &sequence, 1, Vec::new());
     let header = panel.header_rect(0).expect("the panel has been painted");
-    let controls = HeaderLayout::new(header);
+    let controls = HeaderLayout::new(header, TrackKind::Video);
 
     for (target, expected) in [
         (
@@ -278,7 +321,7 @@ fn a_track_header_paints_the_level_meter_it_was_fed_and_lights_it_on_a_clip() {
 
     let (_, shapes) = frame(&ctx, &mut panel, &project, &sequence, 1, Vec::new());
     let header = panel.header_rect(0).expect("a painted header");
-    let meter = HeaderLayout::new(header).meter;
+    let meter = HeaderLayout::new(header, TrackKind::Video).meter;
     let lit: Vec<_> = filled_rects(&shapes)
         .into_iter()
         .filter(|(rect, color)| *color == sub_ui::CLIP_COLOR && meter.intersects(*rect))
@@ -290,7 +333,7 @@ fn a_track_header_paints_the_level_meter_it_was_fed_and_lights_it_on_a_clip() {
 
     // The second track was never fed, so nothing of its meter is lit.
     let second = panel.header_rect(1).expect("a painted header");
-    let second_meter = HeaderLayout::new(second).meter;
+    let second_meter = HeaderLayout::new(second, TrackKind::Video).meter;
     assert!(
         filled_rects(&shapes)
             .into_iter()
@@ -594,7 +637,10 @@ fn header_column(
     let mut top = ui.max_rect().min;
     for (index, track) in tracks.iter().enumerate() {
         let rect = Rect::from_min_size(top, HARNESS_HEADER);
-        action = state.ui(ui, rect, track, index, tracks.len()).or(action);
+        action = state
+            .ui(ui, rect, track, index, tracks.len())
+            .action
+            .or(action);
         top.y += HARNESS_HEADER.y;
     }
     action
@@ -663,5 +709,154 @@ fn the_harness_toggles_mute_and_lock_through_the_command_api() {
     assert!(
         !track.muted && !track.locked,
         "undo put both flags back where they were"
+    );
+}
+
+#[test]
+fn an_audio_header_carries_a_solo_toggle_and_a_gain_field() {
+    let (project, sequence) = audio_scene();
+    let mut panel = TimelinePanel::new(RATE);
+    let ctx = egui::Context::default();
+    let (_, shapes) = frame(&ctx, &mut panel, &project, &sequence, 1, Vec::new());
+    let painted = texts(&shapes);
+    for expected in ["A1", "audio", "M", "S", "L"] {
+        assert!(
+            painted.iter().any(|text| text == expected),
+            "an audio header should show {expected:?}: {painted:?}"
+        );
+    }
+    assert!(
+        painted.iter().any(|text| text.ends_with(" dB")),
+        "an audio header shows its level in decibels: {painted:?}"
+    );
+
+    let header = panel.header_rect(0).expect("the panel has been painted");
+    let audio = HeaderLayout::new(header, TrackKind::Audio);
+    assert!(audio.solo.width() > 0.0 && audio.gain.width() > 0.0);
+    let video = HeaderLayout::new(header, TrackKind::Video);
+    assert!(
+        video.solo.width() == 0.0 && video.gain.width() == 0.0,
+        "a video lane has nothing to solo or level"
+    );
+    assert!(
+        video.name.width() > audio.name.width(),
+        "the gain field takes its room from the name row"
+    );
+}
+
+#[test]
+fn clicking_solo_raises_an_undoable_action() {
+    let (mut project, sequence) = audio_scene();
+    let sequence_id = sequence.id;
+    let track_id = sequence.tracks[0].id;
+    let mut panel = TimelinePanel::new(RATE);
+    let ctx = egui::Context::default();
+    frame(&ctx, &mut panel, &project, &sequence, 1, Vec::new());
+    let header = panel.header_rect(0).expect("the panel has been painted");
+    let target = HeaderLayout::new(header, TrackKind::Audio).solo.center();
+
+    frame(
+        &ctx,
+        &mut panel,
+        &project,
+        &sequence,
+        1,
+        vec![egui::Event::PointerMoved(target)],
+    );
+    let (actions, _) = frame(&ctx, &mut panel, &project, &sequence, 1, click_at(target));
+    assert_eq!(
+        actions,
+        vec![TrackAction::SetSolo {
+            track: track_id,
+            solo: true,
+        }]
+    );
+
+    let mut history = History::new();
+    history
+        .apply_boxed(&mut project, actions[0].clone().into_command(sequence_id))
+        .expect("the action applies");
+    assert!(project.sequences[0].tracks[0].solo);
+    history.undo(&mut project).expect("undo");
+    assert!(!project.sequences[0].tracks[0].solo, "the action undoes");
+}
+
+#[test]
+fn dragging_the_gain_field_applies_live_and_undoes_in_one_step() {
+    let (mut project, mut sequence) = audio_scene();
+    let sequence_id = sequence.id;
+    let mut panel = TimelinePanel::new(RATE);
+    let ctx = egui::Context::default();
+    let mut history = History::new();
+    frame(&ctx, &mut panel, &project, &sequence, 1, Vec::new());
+    let header = panel.header_rect(0).expect("the panel has been painted");
+    let field = HeaderLayout::new(header, TrackKind::Audio).gain.center();
+
+    // Hover, press, drag in two steps, release: the same shape a real drag
+    // has, so the field sees a gesture rather than a click.
+    let mut events = vec![
+        egui::Event::PointerMoved(field),
+        egui::Event::PointerButton {
+            pos: field,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        },
+    ];
+    let mut applied = 0_usize;
+    let mut opened = 0_usize;
+    let mut committed = 0_usize;
+    for step in 1..=3_i32 {
+        let pos = Pos2::new(
+            field.x - f32::from(i16::try_from(step * 10).unwrap()),
+            field.y,
+        );
+        if step == 3 {
+            events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            });
+        } else {
+            events.push(egui::Event::PointerMoved(pos));
+        }
+        for outcome in frame_outcome(
+            &ctx,
+            &mut panel,
+            &project,
+            &sequence,
+            1,
+            std::mem::take(&mut events),
+        ) {
+            if outcome.is_empty() {
+                continue;
+            }
+            opened += usize::from(outcome.begin.is_some());
+            committed += usize::from(outcome.commit);
+            applied += usize::from(outcome.action.is_some());
+            apply_actions(&mut history, &mut project, sequence_id, &outcome)
+                .expect("the header edit applies");
+            sequence = project.sequences[0].clone();
+        }
+    }
+
+    assert!(
+        applied > 0,
+        "the drag applied a gain command while it moved"
+    );
+    assert_eq!(opened, 1, "the whole drag opened exactly one undo group");
+    assert_eq!(committed, 1, "and closed it exactly once");
+    let quieter = project.sequences[0].tracks[0].gain;
+    assert!(
+        quieter.decibels().as_f64() < 0.0,
+        "dragging left cut the level: {quieter:?}"
+    );
+
+    history.undo(&mut project).expect("undo");
+    assert_eq!(
+        project.sequences[0].tracks[0].gain,
+        sub_model::GainDb::UNITY,
+        "one undo puts the whole drag back"
     );
 }

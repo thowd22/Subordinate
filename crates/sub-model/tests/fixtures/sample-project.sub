@@ -153,6 +153,7 @@
         },
         "tracks": [
           {
+            "gain": 0,
             "id": "0192f3a0-0005-7000-8000-000000000001",
             "items": [
               {
@@ -303,9 +304,11 @@
             "kind": "video",
             "locked": false,
             "muted": false,
-            "name": "V1"
+            "name": "V1",
+            "solo": false
           },
           {
+            "gain": 0,
             "id": "0192f3a0-0005-7000-8000-000000000002",
             "items": [
               {
@@ -374,9 +377,11 @@
             "kind": "video",
             "locked": false,
             "muted": false,
-            "name": "V2"
+            "name": "V2",
+            "solo": false
           },
           {
+            "gain": 0,
             "id": "0192f3a0-0005-7000-8000-000000000003",
             "items": [
               {
@@ -434,7 +439,8 @@
             "kind": "audio",
             "locked": false,
             "muted": false,
-            "name": "A1"
+            "name": "A1",
+            "solo": false
           }
         ]
       },
@@ -482,6 +488,7 @@
         },
         "tracks": [
           {
+            "gain": 0,
             "id": "0192f3a0-0005-7000-8000-000000000004",
             "items": [
               {
@@ -539,9 +546,11 @@
             "kind": "video",
             "locked": false,
             "muted": false,
-            "name": "V1"
+            "name": "V1",
+            "solo": false
           },
           {
+            "gain": 0,
             "id": "0192f3a0-0005-7000-8000-000000000005",
             "items": [
               {
@@ -559,9 +568,11 @@
             "kind": "video",
             "locked": false,
             "muted": false,
-            "name": "V2"
+            "name": "V2",
+            "solo": false
           },
           {
+            "gain": 0,
             "id": "0192f3a0-0005-7000-8000-000000000006",
             "items": [
               {
@@ -619,7 +630,8 @@
             "kind": "audio",
             "locked": false,
             "muted": false,
-            "name": "A1"
+            "name": "A1",
+            "solo": false
           }
         ]
       }

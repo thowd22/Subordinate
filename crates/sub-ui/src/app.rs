@@ -877,6 +877,19 @@ impl SubordinateApp {
                         group.len()
                     );
                 }
+                if let Some(refusal) = response.fade_refused {
+                    log::debug!("clip fade refused: {}", refusal.id());
+                }
+                if let Some(edit) = response.clip_fade {
+                    // Planned, not applied: a fade is one command through
+                    // `fade::apply_fade`, on the engine handle the app does
+                    // not own yet.
+                    log::debug!(
+                        "clip fade is not wired up yet: {} to {}",
+                        edit.label(),
+                        edit.duration
+                    );
+                }
                 if let Some(refusal) = response.split_refused {
                     log::debug!("clip split refused: {}", refusal.id());
                 }

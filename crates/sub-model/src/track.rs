@@ -319,6 +319,22 @@ pub struct Track {
     /// written before the flag existed still loads.
     #[serde(default)]
     pub muted: bool,
+    /// Whether the lane is soloed: while any track in the sequence is soloed,
+    /// the tracks that are not contribute nothing to the mixer.
+    ///
+    /// Solo is a property of the lane rather than of the mixer so that it
+    /// survives save, load and undo like every other edit. Defaults to false,
+    /// and is defaulted on the way in so a project file written before the
+    /// flag existed still loads.
+    #[serde(default)]
+    pub solo: bool,
+    /// The lane's audio level in decibels, applied to every clip on it on top
+    /// of the clip's own [`Clip::gain`].
+    ///
+    /// Unity by default, and defaulted on the way in so a project file
+    /// written before the field existed still loads.
+    #[serde(default)]
+    pub gain: GainDb,
     /// Whether the lane is locked against edits.
     ///
     /// Clip commands refuse to touch a locked track (`edit.track_locked`);
@@ -338,6 +354,8 @@ impl Track {
             name: name.into(),
             kind,
             muted: false,
+            solo: false,
+            gain: GainDb::UNITY,
             locked: false,
             items: Vec::new(),
         }
@@ -421,10 +439,12 @@ mod tests {
     }
 
     #[test]
-    fn a_new_track_is_neither_muted_nor_locked() {
+    fn a_new_track_is_neither_muted_soloed_nor_locked_and_plays_at_unity() {
         let track = Track::new("V1", TrackKind::Video);
         assert!(!track.muted);
+        assert!(!track.solo);
         assert!(!track.locked);
+        assert_eq!(track.gain, GainDb::UNITY);
     }
 
     #[test]
@@ -441,7 +461,9 @@ mod tests {
         let track: Track = serde_json::from_str(&text).unwrap();
         assert_eq!(track.id, id);
         assert!(!track.muted);
+        assert!(!track.solo);
         assert!(!track.locked);
+        assert_eq!(track.gain, GainDb::UNITY);
     }
 
     #[test]

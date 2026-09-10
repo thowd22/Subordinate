@@ -48,7 +48,8 @@ pub use sequence::{
     CreateSequence, DeleteSequence, InsertSequence, RenameSequence, SetSequenceSettings,
 };
 pub use track::{
-    AddTrack, InsertTrack, RemoveTrack, RenameTrack, ReorderTrack, SetTrackLocked, SetTrackMuted,
+    AddTrack, InsertTrack, RemoveTrack, RenameTrack, ReorderTrack, SetTrackGain, SetTrackLocked,
+    SetTrackMuted, SetTrackSolo,
 };
 
 use crate::CommandRegistry;
@@ -80,6 +81,8 @@ pub fn register_builtin(registry: &mut CommandRegistry) -> SubResult<()> {
     registry.register::<ReorderTrack>()?;
     registry.register::<RenameTrack>()?;
     registry.register::<SetTrackMuted>()?;
+    registry.register::<SetTrackSolo>()?;
+    registry.register::<SetTrackGain>()?;
     registry.register::<SetTrackLocked>()?;
     registry.register::<CreateSequence>()?;
     registry.register::<InsertSequence>()?;
@@ -391,8 +394,10 @@ mod tests {
                 "track.remove",
                 "track.rename",
                 "track.reorder",
+                "track.set_gain",
                 "track.set_locked",
                 "track.set_muted",
+                "track.set_solo",
             ]
         );
 

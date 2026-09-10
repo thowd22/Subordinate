@@ -1,5 +1,12 @@
-//! The controls in a track header: name, mute, lock, and the menu that adds,
-//! removes, renames and reorders tracks.
+//! The controls in a track header: name, mute, solo, gain, lock, and the menu
+//! that adds, removes, renames and reorders tracks.
+//!
+//! An audio lane carries two controls a video lane has no use for: a solo
+//! toggle and a level in decibels. The level is dragged, so it behaves like
+//! the inspector's sliders — every frame the number changes raises a command
+//! the caller applies straight away, and the whole drag is one entry in the
+//! undo stack because the outcome carries the group it opens and closes
+//! ([`apply_actions`] is that caller for anyone who wants it done for them).
 //!
 //! The header column is the one part of the timeline that is made of widgets
 //! rather than painted shapes. A sequence holds tens of tracks, not the
@@ -15,15 +22,17 @@
 use eframe::egui::text::CCursor;
 use eframe::egui::text_selection::CCursorRange;
 use eframe::egui::{
-    Align, Button, Key, Label, Layout, Rect, Response, RichText, Sense, TextEdit, Ui, UiBuilder,
-    Vec2, pos2,
+    Align, Button, DragValue, Key, Label, Layout, Rect, Response, RichText, Sense, TextEdit, Ui,
+    UiBuilder, Vec2, pos2,
 };
 use sub_audio::MeterLevels;
-use sub_edit::BoxedCommand;
+use sub_core::SubResult;
 use sub_edit::commands::{
-    AddTrack, RemoveTrack, RenameTrack, ReorderTrack, SetTrackLocked, SetTrackMuted,
+    AddTrack, RemoveTrack, RenameTrack, ReorderTrack, SetTrackGain, SetTrackLocked, SetTrackMuted,
+    SetTrackSolo,
 };
-use sub_model::{SequenceId, Track, TrackId, TrackKind};
+use sub_edit::{BoxedCommand, History};
+use sub_model::{GainDb, Project, SequenceId, Track, TrackId, TrackKind};
 
 use crate::meter::MeterState;
 
@@ -32,8 +41,20 @@ use std::collections::HashMap;
 /// Padding between the header's edge and its controls, in points.
 const PADDING: f32 = 5.0;
 
-/// The size of the mute and lock toggles, in points.
+/// The size of the mute, solo and lock toggles, in points.
 const TOGGLE_SIZE: Vec2 = Vec2::new(20.0, 16.0);
+
+/// The width of the gain field on an audio header, in points.
+const GAIN_WIDTH: f32 = 52.0;
+
+/// The height of the gain field on an audio header, in points.
+const GAIN_HEIGHT: f32 = 18.0;
+
+/// How many decibels a point of drag on the gain field is worth.
+const GAIN_DRAG_SPEED: f64 = 0.2;
+
+/// The label the one history entry a gain drag produces gets.
+const GAIN_UNDO_LABEL: &str = "Change track gain";
 
 /// The height of the row holding the kind label and the toggles, in points.
 const CONTROL_ROW_HEIGHT: f32 = 16.0;
@@ -91,6 +112,20 @@ pub enum TrackAction {
         /// The state it ends up in.
         muted: bool,
     },
+    /// Solo or unsolo a track.
+    SetSolo {
+        /// The track to solo or unsolo.
+        track: TrackId,
+        /// The state it ends up in.
+        solo: bool,
+    },
+    /// Set a track's audio level.
+    SetGain {
+        /// The track whose level changes.
+        track: TrackId,
+        /// The level it ends up at.
+        gain: GainDb,
+    },
     /// Lock or unlock a track.
     SetLocked {
         /// The track to lock or unlock.
@@ -139,6 +174,8 @@ impl TrackAction {
                 Box::new(ReorderTrack::new(sequence, track, to_index))
             }
             Self::SetMuted { track, muted } => Box::new(SetTrackMuted::new(sequence, track, muted)),
+            Self::SetSolo { track, solo } => Box::new(SetTrackSolo::new(sequence, track, solo)),
+            Self::SetGain { track, gain } => Box::new(SetTrackGain::new(sequence, track, gain)),
             Self::SetLocked { track, locked } => {
                 Box::new(SetTrackLocked::new(sequence, track, locked))
             }
@@ -293,6 +330,10 @@ pub struct HeaderLayout {
     pub kind: Rect,
     /// The mute toggle.
     pub mute: Rect,
+    /// The solo toggle, which is empty on a video header.
+    pub solo: Rect,
+    /// The gain field, which is empty on a video header.
+    pub gain: Rect,
     /// The lock toggle.
     pub lock: Rect,
     /// The level meter, between the kind label and the toggles.
@@ -300,9 +341,12 @@ pub struct HeaderLayout {
 }
 
 impl HeaderLayout {
-    /// Splits `rect` into the name row and the control row.
+    /// Splits `rect` into the name row and the control row for a `kind` lane.
+    ///
+    /// A video lane has no solo toggle and no gain field, so both come back
+    /// empty and the name and the meter take the room they would have had.
     #[must_use]
-    pub fn new(rect: Rect) -> Self {
+    pub fn new(rect: Rect, kind: TrackKind) -> Self {
         // A header narrower or shorter than its own padding still has to
         // produce sane rectangles: the panel can be dragged to any size.
         let padding = PADDING
@@ -319,12 +363,26 @@ impl HeaderLayout {
             pos2(lock.left() - TOGGLE_SIZE.x - CONTROL_GAP, controls_top),
             TOGGLE_SIZE,
         );
+        // Sound is the only thing that can be soloed or levelled, so a video
+        // header keeps the layout it had before the two controls existed.
+        let audio = matches!(kind, TrackKind::Audio);
+        let solo = if audio {
+            Rect::from_min_size(
+                pos2(mute.left() - TOGGLE_SIZE.x - CONTROL_GAP, controls_top),
+                TOGGLE_SIZE,
+            )
+        } else {
+            Rect::from_min_size(
+                pos2(mute.left(), controls_top),
+                Vec2::new(0.0, TOGGLE_SIZE.y),
+            )
+        };
         // The control row reads left to right: the kind, the level meter, then
         // the two toggles. The meter takes whatever the kind label leaves, and
         // closes to nothing rather than overlapping anything in a header too
         // narrow for all four.
         let kind_right = (inner.left() + KIND_WIDTH)
-            .min(mute.left() - CONTROL_GAP)
+            .min(solo.left() - CONTROL_GAP)
             .max(inner.left());
         let kind = Rect::from_min_max(
             pos2(inner.left(), controls_top),
@@ -336,19 +394,91 @@ impl HeaderLayout {
         let meter = Rect::from_min_max(
             pos2(meter_left, meter_top),
             pos2(
-                (mute.left() - CONTROL_GAP).max(meter_left),
+                (solo.left() - CONTROL_GAP).max(meter_left),
                 (meter_top + meter_height).min(inner.bottom()),
             ),
         );
+        // The gain field sits at the right of the name row, where there is
+        // room for a number wide enough to read.
+        let name_bottom = controls_top;
+        let gain_height = GAIN_HEIGHT.min((name_bottom - inner.top()).max(0.0));
+        let gain_top = (inner.top() + ((name_bottom - inner.top()) - gain_height) / 2.0)
+            .max(inner.top())
+            .min(name_bottom);
+        let gain_left = if audio {
+            (inner.right() - GAIN_WIDTH).max(inner.left())
+        } else {
+            inner.right()
+        };
+        let gain = Rect::from_min_max(
+            pos2(gain_left, gain_top),
+            pos2(inner.right().max(gain_left), gain_top + gain_height),
+        );
+        let name_right = if audio {
+            (gain.left() - CONTROL_GAP).max(inner.left())
+        } else {
+            inner.right()
+        };
         Self {
             rect,
-            name: Rect::from_min_max(inner.min, pos2(inner.right(), controls_top)),
+            name: Rect::from_min_max(inner.min, pos2(name_right, name_bottom)),
             kind,
             mute,
+            solo,
+            gain,
             lock,
             meter,
         }
     }
+}
+
+/// What one painted header row asked the Command API to do.
+///
+/// A click on a toggle is one action and nothing else; a gain drag is a run of
+/// actions, one a frame, wrapped in the undo group named by
+/// [`HeaderOutcome::begin`] and closed by [`HeaderOutcome::commit`], so the
+/// whole gesture is one entry in the history however many frames it took.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeaderOutcome {
+    /// The action the frame's input asked for, if any.
+    pub action: Option<TrackAction>,
+    /// The label of the undo group this frame opens, when a gesture begins.
+    pub begin: Option<String>,
+    /// Whether the gesture ended this frame, closing the group.
+    pub commit: bool,
+}
+
+impl HeaderOutcome {
+    /// True when the frame asked for nothing at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.action.is_none() && self.begin.is_none() && !self.commit
+    }
+}
+
+/// Applies what a painted frame of the header column raised, as one entry in
+/// the undo stack per gesture.
+///
+/// # Errors
+///
+/// Returns whatever the history or a command refuses with; an unknown track
+/// yields `edit.unknown_track`.
+pub fn apply_actions(
+    history: &mut History,
+    project: &mut Project,
+    sequence: SequenceId,
+    outcome: &HeaderOutcome,
+) -> SubResult<()> {
+    if let Some(label) = &outcome.begin {
+        history.begin_group(label.clone())?;
+    }
+    if let Some(action) = outcome.action.clone() {
+        history.apply_boxed(project, action.into_command(sequence))?;
+    }
+    if outcome.commit {
+        history.commit_group()?;
+    }
+    Ok(())
 }
 
 /// The rename in progress, if any.
@@ -371,6 +501,9 @@ struct Rename {
 pub struct TrackHeaderState {
     /// The rename in progress.
     rename: Option<Rename>,
+    /// The track whose gain field a drag is open on, which is what tells a
+    /// gesture still under the pointer from one that has just ended.
+    gain_drag: Option<TrackId>,
     /// One meter per track that has been metered, keyed by track. A track
     /// with no entry draws a silent meter.
     meters: HashMap<TrackId, MeterState>,
@@ -381,6 +514,12 @@ impl TrackHeaderState {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The track whose gain is being dragged, if one is.
+    #[must_use]
+    pub const fn gain_drag(&self) -> Option<TrackId> {
+        self.gain_drag
     }
 
     /// The track whose name is being edited, if one is.
@@ -480,8 +619,9 @@ impl TrackHeaderState {
         track: &Track,
         index: usize,
         count: usize,
-    ) -> Option<TrackAction> {
-        let layout = HeaderLayout::new(rect);
+    ) -> HeaderOutcome {
+        let layout = HeaderLayout::new(rect, track.kind);
+        let mut outcome = HeaderOutcome::default();
         let mut action = None;
         let mut inner = ui.new_child(
             UiBuilder::new()
@@ -548,6 +688,27 @@ impl TrackHeaderState {
                 locked: !track.locked,
             });
         }
+        if matches!(track.kind, TrackKind::Audio) {
+            let solo = inner
+                .put(
+                    layout.solo,
+                    Button::new(RichText::new("S").size(10.0)).selected(track.solo),
+                )
+                .on_hover_text(if track.solo {
+                    "Stop soloing this track"
+                } else {
+                    "Solo this track"
+                });
+            if solo.clicked() {
+                action = Some(TrackAction::SetSolo {
+                    track: track.id,
+                    solo: !track.solo,
+                });
+            }
+            if let Some(gain) = self.gain_field(&mut inner, layout.gain, track, &mut outcome) {
+                action = Some(gain);
+            }
+        }
 
         // The meter is painted rather than laid out as a widget: it takes no
         // input, and the header's rectangles are computed up front so that the
@@ -555,7 +716,60 @@ impl TrackHeaderState {
         let meter = self.meters.get(&track.id).copied().unwrap_or_default();
         meter.paint(inner.painter(), layout.meter, inner.visuals());
 
-        self.menu(&background, track, index, count).or(action)
+        outcome.action = self.menu(&background, track, index, count).or(action);
+        outcome
+    }
+
+    /// The gain field of an audio header: a level in decibels, dragged.
+    ///
+    /// The number is a float because egui's drag value is, and it is turned
+    /// back into a [`GainDb`] the same frame; nothing here keeps a float
+    /// between frames. A value the model would refuse — the field is ranged,
+    /// so only an overflow gets there — raises no action at all rather than a
+    /// command that would fail.
+    fn gain_field(
+        &mut self,
+        ui: &mut Ui,
+        rect: Rect,
+        track: &Track,
+        outcome: &mut HeaderOutcome,
+    ) -> Option<TrackAction> {
+        let mut decibels = track.gain.decibels().as_f64();
+        let painted = ui
+            .put(
+                rect,
+                DragValue::new(&mut decibels)
+                    .speed(GAIN_DRAG_SPEED)
+                    .range(GainDb::MIN.as_f64()..=GainDb::MAX.as_f64())
+                    .fixed_decimals(1)
+                    .suffix(" dB"),
+            )
+            .on_hover_text("This track's level, in decibels");
+
+        let mut action = None;
+        if painted.changed() {
+            if self.gain_drag.is_none() {
+                self.gain_drag = Some(track.id);
+                outcome.begin = Some(GAIN_UNDO_LABEL.to_owned());
+            }
+            action = GainDb::from_f64(decibels)
+                .ok()
+                .map(|gain| TrackAction::SetGain {
+                    track: track.id,
+                    gain,
+                });
+        }
+        // The gesture ends when the pointer lets go, when the field loses
+        // focus, or straight away when the change was never a drag: a typed
+        // value, or an arrow key.
+        let dragging = painted.dragged() || painted.drag_started();
+        let released =
+            painted.drag_stopped() || painted.lost_focus() || (painted.changed() && !dragging);
+        if released && self.gain_drag == Some(track.id) {
+            self.gain_drag = None;
+            outcome.commit = true;
+        }
+        action
     }
 
     /// The inline name editor, which commits on Enter and on losing focus and
@@ -680,7 +894,10 @@ mod tests {
 
     #[test]
     fn the_meter_sits_in_the_control_row_between_the_kind_and_the_toggles() {
-        let layout = HeaderLayout::new(Rect::from_min_max(pos2(0.0, 0.0), pos2(132.0, 54.0)));
+        let layout = HeaderLayout::new(
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(132.0, 54.0)),
+            TrackKind::Video,
+        );
         assert!(
             layout.rect.contains_rect(layout.meter),
             "the meter escapes the header"
@@ -705,7 +922,10 @@ mod tests {
         // The toggles alone are wider than this header, so there is no room
         // left for a meter at all: it must come out empty rather than
         // negative, since a painter would draw an inverted rectangle.
-        let layout = HeaderLayout::new(Rect::from_min_max(pos2(0.0, 0.0), pos2(40.0, 54.0)));
+        let layout = HeaderLayout::new(
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(40.0, 54.0)),
+            TrackKind::Video,
+        );
         assert!(
             layout.meter.width() <= 0.0 + f32::EPSILON,
             "a squeezed meter is empty, not {} wide",
@@ -740,7 +960,10 @@ mod tests {
 
     #[test]
     fn the_controls_get_hit_targets_inside_the_header() {
-        let layout = HeaderLayout::new(Rect::from_min_max(pos2(0.0, 0.0), pos2(132.0, 54.0)));
+        let layout = HeaderLayout::new(
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(132.0, 54.0)),
+            TrackKind::Video,
+        );
         for control in [layout.name, layout.kind, layout.mute, layout.lock] {
             assert!(
                 layout.rect.contains_rect(control),
@@ -765,8 +988,51 @@ mod tests {
 
     #[test]
     fn a_header_that_is_too_small_still_lays_out() {
-        let layout = HeaderLayout::new(Rect::from_min_max(pos2(0.0, 0.0), pos2(12.0, 8.0)));
+        let layout = HeaderLayout::new(
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(12.0, 8.0)),
+            TrackKind::Audio,
+        );
         assert!(layout.name.height() >= 0.0 && layout.kind.height() >= 0.0);
+    }
+
+    #[test]
+    fn an_audio_header_lays_the_solo_toggle_and_the_gain_field_out_too() {
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(132.0, 54.0));
+        let audio = HeaderLayout::new(rect, TrackKind::Audio);
+        for control in [audio.solo, audio.gain] {
+            assert!(
+                audio.rect.contains_rect(control),
+                "{control:?} escapes the header {:?}",
+                audio.rect
+            );
+            assert!(control.width() > 0.0 && control.height() > 0.0);
+        }
+        assert!(
+            audio.solo.right() <= audio.mute.left(),
+            "the toggles must not overlap"
+        );
+        assert!(
+            audio.meter.right() <= audio.solo.left(),
+            "the meter stops before the solo toggle"
+        );
+        assert!(
+            audio.name.right() <= audio.gain.left(),
+            "the name stops before the gain field"
+        );
+        assert!(
+            audio.gain.bottom() <= audio.mute.top() + f32::EPSILON,
+            "the gain field sits in the name row"
+        );
+
+        let video = HeaderLayout::new(rect, TrackKind::Video);
+        assert!(
+            video.solo.width() <= f32::EPSILON && video.gain.width() <= f32::EPSILON,
+            "a video header carries neither control"
+        );
+        assert!(
+            video.meter.width() > audio.meter.width(),
+            "and gives the room back to the meter"
+        );
     }
 
     #[test]

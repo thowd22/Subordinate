@@ -203,6 +203,59 @@ fn dragging_the_opacity_slider_edits_live_and_commits_one_undo_step() {
 }
 
 #[test]
+fn the_gain_field_shows_decibels_and_edits_the_clip_in_them() {
+    let mut harness = harness(scene(1, 1));
+    harness.run();
+    assert_eq!(
+        harness.state().clips()[0].gain,
+        sub_model::GainDb::UNITY,
+        "a fresh clip plays at unity"
+    );
+    assert!(
+        harness
+            .query_all_by_label(InspectorField::Gain.label())
+            .any(|node| node.value().is_some_and(|value| value.ends_with(" dB"))),
+        "the gain field reads out in decibels"
+    );
+
+    // The fader runs from -144 dB to +24 dB, so a quarter of the way along is
+    // well below unity.
+    let rect = slider_rect(&harness, InspectorField::Gain.label());
+    let target = egui::pos2(rect.left() + rect.width() * 0.25, rect.center().y);
+    harness.hover_at(target);
+    harness.run();
+    harness.drag_at(target);
+    harness.run();
+    harness.drop_at(target);
+    harness.run();
+
+    let quieter = harness.state().clips()[0].gain;
+    assert!(
+        quieter.decibels().as_f64() < 0.0,
+        "dragging down the fader cut the clip's level: {quieter:?}"
+    );
+    assert_eq!(
+        harness.state().history.undo_entries().count(),
+        1,
+        "the whole gesture is one entry in the undo stack"
+    );
+
+    let Scene {
+        project, history, ..
+    } = harness.state_mut();
+    history.undo(project).expect("the gain edit undoes");
+    assert_eq!(
+        project.sequences[0].tracks[0]
+            .clips()
+            .next()
+            .expect("a clip")
+            .gain,
+        sub_model::GainDb::UNITY,
+        "one undo puts the level back"
+    );
+}
+
+#[test]
 fn an_edit_applies_to_every_selected_clip() {
     let mut harness = harness(scene(3, 3));
     harness.run();
