@@ -10,18 +10,21 @@ use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
 use sub_core::SubError;
-use sub_edit::playback::PlaybackScheduler;
+use sub_edit::playback::{PlaybackScheduler, ShuttleSpeed};
 use sub_model::Project;
 use sub_model::sequence::{Resolution, Sequence, SequenceSettings};
 use sub_render::{
     Compositor, RenderContext, RenderError, ResolvedClip, SourceFrame, describe_adapter,
     select_adapter,
 };
+use sub_time::RationalTime;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sub_audio::mixer::{MixGraphBuilder, MixerConfig, mixer};
+use sub_audio::mixer::{MixGraphBuilder, MixerConfig, MixerControl, mixer};
 use sub_audio::{AudioOutput, CpalBackend, MeterBank, OutputOptions};
 
 use crate::audio_settings::{AudioSettingsAction, AudioSettingsPanel};
@@ -88,10 +91,16 @@ pub struct SubordinateApp {
     compositor: Compositor,
     /// The viewer panel: picture, scrub bar and timecode.
     viewer: ViewerPanel,
-    /// The playback clock behind J, K, L and the space bar. It owns the
+    /// The video scheduler behind J, K, L and the space bar. It owns the
     /// playhead while playback runs; the viewer owns it the rest of the time,
-    /// and the two are synchronised once a frame.
+    /// and the two are synchronised once a frame. It measures no time itself:
+    /// it follows the audio clock while the output stream is playing, and the
+    /// monotonic fallback master otherwise (docs/PLAN.md §5.4).
     scheduler: PlaybackScheduler,
+    /// The control half of whatever mixer the output stage last built, so the
+    /// audio transport can be seeked to the playhead. `None` until a stream
+    /// has been opened.
+    audio_control: Rc<RefCell<Option<MixerControl>>>,
     /// The project the bin and the timeline show. Loading a project replaces
     /// it; until then it is empty, as the sequence is.
     project: Project,
@@ -155,7 +164,12 @@ impl SubordinateApp {
         let layout = DockLayout::load();
         layout.log_problems();
         let meters = Arc::new(MeterBank::new(METERED_TRACKS));
-        let audio = audio_output(sequence.settings.sample_rate, Arc::clone(&meters));
+        let audio_control = Rc::new(RefCell::new(None));
+        let audio = audio_output(
+            sequence.settings.sample_rate,
+            Arc::clone(&meters),
+            Rc::clone(&audio_control),
+        );
         Ok(Self {
             render,
             render_state: state.clone(),
@@ -170,6 +184,7 @@ impl SubordinateApp {
             compositor,
             viewer,
             scheduler,
+            audio_control,
             project: Project::new("Untitled"),
             media_bin: MediaBinPanel::new(),
             timeline,
@@ -265,32 +280,106 @@ impl SubordinateApp {
         moved
     }
 
-    /// Runs the playback clock for this frame and returns whether the
-    /// playhead moved.
+    /// Runs the transport for this frame and returns whether the playhead
+    /// moved.
     ///
-    /// The clock is the master while it plays: it is advanced by the wall time
-    /// egui reports for the frame, and whichever frame it lands on becomes the
-    /// viewer's playhead. Any other move — a scrub, a frame step — is fed the
-    /// other way, so playback resumes from wherever the user left the
-    /// playhead. Frames the clock skips because a frame took too long are
-    /// dropped and counted by the scheduler rather than slowing playback down.
+    /// Audio is the master (docs/PLAN.md §5.4): while the output stream is
+    /// playing, the frame shown is the one covering the position the callback
+    /// has actually rendered, less what is still sitting in the device buffer.
+    /// With no stream — nothing playing at 1x, or no device to open — the
+    /// scheduler follows its monotonic fallback master instead, advanced by
+    /// the wall time egui reports for the frame. Either way any other move —
+    /// a scrub, a frame step — is fed the other way, so playback resumes from
+    /// wherever the user left the playhead, and presentations the master ran
+    /// past are dropped and counted rather than slowing playback down.
     fn run_transport(&mut self, ctx: &egui::Context, elapsed: Duration) -> bool {
         self.scheduler.set_duration(self.viewer.state.duration());
         if !self.scheduler.is_playing() {
+            self.stop_audio();
             self.scheduler.seek(self.viewer.state.playhead());
             return false;
         }
         if self.scheduler.position() != self.viewer.state.playhead() {
             // The user scrubbed or stepped while playing; carry on from there.
             self.scheduler.seek(self.viewer.state.playhead());
+            self.seek_audio(self.viewer.state.playhead());
         }
-        let moved = self
-            .scheduler
-            .advance(elapsed)
-            .is_some_and(|tick| self.viewer.state.seek_to(tick.position));
+        self.follow_audio();
+        let master = self
+            .audio
+            .clock()
+            .and_then(|clock| clock.position())
+            .map(|position| position.rescaled_to(self.scheduler.rate()));
+        let tick = match master {
+            Some(position) => self.scheduler.follow(position),
+            None => self.scheduler.advance(elapsed),
+        };
+        let moved = tick.is_some_and(|tick| {
+            if tick.wrapped || tick.stopped {
+                // The master has to be moved with the playhead: a loop that
+                // wrapped the picture and left the sound running would not be
+                // in sync any more.
+                self.seek_audio(tick.position);
+            }
+            self.viewer.state.seek_to(tick.position)
+        });
         // Playback only looks like playback if the next frame is asked for.
         ctx.request_repaint();
         moved
+    }
+
+    /// Opens the output stream at the playhead once playback is running at
+    /// 1x, and closes it at any other speed.
+    ///
+    /// Only 1x is played out: shuttling and reverse have no audio until
+    /// scrubbing lands (TASK-54), so at those speeds the stream is closed and
+    /// the fallback master drives the picture. A device that will not open is
+    /// logged once and playback carries on silently rather than stopping.
+    fn follow_audio(&mut self) {
+        if self.scheduler.speed() != ShuttleSpeed::Forward1x {
+            self.stop_audio();
+            return;
+        }
+        if self.audio.is_open() {
+            return;
+        }
+        if let Err(error) = self.audio.start() {
+            log::warn!(
+                "no audio output; playback follows the monotonic clock: [{}] {}",
+                error.code,
+                error.message
+            );
+            return;
+        }
+        self.seek_audio(self.viewer.state.playhead());
+    }
+
+    /// Closes the output stream, if one is open, and drops the master
+    /// baseline so reopening it is not read as dropped frames.
+    fn stop_audio(&mut self) {
+        if !self.audio.is_open() {
+            return;
+        }
+        self.audio.stop();
+        self.scheduler.resync_master();
+    }
+
+    /// Moves the audio transport to `position` and forgets the clock reading
+    /// taken at the old one.
+    fn seek_audio(&mut self, position: RationalTime) {
+        if let Some(control) = self.audio_control.borrow_mut().as_mut()
+            && let Err(error) = control.seek(position)
+        {
+            log::warn!(
+                "could not move the audio transport: [{}] {}",
+                error.code,
+                error.message
+            );
+        }
+        if let Some(clock) = self.audio.clock() {
+            clock.reset();
+        }
+        self.scheduler.resync_master();
     }
 
     /// Composites the sequence at the playhead, if the playhead has moved,
@@ -541,15 +630,22 @@ pub fn run(options: AppOptions) -> eframe::Result {
 ///
 /// The factory it carries builds a fresh mixer every time a stream opens,
 /// because a reopened stream needs a mixer paired with a fresh control half.
-/// Until the transport is wired up (TASK-50) that mixer plays an empty graph,
-/// so the device the user picks here is remembered rather than opened.
-fn audio_output(sample_rate: u32, meters: Arc<MeterBank>) -> AudioOutput<CpalBackend> {
+/// That control half is handed back through `control` so the transport can
+/// seek the mixer to the playhead: it is the same clock the picture follows.
+/// The graph itself is still empty — feeding it the sequence's clips is the
+/// next task — so what plays is silence at the right position.
+fn audio_output(
+    sample_rate: u32,
+    meters: Arc<MeterBank>,
+    control: Rc<RefCell<Option<MixerControl>>>,
+) -> AudioOutput<CpalBackend> {
     AudioOutput::new(
         CpalBackend::new(),
         OutputOptions::default(),
         Box::new(move || {
             let graph = MixGraphBuilder::new(sample_rate, 2).build()?;
-            let (_control, mixer) = mixer(graph, MixerConfig::default())?;
+            let (fresh, mixer) = mixer(graph, MixerConfig::default())?;
+            *control.borrow_mut() = Some(fresh);
             Ok(mixer.with_meters(Arc::clone(&meters)))
         }),
     )

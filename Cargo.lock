@@ -4878,6 +4878,7 @@ dependencies = [
  "ringbuf",
  "rubato",
  "sub-core",
+ "sub-edit",
  "sub-test-support",
  "sub-time",
  "symphonia",
