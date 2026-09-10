@@ -76,3 +76,21 @@ pub mod menu {
         },
     });
 }
+
+/// The `mcp-tools` world: a plugin that contributes MCP tools.
+///
+/// Generated separately because one `bindgen!` expansion covers one world. The
+/// `with` map points the shared interfaces at the `command` expansion above, so
+/// `WitError` and the `command_api::Host` trait are the same Rust items in both
+/// worlds and a host implements them once.
+pub mod mcp_tools {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "mcp-tools",
+        with: {
+            "subordinate:plugin/types": super::subordinate::plugin::types,
+            "subordinate:plugin/command-api": super::subordinate::plugin::command_api,
+        },
+        additional_derives: [PartialEq, Eq, Hash],
+    });
+}

@@ -579,3 +579,53 @@ world commands {
     /// is `context.args`.
     export run: func(id: string, context: command-context) -> result<string, error>;
 }
+
+/// The descriptor a plugin publishes for each MCP tool it contributes.
+interface mcp {
+    /// One tool a plugin adds to the agent surface (docs/PLAN.md §6.2, §7).
+    ///
+    /// These are the same three fields an MCP client sees, so the bridge
+    /// forwards a descriptor rather than rebuilding one. The plugin's manifest
+    /// declares the same tools; the host checks the two agree before it offers
+    /// any of them, and validates a call's arguments against `json-schema`
+    /// before the call reaches the plugin.
+    record tool-desc {
+        /// The tool's plugin-local name, e.g. `cut_silence`. Lowercase ASCII
+        /// letters, digits and underscores. The bridge prefixes it with the
+        /// plugin id, so a plugin never namespaces it itself.
+        name: string,
+        /// One line telling an agent what the tool does and when to reach for
+        /// it. This is the text the agent chooses on, so it is prose rather
+        /// than a signature.
+        description: string,
+        /// The tool's argument schema: a JSON Schema object encoded as UTF-8.
+        /// It must be self-contained, because the host resolves no remote or
+        /// file references while validating.
+        json-schema: string,
+    }
+}
+
+/// A plugin that contributes MCP tools of its own.
+///
+/// The host forwards each tool to the MCP bridge under the plugin's id, so an
+/// agent sees plugin tools and built-in tools in one list. A tool that changes
+/// the project still goes through `command-api`, so it stays one undoable
+/// command like any other edit.
+world mcp-tools {
+    use types.{error};
+    use mcp.{tool-desc};
+
+    import command-api;
+
+    /// Every tool the plugin contributes, in the order an agent should see
+    /// them. Called on load and again after a hot reload; the host compares the
+    /// result with the manifest's declarations and refuses any tool the
+    /// manifest does not declare.
+    export tools: func() -> list<tool-desc>;
+
+    /// Runs one of the plugin's tools. `name` is the plugin-local name from
+    /// `tools`, without the plugin-id prefix, and `args-json` is a JSON object
+    /// the host has already validated against that tool's schema. The result is
+    /// the tool's JSON output.
+    export call: func(name: string, args-json: string) -> result<string, error>;
+}

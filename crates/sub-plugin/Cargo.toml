@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Argument validation for plugin-contributed MCP tools. Default features off:
+# they pull reqwest and rustls to resolve remote `$ref`s, and a plugin's tool
+# schema must be self-contained, never fetched from the network at call time.
+jsonschema = { version = "0.55", default-features = false }
 serde_json = { workspace = true }
 sub-core = { version = "0.1.0", path = "../sub-core" }
 sub-edit = { version = "0.1.0", path = "../sub-edit" }

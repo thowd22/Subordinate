@@ -15,9 +15,9 @@ use sub_plugin::command_api::{
     ClipMetadata, Host, LogLevel, MarkerMetadata, ProjectMetadata, SequenceMetadata, TrackMetadata,
 };
 use sub_plugin::{
-    Command, Commands, Effect, EffectCpu, WitEffectDesc, WitError, WitFrame, WitParamBinding,
-    WitProjectId, WitSequenceId, WitTrackId, marker_metadata, project_metadata, sequence_metadata,
-    track_clip_metadata, track_metadata,
+    Command, Commands, Effect, EffectCpu, McpTools, WitEffectDesc, WitError, WitFrame,
+    WitParamBinding, WitProjectId, WitSequenceId, WitTrackId, marker_metadata, project_metadata,
+    sequence_metadata, track_clip_metadata, track_metadata,
 };
 use sub_time::{Rational, RationalTime, TimeRange};
 
@@ -103,6 +103,8 @@ impl sub_plugin::effect_types::Host for TestHost {}
 /// The registration records carry no host functions of their own; a host still
 /// declares that it serves the interface they live in.
 impl sub_plugin::command_menu::Host for TestHost {}
+
+impl sub_plugin::mcp_types::Host for TestHost {}
 
 impl Host for TestHost {
     fn run_command(
@@ -327,4 +329,21 @@ fn the_commands_world_links_against_the_same_host() {
         state
     })
     .expect("the commands world's imports are all implemented");
+}
+
+/// The `mcp-tools` world links against the very same host.
+///
+/// It imports `command-api` too, and the `with` remapping in `bindings` points
+/// both worlds at one set of Rust types, so a host that satisfies `command`
+/// satisfies `mcp-tools` without implementing anything twice. If the remapping
+/// ever broke, this would stop compiling rather than silently generate a second
+/// `Host` trait.
+#[test]
+fn the_mcp_tools_world_links_against_the_same_host() {
+    let engine = wasmtime::Engine::default();
+    let mut linker = wasmtime::component::Linker::<TestHost>::new(&engine);
+    McpTools::add_to_linker::<_, wasmtime::component::HasSelf<TestHost>>(&mut linker, |state| {
+        state
+    })
+    .expect("the mcp-tools world's imports are all implemented");
 }
