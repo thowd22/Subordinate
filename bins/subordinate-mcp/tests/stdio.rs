@@ -130,7 +130,7 @@ fn the_binary_speaks_mcp_over_stdio_and_drives_the_command_api() {
     // Every Command API method is offered, with the schema's own description.
     let listed = client.request("tools/list", &json!({}));
     let tools = listed["tools"].as_array().expect("a tool list");
-    assert_eq!(tools.len(), 45);
+    assert_eq!(tools.len(), 50);
     let create = tools
         .iter()
         .find(|tool| tool["name"] == "bin_create")

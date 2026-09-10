@@ -103,6 +103,63 @@
       ],
       "type": "object"
     },
+    "Analysis": {
+      "additionalProperties": false,
+      "description": "One analyzer run's findings about a media item.\n\n`analyzer` is the identity of the analyzer that produced them, e.g.\n`silence` or `scene-detect`. A media item holds at most one analysis per\nanalyzer: re-running one replaces what it found last time.",
+      "properties": {
+        "analyzer": {
+          "description": "Which analyzer produced these findings.",
+          "type": "string"
+        },
+        "markers": {
+          "description": "Points and spans for a person to see, in media time.",
+          "items": {
+            "$ref": "#/$defs/Marker"
+          },
+          "type": "array"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "description": "Scalar findings: loudness, a transcript, whatever the analyzer's own\nvocabulary holds. Ordered by key so the project file stays stable.",
+          "type": "object"
+        },
+        "ranges": {
+          "description": "Spans for a command to act on, in media time.",
+          "items": {
+            "$ref": "#/$defs/AnalysisRange"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "analyzer"
+      ],
+      "type": "object"
+    },
+    "AnalysisRange": {
+      "additionalProperties": false,
+      "description": "A labelled span of a media item: silence, a scene, a spoken sentence.\n\nRanges are kept apart from markers because they are the input to editing —\na cut-silence command consumes ranges — whereas markers exist for a person\nto look at. A range carries a [`MarkerId`] so that turning it into a marker\nproduces the same identifier every time the command is replayed; the host\nassigns it once, when the analyzer's findings are stored.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/MarkerId",
+          "description": "The identity a marker made from this range takes."
+        },
+        "label": {
+          "description": "What the span is, e.g. `silence` or `scene`. Analyzers keep a small,\nstable vocabulary: commands downstream match on it.",
+          "type": "string"
+        },
+        "range": {
+          "$ref": "#/$defs/TimeRange",
+          "description": "The span, in media time."
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "range"
+      ],
+      "type": "object"
+    },
     "AppliedResult": {
       "description": "What one applied, undone or redone command did.\n\nThe project itself is deliberately not included: a caller that wants it\nasks for [`PROJECT_GET`], so a chatty edit session does not serialise the\nwhole timeline on every call.",
       "properties": {
@@ -876,6 +933,42 @@
         }
       ]
     },
+    "MarkersFromAnalysis": {
+      "additionalProperties": false,
+      "description": "Turns a stored analysis into markers on a clip.\n\nThe clip names the media, so the findings that apply are the ones stored on\nthe clip's own media item. Analysis times are media times and a clip's\nmarkers are in that same source time, so the markers are copied across\nunchanged: no rate conversion, no rounding, nothing to drift.\n\nTwo things are filtered out. Findings that fall outside the clip's\n`source_range` are skipped, because the clip does not show that part of the\nfile; and a finding whose identifier is already on the clip is skipped, so\nrunning the command twice is idempotent rather than a duplicate-marker\nerror. `label` narrows it further to ranges carrying one label — the way a\ncut-silence workflow marks only the silence.\n\nIdentifiers come from the stored analysis, so replaying this command\nreproduces the same project byte for byte.",
+      "properties": {
+        "analyzer": {
+          "description": "Which analyzer's findings to use.",
+          "type": "string"
+        },
+        "clip": {
+          "$ref": "#/$defs/ClipId",
+          "description": "The clip the markers land on."
+        },
+        "label": {
+          "description": "When present, only ranges with this label are used and the analysis's\nown markers are left out.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sequence": {
+          "$ref": "#/$defs/SequenceId",
+          "description": "The sequence holding the track."
+        },
+        "track": {
+          "$ref": "#/$defs/TrackId",
+          "description": "The track holding the clip."
+        }
+      },
+      "required": [
+        "sequence",
+        "track",
+        "clip",
+        "analyzer"
+      ],
+      "type": "object"
+    },
     "MediaId": {
       "description": "The canonical lowercase hyphenated UUIDv7 of a media.",
       "format": "uuid",
@@ -885,6 +978,13 @@
       "additionalProperties": false,
       "description": "A source file the project references.\n\nOTIO counterpart: `ExternalReference`, the media reference a `Clip` points\nat. Subordinate hoists it out of the clip into a project-level list so many\nclips share one entry, and so relinking a moved file is a single edit.\n\nThe stored path is always project-relative and the [`ContentHash`] identifies\nthe bytes, so a project folder copied to another machine relinks without\nuser intervention (docs/PLAN.md §5.6).",
       "properties": {
+        "analyses": {
+          "description": "What analyzer plugins found in this media, at most one entry per\nanalyzer (docs/PLAN.md §6.2). Empty until an analysis has run, and\nabsent from the project file while it is empty, so a file written\nbefore analyses existed still loads.",
+          "items": {
+            "$ref": "#/$defs/Analysis"
+          },
+          "type": "array"
+        },
         "color": {
           "$ref": "#/$defs/ColorTags",
           "description": "Colour tags read from the file, stored but not applied in the MVP\n(decision-3)."
@@ -1377,6 +1477,25 @@
       ],
       "type": "object"
     },
+    "RemoveMediaAnalysis": {
+      "additionalProperties": false,
+      "description": "Removes one analyzer's findings from a media item.",
+      "properties": {
+        "analyzer": {
+          "description": "Which analyzer's findings to drop.",
+          "type": "string"
+        },
+        "media": {
+          "$ref": "#/$defs/MediaId",
+          "description": "The media item to clear."
+        }
+      },
+      "required": [
+        "media",
+        "analyzer"
+      ],
+      "type": "object"
+    },
     "RemoveTrack": {
       "additionalProperties": false,
       "description": "Removes a track from a sequence.\n\nA track that still holds clips is refused with `edit.track_not_empty`\nunless `force` is set: dropping an hour of cut material must be something\nthe caller asked for twice, not something a mis-click does. A forced\nremoval is undoable like any other command — the inverse carries the whole\ntrack back.",
@@ -1486,6 +1605,60 @@
         "sequence",
         "track",
         "to_index"
+      ],
+      "type": "object"
+    },
+    "ReplaceClipMarkers": {
+      "additionalProperties": false,
+      "description": "Replaces a clip's whole marker list.\n\nThe inverse of [`MarkersFromAnalysis`], and its own inverse: it carries the\nmarkers whole, identifiers and notes included.",
+      "properties": {
+        "clip": {
+          "$ref": "#/$defs/ClipId",
+          "description": "The clip to rewrite."
+        },
+        "markers": {
+          "description": "The markers it is left holding, in order.",
+          "items": {
+            "$ref": "#/$defs/Marker"
+          },
+          "type": "array"
+        },
+        "sequence": {
+          "$ref": "#/$defs/SequenceId",
+          "description": "The sequence holding the track."
+        },
+        "track": {
+          "$ref": "#/$defs/TrackId",
+          "description": "The track holding the clip."
+        }
+      },
+      "required": [
+        "sequence",
+        "track",
+        "clip",
+        "markers"
+      ],
+      "type": "object"
+    },
+    "ReplaceMediaAnalyses": {
+      "additionalProperties": false,
+      "description": "Replaces a media item's whole analysis list.\n\nThis is the inverse of both storing commands, and its own inverse, so undo\nand redo of an analysis are exact.",
+      "properties": {
+        "analyses": {
+          "description": "The list it is left holding, at most one entry per analyzer.",
+          "items": {
+            "$ref": "#/$defs/Analysis"
+          },
+          "type": "array"
+        },
+        "media": {
+          "$ref": "#/$defs/MediaId",
+          "description": "The media item to rewrite."
+        }
+      },
+      "required": [
+        "media",
+        "analyses"
       ],
       "type": "object"
     },
@@ -1744,6 +1917,25 @@
         "sequence",
         "track",
         "clip"
+      ],
+      "type": "object"
+    },
+    "SetMediaAnalysis": {
+      "additionalProperties": false,
+      "description": "Stores one analyzer's findings on a media item, replacing what that same\nanalyzer found before.\n\nThis is what the host applies when an analysis job finishes. Other\nanalyzers' findings are left alone: a media item holds at most one analysis\nper analyzer, keyed by [`Analysis::analyzer`].\n\n```\nuse sub_edit::History;\nuse sub_edit::commands::{ImportMedia, SetMediaAnalysis};\nuse sub_model::{Analysis, MediaItem, MediaPath, Project};\n\nlet mut project = Project::new(\"Doc cut\");\nlet item = MediaItem::new(MediaPath::new(\"footage/interview.mp4\").unwrap());\nlet media = item.id;\n\nlet mut history = History::new();\nhistory.apply(&mut project, ImportMedia::new(item)).unwrap();\nhistory\n    .apply(\n        &mut project,\n        SetMediaAnalysis::new(media, Analysis::new(\"loudness\")),\n    )\n    .unwrap();\nassert!(project.media_item(media).unwrap().analysis(\"loudness\").is_some());\n\nhistory.undo(&mut project).unwrap();\nassert!(project.media_item(media).unwrap().analyses.is_empty());\n```",
+      "properties": {
+        "analysis": {
+          "$ref": "#/$defs/Analysis",
+          "description": "The findings, carrying the analyzer they came from."
+        },
+        "media": {
+          "$ref": "#/$defs/MediaId",
+          "description": "The media item the findings describe."
+        }
+      },
+      "required": [
+        "media",
+        "analysis"
       ],
       "type": "object"
     },
@@ -2549,6 +2741,17 @@
       }
     },
     {
+      "description": "Turn an analyzer's findings about a clip's media into markers on that clip.",
+      "kind": "command",
+      "name": "marker.from_analysis",
+      "params": {
+        "$ref": "#/$defs/MarkersFromAnalysis"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
       "description": "Move a marker to a different time.",
       "kind": "command",
       "name": "marker.move",
@@ -2565,6 +2768,17 @@
       "name": "marker.remove",
       "params": {
         "$ref": "#/$defs/RemoveMarker"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Replace a clip's whole marker list.",
+      "kind": "command",
+      "name": "marker.replace_on_clip",
+      "params": {
+        "$ref": "#/$defs/ReplaceClipMarkers"
       },
       "result": {
         "$ref": "#/$defs/AppliedResult"
@@ -2609,6 +2823,39 @@
       "name": "media.remove",
       "params": {
         "$ref": "#/$defs/RemoveMedia"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Remove one analyzer's findings from a media item.",
+      "kind": "command",
+      "name": "media.remove_analysis",
+      "params": {
+        "$ref": "#/$defs/RemoveMediaAnalysis"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Replace a media item's whole list of analyzer findings.",
+      "kind": "command",
+      "name": "media.replace_analyses",
+      "params": {
+        "$ref": "#/$defs/ReplaceMediaAnalyses"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Store one analyzer's findings on a media item, replacing that analyzer's previous run.",
+      "kind": "command",
+      "name": "media.set_analysis",
+      "params": {
+        "$ref": "#/$defs/SetMediaAnalysis"
       },
       "result": {
         "$ref": "#/$defs/AppliedResult"

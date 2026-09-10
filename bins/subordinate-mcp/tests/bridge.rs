@@ -74,7 +74,7 @@ fn tool_calls_reach_a_running_editor_and_come_back_as_content() {
     let bridge = bridge(backend);
 
     // The whole Command API is offered, and `tools/list` says so.
-    assert_eq!(bridge.tools().len(), 45);
+    assert_eq!(bridge.tools().len(), 50);
     assert_eq!(bridge.tools().method("bin_create"), Some("bin.create"));
     let info = bridge.get_info();
     assert!(info.capabilities.tools.is_some());

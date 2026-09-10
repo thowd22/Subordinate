@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sub_time::{Rational, RationalTime};
 
+use crate::analysis::Analysis;
 use crate::content::{ContentHash, MediaPath};
 use crate::ids::{BinId, MediaId};
 use crate::sequence::ColorTags;
@@ -133,6 +134,12 @@ pub struct MediaItem {
     /// Colour tags read from the file, stored but not applied in the MVP
     /// (decision-3).
     pub color: ColorTags,
+    /// What analyzer plugins found in this media, at most one entry per
+    /// analyzer (docs/PLAN.md §6.2). Empty until an analysis has run, and
+    /// absent from the project file while it is empty, so a file written
+    /// before analyses existed still loads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub analyses: Vec<Analysis>,
 }
 
 impl MediaItem {
@@ -148,7 +155,16 @@ impl MediaItem {
             proxy: ProxyState::None,
             offline: false,
             color: ColorTags::REC709,
+            analyses: Vec::new(),
         }
+    }
+
+    /// What `analyzer` found in this media, when it has run.
+    #[must_use]
+    pub fn analysis(&self, analyzer: &str) -> Option<&Analysis> {
+        self.analyses
+            .iter()
+            .find(|analysis| analysis.analyzer == analyzer)
     }
 
     /// The absolute path of the source file, given the folder holding the
@@ -283,6 +299,29 @@ mod tests {
         assert_eq!(item.proxy, ProxyState::None);
         assert!(!item.offline);
         assert_ne!(item.id, MediaItem::new(path("a.mp4")).id);
+    }
+
+    #[test]
+    fn a_media_item_written_before_analyses_existed_still_loads() {
+        let item = MediaItem::new(path("footage/interview.mp4"));
+        let text = serde_json::to_string(&item).unwrap();
+        assert!(
+            !text.contains("analyses"),
+            "an empty list is left out of the file: {text}"
+        );
+
+        let loaded: MediaItem = serde_json::from_str(&text).unwrap();
+        assert!(loaded.analyses.is_empty());
+        assert!(loaded.analysis("silence").is_none());
+    }
+
+    #[test]
+    fn an_analysis_is_found_by_the_analyzer_that_produced_it() {
+        let mut item = MediaItem::new(path("footage/interview.mp4"));
+        item.analyses.push(Analysis::new("silence"));
+        item.analyses.push(Analysis::new("loudness"));
+        assert_eq!(item.analysis("loudness").unwrap().analyzer, "loudness");
+        assert!(item.analysis("scene-detect").is_none());
     }
 
     #[test]

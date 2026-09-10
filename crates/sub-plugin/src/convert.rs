@@ -23,13 +23,16 @@
 //! assert_eq!(RationalTime::try_from(crossed).unwrap(), playhead);
 //! ```
 
+use std::collections::BTreeMap;
+
 use sub_core::{SubError, SubResult};
 use sub_model::{
-    ClipId, Marker, MarkerId, MediaId, Project, ProjectId, Resolution, Sequence, SequenceId, Track,
-    TrackId, TrackKind,
+    Analysis, AnalysisRange, ClipId, Marker, MarkerId, MediaId, Project, ProjectId, Resolution,
+    Sequence, SequenceId, Track, TrackId, TrackKind,
 };
 use sub_time::{Rational, RationalTime, TimeRange};
 
+use crate::bindings::analyzer::subordinate::plugin::analysis as wit_analysis;
 use crate::bindings::subordinate::plugin::command_api as wit_api;
 use crate::bindings::subordinate::plugin::types as wit_types;
 use crate::codes;
@@ -342,6 +345,75 @@ pub fn marker_metadata(marker: &Marker) -> wit_api::MarkerMetadata {
         note: marker.note.clone(),
         marked_range: marker.marked_range.into(),
     }
+}
+
+/// Turns one analyzer run's WIT findings into the [`Analysis`] the project
+/// stores.
+///
+/// Three things happen on the way across, and all three are the host's job
+/// rather than the plugin's.
+///
+/// - **Identifiers are assigned here.** A WIT finding carries no
+///   [`MarkerId`]: a sandboxed plugin has no clock, no entropy the host would
+///   trust and no reason to know what a project identifier looks like. The
+///   host mints one per finding as it stores them, which is what later makes
+///   `marker.from_analysis` replayable.
+/// - **Times are validated.** A `time-range` from a plugin is untrusted input,
+///   so a zero denominator, a negative duration or two endpoints at different
+///   rates come back as `plugin.invalid_rational` or
+///   `plugin.invalid_time_range` rather than reaching the model.
+/// - **Metadata is parsed.** Each value crosses as JSON text because WIT has
+///   no dynamic JSON type; text that is not JSON, or a key sent twice, is
+///   `plugin.invalid_metadata`.
+///
+/// # Errors
+///
+/// `plugin.invalid_rational`, `plugin.invalid_time_range` or
+/// `plugin.invalid_metadata`, as above.
+pub fn analysis(analyzer: &str, found: &wit_analysis::AnalysisResult) -> SubResult<Analysis> {
+    let mut markers = Vec::with_capacity(found.markers.len());
+    for marker in &found.markers {
+        markers.push(Marker {
+            id: MarkerId::new(),
+            name: marker.name.clone(),
+            marked_range: TimeRange::try_from(marker.marked_range)?,
+            note: marker.note.clone(),
+        });
+    }
+
+    let mut ranges = Vec::with_capacity(found.ranges.len());
+    for range in &found.ranges {
+        ranges.push(AnalysisRange::new(
+            range.label.clone(),
+            TimeRange::try_from(range.range)?,
+        ));
+    }
+
+    let mut metadata = BTreeMap::new();
+    for entry in &found.metadata {
+        let value = serde_json::from_str(&entry.value).map_err(|err| {
+            SubError::new(
+                codes::INVALID_METADATA,
+                "an analysis metadata value is not JSON",
+            )
+            .with_detail("key", entry.key.clone())
+            .with_detail("reason", err.to_string())
+        })?;
+        if metadata.insert(entry.key.clone(), value).is_some() {
+            return Err(SubError::new(
+                codes::INVALID_METADATA,
+                "an analysis reported the same metadata key twice",
+            )
+            .with_detail("key", entry.key.clone()));
+        }
+    }
+
+    Ok(Analysis {
+        analyzer: analyzer.to_owned(),
+        markers,
+        ranges,
+        metadata,
+    })
 }
 
 #[cfg(test)]

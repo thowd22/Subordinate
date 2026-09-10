@@ -11,13 +11,17 @@ use sub_model::{
     Clip, ColorTags, Marker, MediaItem, MediaPath, Project, ProjectId, Resolution, Sequence,
     SequenceSettings, Track, TrackItem, TrackKind,
 };
+use sub_plugin::analysis::Host as AnalysisTypes;
+use sub_plugin::analysis_host::Host as AnalysisHost;
 use sub_plugin::command_api::{
     ClipMetadata, Host, LogLevel, MarkerMetadata, ProjectMetadata, SequenceMetadata, TrackMetadata,
 };
 use sub_plugin::{
-    AudioEffect, Command, Commands, Effect, EffectCpu, Exporter, Importer, McpTools, WitEffectDesc,
-    WitError, WitFrame, WitParamBinding, WitProjectId, WitSequenceId, WitTrackId, marker_metadata,
-    project_metadata, sequence_metadata, track_clip_metadata, track_metadata,
+    AnalyzerWorld, AudioEffect, Command, Commands, Effect, EffectCpu, Exporter, Importer, McpTools,
+    WitAnalysisMarker, WitAnalysisRange, WitAnalysisResult, WitDetail, WitEffectDesc, WitError,
+    WitFrame, WitParamBinding, WitProjectId, WitSequenceId, WitTimeRange, WitTrackId,
+    analysis_from_wit, marker_metadata, project_metadata, sequence_metadata, track_clip_metadata,
+    track_metadata,
 };
 use sub_time::{Rational, RationalTime, TimeRange};
 
@@ -32,6 +36,10 @@ struct TestHost {
     revision: u64,
     playhead: RationalTime,
     log: Vec<(LogLevel, String)>,
+    /// The progress an analyzer reported, and whether its run was cancelled:
+    /// the whole of the `analysis-host` import a host has to answer.
+    progress: Vec<(u64, u64)>,
+    cancelled: bool,
 }
 
 impl TestHost {
@@ -65,6 +73,8 @@ impl TestHost {
             revision: 3,
             playhead: RationalTime::from_frames(12, fps()),
             log: Vec::new(),
+            progress: Vec::new(),
+            cancelled: false,
         }
     }
 
@@ -385,4 +395,78 @@ fn the_interchange_worlds_link_with_every_import_satisfied() {
         state
     })
     .expect("the exporter world's imports are all implemented");
+}
+
+/// The analyzer world's records carry no host functions; the trait exists so a
+/// host that serves the world's types is linked like any other import.
+impl AnalysisTypes for TestHost {}
+
+/// The analyzer world's second import: progress out, cancellation in. A real
+/// host forwards both to the job the analysis runs as (`sub_plugin::analyzer`).
+impl AnalysisHost for TestHost {
+    fn report_progress(&mut self, done: u64, total: u64) {
+        self.progress.push((done, total));
+    }
+
+    fn is_cancelled(&mut self) -> bool {
+        self.cancelled
+    }
+}
+
+#[test]
+fn the_analyzer_world_links_with_every_import_satisfied() {
+    let engine = wasmtime::Engine::default();
+    let mut linker = wasmtime::component::Linker::<TestHost>::new(&engine);
+    AnalyzerWorld::add_to_linker::<_, wasmtime::component::HasSelf<TestHost>>(
+        &mut linker,
+        |state| state,
+    )
+    .expect("the analyzer world's imports are all implemented");
+}
+
+#[test]
+fn the_analysis_host_import_is_the_jobs_progress_and_cancel_channel() {
+    let mut host = TestHost::new();
+    assert!(!host.is_cancelled());
+    host.report_progress(1, 4);
+    host.report_progress(4, 4);
+    host.cancelled = true;
+    assert!(host.is_cancelled());
+    assert_eq!(host.progress, [(1, 4), (4, 4)]);
+}
+
+#[test]
+fn analysis_findings_become_a_stored_analysis_with_host_assigned_ids() {
+    let range = TimeRange::new(
+        RationalTime::from_frames(12, fps()),
+        RationalTime::from_frames(6, fps()),
+    )
+    .unwrap();
+    let found = WitAnalysisResult {
+        markers: vec![WitAnalysisMarker {
+            name: "slate".to_owned(),
+            note: String::new(),
+            marked_range: WitTimeRange::from(TimeRange::empty_at(RationalTime::zero(fps()))),
+        }],
+        ranges: vec![WitAnalysisRange {
+            label: "silence".to_owned(),
+            range: WitTimeRange::from(range),
+        }],
+        metadata: vec![WitDetail {
+            key: "lufs".to_owned(),
+            value: "-23".to_owned(),
+        }],
+    };
+
+    let analysis = analysis_from_wit("silence", &found).unwrap();
+    assert_eq!(analysis.analyzer, "silence");
+    assert_eq!(analysis.markers.len(), 1);
+    assert_eq!(analysis.ranges[0].range, range);
+    assert_eq!(analysis.metadata.get("lufs"), Some(&serde_json::json!(-23)));
+
+    // The plugin invented no identifier, and the one the host minted is the one
+    // a marker made from the range carries.
+    let marker = analysis.ranges[0].to_marker();
+    assert_eq!(marker.id, analysis.ranges[0].id);
+    assert_eq!(marker.name, "silence");
 }

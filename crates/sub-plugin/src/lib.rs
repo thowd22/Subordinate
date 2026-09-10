@@ -94,10 +94,22 @@
 //!   host has written it. [`export_presets`] validates the preset records into
 //!   the [`ExportPreset`] rows the export panel (TASK-62) lists.
 //!
+//! # The analyzer world
+//!
+//! `analyzer` is background analysis (docs/PLAN.md §6.2): it exports
+//! `analyze(media, options)` and adds one import, `analysis-host`, the progress
+//! and cancellation channel of the job the run is. [`analyzer`] is the host
+//! side of it — [`AnalysisJobs`] puts a run on the shared
+//! [`JobService`](sub_core::jobs::JobService), forwards progress, honours
+//! cancellation, and stores what was found on the media item by applying
+//! `media.set_analysis` through the engine, so findings arrive as an ordinary
+//! undoable command.
+//!
 //! [`bindings`] holds the generated host side of those worlds; [`convert`] maps
 //! its records onto [`sub_core::SubError`], [`sub_time::RationalTime`] and the
 //! `sub_model` identifiers, so an implementation of the generated `Host` trait
-//! (TASK-84) never hand-builds a record.
+//! (TASK-84) never hand-builds a record. `convert` is also where an analyzer's
+//! findings become a [`sub_model::Analysis`], marker identifiers and all.
 //!
 //! ```
 //! use sub_plugin::{WitError, WitRationalTime};
@@ -120,6 +132,7 @@
 //! capabilities it asks for and the MCP tools it contributes. [`schema`]
 //! exports its JSON Schema, committed at `docs/schema/plugin-manifest.json`.
 
+pub mod analyzer;
 pub mod audio;
 pub mod bindings;
 mod convert;
@@ -131,7 +144,15 @@ pub mod schema;
 
 pub use manifest::{MANIFEST_FILE_NAME, Manifest, PluginId, World};
 
+pub use analyzer::{AnalysisContext, AnalysisJobs, Analyzer};
 pub use bindings::Command;
+pub use bindings::analyzer::Analyzer as AnalyzerWorld;
+pub use bindings::analyzer::subordinate::plugin::analysis;
+pub use bindings::analyzer::subordinate::plugin::analysis::{
+    AnalysisMarker as WitAnalysisMarker, AnalysisRange as WitAnalysisRange,
+    AnalysisResult as WitAnalysisResult,
+};
+pub use bindings::analyzer::subordinate::plugin::analysis_host;
 pub use bindings::audio::AudioEffect;
 pub use bindings::audio::subordinate::plugin::audio as audio_types;
 pub use bindings::audio::subordinate::plugin::audio::{
@@ -176,7 +197,8 @@ pub use bindings::subordinate::plugin::types::{
     TrackId as WitTrackId,
 };
 pub use convert::{
-    marker_metadata, project_metadata, sequence_metadata, track_clip_metadata, track_metadata,
+    analysis as analysis_from_wit, marker_metadata, project_metadata, sequence_metadata,
+    track_clip_metadata, track_metadata,
 };
 pub use interchange::{CommandCall, ExportPreset, ImportTarget, export_presets, import_plan};
 pub use menu::{
@@ -264,4 +286,6 @@ pub mod codes {
     /// An exporter offered a preset with a malformed id, name, container or
     /// settings, or two presets sharing an id.
     pub const INVALID_PRESET: ErrorCode = ErrorCode::from_static("plugin.invalid_preset");
+    /// An analysis metadata value is not JSON, or a key was reported twice.
+    pub const INVALID_METADATA: ErrorCode = ErrorCode::from_static("plugin.invalid_metadata");
 }
