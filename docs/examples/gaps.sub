@@ -1,0 +1,269 @@
+{
+  "project": {
+    "id": "01930000-0000-7000-8000-000000000101",
+    "media": [
+      {
+        "analyses": [],
+        "color": {
+          "primaries": "bt709",
+          "space": "rec709",
+          "transfer": "bt709"
+        },
+        "hash": null,
+        "id": "01930000-0001-7000-8000-000000000101",
+        "info": {
+          "audio": [],
+          "duration": {
+            "rate": {
+              "denominator": 1,
+              "numerator": 25
+            },
+            "value": 250
+          },
+          "video": [
+            {
+              "color": {
+                "primaries": "bt709",
+                "space": "rec709",
+                "transfer": "bt709"
+              },
+              "frame_rate": {
+                "denominator": 1,
+                "numerator": 25
+              },
+              "height": 1080,
+              "sample_aspect": {
+                "denominator": 1,
+                "numerator": 1
+              },
+              "width": 1920
+            }
+          ]
+        },
+        "name": "b-roll.mp4",
+        "offline": true,
+        "path": "video/b-roll.mp4",
+        "proxy": "none"
+      }
+    ],
+    "name": "Gaps fixture",
+    "root_bin": {
+      "children": [],
+      "id": "01930000-0000-7000-8000-000000000102",
+      "media": [
+        "01930000-0001-7000-8000-000000000101"
+      ],
+      "name": "Gaps fixture"
+    },
+    "sequences": [
+      {
+        "id": "01930000-0006-7000-8000-000000000101",
+        "markers": [],
+        "name": "Main",
+        "settings": {
+          "color": {
+            "primaries": "bt709",
+            "space": "rec709",
+            "transfer": "bt709"
+          },
+          "frame_rate": {
+            "denominator": 1,
+            "numerator": 25
+          },
+          "resolution": {
+            "height": 1080,
+            "width": 1920
+          },
+          "sample_rate": 48000
+        },
+        "tracks": [
+          {
+            "id": "01930000-0005-7000-8000-000000000101",
+            "items": [
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "gain": 0,
+                  "id": "01930000-0003-7000-8000-000000000101",
+                  "markers": [],
+                  "media": "01930000-0001-7000-8000-000000000101",
+                  "name": "one",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 25
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 0
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              },
+              {
+                "gap": {
+                  "duration": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 10
+                  }
+                }
+              },
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "gain": 0,
+                  "id": "01930000-0003-7000-8000-000000000102",
+                  "markers": [],
+                  "media": "01930000-0001-7000-8000-000000000101",
+                  "name": "two",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 25
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 50
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              },
+              {
+                "gap": {
+                  "duration": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 5
+                  }
+                }
+              },
+              {
+                "clip": {
+                  "fade_in": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "fade_out": {
+                    "rate": {
+                      "denominator": 1,
+                      "numerator": 25
+                    },
+                    "value": 0
+                  },
+                  "gain": 0,
+                  "id": "01930000-0003-7000-8000-000000000103",
+                  "markers": [],
+                  "media": "01930000-0001-7000-8000-000000000101",
+                  "name": "three",
+                  "opacity": 1000000,
+                  "source_range": {
+                    "duration": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 25
+                    },
+                    "start": {
+                      "rate": {
+                        "denominator": 1,
+                        "numerator": 25
+                      },
+                      "value": 100
+                    }
+                  },
+                  "transform": {
+                    "position": {
+                      "x": 0,
+                      "y": 0
+                    },
+                    "rotation_degrees": 0,
+                    "scale": {
+                      "x": 1000000,
+                      "y": 1000000
+                    }
+                  }
+                }
+              }
+            ],
+            "kind": "video",
+            "locked": false,
+            "muted": false,
+            "name": "V1"
+          }
+        ]
+      }
+    ]
+  },
+  "schema_version": 1
+}
