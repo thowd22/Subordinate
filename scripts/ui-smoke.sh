@@ -192,6 +192,16 @@ case "$ready_line" in
     exit 1
     ;;
 esac
+# The window edits through the engine that owns the project, so the counts on
+# the ready line are read back out of that engine's snapshot. A window that
+# came up on an empty project would still say project=loaded; these say the
+# sequence the panels are showing really came from the file.
+case "$ready_line" in
+*sequences=0* | *tracks=0*)
+    echo "ui-smoke: the window came up on an empty project" >&2
+    exit 1
+    ;;
+esac
 
 # One capture of the whole Xinerama desktop, then a crop per head: two xwd
 # runs could catch the two windows a frame apart.

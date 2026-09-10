@@ -26,6 +26,8 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use eframe::egui::{self, Color32, RichText, Ui, Vec2};
+use sub_edit::BoxedCommand;
+use sub_edit::commands::{CreateBin, MoveBin, MoveToBin, RenameBin};
 use sub_model::media::StreamInfo;
 use sub_model::{Bin, BinId, MediaId, MediaItem, Project};
 use sub_time::{Rational, RationalTime, Timecode, TimecodeRate};
@@ -233,6 +235,27 @@ pub enum MediaBinAction {
     /// The host opens the same dialog for all of them; what it finds is
     /// applied as a single undo step.
     RelinkAll,
+}
+
+impl MediaBinAction {
+    /// The command this action commits, when it is one command on its own.
+    ///
+    /// Four of the six are: creating, renaming and reparenting a folder, and
+    /// filing an item in one. The other two are not edits by themselves —
+    /// importing has to hash and probe the files first, and relinking has to
+    /// find the replacement — so they return `None` and the host runs the
+    /// import queue or the relink dialog, which then commits a command of its
+    /// own.
+    #[must_use]
+    pub fn into_command(self) -> Option<BoxedCommand> {
+        match self {
+            Self::CreateBin { parent, name } => Some(Box::new(CreateBin::new(name).inside(parent))),
+            Self::RenameBin { bin, name } => Some(Box::new(RenameBin::new(bin, name))),
+            Self::MoveBin { bin, parent } => Some(Box::new(MoveBin::new(bin, parent))),
+            Self::MoveMedia { media, bin } => Some(Box::new(MoveToBin::new(media, bin))),
+            Self::Import { .. } | Self::Relink(_) | Self::RelinkAll => None,
+        }
+    }
 }
 
 /// The item an editor is dragging out of the bin.

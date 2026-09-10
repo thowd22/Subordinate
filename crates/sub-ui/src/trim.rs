@@ -154,6 +154,24 @@ impl TrimGroup {
         self.steps.is_empty()
     }
 
+    /// The trim as boxed commands, in the order they must be applied.
+    ///
+    /// This is what the app hands
+    /// [`EditorSession::apply_group`](crate::session::EditorSession::apply_group),
+    /// so the trim and every clip a ripple carried are one entry in the undo
+    /// stack.
+    #[must_use]
+    pub fn commands(&self) -> Vec<sub_edit::BoxedCommand> {
+        self.steps
+            .iter()
+            .map(|step| match step {
+                TrimStep::TrimIn(command) => Box::new(command.clone()) as sub_edit::BoxedCommand,
+                TrimStep::TrimOut(command) => Box::new(command.clone()) as sub_edit::BoxedCommand,
+                TrimStep::Move(command) => Box::new(command.clone()) as sub_edit::BoxedCommand,
+            })
+            .collect()
+    }
+
     /// How many clips the ripple carries along, the trimmed clip aside.
     #[must_use]
     pub fn rippled(&self) -> usize {

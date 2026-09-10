@@ -264,6 +264,19 @@ impl MoveGroup {
     pub fn is_empty(&self) -> bool {
         self.moves.is_empty()
     }
+
+    /// The drag as boxed commands, in the order they must be applied.
+    ///
+    /// This is what the app hands
+    /// [`EditorSession::apply_group`](crate::session::EditorSession::apply_group),
+    /// so the whole drag becomes one entry in the engine's undo stack.
+    #[must_use]
+    pub fn commands(&self) -> Vec<sub_edit::BoxedCommand> {
+        self.moves
+            .iter()
+            .map(|command| Box::new(command.clone()) as sub_edit::BoxedCommand)
+            .collect()
+    }
 }
 
 /// Works out what dragging `selection` by `delta` and `track_delta` lanes

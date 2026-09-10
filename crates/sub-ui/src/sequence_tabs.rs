@@ -16,6 +16,8 @@
 
 use eframe::egui::{self, Ui};
 use sub_core::{SubError, SubResult};
+use sub_edit::BoxedCommand;
+use sub_edit::commands::{CreateSequence, DeleteSequence, RenameSequence};
 use sub_model::sequence::{Resolution, Sequence, SequenceSettings};
 use sub_model::{ColorTags, SequenceId};
 use sub_time::{Rational, RationalTime};
@@ -73,6 +75,20 @@ pub enum SequenceTabAction {
     },
     /// Delete this sequence and everything on it.
     Delete(SequenceId),
+}
+
+impl SequenceTabAction {
+    /// The command this action commits, or `None` for
+    /// [`SequenceTabAction::Switch`], which changes nothing in the project.
+    #[must_use]
+    pub fn into_command(self) -> Option<BoxedCommand> {
+        match self {
+            Self::Switch(_) => None,
+            Self::Create { name, settings } => Some(Box::new(CreateSequence::new(name, settings))),
+            Self::Rename { sequence, name } => Some(Box::new(RenameSequence::new(sequence, name))),
+            Self::Delete(sequence) => Some(Box::new(DeleteSequence::new(sequence))),
+        }
+    }
 }
 
 /// Where one sequence was last being looked at.

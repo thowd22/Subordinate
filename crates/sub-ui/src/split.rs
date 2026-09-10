@@ -124,6 +124,19 @@ impl SplitGroup {
     pub fn is_empty(&self) -> bool {
         self.splits.is_empty()
     }
+
+    /// The cut as boxed commands, in the order they must be applied.
+    ///
+    /// This is what the app hands
+    /// [`EditorSession::apply_group`](crate::session::EditorSession::apply_group),
+    /// so a through-edit across several tracks is one entry in the undo stack.
+    #[must_use]
+    pub fn commands(&self) -> Vec<sub_edit::BoxedCommand> {
+        self.splits
+            .iter()
+            .map(|command| Box::new(command.clone()) as sub_edit::BoxedCommand)
+            .collect()
+    }
 }
 
 /// Works out what cutting at `at` would do, given what is selected.

@@ -25,6 +25,7 @@ pub mod recovery;
 pub mod relink_dialog;
 pub mod selection;
 pub mod sequence_tabs;
+pub mod session;
 pub mod shortcuts;
 pub mod snapping;
 pub mod source_edit;
@@ -43,7 +44,8 @@ pub use audio_settings::{AudioSettingsAction, AudioSettingsPanel, device_label, 
 pub use diagnostics::DiagnosticsPanel;
 pub use dock::{DockLayout, LAYOUT_FILE_NAME, LAYOUT_VERSION, LoadedLayout, Panel, layout_menu_ui};
 pub use history_panel::{
-    HistoryAction, HistoryList, HistoryPanel, ORIGINAL_STATE_LABEL, edit_menu_ui,
+    EARLIER_STEP_LABEL, HistoryAction, HistoryList, HistoryPanel, LATER_STEP_LABEL,
+    ORIGINAL_STATE_LABEL, edit_menu_ui,
 };
 pub use inspector::{
     InspectorField, InspectorPanel, InspectorResponse, apply_edit as apply_inspector_edit,
@@ -93,6 +95,7 @@ pub use selection::{
 pub use sequence_tabs::{
     NewSequenceDialog, SequenceTabAction, SequenceTabs, SequenceViewState, default_sequence_name,
 };
+pub use session::EditorSession;
 pub use shortcuts::{
     Action, Binding, Category, Conflict, DEFAULT_BINDINGS, HelpRow, ShortcutMap, ShortcutsWindow,
     help_rows,
@@ -170,6 +173,10 @@ pub mod codes {
 
     /// A project file exists but could not be read or parsed.
     pub const PROJECT_UNREADABLE: ErrorCode = ErrorCode::from_static("ui.project_unreadable");
+
+    /// The project could not be written: no file has been chosen for it yet,
+    /// or the write itself failed.
+    pub const PROJECT_UNSAVED: ErrorCode = ErrorCode::from_static("ui.project_unsaved");
 
     /// A plugin asked for a chord the editor or an earlier plugin already
     /// holds. The command keeps its menu entry and loses its shortcut.

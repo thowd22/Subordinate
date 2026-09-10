@@ -5036,6 +5036,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sub-audio",
+ "sub-command",
  "sub-core",
  "sub-edit",
  "sub-export",
