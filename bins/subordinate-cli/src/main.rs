@@ -120,7 +120,9 @@ Usage:
   subordinate-cli --help       print this text
 
 Every subcommand prints JSON, indented by default and on one line with
---compact. A failure prints a JSON SubError on stderr.
+--compact. A failure prints a JSON SubError on stderr on the same terms: a
+stable code, a message, and — for a plugin failure — the WIT type or function
+it belongs to and a one-line hint saying what would fix it.
 ";
 
 /// Parses the arguments after the program name.
@@ -361,16 +363,35 @@ fn print_json(value: &serde_json::Value, pretty: bool) -> ExitCode {
     }
 }
 
-/// Prints what a project subcommand answered, or its error as a JSON
-/// `SubError` on stderr.
+/// Prints what a subcommand answered, or its error as a JSON `SubError` on
+/// stderr.
+///
+/// A failure is JSON on the same terms as a success — indented by default,
+/// one line with `--compact` — so whoever called the CLI parses one shape
+/// whichever way it went. A plugin failure carries the WIT item it belongs to
+/// and a hint beside its stable code (`sub_plugin::errors`).
 fn report(result: sub_core::SubResult<serde_json::Value>, pretty: bool) -> ExitCode {
     match result {
         Ok(value) => print_json(&value, pretty),
-        Err(err) => {
-            eprintln!("{}", err.to_json());
-            ExitCode::FAILURE
-        }
+        Err(err) => print_error(&err, pretty),
     }
+}
+
+/// Prints one `SubError` as JSON on stderr and fails.
+fn print_error(error: &sub_core::SubError, pretty: bool) -> ExitCode {
+    let json = error.to_json();
+    let text = if pretty {
+        serde_json::to_string_pretty(&json)
+    } else {
+        serde_json::to_string(&json)
+    };
+    match text {
+        Ok(text) => eprintln!("{text}"),
+        // A `SubError` is always serialisable; if that ever fails, the
+        // rendered error is still better than nothing.
+        Err(_) => eprintln!("{error}"),
+    }
+    ExitCode::FAILURE
 }
 
 /// Generates the Command API JSON Schema and prints it.
@@ -382,17 +403,13 @@ fn report(result: sub_core::SubResult<serde_json::Value>, pretty: bool) -> ExitC
 fn schema(pretty: bool) -> ExitCode {
     let engine = match sub_edit::Engine::spawn(sub_model::Project::new("schema")) {
         Ok(engine) => engine,
-        Err(err) => {
-            eprintln!("{}", err.to_json());
-            return ExitCode::FAILURE;
-        }
+        Err(err) => return print_error(&err, pretty),
     };
     let dispatcher = sub_command::Dispatcher::new(engine.handle().clone());
     let document = sub_command::schema::document(&dispatcher);
     let status = print_json(&document, pretty);
     if let Err(err) = engine.shutdown() {
-        eprintln!("{}", err.to_json());
-        return ExitCode::FAILURE;
+        return print_error(&err, pretty);
     }
     status
 }
@@ -401,27 +418,18 @@ fn schema(pretty: bool) -> ExitCode {
 fn diag(pretty: bool) -> ExitCode {
     let diagnostics = match sub_media::HardwareDiagnostics::collect() {
         Ok(diagnostics) => diagnostics,
-        Err(err) => {
-            eprintln!("{}", err.to_json());
-            return ExitCode::FAILURE;
-        }
+        Err(err) => return print_error(&err, pretty),
     };
     let mut json = match diagnostics.to_json() {
         Ok(json) => json,
-        Err(err) => {
-            eprintln!("{}", err.to_json());
-            return ExitCode::FAILURE;
-        }
+        Err(err) => return print_error(&err, pretty),
     };
     // The registry says which encoders are installed; the probe says which of
     // them this machine can actually start, which is what export selection
     // goes by. The panel shows both, so the CLI prints both.
     match sub_export::EncoderProbe::cached().and_then(sub_export::EncoderProbe::to_json) {
         Ok(encoders) => json["encoder_probe"] = encoders,
-        Err(err) => {
-            eprintln!("{}", err.to_json());
-            return ExitCode::FAILURE;
-        }
+        Err(err) => return print_error(&err, pretty),
     }
     print_json(&json, pretty)
 }

@@ -53,6 +53,10 @@ test-guests = []
 
 [dev-dependencies]
 sub-edit = { version = "0.1.0", path = "../sub-edit" }
+# The plugin-facing copy of the error catalogue. A dev-dependency only: the
+# host publishes the codes, the SDK republishes them to plugin authors, and
+# `tests/errors.rs` keeps the two tables identical.
+subordinate-sdk = { version = "0.1.0", path = "../../sdk/subordinate-sdk" }
 # Self dev-dependency: the only way to turn a feature on for this crate's own
 # test targets and nothing else.
 sub-plugin = { version = "0.1.0", path = ".", features = ["test-guests", "render"] }

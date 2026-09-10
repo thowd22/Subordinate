@@ -27,11 +27,22 @@
 //! and identifiers cross as distinct records, so a [`TrackId`] cannot be passed
 //! where a [`ClipId`] is expected.
 //!
+//! # What a failure looks like
+//!
+//! Every host failure a plugin, a CLI or an agent sees is one JSON object
+//! with a stable `code`, a one-line `message` and details that carry the WIT
+//! item it belongs to and a hint saying what would fix it (docs/PLAN.md
+//! §6.4). [`errors`] is the catalogue: the code constants to match on, what
+//! each one means, and its hint. Manifest, capability, install, reload,
+//! load and runtime-limit failures each have their own codes, so a plugin
+//! author never has to read a message to tell them apart.
+//!
 //! Typed helpers over these bindings — serde-shaped parameters, a project
 //! handle, error constructors — arrive with the SDK proper (TASK-89). This
-//! crate is currently the bindings and their re-exports.
+//! crate is currently the bindings, the error catalogue and their re-exports.
 
 pub mod bindings;
+pub mod errors;
 
 pub use bindings::subordinate::plugin::command_api;
 pub use bindings::subordinate::plugin::command_api::{

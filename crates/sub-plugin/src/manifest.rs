@@ -132,18 +132,23 @@ impl Manifest {
     /// # Errors
     ///
     /// [`codes::MANIFEST_UNREADABLE`] when `path` cannot be read, and
-    /// whatever [`Manifest::parse`] returns otherwise.
+    /// whatever [`Manifest::parse`] returns otherwise. Both name the offending
+    /// file and carry the hint their code implies (see [`crate::errors`]).
     pub fn read_file(path: impl AsRef<Path>) -> SubResult<Self> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(|err| {
-            SubError::wrap(
-                codes::MANIFEST_UNREADABLE,
-                format!("cannot read the plugin manifest at {}", path.display()),
-                &err,
-            )
-            .with_detail("path", path.display().to_string())
-        })?;
-        Self::parse(&text).map_err(|err| err.with_detail("path", path.display().to_string()))
+        let text = std::fs::read_to_string(path)
+            .map_err(|err| {
+                SubError::wrap(
+                    codes::MANIFEST_UNREADABLE,
+                    format!("cannot read the plugin manifest at {}", path.display()),
+                    &err,
+                )
+                .with_detail("path", path.display().to_string())
+            })
+            .map_err(crate::errors::explain)?;
+        Self::parse(&text).map_err(|err| {
+            crate::errors::explain(err.with_detail("path", path.display().to_string()))
+        })
     }
 
     /// True when the plugin implements `world`.

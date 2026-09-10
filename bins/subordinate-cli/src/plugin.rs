@@ -20,6 +20,12 @@
 //! Every subcommand prints JSON, like the rest of the CLI: the listing carries
 //! the two directories it walked, the plugins it loaded, the ones that failed
 //! to load and the ones hidden by an id conflict.
+//!
+//! A failure prints a JSON `SubError` on stderr, and every error leaving here
+//! has been through [`sub_plugin::errors`], so it carries the WIT type or
+//! function it belongs to and a one-line hint beside its stable code — which
+//! is what makes a build, install or reload failure something an agent can act
+//! on (docs/PLAN.md §6.4).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -90,12 +96,21 @@ impl Options {
 
 /// Runs one `plugin` subcommand and answers what it did as JSON.
 ///
+/// Every failure comes back as a [`SubError`] carrying its stable code, the
+/// WIT type or function it belongs to when there is one, and a one-line hint
+/// (`sub_plugin::errors`), which is what the caller prints as JSON.
+///
 /// # Errors
 ///
 /// `plugin.invalid_plugin_id` for an id that is not reverse-DNS, and whatever
 /// the registry returns: `plugin.not_installed`, an unreadable plugin
 /// directory, or a `plugins.json` this build cannot read.
 pub fn run(action: &Action, options: &Options) -> SubResult<Value> {
+    sub_plugin::errors::explained(act(action, options))
+}
+
+/// The subcommand itself; [`run`] is this plus the error catalogue.
+fn act(action: &Action, options: &Options) -> SubResult<Value> {
     let dirs = options.dirs()?;
     let registry = Arc::new(PluginRegistry::new(dirs.clone()));
     match action {
