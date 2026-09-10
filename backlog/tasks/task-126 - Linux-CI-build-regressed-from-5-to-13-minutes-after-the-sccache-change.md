@@ -1,11 +1,10 @@
 ---
 id: TASK-126
 title: Linux CI build regressed from 5 to 13 minutes after the sccache change
-status: In Progress
-assignee:
-  - '@opus-task-126'
+status: To Do
+assignee: []
 created_date: '2026-09-10 00:47'
-updated_date: '2026-09-10 03:11'
+updated_date: '2026-09-10 08:42'
 labels:
   - infra
   - ci
@@ -62,4 +61,6 @@ Expected side effect: the first Linux run after this lands is cold. rust-cache f
 Verification actually performed here: ci.yml re-parsed with PyYAML and the matrix, job env and step conditions asserted; cargo fmt --all --check passes. No Rust source changed, so clippy and the test suite are unaffected by this diff; the full workspace clippy/test was not re-run in this worktree because GStreamer is not installed system-wide here and nothing in the diff can change their result.
 
 Not verified, and why: AC #1 (ubuntu-26.04 under 7 minutes on a warm no-change rerun, with the run id) and AC #3 (Windows under 15 minutes on that rerun) can only be established by a real GitHub Actions run. This worktree is under instruction never to push, so no run could be triggered or measured. Both are left unchecked. To close them: merge the branch, let one run land to repopulate the Linux rust-cache under its new key, then re-run that run with no changes and record the run id plus the ubuntu-26.04 and windows-latest job durations.
+
+2026-09-10 supervisor measurement after the sccache-on-Linux-off fix merged: warm no-change rerun of run 34451650066 gave ubuntu-26.04 7m46s (target under 7m, close), macos-latest 7m51s, and windows-latest CANCELLED at the 40-minute timeout, i.e. Windows regressed back to a cold build. Suspect the 10 GB per-repository Actions cache is evicting entries (rust-cache per-OS per-Cargo.lock keys plus sccache) so Windows starts cold on most runs. Next worker: inspect gh cache list sizes and keys, cut the cache footprint (e.g. rust-cache save only on main with a stable key, or sccache alone on Windows, or delete stale keys), and re-measure with two consecutive warm reruns. Requeued.
 <!-- SECTION:NOTES:END -->
