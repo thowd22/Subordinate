@@ -44,6 +44,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use sub_core::{SubError, SubResult};
 
+use crate::clock::{AudioClock, convert_frames};
 use crate::codes;
 use crate::decode::MAX_CHANNELS;
 use crate::mixer::Mixer;
@@ -558,6 +559,9 @@ pub struct OutputRenderer {
     converter: Converter,
     /// Counters the callback publishes into.
     metrics: Arc<OutputMetrics>,
+    /// The playback master: where the transport has got to, and how much of
+    /// that is still in the device buffer.
+    clock: Arc<AudioClock>,
     /// Device frames converted in one pass.
     max_block_frames: usize,
     /// `f32` staging for the integer sample formats. Empty for `f32` output.
@@ -644,6 +648,7 @@ impl OutputRenderer {
         // The integer paths always stage through `f32`, and which of the
         // render entry points the host will call is not known until it does.
         let staging = vec![0.0; max_block_frames * device_channels];
+        let clock = Arc::new(AudioClock::new(format.source_sample_rate)?);
         Ok(Self {
             mixer,
             converter: Converter {
@@ -654,6 +659,7 @@ impl OutputRenderer {
                 held: 0,
             },
             metrics,
+            clock,
             max_block_frames,
             staging,
         })
@@ -667,6 +673,47 @@ impl OutputRenderer {
     /// The counters the callback publishes into.
     pub fn metrics(&self) -> &Arc<OutputMetrics> {
         &self.metrics
+    }
+
+    /// The playback master this callback drives.
+    ///
+    /// Clone the `Arc` to read the playhead from anywhere: the callback only
+    /// stores into it (docs/PLAN.md §5.4).
+    pub fn clock(&self) -> &Arc<AudioClock> {
+        &self.clock
+    }
+
+    /// Replaces the clock the callback publishes into, so a stream that was
+    /// reopened keeps feeding the playhead the transport already follows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`codes::FORMAT_UNSUPPORTED`] when the clock does not count at
+    /// this renderer's sequence sample rate, which would report the playhead
+    /// at the wrong timebase.
+    pub fn use_clock(&mut self, clock: Arc<AudioClock>) -> SubResult<()> {
+        let source_sample_rate = self.converter.format.source_sample_rate;
+        if clock.sample_rate() != source_sample_rate {
+            return Err(SubError::new(
+                codes::FORMAT_UNSUPPORTED,
+                "the audio clock does not count at this stream's sequence sample rate",
+            )
+            .with_detail("clock_sample_rate", clock.sample_rate())
+            .with_detail("source_sample_rate", source_sample_rate));
+        }
+        self.clock = clock;
+        Ok(())
+    }
+
+    /// Publishes the transport position after a block of `frames` device
+    /// frames. Real-time safe.
+    ///
+    /// The block just written is still in the device's buffer, so it is the
+    /// latency between what the mixer has rendered and what is being heard.
+    fn publish_clock(&self, frames: u64) {
+        let format = self.converter.format;
+        let latency = convert_frames(frames, format.sample_rate, format.source_sample_rate);
+        self.clock.publish(self.mixer.position_frames(), latency);
     }
 
     /// The mixer behind the callback, for tests and for reading the transport
@@ -692,10 +739,10 @@ impl OutputRenderer {
         for sample in &mut out[frames * device_channels..] {
             *sample = 0.0;
         }
-        self.metrics.record_block(
-            u64::try_from(frames).unwrap_or(u64::MAX),
-            self.mixer.underrun_frames(),
-        );
+        let frames = u64::try_from(frames).unwrap_or(u64::MAX);
+        self.metrics
+            .record_block(frames, self.mixer.underrun_frames());
+        self.publish_clock(frames);
     }
 
     /// Fills `out` with 16-bit signed device frames. Real-time safe.
@@ -739,10 +786,10 @@ impl OutputRenderer {
             }
             done += count;
         }
-        self.metrics.record_block(
-            u64::try_from(frames).unwrap_or(u64::MAX),
-            self.mixer.underrun_frames(),
-        );
+        let frames = u64::try_from(frames).unwrap_or(u64::MAX);
+        self.metrics
+            .record_block(frames, self.mixer.underrun_frames());
+        self.publish_clock(frames);
     }
 }
 
@@ -936,6 +983,8 @@ pub struct OpenStream {
     pub format: NegotiatedFormat,
     /// The counters its callback publishes into.
     pub metrics: Arc<OutputMetrics>,
+    /// The playback master its callback publishes into.
+    pub clock: Arc<AudioClock>,
     /// The live stream.
     pub handle: Box<dyn StreamHandle>,
 }
@@ -987,6 +1036,8 @@ pub struct OutputStream {
     format: NegotiatedFormat,
     /// The counters its callback publishes into.
     metrics: Arc<OutputMetrics>,
+    /// The playback master its callback publishes into.
+    clock: Arc<AudioClock>,
     /// The live stream; dropping it closes the device.
     handle: Box<dyn StreamHandle>,
 }
@@ -1017,6 +1068,7 @@ impl OutputStream {
             device: open.device,
             format: open.format,
             metrics: open.metrics,
+            clock: open.clock,
             handle: open.handle,
         })
     }
@@ -1034,6 +1086,12 @@ impl OutputStream {
     /// The counters its callback publishes into.
     pub fn metrics(&self) -> &Arc<OutputMetrics> {
         &self.metrics
+    }
+
+    /// The playback master its callback publishes into: where playback
+    /// actually is, for the video scheduler to follow.
+    pub fn clock(&self) -> &Arc<AudioClock> {
+        &self.clock
     }
 
     /// Starts or resumes playback.
@@ -1142,6 +1200,11 @@ impl<B: OutputBackend> AudioOutput<B> {
     /// Whether a stream is open.
     pub fn is_open(&self) -> bool {
         self.stream.is_some()
+    }
+
+    /// The playback master of the open stream, when one is open.
+    pub fn clock(&self) -> Option<&Arc<AudioClock>> {
+        self.stream.as_ref().map(OutputStream::clock)
     }
 
     /// A snapshot of the open stream, when there is one.
@@ -1384,6 +1447,7 @@ impl OutputBackend for CpalBackend {
                 .buffer_frames
                 .map_or(cpal::BufferSize::Default, cpal::BufferSize::Fixed),
         };
+        let clock = Arc::clone(renderer.clock());
         let errors = Arc::clone(&metrics);
         let on_error = move |error: cpal::Error| errors.record_stream_error(error.to_string());
         let stream = match format.sample_format {
@@ -1417,6 +1481,7 @@ impl OutputBackend for CpalBackend {
             device: info,
             format,
             metrics,
+            clock,
             handle: Box::new(CpalStreamHandle(stream)),
         })
     }
@@ -1829,16 +1894,18 @@ mod tests {
             let format = device.negotiate(mixer.graph().sample_rate(), mixer.graph().channels())?;
             let metrics = Arc::new(OutputMetrics::new());
             // Building the renderer proves the mixer and the format agree.
-            let _renderer = OutputRenderer::new(
+            let renderer = OutputRenderer::new(
                 mixer,
                 format,
                 Arc::clone(&metrics),
                 options.max_block_frames,
             )?;
+            let clock = Arc::clone(renderer.clock());
             Ok(OpenStream {
                 device,
                 format,
                 metrics,
+                clock,
                 handle: Box::new(StubHandle),
             })
         }

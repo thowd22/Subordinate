@@ -20,4 +20,5 @@ tracing = "0.1"
 workspace = true
 
 [dev-dependencies]
+sub-edit = { path = "../sub-edit" }
 sub-test-support = { path = "../sub-test-support" }

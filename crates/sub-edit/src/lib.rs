@@ -99,7 +99,7 @@ pub use engine::{
 };
 pub use event::{ChangeEvent, ChangeOrigin, ChangeType, EntityKind};
 pub use history::{DEFAULT_DEPTH, History, HistoryEntry};
-pub use playback::{PlaybackScheduler, PlayheadEvent, ShuttleSpeed, Tick};
+pub use playback::{MonotonicClock, PlaybackScheduler, PlayheadEvent, ShuttleSpeed, Tick};
 pub use relink::{
     MatchKind, RelinkMatch, RelinkPlan, RelinkTarget, SearchOptions, match_chosen, match_offline,
     match_targets, scan_folder,

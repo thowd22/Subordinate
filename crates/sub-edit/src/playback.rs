@@ -1,30 +1,36 @@
-//! The playback scheduler and its clock.
+//! The playback scheduler, and the clock the video follows.
 //!
-//! Play/pause needs something that advances the playhead in real time and
-//! tells the rest of the preview path which frame to show
+//! Play/pause needs something that tells the rest of the preview path which
+//! frame to show
 //! (`Playhead -> Scheduler -> {decode requests} -> frame cache -> compositor`,
-//! docs/PLAN.md §4). That is [`PlaybackScheduler`]: a clock that is driven by
-//! wall-clock deltas handed to [`PlaybackScheduler::advance`] and answers with
-//! the frame that should be on screen now.
+//! docs/PLAN.md §4). That is [`PlaybackScheduler`].
+//!
+//! **Video has no clock of its own.** Sync is defined by audio: the master
+//! reports a media time — for real playback the audio callback's position, as
+//! `sub_audio::clock::AudioClock` publishes it — and
+//! [`PlaybackScheduler::follow`] picks the frame that covers it
+//! (docs/PLAN.md §5.4). When nothing is playing out of an audio device there
+//! is still a master, [`MonotonicClock`], which turns elapsed wall time into
+//! the same kind of media time;
+//! [`PlaybackScheduler::advance`] is that master and [`PlaybackScheduler::follow`]
+//! in one call. Either way the scheduler only ever chooses a frame for a time
+//! somebody else measured.
 //!
 //! Three properties matter:
 //!
-//! - **No floats.** The clock accumulates elapsed nanoseconds in integer units
-//!   scaled by the sequence timebase, so a frame boundary is crossed at
-//!   exactly the same instant on every run and 1001/30000 rates never drift
-//!   (docs/PLAN.md §5.1).
-//! - **It drops rather than stalls.** The position follows the wall clock, not
-//!   the last frame shown, so a tick that took longer than a frame interval —
-//!   decode falling behind, a slow composite — skips the presentations that
-//!   were missed, counts them and logs the running total. Playback stays in
-//!   time; it never waits for a late frame.
+//! - **No floats.** The fallback master accumulates elapsed nanoseconds in
+//!   integer units scaled by the sequence timebase, and a master time is
+//!   converted to a frame by exact rational rescaling, so a frame boundary is
+//!   crossed at exactly the same instant on every run and 1001/30000 rates
+//!   never drift (docs/PLAN.md §5.1).
+//! - **It drops rather than stalls.** The frame is chosen for the master's
+//!   time, not for the last frame shown, so when a tick covers several frame
+//!   intervals — decode falling behind, a slow composite — the presentations
+//!   in between are counted as dropped and the playhead lands where the master
+//!   says. Playback stays in time; it never waits for a late frame.
 //! - **It is not project state.** The playhead is where the user is looking,
 //!   not part of the edit, so moving it is not a [`crate::Command`] and is not
 //!   undoable. It is published as a [`PlayheadEvent`] instead.
-//!
-//! The audio clock replaces this one as the playback master in phase 3
-//! (docs/PLAN.md §5.4); until then the video clock is the master and this is
-//! it.
 //!
 //! ```
 //! use std::time::Duration;
@@ -175,9 +181,11 @@ impl ShuttleSpeed {
 
 /// What one presented frame of playback did.
 ///
-/// A tick is produced only when the clock crossed a frame boundary: an
-/// [`PlaybackScheduler::advance`] shorter than a frame interval returns
-/// `None`, so a caller ticking faster than the timebase repaints nothing.
+/// A tick is produced only when the master crossed a frame boundary: an
+/// [`PlaybackScheduler::advance`] shorter than a frame interval, or a
+/// [`PlaybackScheduler::follow`] of a master time still inside the frame on
+/// screen, returns `None`, so a caller ticking faster than the timebase
+/// repaints nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tick {
     /// Where the playhead now is.
@@ -214,13 +222,124 @@ pub struct PlayheadEvent {
     pub wrapped: bool,
 }
 
-/// The clock that drives playback.
+/// The master clock used when no audio stream is playing.
+///
+/// It measures the same thing an audio clock does — how much media time has
+/// gone by — but from the wall clock instead of from rendered samples, so a
+/// silent sequence, a shuttle speed no device is playing at, and a headless
+/// engine all still have a master to follow.
+///
+/// It counts in integers: elapsed nanoseconds scaled by the timebase
+/// numerator, with the part-frame carried between calls, so a fractional rate
+/// never drifts.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use sub_edit::playback::{MonotonicClock, ShuttleSpeed};
+/// use sub_time::{Rational, RationalTime};
+///
+/// let mut clock = MonotonicClock::new(Rational::FPS_24);
+/// clock.reset_to(10);
+/// let position = clock.advance(Duration::from_millis(500), ShuttleSpeed::Forward1x);
+/// assert_eq!(position, RationalTime::new(22, Rational::FPS_24));
+/// ```
+#[derive(Debug, Clone)]
+pub struct MonotonicClock {
+    /// The timebase the position is counted at.
+    rate: Rational,
+    /// Media time so far, in frames at `rate`. Signed: reverse shuttling runs
+    /// it backwards, and the scheduler clamps what it does with it.
+    frame: i64,
+    /// Elapsed time not yet worth a frame, in nanoseconds scaled by the
+    /// timebase numerator. Always in `0..NANOS_PER_SECOND * denominator`.
+    residue: i128,
+}
+
+impl MonotonicClock {
+    /// A clock at `rate`, reading zero.
+    #[must_use]
+    pub const fn new(rate: Rational) -> Self {
+        Self {
+            rate,
+            frame: 0,
+            residue: 0,
+        }
+    }
+
+    /// The timebase the position is counted at.
+    #[must_use]
+    pub const fn rate(&self) -> Rational {
+        self.rate
+    }
+
+    /// Re-expresses the clock at `rate`, keeping the same instant and
+    /// dropping the part-frame so the next frame is a whole one.
+    pub fn set_rate(&mut self, rate: Rational) {
+        if rate == self.rate {
+            return;
+        }
+        self.frame = self.position().rescaled_to(rate).value();
+        self.rate = rate;
+        self.residue = 0;
+    }
+
+    /// Moves the clock to `frame` and drops the part-frame it had
+    /// accumulated, so that the next frame boundary is a whole interval away.
+    ///
+    /// A seek calls this so that the fallback master reads the same instant
+    /// the playhead was put at.
+    pub const fn reset_to(&mut self, frame: i64) {
+        self.frame = frame;
+        self.residue = 0;
+    }
+
+    /// The media time the clock has reached.
+    #[must_use]
+    pub const fn position(&self) -> RationalTime {
+        RationalTime::new(self.frame, self.rate)
+    }
+
+    /// Adds `elapsed` of wall time at `speed` and returns the media time
+    /// reached, which is unchanged when the part-frame is not yet whole.
+    pub fn advance(&mut self, elapsed: Duration, speed: ShuttleSpeed) -> RationalTime {
+        if speed.is_paused() {
+            return self.position();
+        }
+        let nanos = i128::try_from(elapsed.as_nanos()).unwrap_or(i128::MAX);
+        self.residue += nanos * i128::from(self.rate.numerator());
+        let interval = self.interval_units();
+        let intervals = i64::try_from(self.residue / interval).unwrap_or(i64::MAX);
+        self.residue %= interval;
+        self.frame = self
+            .frame
+            .saturating_add(intervals.saturating_mul(speed.signed_multiplier()));
+        self.position()
+    }
+
+    /// How long until the clock crosses its next frame boundary.
+    #[must_use]
+    pub fn time_until_next_frame(&self) -> Duration {
+        let numerator = i128::from(self.rate.numerator());
+        let remaining = (self.interval_units() - self.residue).max(0);
+        // Round up: waking a hair early would tick nothing and wait again.
+        let nanos = (remaining + numerator - 1) / numerator;
+        Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+    }
+
+    /// One frame interval in the accumulator's units.
+    fn interval_units(&self) -> i128 {
+        NANOS_PER_SECOND * i128::from(self.rate.denominator())
+    }
+}
+
+/// The playhead, and the frame chosen for whatever the master clock reads.
 ///
 /// It owns the playhead, the shuttle speed and the loop range, and nothing
-/// else: decoding, compositing and audio all read from it. The caller drives
-/// it, so it is deterministic and testable without a real timer — the engine
-/// hands it the elapsed time between wake-ups, and a test hands it whatever
-/// [`Duration`] it likes.
+/// else: decoding and compositing read from it. It never measures time
+/// itself — [`PlaybackScheduler::follow`] takes the master's reading — so it
+/// is deterministic and testable without a real timer, and identical whether
+/// the master is the audio callback or [`MonotonicClock`].
 #[derive(Debug, Clone)]
 pub struct PlaybackScheduler {
     /// The sequence timebase every position is expressed at.
@@ -233,9 +352,13 @@ pub struct PlaybackScheduler {
     speed: ShuttleSpeed,
     /// The loop range as `(start, end_exclusive)` frames, when one is set.
     loop_frames: Option<(i64, i64)>,
-    /// Elapsed time not yet worth a frame, in nanoseconds scaled by the
-    /// timebase numerator. Always in `0..NANOS_PER_SECOND * denominator`.
-    residue: i128,
+    /// The master clock used when no audio stream is playing.
+    fallback: MonotonicClock,
+    /// The master's last reading, in frames at `rate`, or `None` when the
+    /// baseline is gone — a seek, a speed change, or a master that has just
+    /// started publishing again. The next reading only re-establishes it, so
+    /// a jump in the master is not counted as dropped frames.
+    master: Option<i64>,
     /// Presentations missed in this run of playback.
     dropped: u64,
 }
@@ -250,7 +373,8 @@ impl PlaybackScheduler {
             frame: 0,
             speed: ShuttleSpeed::Paused,
             loop_frames: None,
-            residue: 0,
+            fallback: MonotonicClock::new(rate),
+            master: None,
             dropped: 0,
         }
     }
@@ -302,7 +426,7 @@ impl PlaybackScheduler {
         self.rate = rate;
         self.duration_frames = duration.value().max(0);
         self.loop_frames = loop_range.filter(|(start, end)| end > start);
-        self.residue = 0;
+        self.fallback.set_rate(rate);
         self.seek(position);
     }
 
@@ -353,8 +477,8 @@ impl PlaybackScheduler {
         self.frame
     }
 
-    /// Moves the playhead, clamped to the sequence, and resets the part-frame
-    /// the clock had accumulated so the next frame is a whole one.
+    /// Moves the playhead, clamped to the sequence, and re-seeds the master
+    /// baseline there so the next frame is a whole one.
     ///
     /// Seeking does not stop playback: scrubbing while playing keeps playing
     /// from where it landed, which is what the scrub bar wants.
@@ -366,9 +490,29 @@ impl PlaybackScheduler {
     }
 
     /// [`PlaybackScheduler::seek`] by frame number at the sequence timebase.
+    ///
+    /// Whoever owns the audio transport seeks it to the same instant: the
+    /// master defines sync, so moving the playhead means moving the master.
     pub fn seek_frames(&mut self, frame: i64) {
         self.frame = frame.clamp(0, self.last_frame_number());
-        self.residue = 0;
+        self.fallback.reset_to(self.frame);
+        self.master = Some(self.frame);
+    }
+
+    /// Forgets the master's baseline without moving the playhead.
+    ///
+    /// The transport calls this when the master reading is about to jump for
+    /// a reason that is not playback — the audio stream was reopened, or its
+    /// clock was reset by a seek — so the jump is not counted as dropped
+    /// frames.
+    pub const fn resync_master(&mut self) {
+        self.master = None;
+    }
+
+    /// The fallback master, for a caller that wants to read or re-seed it.
+    #[must_use]
+    pub const fn fallback_clock(&self) -> &MonotonicClock {
+        &self.fallback
     }
 
     /// The speed playback is running at.
@@ -395,7 +539,8 @@ impl PlaybackScheduler {
             self.dropped = 0;
         }
         self.speed = speed;
-        self.residue = 0;
+        self.fallback.reset_to(self.frame);
+        self.master = Some(self.frame);
     }
 
     /// L: play forward, and shuttle faster on every further press.
@@ -486,61 +631,67 @@ impl PlaybackScheduler {
     /// How long until the next frame is due, or `None` while paused.
     ///
     /// The engine thread waits exactly this long for a request before ticking
-    /// again, so playback keeps time without polling.
+    /// again, so playback keeps time without polling. It is the fallback
+    /// master's cadence: a caller following an audio clock repaints when the
+    /// clock moves, not when this expires.
     #[must_use]
     pub fn time_until_next_frame(&self) -> Option<Duration> {
-        if !self.is_playing() {
-            return None;
-        }
-        let numerator = i128::from(self.rate.numerator());
-        let remaining = (self.interval_units() - self.residue).max(0);
-        // Round up: waking a hair early would tick nothing and wait again.
-        let nanos = (remaining + numerator - 1) / numerator;
-        Some(Duration::from_nanos(
-            u64::try_from(nanos).unwrap_or(u64::MAX),
-        ))
+        self.is_playing()
+            .then(|| self.fallback.time_until_next_frame())
     }
 
-    /// Advances the clock by `elapsed` and returns the frame to present, if
-    /// the clock crossed a frame boundary.
+    /// Picks the frame that covers `master`, the media time the playback
+    /// master has reached, and returns what that presentation did.
     ///
-    /// Position follows the wall clock: when `elapsed` covers several frame
-    /// intervals — decode fell behind, or the app was not scheduled — the
-    /// presentations in between are counted as dropped and logged, and the
-    /// playhead lands where the clock says it should rather than where the
-    /// last frame left it.
-    pub fn advance(&mut self, elapsed: Duration) -> Option<Tick> {
+    /// This is where video follows audio (docs/PLAN.md §5.4): `master` is the
+    /// audio clock's position during real playback, so the frame on screen is
+    /// always the one the samples being heard belong to. The playhead lands
+    /// where the master says rather than one frame on from the last one
+    /// shown, so a master that has run ahead — decode fell behind, the app
+    /// was not scheduled — drops the presentations in between and counts
+    /// them instead of playing them late.
+    ///
+    /// Returns `None` while paused, and while the master is still inside the
+    /// frame already on screen.
+    pub fn follow(&mut self, master: RationalTime) -> Option<Tick> {
         if !self.is_playing() {
             return None;
         }
-        let nanos = i128::try_from(elapsed.as_nanos()).unwrap_or(i128::MAX);
-        self.residue += nanos * i128::from(self.rate.numerator());
-        let interval = self.interval_units();
-        let intervals = self.residue / interval;
-        self.residue %= interval;
-        let intervals = i64::try_from(intervals).unwrap_or(i64::MAX);
-        if intervals == 0 {
-            return None;
-        }
-
-        let dropped = u64::try_from(intervals - 1).unwrap_or(0);
+        let target = master
+            .rescaled_to_rounding(self.rate, Rounding::Floor)
+            .value();
+        let baseline = self.master.replace(target);
+        let dropped = match baseline {
+            // A master reading in the same frame as the last one has nothing
+            // new to show.
+            Some(previous) if previous == target => return None,
+            Some(previous) => {
+                let per_frame = u64::try_from(self.speed.multiplier()).unwrap_or(1).max(1);
+                let covered = previous.abs_diff(target) / per_frame;
+                covered.saturating_sub(1)
+            }
+            // No baseline: the master has just been (re-)seeded, so the step
+            // from wherever it was is not a dropped frame.
+            None if target == self.frame => return None,
+            None => 0,
+        };
         if dropped > 0 {
             self.dropped = self.dropped.saturating_add(dropped);
             tracing::warn!(
                 dropped,
                 total = self.dropped,
                 speed = self.speed.label(),
-                "playback fell behind; frames dropped to stay in time"
+                "playback fell behind the master clock; frames dropped to stay in time"
             );
         }
 
-        let frames_advanced = intervals.saturating_mul(self.speed.signed_multiplier());
         let before = self.frame;
-        let (frame, wrapped, stopped) = self.landing(before.saturating_add(frames_advanced));
+        let (frame, wrapped, stopped) = self.landing(target);
         self.frame = frame;
         if stopped {
             self.speed = ShuttleSpeed::Paused;
-            self.residue = 0;
+            self.fallback.reset_to(frame);
+            self.master = None;
         }
         Some(Tick {
             position: self.position(),
@@ -549,6 +700,20 @@ impl PlaybackScheduler {
             wrapped,
             stopped,
         })
+    }
+
+    /// Runs the fallback master on for `elapsed` and follows it.
+    ///
+    /// This is what a caller with no audio stream to follow uses: a silent
+    /// sequence, a shuttle speed nothing is playing at, or the headless
+    /// engine. It is [`MonotonicClock::advance`] followed by
+    /// [`PlaybackScheduler::follow`], and nothing else.
+    pub fn advance(&mut self, elapsed: Duration) -> Option<Tick> {
+        if !self.is_playing() {
+            return None;
+        }
+        let master = self.fallback.advance(elapsed, self.speed);
+        self.follow(master)
     }
 
     /// The event a subscriber is sent for the playhead as it stands, with
@@ -585,11 +750,6 @@ impl PlaybackScheduler {
             return (0, false, true);
         }
         (target, false, false)
-    }
-
-    /// One frame interval in the accumulator's units.
-    fn interval_units(&self) -> i128 {
-        NANOS_PER_SECOND * i128::from(self.rate.denominator())
     }
 }
 
@@ -872,5 +1032,166 @@ mod tests {
         let tick = scheduler.advance(FRAME_24).unwrap();
         assert_eq!(scheduler.position_frames(), 0);
         assert!(tick.stopped);
+    }
+
+    #[test]
+    fn the_frame_shown_is_the_one_that_covers_the_master_time() {
+        let mut scheduler = scheduler(200);
+        scheduler.play_forward();
+        // A master reading at 48 kHz, a second and a half in: frame 36 at 24
+        // fps, and the frames either side of the boundary confirm the choice
+        // is the frame the time falls inside rather than the nearest one.
+        let audio_rate = Rational::new(48_000, 1).unwrap();
+        let tick = scheduler
+            .follow(RationalTime::new(72_000, audio_rate))
+            .unwrap();
+        assert_eq!(tick.position, RationalTime::new(36, Rational::FPS_24));
+        // Still inside frame 36: nothing new to present.
+        assert_eq!(
+            scheduler.follow(RationalTime::new(73_999, audio_rate)),
+            None
+        );
+        let tick = scheduler
+            .follow(RationalTime::new(74_000, audio_rate))
+            .unwrap();
+        assert_eq!(tick.frames_advanced, 1);
+        assert_eq!(tick.position, RationalTime::new(37, Rational::FPS_24));
+    }
+
+    #[test]
+    fn a_master_that_ran_ahead_drops_the_presentations_it_passed() {
+        let mut scheduler = scheduler(200);
+        scheduler.play_forward();
+        let tick = scheduler
+            .follow(RationalTime::new(5, Rational::FPS_24))
+            .unwrap();
+        assert_eq!(tick.frames_advanced, 5);
+        assert_eq!(tick.dropped, 4);
+        assert_eq!(scheduler.position_frames(), 5);
+        assert_eq!(scheduler.dropped_frames(), 4);
+    }
+
+    #[test]
+    fn a_master_that_jumped_for_a_seek_is_not_counted_as_dropped_frames() {
+        let mut scheduler = scheduler(200);
+        scheduler.play_forward();
+        scheduler.follow(RationalTime::new(5, Rational::FPS_24));
+        scheduler.resync_master();
+        // The audio stream was reopened and its clock reset; the reading that
+        // comes back is a long way off, but nothing was missed.
+        let tick = scheduler
+            .follow(RationalTime::new(120, Rational::FPS_24))
+            .unwrap();
+        assert_eq!(scheduler.position_frames(), 120);
+        assert_eq!(tick.dropped, 0);
+        assert_eq!(scheduler.dropped_frames(), 4);
+    }
+
+    #[test]
+    fn a_paused_scheduler_ignores_the_master() {
+        let mut scheduler = scheduler(200);
+        assert_eq!(
+            scheduler.follow(RationalTime::new(10, Rational::FPS_24)),
+            None
+        );
+        assert_eq!(scheduler.position_frames(), 0);
+    }
+
+    #[test]
+    fn following_the_master_wraps_the_loop_and_stops_at_the_end() {
+        let mut scheduler = scheduler(48);
+        let range = TimeRange::from_start_end(
+            RationalTime::new(4, Rational::FPS_24),
+            RationalTime::new(8, Rational::FPS_24),
+        )
+        .unwrap();
+        scheduler.set_loop_range(Some(range)).unwrap();
+        scheduler.seek_frames(4);
+        scheduler.play_forward();
+        let tick = scheduler
+            .follow(RationalTime::new(8, Rational::FPS_24))
+            .unwrap();
+        assert!(tick.wrapped);
+        assert_eq!(scheduler.position_frames(), 4);
+
+        scheduler.set_loop_range(None).unwrap();
+        let tick = scheduler
+            .follow(RationalTime::new(400, Rational::FPS_24))
+            .unwrap();
+        assert!(tick.stopped);
+        assert_eq!(scheduler.position_frames(), 47);
+        assert!(!scheduler.is_playing());
+    }
+
+    #[test]
+    fn an_audio_master_at_a_fractional_rate_never_drifts_a_frame() {
+        // Ten minutes of 48 kHz samples read as 23.976 video: the frame
+        // chosen is always the frame the sample count falls inside, with no
+        // accumulated error at the end.
+        let video = Rational::FPS_23_976;
+        let audio = Rational::new(48_000, 1).unwrap();
+        let mut scheduler = PlaybackScheduler::new(video);
+        scheduler.set_duration(RationalTime::new(15_000, video));
+        scheduler.play_forward();
+        let mut samples: i64 = 0;
+        while samples < 48_000 * 600 {
+            samples += 512;
+            scheduler.follow(RationalTime::new(samples, audio));
+            let expected = RationalTime::new(samples, audio)
+                .rescaled_to_rounding(video, Rounding::Floor)
+                .value();
+            assert_eq!(
+                scheduler.position_frames(),
+                expected.min(scheduler.last_frame_number()),
+                "drifted at {samples} samples"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fallback_master_measures_media_time_from_wall_time() {
+        let mut clock = MonotonicClock::new(Rational::FPS_24);
+        assert_eq!(clock.position(), RationalTime::zero(Rational::FPS_24));
+        // Half a frame is not a frame yet, and the part-frame is carried.
+        clock.advance(Duration::from_millis(20), ShuttleSpeed::Forward1x);
+        assert_eq!(clock.position().value(), 0);
+        clock.advance(Duration::from_millis(22), ShuttleSpeed::Forward1x);
+        assert_eq!(clock.position().value(), 1);
+        // A paused master stands still however long the caller waited.
+        clock.advance(Duration::from_secs(10), ShuttleSpeed::Paused);
+        assert_eq!(clock.position().value(), 1);
+        // Reverse runs it backwards, and the scheduler decides what that
+        // means for the playhead.
+        clock.reset_to(0);
+        clock.advance(FRAME_24 * 3, ShuttleSpeed::Reverse2x);
+        assert_eq!(clock.position().value(), -6);
+    }
+
+    #[test]
+    fn the_fallback_master_re_expresses_itself_at_a_new_timebase() {
+        let mut clock = MonotonicClock::new(Rational::FPS_24);
+        clock.reset_to(12);
+        let fps_48 = Rational::new(48, 1).unwrap();
+        clock.set_rate(fps_48);
+        assert_eq!(clock.rate(), fps_48);
+        assert_eq!(clock.position(), RationalTime::new(24, fps_48));
+    }
+
+    #[test]
+    fn advancing_is_the_fallback_master_followed() {
+        // The two paths agree: running the fallback by hand and following it
+        // lands exactly where advance does.
+        let mut by_hand = scheduler(200);
+        let mut advanced = scheduler(200);
+        by_hand.play_forward();
+        advanced.play_forward();
+        let mut clock = MonotonicClock::new(Rational::FPS_24);
+        for _ in 0..50 {
+            let master = clock.advance(Duration::from_millis(30), ShuttleSpeed::Forward1x);
+            by_hand.follow(master);
+            advanced.advance(Duration::from_millis(30));
+            assert_eq!(by_hand.position_frames(), advanced.position_frames());
+        }
+        assert_eq!(advanced.position_frames(), 36);
     }
 }
