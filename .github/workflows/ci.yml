@@ -25,10 +25,6 @@ env:
   # numbers in RUST_BACKTRACE output at a fraction of the size.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
-  # sccache hits survive the Cargo.lock churn that invalidates the rust-cache
-  # key on nearly every merge.
-  RUSTC_WRAPPER: sccache
-  SCCACHE_GHA_ENABLED: "true"
   # Pinned GStreamer release. All three OSes must stay on the same minor (1.28).
   # Linux comes from Ubuntu 26.04 apt (1.28.x); Windows and macOS use the
   # official binaries at this exact version. Keep docs/DEVELOPMENT.md in sync.
@@ -43,7 +39,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-26.04, windows-latest, macos-latest]
+        # `sccache` picks the compilation cache for the job, and exactly one
+        # cache is used per OS -- see the comment on the Swatinem step below
+        # for why stacking both is what made Linux slow (TASK-126).
+        include:
+          - os: ubuntu-26.04
+            sccache: false
+          - os: windows-latest
+            sccache: true
+          - os: macos-latest
+            sccache: true
+    env:
+      # Matrix context is not available in workflow-level `env`, so the sccache
+      # switch lives here. Cargo treats an empty RUSTC_WRAPPER as no wrapper.
+      RUSTC_WRAPPER: ${{ matrix.sccache && 'sccache' || '' }}
+      SCCACHE_GHA_ENABLED: ${{ matrix.sccache && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,10 +70,22 @@ jobs:
         with:
           shared-key: ci-${{ matrix.os }}
 
-      # rust-cache only hits when Cargo.lock is unchanged, which it rarely is
-      # between merges. sccache is keyed on the compilation itself, so an
-      # unrelated lockfile edit no longer costs a full cold dependency build.
+      # Only one compilation cache per job, never both (TASK-126). rust-cache
+      # and sccache store the same artifacts in the same place -- the 10 GB
+      # per-repository Actions cache -- so running them together roughly
+      # doubled the number of entries competing for that budget. Entries then
+      # started being evicted between runs: a warm no-change rerun of
+      # 34419018398 had Linux restoring neither cache in full (331 rustc
+      # invocations, 164 sccache hits against 167 misses) and taking 13 minutes
+      # against the 5 it took with rust-cache alone, while still paying the
+      # wrapper overhead on every miss.
+      #
+      # So: Linux keeps rust-cache only, which is the configuration that
+      # measured 5 minutes. Windows and macOS keep sccache, which is what
+      # TASK-125 measured the 36m -> 8m win on -- there the MSVC link step and
+      # the lockfile churn make a compilation-keyed cache worth its cost.
       - name: Set up sccache
+        if: matrix.sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
       # Defender scans every object file cargo and the MSVC linker write under
@@ -219,12 +241,12 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      # RUSTC_WRAPPER stays set here on purpose. Cargo folds the wrapper into
-      # its compiler fingerprint, so clearing it for this step alone would
-      # invalidate every dependency and make clippy rebuild the world -- the
-      # opposite of what TASK-125 is for. Under `cargo clippy` the wrapper
-      # chain becomes `sccache clippy-driver`; sccache caches or passes it
-      # through, and either way the dependency artifacts are reused.
+      # Where RUSTC_WRAPPER is set it stays set here on purpose. Cargo folds
+      # the wrapper into its compiler fingerprint, so clearing it for this step
+      # alone would invalidate every dependency and make clippy rebuild the
+      # world -- the opposite of what TASK-125 is for. Under `cargo clippy` the
+      # wrapper chain becomes `sccache clippy-driver`; sccache caches or passes
+      # it through, and either way the dependency artifacts are reused.
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -258,6 +280,6 @@ jobs:
       # is how a warm run is told apart from a cold one (TASK-125). Runs even
       # when an earlier step failed so the numbers are never lost.
       - name: sccache stats
-        if: always()
+        if: always() && matrix.sccache
         shell: bash
         run: sccache --show-stats
