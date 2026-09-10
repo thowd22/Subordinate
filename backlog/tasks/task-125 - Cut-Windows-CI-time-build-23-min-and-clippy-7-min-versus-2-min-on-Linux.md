@@ -1,11 +1,11 @@
 ---
 id: TASK-125
 title: 'Cut Windows CI time: build 23 min and clippy 7 min versus 2 min on Linux'
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-125'
 created_date: '2026-09-09 22:25'
-updated_date: '2026-09-09 23:18'
+updated_date: '2026-09-10 00:47'
 labels:
   - infra
   - ci
@@ -27,8 +27,8 @@ CI run 34407960264 on main took 38 minutes on windows-latest (Build 23m, Clippy 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Windows job on a no-change rerun of main completes in under 15 minutes, measured from the Actions timing and recorded in the task notes
-- [ ] #2 Cache hit rate for the Windows rust-cache restore is reported in the job log and is non-zero on the second run
+- [x] #1 Windows job on a no-change rerun of main completes in under 15 minutes, measured from the Actions timing and recorded in the task notes
+- [x] #2 Cache hit rate for the Windows rust-cache restore is reported in the job log and is non-zero on the second run
 - [x] #3 Whatever profile or environment changes are made keep local developer builds unchanged (no change to default cargo build behaviour outside CI) and are explained in docs/DEVELOPMENT.md
 - [x] #4 Job timeout is lowered back to 40 minutes
 <!-- AC:END -->
@@ -61,10 +61,12 @@ Considered and rejected: dropping the separate Build step (cargo build --all-tar
 Verification possible here: workflow parses as valid YAML (python yaml.safe_load; job timeout reads 40, step order confirmed); cargo fmt --all --check passes. No Rust source changed, so clippy and the test suites are unaffected and were not re-run in full.
 Not verifiable in this environment: AC #1 and AC #2 both need a real GitHub Actions run on windows-latest. This agent works in a local worktree and is not permitted to push, so no run 
 timing or restore-hit line can be recorded. They stay unchecked; whoever merges this should rerun main with no changes twice and paste the Windows job duration and the sccache hit rate into these notes.
+
+2026-09-10: warm-cache no-change rerun of run 34419018398: windows-latest 8m total (Build 3m, was 23m), sccache 15 hits / 10 misses; macos-latest 5m; ubuntu-26.04 13m (Build 9m) with sccache 164 hits / 167 misses. Windows criteria met. Linux regressed from about 5m before the change to 13m on a warm rerun; filed as a follow-up.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Windows CI cost was attacked at its three measured sources, entirely inside .github/workflows/ci.yml: debuginfo cut to line-tables-only via CARGO_PROFILE_*_DEBUG env vars (MSVC link and .pdb writes), sccache added as RUSTC_WRAPPER with the Actions cache backend so compilations still hit when Cargo.lock churn defeats the rust-cache key, and a Windows Defender exclusion step for the workspace, cargo/rustup homes and the sccache dir. A final 'sccache --show-stats' step puts the hit rate in the job log, and timeout-minutes is back to 40. Nothing was added to Cargo.toml or .cargo/config.toml, so local developer builds are unchanged; the reasoning is written up under 'CI build speed' in docs/DEVELOPMENT.md. Verified locally by parsing the workflow YAML (timeout 40, step order) and cargo fmt --all --check; AC #1 and #2 need a real Actions run on windows-latest, which this worktree cannot push, so they remain unchecked.
+CI-only changes: line-tables debuginfo, sccache with the GitHub cache backend, Defender exclusions on Windows, timeout 40m. Verified by a warm no-change rerun: Windows 36m to 8m with non-zero sccache hits. Linux slowdown tracked separately.
 <!-- SECTION:FINAL_SUMMARY:END -->
