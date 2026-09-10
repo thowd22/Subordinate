@@ -39,6 +39,12 @@
 //! A parameter is a float, an int, a bool, a colour or one of a closed set of
 //! choices, each carrying its range and its default: see [`WitParamKind`].
 //!
+//! `plugins/color` is the reference plugin for the world and the template a
+//! scaffolded effect grows into: a tint, an exposure and a saturation over one
+//! WGSL shader, with the parameter table and the reference maths kept out of
+//! the bindings so the host's golden test can render the plugin's own shader
+//! with the plugin's own parameters (`crates/sub-render/tests/color_plugin_golden.rs`).
+//!
 //! The `effect-cpu` world is `effect` plus an optional `process-cpu` export.
 //! **It is slow**: a whole frame is copied into the sandbox, looped over in
 //! WASM and copied back, so it is for small buffers only — thumbnails,

@@ -280,6 +280,17 @@ jobs:
           cargo test
           cargo fmt --all --check
 
+      # The reference effect plugin, likewise its own workspace (TASK-100). Its
+      # shader and its parameter table are also rendered by sub-render's
+      # `color_plugin_golden` test, which the ordinary workspace test job runs.
+      - name: Reference plugin (effect)
+        if: runner.os == 'Linux'
+        working-directory: plugins/color
+        run: |
+          cargo build --release --target wasm32-wasip2
+          cargo test
+          cargo fmt --all --check
+
       # Start the real app, paint a few empty frames and exit. This is what
       # proves eframe comes up on the wgpu backend on every OS (TASK-19 #3).
       - name: GUI smoke test (Linux)
