@@ -381,6 +381,18 @@ returns the project it holds. Restoring is not a `Command` — a snapshot is a
 whole project, so the caller opens it with a fresh engine and history, exactly
 as opening a file does.
 
+`sub_ui::recovery` is the pair of widgets over that. `RecoveryPrompt` is the
+dialog `SubordinateApp::open_project` raises when the check finds something: it
+states which autosave is ahead and how much work the file on disk is missing,
+and its two buttons are the two answers. `SnapshotMenu` is the restore list
+behind File > Snapshot history — the kept snapshots, newest first, each labelled
+with its revision and age and each restorable with a click. Both hand a
+`RecoveryOutcome` back rather than editing anything; the app adopts the returned
+project (`adopt_project`), which replaces the project, sequence, compositor,
+viewer, scheduler and timeline panel, because a snapshot is not a mutation of
+the open project. `crates/sub-ui/tests/autosave_recovery.rs` drives both over a
+real sidecar directory and holds the dialog to a committed snapshot.
+
 `crates/sub-model/tests/fixtures/sample-project.sub` is a committed sample
 project (two sequences, three tracks each, clips, a crossfade, markers and two
 bins). `crates/sub-model/tests/golden.rs` checks that it loads and saves

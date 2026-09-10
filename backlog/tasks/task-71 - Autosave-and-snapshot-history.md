@@ -1,10 +1,11 @@
 ---
 id: TASK-71
 title: Autosave and snapshot history
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@opus-task-71'
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-10 08:07'
+updated_date: '2026-09-10 10:23'
 labels:
   - core
   - ui
@@ -26,9 +27,9 @@ Crash recovery and cheap versioning.
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Autosave writes to the sidecar dir every N seconds after changes without blocking the UI
-- [ ] #2 On open, a newer autosave than the project file prompts to recover
-- [ ] #3 Snapshots keep the last K autosaves and can be restored from a menu
-- [ ] #4 An egui_kittest test in `sub-ui` built on the shared harness in `crates/sub-ui/tests/support/mod.rs` covers the recovery prompt and the snapshot restore list: a committed snapshot of the dialog and an interaction test asserting recover and discard
+- [x] #2 On open, a newer autosave than the project file prompts to recover
+- [x] #3 Snapshots keep the last K autosaves and can be restored from a menu
+- [x] #4 An egui_kittest test in `sub-ui` built on the shared harness in `crates/sub-ui/tests/support/mod.rs` covers the recovery prompt and the snapshot restore list: a committed snapshot of the dialog and an interaction test asserting recover and discard
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -40,6 +41,12 @@ Crash recovery and cheap versioning.
 4. Recovery check on open: compare the newest snapshot against the project file's mtime/revision and return a Recovery describing the choice a UI prompt renders, with recover()/discard() (AC 2 decision logic; sub-ui is still a shell with no project-open flow, so no egui prompt is wired).
 5. Stable error codes edit.autosave_failed and edit.snapshot_not_found in sub_edit::codes; no floats, no new project mutation (restore hands back a Project the caller opens).
 6. Tests: unit tests in the module plus tests/autosave.rs covering interval writes after changes, pruning to K, list/load round-trip, recovery detection both ways, and that autosave never blocks the engine. Document the autosave/ sidecar layout in docs/DEVELOPMENT.md.
+
+7. (wave 2, after TASK-43) UI half: new sub-ui module recovery.rs with RecoveryPrompt (the open-time dialog over sub_edit::autosave::check_for_recovery, stating what would be lost and offering Recover/Discard) and SnapshotMenu (the restore list, newest first, each entry loading its snapshot), both handing back a RecoveryOutcome rather than mutating the open project.
+
+8. Wire both into SubordinateApp: open_project(path) reads a file, adopts it and raises the prompt; a File > Snapshot history menu draws the restore list; adopt_project() replaces project, sequence, compositor, viewer, scheduler and timeline, because a snapshot is a whole project and not a command.
+
+9. Tests: crates/sub-ui/tests/autosave_recovery.rs on the shared harness in tests/support/mod.rs - interaction tests clicking Recover, Discard and a restore entry over a real sidecar directory, plus a committed egui_kittest snapshot of the dialog (AC 4).
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -65,10 +72,29 @@ AC 2 (NOT checked): the decision and the prompt's content are implemented and pr
 AC 3 (NOT checked): the snapshot history and everything a restore menu reads are implemented and proven — the_restore_list_keeps_the_last_k_autosaves_newest_first shows six autosaves pruned to K=3, listed newest first, each entry carrying label()/revision() and load()ing exactly the project it was taken from; the_history_keeps_the_newest_k_snapshots covers the store directly. There is no menu: sub-ui has no menu bar yet, so 'restored from a menu' cannot be demonstrated end to end and the criterion stays unchecked.
 
 2026-09-10: requeued with a dependency on TASK-43 (docking) so the recovery prompt and snapshot menu can be built once the app shell hosts panels.
+
+2026-09-10 (wave 2, on TASK-43): the UI half.
+
+New module crates/sub-ui/src/recovery.rs:
+- RecoveryPrompt is the open-time dialog over sub_edit::autosave::check_for_recovery. open_for(path) asks the question and opens the prompt only when a snapshot is ahead of the file; the body states which autosave it is, how old it is and how much work opening the file as it stands would lose, and its two buttons are the two answers. recover() loads the snapshot (the file and the history are left untouched), discard() drops the history and keeps the file. A failed load becomes RecoveryOutcome::Failed and is shown in the dialog rather than raised, because an unreadable snapshot must not end the session. ui() draws it as a centred window; body_ui() is the same contents without one, which is what the harness lays out.
+- SnapshotMenu is the restore list behind File > Snapshot history: SnapshotStore::list() read once per set_project/refresh (a menu is drawn many times a second, the history changes only when the worker writes), each entry labelled with its revision and a whole-unit age, and a click loads that snapshot. It says so when there is no project and when there are no autosaves.
+- entry_label/age_text/duration_text do the label arithmetic in whole seconds. No floats, and no timeline arithmetic goes near them.
+
+Wired into SubordinateApp: open_project(path) reads the file, adopts it, points the menu at it and raises the prompt; a File menu holds the restore list; adopt_project() replaces project, sequence, compositor, viewer, scheduler and timeline panel, because a snapshot is a whole project and not a Command. New stable code ui.project_unreadable. docs/DEVELOPMENT.md's autosave section now describes the two widgets.
+
+Verification: cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean; cargo test -p sub-ui -p sub-edit all green (sub-ui 214 unit tests including 6 new ones in recovery.rs, plus 6 new integration tests in crates/sub-ui/tests/autosave_recovery.rs). This machine does enumerate a wgpu adapter, so the snapshot test really rendered and the reference PNG was recorded here.
+
+Acceptance criteria evidence:
+
+AC 2 (checked): recovery.rs::opening_a_project_asks_the_autosave_history_and_prompts_when_it_is_ahead drives RecoveryPrompt::open_for itself - no history opens silently, an autosave ahead of the file raises a prompt naming that revision, and answering it hands the autosaved project back and closes it. tests/autosave_recovery.rs::the_prompt_offers_the_newest_autosave_and_recovering_hands_it_back clicks Recover through the shared egui_kittest harness over a real sidecar directory and gets the newest snapshot's project, with the project file and the history untouched; a_project_saved_after_its_last_autosave_shows_no_prompt_but_still_lists_its_history proves the other direction paints no buttons. SubordinateApp::open_project is the call site.
+
+AC 3 (checked): tests/autosave_recovery.rs::the_restore_list_shows_the_kept_autosaves_newest_first_and_restores_the_one_clicked writes six autosaves with K=3, asserts the list is revisions 6, 5, 4 newest first, clicks the middle entry by its label and gets exactly the project that snapshot held. a_menu_with_no_autosaves_says_so covers the empty list. The menu is drawn in the app's File > Snapshot history.
+
+AC 4 (checked): crates/sub-ui/tests/autosave_recovery.rs is built on crates/sub-ui/tests/support/mod.rs. the_dialog_matches_its_snapshot commits crates/sub-ui/tests/snapshots/autosave_recovery_prompt.png (the prompt and the restore list in one frame; the wording with no project file on disk is used because it is the only shape whose text does not depend on how long the test took) and skips with a report where no adapter exists. The interaction tests assert recover and discard as required.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added sub_edit::autosave: a SnapshotStore over the project's sidecar directory (name.sub.d/autosave/) writing complete deterministic .sub snapshots via a .tmp and rename and keeping the newest K, a background Autosave worker that snapshots an EngineHandle::snapshot() Arc at most once per interval and only after a real change (off both the UI and engine threads, flushing on stop, reporting rather than raising a failed write), and check_for_recovery, which offers a snapshot newer than the project file as a Recovery with the prompt text plus recover()/discard(). Restoring is not a Command: a snapshot is a whole project, so it is handed back to be opened with a fresh engine and history. Verified with cargo fmt --all --check, cargo clippy --workspace --all-targets -- -D warnings and cargo test -p sub-edit -p sub-command -p sub-model, all clean, including eight new behavioural integration tests (sidecar writes after a change, nothing when idle, many changes collapsing into one snapshot, 200 commands from an editing thread never blocked, pruning to K newest-first with every entry loading what it holds, and recovery offered, suppressed and discarded). AC 1 is checked; AC 2 and AC 3 stay unchecked because crates/sub-ui is still the eframe shell with no project-open flow and no menu, so the prompt and the restore menu cannot be shown to a user yet.
+Autosave now has both halves. sub_edit::autosave (wave 1) keeps a history of complete .sub snapshots in the project's sidecar directory, written off the UI and engine threads at most once per interval and only after a real change, and answers whether an open should offer to recover. The new sub_ui::recovery adds the two things a user sees: RecoveryPrompt, the dialog an open raises when an autosave is ahead of the project file, stating what would be lost and offering Recover (open the snapshot, touching neither the file nor the history) or Discard (drop the history, keep the file); and SnapshotMenu, the File > Snapshot history restore list of the kept autosaves, newest first, each labelled with its revision and age and restorable with a click. Both hand a whole Project back rather than mutating the open one - a snapshot is not a Command - and SubordinateApp::open_project/adopt_project are the wiring. Verified with cargo fmt --all --check, cargo clippy --workspace --all-targets -- -D warnings and cargo test -p sub-ui -p sub-edit, all clean: 6 new unit tests in recovery.rs and 6 new egui_kittest tests in crates/sub-ui/tests/autosave_recovery.rs on the shared harness, clicking Recover, Discard and a restore entry over a real sidecar directory, plus a committed snapshot of the dialog (crates/sub-ui/tests/snapshots/autosave_recovery_prompt.png). All four acceptance criteria are checked.
 <!-- SECTION:FINAL_SUMMARY:END -->
