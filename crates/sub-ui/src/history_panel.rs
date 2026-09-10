@@ -43,7 +43,7 @@
 
 use eframe::egui::{self, Ui};
 use sub_core::SubResult;
-use sub_edit::History;
+use sub_edit::{History, HistorySummary};
 use sub_model::Project;
 
 use crate::shortcuts::{Action, ShortcutMap};
@@ -51,6 +51,13 @@ use crate::shortcuts::{Action, ShortcutMap};
 /// The label the panel gives the state a project is in before its first
 /// command.
 pub const ORIGINAL_STATE_LABEL: &str = "Open state";
+
+/// What an undone step further down the stack is called when the engine
+/// reported only the depth of the stack and not every label.
+pub const EARLIER_STEP_LABEL: &str = "Earlier edit";
+
+/// What a redoable step further up the stack is called, for the same reason.
+pub const LATER_STEP_LABEL: &str = "Later edit";
 
 /// The history as the Edit menu and the history panel see it: every step's
 /// label, oldest first, and how many of them are currently applied.
@@ -86,6 +93,36 @@ impl HistoryList {
     pub fn new(labels: Vec<String>, position: usize) -> Self {
         let position = position.min(labels.len());
         Self { labels, position }
+    }
+
+    /// A list built from what the engine reports about its history.
+    ///
+    /// The engine's [`HistorySummary`] carries the two labels either side of
+    /// the cursor and the depth of each stack, because that is all the Edit
+    /// menu needs and all that can be read without copying the whole stack
+    /// across the queue. The steps further away are therefore listed under a
+    /// generic name: the menu never shows them, and the panel that does shows
+    /// them as the anonymous steps they are.
+    #[must_use]
+    pub fn from_summary(summary: &HistorySummary) -> Self {
+        let mut labels = Vec::with_capacity(summary.undo_len + summary.redo_len);
+        for step in 0..summary.undo_len {
+            let last = step + 1 == summary.undo_len;
+            labels.push(match (last, summary.undo_label.as_deref()) {
+                (true, Some(label)) => label.to_owned(),
+                _ => EARLIER_STEP_LABEL.to_owned(),
+            });
+        }
+        for step in 0..summary.redo_len {
+            labels.push(match (step, summary.redo_label.as_deref()) {
+                (0, Some(label)) => label.to_owned(),
+                _ => LATER_STEP_LABEL.to_owned(),
+            });
+        }
+        Self {
+            labels,
+            position: summary.undo_len,
+        }
     }
 
     /// Every step, oldest first, undone ones included.

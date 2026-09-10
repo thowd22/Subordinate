@@ -15,6 +15,7 @@ rfd = "0.17"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sub-audio = { version = "0.1.0", path = "../sub-audio" }
+sub-command = { version = "0.1.0", path = "../sub-command" }
 sub-core = { version = "0.1.0", path = "../sub-core" }
 sub-edit = { version = "0.1.0", path = "../sub-edit" }
 sub-export = { version = "0.1.0", path = "../sub-export" }
