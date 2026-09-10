@@ -210,6 +210,12 @@ impl PopoutShared {
 pub struct PopoutViewer {
     /// Whether the pop-out window should exist this frame.
     open: bool,
+    /// Where the window should be placed, in points on the virtual desktop.
+    ///
+    /// `None` leaves the placement to the window manager, which is what a
+    /// user gets. A position is how the CI smoke run puts the pop-out on the
+    /// second monitor without a human dragging it there.
+    position: Option<[f32; 2]>,
     /// What the pop-out's paint closure reads and writes.
     shared: Arc<PopoutShared>,
 }
@@ -226,8 +232,23 @@ impl PopoutViewer {
     pub fn new() -> Self {
         Self {
             open: false,
+            position: None,
             shared: Arc::new(PopoutShared::new()),
         }
+    }
+
+    /// Places the window at `position`, in points on the virtual desktop.
+    ///
+    /// It applies from the next paint onwards, so setting it before the
+    /// pop-out is opened is what puts the first window in the right place.
+    pub const fn set_position(&mut self, position: [f32; 2]) {
+        self.position = Some(position);
+    }
+
+    /// Where the window is asked to appear, if anywhere.
+    #[must_use]
+    pub const fn position(&self) -> Option<[f32; 2]> {
+        self.position
     }
 
     /// Whether the viewer is popped out.
@@ -310,12 +331,25 @@ impl PopoutViewer {
         let shared = Arc::clone(&self.shared);
         ctx.show_viewport_deferred(
             popout_viewport_id(),
-            egui::ViewportBuilder::default()
-                .with_title(POPOUT_TITLE)
-                .with_inner_size(POPOUT_SIZE),
+            popout_viewport_builder(self.position),
             move |ui, _class| popout_viewport_ui(ui, &shared),
         );
         true
+    }
+}
+
+/// The window the pop-out asks eframe for.
+///
+/// Split out of [`PopoutViewer::show`] so the placement can be asserted
+/// without a display attached.
+#[must_use]
+pub fn popout_viewport_builder(position: Option<[f32; 2]>) -> egui::ViewportBuilder {
+    let builder = egui::ViewportBuilder::default()
+        .with_title(POPOUT_TITLE)
+        .with_inner_size(POPOUT_SIZE);
+    match position {
+        Some(position) => builder.with_position(position),
+        None => builder,
     }
 }
 
@@ -377,7 +411,8 @@ pub fn popout_menu_ui(ui: &mut egui::Ui, popout: &mut PopoutViewer) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        PopoutShared, PopoutViewer, is_playback_action, playback_shortcuts, popout_viewport_ui,
+        POPOUT_TITLE, PopoutShared, PopoutViewer, is_playback_action, playback_shortcuts,
+        popout_viewport_builder, popout_viewport_ui,
     };
     use crate::shortcuts::{Action, ShortcutMap};
     use crate::viewer::ViewerFrame;
@@ -519,6 +554,27 @@ mod tests {
         assert!(
             shared.take_actions().is_empty(),
             "taking the queue empties it"
+        );
+    }
+
+    #[test]
+    fn a_placed_popout_asks_for_that_position() {
+        let mut popout = PopoutViewer::new();
+        assert_eq!(popout.position(), None, "placement is the WM's by default");
+        popout.set_position([1280.0, 0.0]);
+        assert_eq!(popout.position(), Some([1280.0, 0.0]));
+
+        let builder = popout_viewport_builder(popout.position());
+        assert_eq!(
+            builder.position,
+            Some(egui::pos2(1280.0, 0.0)),
+            "the second monitor's origin should reach the window"
+        );
+        assert_eq!(builder.title.as_deref(), Some(POPOUT_TITLE));
+        assert_eq!(
+            popout_viewport_builder(None).position,
+            None,
+            "an unplaced pop-out should not pin itself to the origin"
         );
     }
 

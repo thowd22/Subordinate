@@ -23,7 +23,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sub_audio::mixer::{MixGraphBuilder, MixerConfig, MixerControl, mixer};
 use sub_audio::{AudioOutput, CpalBackend, MeterBank, OutputOptions};
@@ -43,6 +43,13 @@ use crate::viewer::{TransportAction, ViewerAction, ViewerFrame, ViewerPanel};
 /// audio tracks than this still plays; the tracks past it are unmetered.
 const METERED_TRACKS: usize = 64;
 
+/// The line the window smoke run prints once every window has a picture.
+///
+/// CI waits for it before it takes a screenshot, so it is part of the
+/// contract with `scripts/ui-smoke.sh` (TASK-123) rather than a stray log
+/// line. Anything after the colon is diagnostics.
+pub const UI_SMOKE_READY: &str = "ui-smoke ready";
+
 /// Options for launching the application.
 #[derive(Debug, Clone, Default)]
 pub struct AppOptions {
@@ -52,6 +59,22 @@ pub struct AppOptions {
     /// paints an empty window `n` times on whatever adapter the machine has
     /// (a software one on a hosted runner) and exits.
     pub smoke_frames: Option<u32>,
+    /// A project to open as soon as the window is up.
+    pub project: Option<PathBuf>,
+    /// Pop the viewer out at startup, as the View menu would.
+    pub open_popout: bool,
+    /// Where to put the pop-out window, in points on the virtual desktop.
+    ///
+    /// This is how CI lands it on a second monitor with nobody there to drag
+    /// it; a normal run leaves it to the window manager.
+    pub popout_position: Option<[f32; 2]>,
+    /// Close the window once it has been up this long.
+    ///
+    /// `None` runs until the user closes it. This is the window smoke run's
+    /// self-destruct: it keeps the windows on screen long enough to be
+    /// photographed and guarantees the process ends even if CI's capture step
+    /// never gets that far.
+    pub hold: Option<Duration>,
 }
 
 impl AppOptions {
@@ -64,6 +87,44 @@ impl AppOptions {
             smoke_frames: std::env::var("SUB_SMOKE_FRAMES")
                 .ok()
                 .and_then(|value| value.trim().parse().ok()),
+            ..Self::default()
+        }
+    }
+
+    /// Whether this run paints on its own rather than waiting for input.
+    ///
+    /// Both CI runs do: one counts frames, the other holds the window open
+    /// for a wall-clock span. Nothing on screen animates, so egui has to be
+    /// asked for the next frame either way.
+    #[must_use]
+    pub const fn is_unattended(&self) -> bool {
+        self.smoke_frames.is_some() || self.hold.is_some()
+    }
+}
+
+/// What became of the project named on the command line.
+///
+/// It reaches CI through the ready line: a smoke run that photographed an
+/// empty editor because the project would not load is a failure, and this is
+/// what makes that visible without reading the whole log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectState {
+    /// No project was asked for.
+    None,
+    /// The project opened.
+    Loaded,
+    /// The project was asked for and would not open.
+    Failed,
+}
+
+impl ProjectState {
+    /// The word the ready line reports.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Loaded => "loaded",
+            Self::Failed => "failed",
         }
     }
 }
@@ -77,6 +138,12 @@ pub struct SubordinateApp {
     options: AppOptions,
     frames_painted: u32,
     closing: bool,
+    /// When the app was built, which is what [`AppOptions::hold`] counts from.
+    started: Instant,
+    /// How the project named on the command line loaded, for the ready line.
+    project_state: ProjectState,
+    /// Whether the ready line has already been printed.
+    announced_ready: bool,
     diagnostics: DiagnosticsPanel,
     /// The audio settings panel: which device plays, and how it is doing.
     audio_settings: AudioSettingsPanel,
@@ -183,12 +250,23 @@ impl SubordinateApp {
             Arc::clone(&meters),
             Rc::clone(&audio_control),
         );
-        Ok(Self {
+        let mut popout = PopoutViewer::new();
+        if let Some(position) = options.popout_position {
+            popout.set_position(position);
+        }
+        if options.open_popout {
+            popout.open();
+        }
+        let startup_project = options.project.clone();
+        let mut app = Self {
             render,
             render_state: state.clone(),
             options,
             frames_painted: 0,
             closing: false,
+            started: Instant::now(),
+            project_state: ProjectState::None,
+            announced_ready: false,
             diagnostics: DiagnosticsPanel::new(),
             audio_settings: AudioSettingsPanel::new(),
             audio,
@@ -196,7 +274,7 @@ impl SubordinateApp {
             sequence,
             compositor,
             viewer,
-            popout: PopoutViewer::new(),
+            popout,
             scheduler,
             audio_control,
             project: Project::new("Untitled"),
@@ -210,7 +288,25 @@ impl SubordinateApp {
             project_file: None,
             recovery: RecoveryPrompt::new(),
             snapshots: SnapshotMenu::new(),
-        })
+        };
+        if let Some(path) = startup_project {
+            app.project_state = match app.open_project(&path) {
+                Ok(()) => {
+                    log::info!("opened {}", path.display());
+                    ProjectState::Loaded
+                }
+                Err(error) => {
+                    log::error!(
+                        "could not open {}: [{}] {}",
+                        path.display(),
+                        error.code,
+                        error.message
+                    );
+                    ProjectState::Failed
+                }
+            };
+        }
+        Ok(app)
     }
 
     /// Opens a project file, offering to recover a newer autosave first.
@@ -651,11 +747,54 @@ impl SubordinateApp {
         self.frames_painted
     }
 
-    /// Whether this run should end now.
-    fn smoke_test_is_done(&self) -> bool {
-        self.options
+    /// Whether this run should end now, and why.
+    ///
+    /// `--smoke-test` counts frames and the window smoke run counts seconds;
+    /// a run given both ends on whichever arrives first.
+    fn unattended_close_reason(&self) -> Option<String> {
+        if self
+            .options
             .smoke_frames
             .is_some_and(|target| self.frames_painted >= target)
+        {
+            return Some(format!("smoke test painted {} frames", self.frames_painted));
+        }
+        let hold = self.options.hold?;
+        let elapsed = self.started.elapsed();
+        (elapsed >= hold).then(|| format!("window held for {:.1}s", elapsed.as_secs_f32()))
+    }
+
+    /// How the project named on the command line loaded.
+    pub const fn project_state(&self) -> ProjectState {
+        self.project_state
+    }
+
+    /// Whether every window this run asked for has painted a frame.
+    ///
+    /// The pop-out paints on its own pass, so "the app is up" is not the
+    /// editor window alone: a screenshot taken before the second window has a
+    /// picture would photograph an empty rectangle.
+    pub fn windows_are_up(&self) -> bool {
+        self.frames_painted > 0
+            && (!self.popout.is_open() || self.popout.shared().frames_painted() > 0)
+    }
+
+    /// Prints the ready line once every window has a picture.
+    ///
+    /// `scripts/ui-smoke.sh` waits for this line before it captures, so the
+    /// wording and the fields are a contract; see [`UI_SMOKE_READY`].
+    fn announce_ready(&mut self) {
+        if self.announced_ready || !self.windows_are_up() {
+            return;
+        }
+        self.announced_ready = true;
+        log::info!(
+            "{UI_SMOKE_READY}: frames={} popout={} popout_frames={} project={}",
+            self.frames_painted,
+            self.popout.is_open(),
+            self.popout.shared().frames_painted(),
+            self.project_state.label()
+        );
     }
 }
 
@@ -747,13 +886,16 @@ impl eframe::App for SubordinateApp {
 
         self.frames_painted = self.frames_painted.saturating_add(1);
 
-        if self.options.smoke_frames.is_some() {
+        if self.options.is_unattended() {
             let ctx = ui.ctx();
             // Nothing is animating, so ask for the next frame explicitly.
             ctx.request_repaint();
-            if self.smoke_test_is_done() && !self.closing {
+            self.announce_ready();
+            if !self.closing
+                && let Some(reason) = self.unattended_close_reason()
+            {
                 self.closing = true;
-                log::info!("smoke test painted {} frames; closing", self.frames_painted);
+                log::info!("{reason}; closing");
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
@@ -835,11 +977,44 @@ fn audio_output(
 
 #[cfg(test)]
 mod tests {
-    use super::AppOptions;
+    use super::{AppOptions, ProjectState, UI_SMOKE_READY};
+    use std::time::Duration;
 
     #[test]
     fn options_default_to_a_normal_run() {
-        assert_eq!(AppOptions::default().smoke_frames, None);
+        let options = AppOptions::default();
+        assert_eq!(options.smoke_frames, None);
+        assert_eq!(options.hold, None);
+        assert!(!options.open_popout);
+        assert_eq!(options.popout_position, None);
+        assert!(
+            !options.is_unattended(),
+            "a normal run waits for the user, not for a clock"
+        );
+    }
+
+    #[test]
+    fn either_ci_run_paints_on_its_own() {
+        let counted = AppOptions {
+            smoke_frames: Some(3),
+            ..AppOptions::default()
+        };
+        assert!(counted.is_unattended());
+        let held = AppOptions {
+            hold: Some(Duration::from_secs(5)),
+            ..AppOptions::default()
+        };
+        assert!(held.is_unattended());
+    }
+
+    #[test]
+    fn the_ready_line_reports_the_project() {
+        // scripts/ui-smoke.sh greps for both of these; a rename here without
+        // one there is a CI job that waits for a line that never comes.
+        assert_eq!(UI_SMOKE_READY, "ui-smoke ready");
+        assert_eq!(ProjectState::Loaded.label(), "loaded");
+        assert_eq!(ProjectState::Failed.label(), "failed");
+        assert_eq!(ProjectState::None.label(), "none");
     }
 
     #[test]

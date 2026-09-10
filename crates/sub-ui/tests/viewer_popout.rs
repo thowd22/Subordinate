@@ -17,7 +17,8 @@ use eframe::egui;
 use egui_kittest::kittest::Queryable;
 use sub_time::{Rational, RationalTime};
 use sub_ui::popout::{
-    CLOSE_LABEL, OPEN_LABEL, PopoutViewer, popout_content_ui, popout_menu_ui, popout_viewport_ui,
+    CLOSE_LABEL, OPEN_LABEL, PopoutViewer, popout_content_ui, popout_menu_ui,
+    popout_viewport_builder, popout_viewport_ui,
 };
 use sub_ui::shortcuts::{Action, ShortcutMap};
 use sub_ui::viewer::{TransportAction, ViewerAction, ViewerFrame, ViewerPanel};
@@ -133,6 +134,31 @@ fn the_menu_item_pops_the_viewer_out_and_puts_it_back() {
     assert!(
         !harness.state().is_open(),
         "and the same item puts it back in the dock"
+    );
+}
+
+#[test]
+fn a_placed_pop_out_opens_on_the_second_monitor() {
+    // What the Xvfb window smoke run does with nobody there to drag the
+    // window: the second head's origin is set before the pop-out opens, so
+    // the first window eframe creates is already on the second monitor
+    // (TASK-123). The window itself is TASK-118's job on real hardware.
+    let mut placed = PopoutViewer::new();
+    placed.set_position([1280.0, 0.0]);
+    let mut harness = support::panel_harness_state(placed, |ui, popout| {
+        popout_menu_ui(ui, popout);
+    });
+    harness.run();
+
+    harness.get_by_label(OPEN_LABEL).click();
+    harness.run();
+    let popout = harness.state();
+    assert!(popout.is_open(), "the pop-out opened");
+    assert_eq!(
+        popout_viewport_builder(popout.position()).position,
+        Some(egui::pos2(1280.0, 0.0)),
+        "and it asks for the second monitor rather than wherever the window \
+         manager felt like putting it"
     );
 }
 
