@@ -394,6 +394,12 @@ SUB_UPDATE_GOLDEN=1 cargo test -p sub-model --test golden
 
 ## UI tests (egui_kittest)
 
+**The rule: any task that touches `sub-ui` adds or updates a test here.** A
+panel that gains a widget, a colour, a layout or a click gains a snapshot or an
+interaction test in the same commit, or updates the one it already has. This is
+also in the conventions list in `CLAUDE.md`, because it is the convention new
+panels break most often.
+
 `sub-ui` panels are tested headlessly with
 [`egui_kittest`](https://docs.rs/egui_kittest) 0.36 (features `eframe`,
 `snapshot`, `wgpu`). It runs a real egui pass, renders it through wgpu on a
@@ -406,13 +412,53 @@ of test:
   (`harness.get_by_label("Add track").click()`) and then assert on the model.
   These need no adapter and run everywhere.
 
-The shared harness is `crates/sub-ui/tests/support/mod.rs`; pull it into a test
-file with `mod support;`. It fixes the frame every panel is painted in
-(800x600 logical points, one pixel per point, dark theme, wgpu renderer),
-loads the committed sample project (`support::fixture_project()`), and reports
-and passes rather than failing when the machine enumerates no adapter
-(`if !support::can_render() { return; }`). Every task that touches a panel
-adds or updates a test here.
+Prefer an interaction test for behaviour (what a click changes) and a snapshot
+for appearance (that the panel is laid out and painted at all). Most panel
+tasks want one of each, and one snapshot per panel is usually enough — a
+snapshot per state multiplies the PNGs that have to be re-recorded whenever the
+theme moves.
+
+### The harness
+
+The shared harness is **`crates/sub-ui/tests/support/mod.rs`**; pull it into a
+test file with `mod support;`. It fixes the frame every panel is painted in
+(800x600 logical points, one pixel per point, dark theme, wgpu renderer) and
+loads the committed sample project, so every snapshot shows the same realistic
+two-sequence, three-track edit:
+
+```rust
+mod support;
+
+#[test]
+fn the_inspector_matches_its_snapshot() {
+    if !support::can_render() {
+        return;                       // no wgpu adapter here: report and pass
+    }
+    let project = support::fixture_project();
+    let sequence = support::fixture_sequence(&project).clone();
+    let mut panel = InspectorPanel::new();
+    let mut harness = support::panel_harness(|ui| panel.ui(ui, &project, &sequence));
+    harness.run();
+    support::snapshot(&mut harness, "inspector_panel");
+}
+```
+
+- `support::builder()` / `panel_harness()` / `panel_harness_state()` — the
+  frame settings; `panel_harness_state` carries the state an interaction test
+  asserts on afterwards.
+- `support::fixture_project()` / `fixture_sequence()` — the committed sample
+  project, never a hand-built one, so a fixture change shows up as a visible
+  diff.
+- `support::can_render()` — guards the rendering half only. A test that merely
+  drives input and asserts on the model must not ask, or it will silently stop
+  running on machines with no ICD.
+- `support::snapshot(&mut harness, name)` — the comparison. Name snapshots
+  after the panel, in `snake_case`.
+
+Use only these entry points, so a change to the frame size or theme moves every
+snapshot together.
+
+### Updating snapshots
 
 ```bash
 cargo test -p sub-ui                          # compare against the references
@@ -420,25 +466,57 @@ UPDATE_SNAPSHOTS=1 cargo test -p sub-ui       # re-record them, then commit the 
 ```
 
 Re-record only when the change to the UI is intended, and look at the new PNGs
-before committing them. A failing comparison writes `<name>.new.png` and
-`<name>.diff.png` next to the reference; both are gitignored, and CI uploads
-them as the `ui-snapshot-diffs-<os>` artifact when the test job fails.
+before committing them. `UPDATE_SNAPSHOTS=1` rewrites every reference the run
+touches, so run the whole crate's tests first and re-record with a clean tree —
+otherwise an unrelated regression is baked into a reference and lost.
 
 Tolerances live in `kittest.toml` at the workspace root. `threshold = 0.6` is
 the per-pixel colour distance (egui's own default, enough to cover different
 wgpu backends), and `max_failed_pixels` is how many pixels may exceed it: 10 on
 Linux, where the references are recorded on lavapipe, and 300 on Windows (WARP)
 and macOS (Metal), whose blending rounds differently. Those numbers are far
-below what a genuine regression costs, so raise them only with a reason.
+below what a genuine regression costs, so raise them only with a reason in the
+commit message.
 
 Snapshot PNGs are committed, so keep them small: render at 800x600 or less, no
 LFS. A test in `crates/sub-ui/tests/ui_harness.rs` enforces the budget — 150 KB
 per snapshot and 5 MB for the directory.
 
+### Looking at a failure (including from an agent)
+
+A failing comparison writes two PNGs next to the reference:
+`<name>.new.png` (what this run rendered) and `<name>.diff.png` (the pixels
+that differ). Both are gitignored. Locally they are simply in
+`crates/sub-ui/tests/snapshots/` — open them.
+
+From CI they come back as an artifact. The test job uploads
+`ui-snapshot-diffs-<os>` whenever it fails, and an agent with no window can
+fetch and read it without leaving the terminal:
+
+```bash
+gh run list --workflow ci.yml --limit 5                       # find the failing run
+gh run download <run-id> -n ui-snapshot-diffs-ubuntu-latest -D /tmp/snap
+ls /tmp/snap                                                  # *.new.png, *.diff.png
+```
+
+Read the PNGs directly — an agent can open an image file, and the `.diff.png`
+usually says what moved at a glance. A diff that is a handful of scattered
+pixels along an edge is a backend rounding difference and belongs in
+`kittest.toml`; a diff that is a solid block is a real change, and the fix is
+either the code or a deliberate re-record.
+
+### Where these run
+
 CI installs Mesa's lavapipe on Linux; Windows uses WARP through D3D12 and macOS
-has Metal, so the snapshot tests run in `cargo test --workspace` on all three
-hosted runners at no extra cost. GPU runners are reserved for checks that need
-real hardware.
+has Metal, so the snapshot tests run inside the ordinary
+`cargo test --workspace` on all three hosted runners at no extra cost.
+
+**Hosted runners are where UI tests belong. GPU runners are only for checks
+that need real hardware** — hardware encode and decode, driver-specific
+behaviour, multi-monitor and fullscreen presentation (see "GPU CI (RunsOn)"
+below). They are billed by the hour, and routing a panel snapshot through one
+buys nothing: the software adapters render the same egui output. If a panel
+test seems to need a GPU, the test is wrong.
 
 ## CI build speed
 

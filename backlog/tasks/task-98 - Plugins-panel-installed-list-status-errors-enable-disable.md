@@ -4,7 +4,7 @@ title: 'Plugins panel: installed list, status, errors, enable/disable'
 status: To Do
 assignee: []
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-10 08:02'
+updated_date: '2026-09-10 08:07'
 labels:
   - ui
   - plugins
@@ -30,4 +30,5 @@ Non-agent users need to manage plugins too.
 - [ ] #2 Enable, disable, remove and open-folder actions
 - [ ] #3 Reload errors display inline
 - [ ] #4 Hot-reload errors from --dev installs display inline in the panel (moved from TASK-86)
+- [ ] #5 An egui_kittest test in `sub-ui` built on the shared harness in `crates/sub-ui/tests/support/mod.rs` covers the plugins panel: committed snapshots of the installed list in its healthy and error states, and an interaction test for enable/disable
 <!-- AC:END -->
