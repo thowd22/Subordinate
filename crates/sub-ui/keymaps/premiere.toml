@@ -37,9 +37,12 @@
 "marking.set_out_point" = "O"
 "marking.add_marker" = "Ctrl+M"
 
-# Editing. C is the razor tool in Premiere, so the split moves off Ctrl+K
-# onto it. Nudging is Alt+Left / Alt+Right.
-"editing.split_at_playhead" = "C"
+# Editing. Premiere adds an edit at the playhead with Ctrl+K, which is where
+# Subordinate ships it, and its tools are on V and C. Nudging is Alt+Left /
+# Alt+Right.
+"editing.split_at_playhead" = "Ctrl+K"
+"editing.select_tool" = "V"
+"editing.razor_tool" = "C"
 "editing.nudge_back" = "Alt+Left"
 "editing.nudge_forward" = "Alt+Right"
 "editing.undo" = "Ctrl+Z"

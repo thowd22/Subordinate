@@ -25,6 +25,7 @@ pub mod selection;
 pub mod sequence_tabs;
 pub mod shortcuts;
 pub mod snapping;
+pub mod split;
 pub mod thumbnails;
 pub mod timeline;
 pub mod timeline_panel;
@@ -92,6 +93,7 @@ pub use snapping::{
     DEFAULT_THRESHOLD_PX, SnapCandidate, SnapKind, SnapSettings, collect_candidates, snap,
     snapped_time, track_edges,
 };
+pub use split::{SplitCut, SplitGroup, SplitRefusal, apply_split, plan_split, plan_split_clip};
 pub use thumbnails::{
     BUCKET_SIZES, DEFAULT_BUDGET_BYTES, DEFAULT_UPLOADS_PER_FRAME, ThumbnailCache,
     ThumbnailCacheConfig, ThumbnailCacheStats, ZoomBucket, fitted_size, scale_to_bucket, tile_time,
@@ -99,8 +101,8 @@ pub use thumbnails::{
 pub use timeline::{ClipPlacement, TimelineView, TrackLayout, ZoomLevel};
 pub use timeline_panel::{
     ClipMediaKind, MARKER_FLAG_HEIGHT, MARKER_FLAG_WIDTH, PanelLayout, StripTiles, TRIM_HANDLE_PX,
-    TimelineMetrics, TimelinePanel, TimelineResponse, TrimmedEdges, WheelInput, clip_edits_allowed,
-    strip_tiles,
+    TimelineMetrics, TimelinePanel, TimelineResponse, Tool, TrimmedEdges, WheelInput,
+    clip_edits_allowed, strip_tiles,
 };
 pub use track_header::{HeaderLayout, MenuChoice, MenuEntry, TrackAction, TrackHeaderState};
 pub use trim::{TrimEdge, TrimGroup, TrimRefusal, TrimStep, apply_trim, plan_trim};
@@ -172,6 +174,12 @@ pub mod codes {
     /// clamped to the source rather than refused. The `reason` detail carries
     /// the [`TrimRefusal`](crate::trim::TrimRefusal) id.
     pub const CLIP_TRIM_REFUSED: ErrorCode = ErrorCode::from_static("ui.clip_trim_refused");
+
+    /// A cut cannot become an edit: the razor is on a locked track, the clip
+    /// it named has gone, or the cut point is not inside that clip. The
+    /// `reason` detail carries the [`SplitRefusal`](crate::split::SplitRefusal)
+    /// id.
+    pub const CLIP_SPLIT_REFUSED: ErrorCode = ErrorCode::from_static("ui.clip_split_refused");
 
     /// A plugin's install directory could not be handed to the platform's
     /// file manager.

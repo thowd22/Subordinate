@@ -26,6 +26,7 @@ use sub_time::{Rational, RationalTime, TimeRange, Timecode, TimecodeRate};
 use crate::markers::{self, DEFAULT_MARKER_NAME, MarkerAction, MarkerState};
 use crate::selection::{ClipRef, MoveGroup, MoveRefusal, Selection, clips_in_marquee, plan_move};
 use crate::snapping::{self, SnapCandidate, SnapKind, SnapSettings};
+use crate::split::{SplitGroup, SplitRefusal, plan_split, plan_split_clip};
 use crate::thumbnails::{ThumbnailCache, ZoomBucket, tile_time};
 use crate::timeline::{TimelineView, TrackLayout, ZoomLevel};
 use crate::track_header::{TrackAction, TrackHeaderState, empty_column_menu};
@@ -181,6 +182,21 @@ const GHOST_ALPHA: u8 = 56;
 
 /// How much of [`SELECTION_COLOR`] fills the marquee rectangle.
 const MARQUEE_ALPHA: u8 = 32;
+
+/// The colour the razor's cut line is drawn in.
+///
+/// The same yellow a snapped edge is flagged in, because it is the same
+/// promise: this is the exact instant the gesture will land on.
+const RAZOR_COLOR: Color32 = SNAP_COLOR;
+
+/// How wide the razor's cut line is, in points.
+const RAZOR_WIDTH: f32 = 1.0;
+
+/// How tall the blade drawn at the head of the razor's line is, in points.
+const RAZOR_BLADE_HEIGHT: f32 = 7.0;
+
+/// How wide the blade drawn at the head of the razor's line is, in points.
+const RAZOR_BLADE_WIDTH: f32 = 7.0;
 
 /// The fixed sizes the panel lays itself out with, in points.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -525,6 +541,41 @@ pub fn tick_frames(view: &TimelineView, interval: i64) -> impl Iterator<Item = i
     .take_while(move |frame| *frame <= end)
 }
 
+/// What a press in the lanes means.
+///
+/// A tool is view state, not part of the edit: it decides which gesture a
+/// press starts, and nothing else. The two the editor has are the arrow —
+/// select, marquee and drag — and the razor, which cuts the clip it is
+/// clicked on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Tool {
+    /// Select clips, band-select and drag them: the default.
+    #[default]
+    Select,
+    /// Cut the clicked clip at the instant clicked.
+    Razor,
+}
+
+impl Tool {
+    /// A stable identifier, for logging and for tests.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Select => "select",
+            Self::Razor => "razor",
+        }
+    }
+
+    /// What the tool is called in the interface.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Select => "Select",
+            Self::Razor => "Razor",
+        }
+    }
+}
+
 /// The timeline panel's own state: what it is looking at, and the indexes it
 /// looks through.
 ///
@@ -611,6 +662,17 @@ pub struct TimelinePanel {
     /// Marker actions raised from outside a painted frame — the `M` shortcut
     /// — waiting for the next frame to report them.
     pending_markers: Vec<MarkerAction>,
+    /// What a press in the lanes means: select, or cut.
+    tool: Tool,
+    /// Where the razor would cut if it were clicked now, snapped.
+    ///
+    /// Recomputed from the pointer every frame the razor is out, and painted
+    /// as the cut line so the editor sees the frame it is about to land on
+    /// before pressing.
+    razor_time: Option<RationalTime>,
+    /// A split asked for from outside a painted frame — the `Ctrl+K` shortcut
+    /// — waiting for the next frame, which has the sequence to plan against.
+    pending_split: bool,
 }
 
 /// A gesture that started in the lanes and is still under the pointer.
@@ -623,6 +685,11 @@ enum Gesture {
         /// Where the pointer is now.
         current: Pos2,
     },
+    /// A razor press that has already cut, still under the button.
+    ///
+    /// The razor has no drag: the cut happens on the press, and this is what
+    /// keeps the frames the button stays down from cutting again.
+    Cut,
     /// The selection being dragged to a new time, and maybe a new track.
     Move {
         /// Where the drag was pressed.
@@ -681,6 +748,15 @@ pub struct TimelineResponse {
     pub clip_trim: Option<TrimGroup>,
     /// Why the trim under the pointer cannot become an edit, while it cannot.
     pub trim_refused: Option<TrimRefusal>,
+    /// The cut a razor click or `Ctrl+K` asks for, as one undoable group.
+    ///
+    /// The panel has cut nothing: it plans the cut and hands the plan over,
+    /// for the caller to apply with [`apply_split`](crate::split::apply_split)
+    /// so a through-edit across several tracks is one entry in the undo
+    /// stack.
+    pub clip_split: Option<SplitGroup>,
+    /// Why the cut asked for this frame could not be planned.
+    pub split_refused: Option<SplitRefusal>,
     /// The marker actions raised this frame, in the order they were raised.
     ///
     /// Every one of them is exactly one command
@@ -718,7 +794,44 @@ impl TimelinePanel {
             marker_press: false,
             marker_grab_offset: 0.0,
             pending_markers: Vec::new(),
+            tool: Tool::Select,
+            razor_time: None,
+            pending_split: false,
         }
+    }
+
+    /// Which tool a press in the lanes drives.
+    #[must_use]
+    pub const fn tool(&self) -> Tool {
+        self.tool
+    }
+
+    /// Picks the tool a press in the lanes drives.
+    ///
+    /// Putting the razor away drops the cut line with it, so the panel does
+    /// not keep painting a cut that can no longer be made.
+    pub const fn set_tool(&mut self, tool: Tool) {
+        self.tool = tool;
+        if !matches!(tool, Tool::Razor) {
+            self.razor_time = None;
+        }
+    }
+
+    /// Where the razor would cut if it were clicked now, while it is out.
+    #[must_use]
+    pub const fn razor_time(&self) -> Option<RationalTime> {
+        self.razor_time
+    }
+
+    /// Asks for a cut at the playhead on the next painted frame.
+    ///
+    /// This is what [`Action::SplitAtPlayhead`](crate::shortcuts::Action) —
+    /// `Ctrl+K` — calls. The cut is not planned here because planning it
+    /// takes the sequence, which the panel only sees while it paints; the
+    /// plan reaches the caller as [`TimelineResponse::clip_split`] on the
+    /// next frame, exactly as a razor click's does.
+    pub const fn request_split_at_playhead(&mut self) {
+        self.pending_split = true;
     }
 
     /// The clips the editor has selected.
@@ -1186,12 +1299,25 @@ impl TimelinePanel {
         let mut marker_actions = self.handle_markers(ui, &response, &layout, sequence);
         let seek = self.handle_scrub(&response, &layout, sequence);
         let (shift, alt) = ui.input(|input| (input.modifiers.shift, input.modifiers.alt));
-        let lanes = if seek.is_some() {
+        let mut lanes = if seek.is_some() {
             LaneOutcome::default()
+        } else if matches!(self.tool, Tool::Razor) {
+            self.handle_razor(&response, &layout, sequence)
         } else {
+            self.razor_time = None;
             self.handle_lanes(&response, &layout, project, sequence, shift, alt)
         };
         self.update_trim_hover(ui.ctx(), &response, &layout, sequence);
+        // A cut asked for by the keyboard beats one asked for by the razor in
+        // the same frame, which cannot happen unless a script drives both.
+        if self.pending_split {
+            self.pending_split = false;
+            match plan_split(sequence, &self.selection, self.playhead) {
+                Ok(Some(group)) => lanes.clip_split = Some(group),
+                Ok(None) => {}
+                Err(refusal) => lanes.split_refused = Some(refusal),
+            }
+        }
         self.prepare_waveforms(ui.ctx(), project, sequence, layout);
         let visuals = ui.visuals().clone();
         let painter = ui.painter().with_clip_rect(rect);
@@ -1210,6 +1336,7 @@ impl TimelinePanel {
         self.paint_lanes(&painter, &layout, &visuals, project, sequence, &mut strips);
         self.thumbnails = thumbnails;
         self.paint_gesture(&painter, &layout, sequence);
+        self.paint_razor(&painter, &layout);
         self.paint_markers(&painter, &layout, sequence);
         self.paint_playhead(&painter, &layout);
         let actions = self.header_controls(ui, &layout, sequence);
@@ -1224,6 +1351,8 @@ impl TimelinePanel {
             refused: lanes.refused,
             clip_trim: lanes.clip_trim,
             trim_refused: lanes.trim_refused,
+            clip_split: lanes.clip_split,
+            split_refused: lanes.split_refused,
             marker_actions,
         }
     }
@@ -1567,6 +1696,14 @@ impl TimelinePanel {
             return outcome;
         };
         match gesture {
+            // A cut left under the pointer by the razor: putting the arrow
+            // back does not turn it into a drag, and the button is already
+            // down, so it is dropped and the next press starts a gesture.
+            Gesture::Cut => {
+                if !held {
+                    self.gesture = None;
+                }
+            }
             Gesture::Marquee { origin, current } => {
                 let pos = pointer.unwrap_or(current);
                 self.gesture = Some(Gesture::Marquee {
@@ -1636,6 +1773,116 @@ impl TimelinePanel {
             }
         }
         outcome
+    }
+
+    /// Turns a hover and a press in the lanes into a cut.
+    ///
+    /// The razor has no drag: a press is a cut, at the instant under the
+    /// pointer and on the clip under it. That instant is resolved through
+    /// [`crate::snapping`] exactly as a scrub's is, so a cut aimed near a
+    /// clip edge, a marker or the playhead lands exactly on it rather than a
+    /// frame beside it. The playhead is a candidate here — matching a cut to
+    /// where the viewer is looking is the commonest reason to reach for the
+    /// razor at all.
+    ///
+    /// A press whose snapped instant lands on a clip's own head is not a
+    /// refusal and not a cut: there is already an edit there.
+    fn handle_razor(
+        &mut self,
+        response: &Response,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+    ) -> LaneOutcome {
+        let mut outcome = LaneOutcome::default();
+        let held = response.is_pointer_button_down_on();
+        // A press that has already cut stays a [`Gesture::Cut`] until the
+        // button comes up, so the frames it is held for do not cut again.
+        let cutting = held && matches!(self.gesture, Some(Gesture::Cut));
+        if !cutting {
+            // Any gesture the arrow left behind is over the moment the razor
+            // comes out; a cut is never a drag.
+            self.gesture = None;
+            self.drag_plan = None;
+        }
+        let pointer = response
+            .interact_pointer_pos()
+            .or_else(|| response.hover_pos());
+        let Some(pos) = pointer.filter(|pos| layout.content.contains(*pos)) else {
+            self.razor_time = None;
+            return outcome;
+        };
+        let at = self.razor_target(pos, layout, sequence);
+        self.razor_time = Some(at);
+        if !held || cutting {
+            return outcome;
+        }
+        self.gesture = Some(Gesture::Cut);
+        let Some(item) = self.clip_at(pos, layout, sequence) else {
+            // Empty lane, or a locked track: nothing to cut, and nothing to
+            // complain about either.
+            return outcome;
+        };
+        match plan_split_clip(sequence, item, at) {
+            Ok(group) => outcome.clip_split = Some(group),
+            Err(refusal) => outcome.split_refused = Some(refusal),
+        }
+        outcome
+    }
+
+    /// The instant a razor at `pos` would cut at, snapped.
+    fn razor_target(
+        &mut self,
+        pos: Pos2,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+    ) -> RationalTime {
+        let rate = self.view.rate();
+        let raw = self
+            .view
+            .time_at_pixel(round_px(pos.x - layout.content.left()));
+        let raw = if raw.is_negative() {
+            RationalTime::zero(rate)
+        } else {
+            raw
+        };
+        self.collect_snap_candidates(sequence, true);
+        self.snap(raw).map_or(raw, |candidate| candidate.time)
+    }
+
+    /// Paints the cut line the razor is about to make.
+    ///
+    /// Only while the razor is out and over the lanes: the line is a promise
+    /// about the next press, so with no razor and no pointer there is nothing
+    /// to promise.
+    fn paint_razor(&self, painter: &Painter, layout: &PanelLayout) {
+        let Some(at) = self.razor_time.filter(|_| matches!(self.tool, Tool::Razor)) else {
+            return;
+        };
+        let x = layout.content.left() + self.view.pixel_of(at);
+        if !(layout.content.left()..=layout.content.right()).contains(&x) {
+            return;
+        }
+        let lanes = painter.with_clip_rect(layout.content);
+        lanes.line_segment(
+            [
+                pos2(x, layout.content.top()),
+                pos2(x, layout.content.bottom()),
+            ],
+            Stroke::new(RAZOR_WIDTH, RAZOR_COLOR),
+        );
+        // A small blade at the head of the line, so the razor reads as a tool
+        // rather than as another playhead.
+        let half = RAZOR_BLADE_WIDTH / 2.0;
+        let top = layout.content.top();
+        lanes.add(eframe::egui::Shape::convex_polygon(
+            vec![
+                pos2(x - half, top),
+                pos2(x + half, top),
+                pos2(x, top + RAZOR_BLADE_HEIGHT),
+            ],
+            RAZOR_COLOR,
+            Stroke::NONE,
+        ));
     }
 
     /// Starts the gesture a press at `pos` belongs to, and says whether the
@@ -1817,7 +2064,10 @@ impl TimelinePanel {
         layout: &PanelLayout,
         sequence: &Sequence,
     ) {
+        // The razor never trims: while it is out, no edge is hovered and the
+        // cursor stays the razor's own.
         self.hovered_trim = match self.gesture {
+            _ if matches!(self.tool, Tool::Razor) => None,
             Some(Gesture::Trim { target, edge, .. }) => Some((target, edge)),
             Some(_) => None,
             None => response
@@ -1937,7 +2187,9 @@ impl TimelinePanel {
             }
             // The trimmed span's ghost is painted above, before the gesture
             // is matched on, because it is the whole of what a trim previews.
-            Some(Gesture::Trim { .. }) | None => {}
+            // The razor paints its own cut line; a press that has already cut
+            // has nothing left to preview.
+            Some(Gesture::Trim { .. } | Gesture::Cut) | None => {}
         }
     }
 
@@ -2277,6 +2529,10 @@ struct LaneOutcome {
     clip_trim: Option<TrimGroup>,
     /// Why the trim under the pointer cannot become an edit.
     trim_refused: Option<TrimRefusal>,
+    /// The cut a razor click asks for.
+    clip_split: Option<SplitGroup>,
+    /// Why the cut under the pointer cannot become an edit.
+    split_refused: Option<SplitRefusal>,
 }
 
 /// Paints the grips a trim drag takes hold of, at both ends of a clip.
