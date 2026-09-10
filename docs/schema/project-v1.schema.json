@@ -735,6 +735,11 @@
       "additionalProperties": false,
       "description": "One lane of a sequence: an ordered list of clips, gaps and transitions.\n\nOTIO counterpart: `Track`, a `Composition` whose children are laid end to\nend in order.",
       "properties": {
+        "gain": {
+          "$ref": "#/$defs/GainDb",
+          "default": 0,
+          "description": "The lane's audio level in decibels, applied to every clip on it on top\nof the clip's own [`Clip::gain`].\n\nUnity by default, and defaulted on the way in so a project file\nwritten before the field existed still loads."
+        },
         "id": {
           "$ref": "#/$defs/TrackId",
           "description": "Stable identity, preserved across save, load and undo."
@@ -763,6 +768,11 @@
         "name": {
           "description": "Display name, shown in the track header (\"V1\", \"Dialogue\").",
           "type": "string"
+        },
+        "solo": {
+          "default": false,
+          "description": "Whether the lane is soloed: while any track in the sequence is soloed,\nthe tracks that are not contribute nothing to the mixer.\n\nSolo is a property of the lane rather than of the mixer so that it\nsurvives save, load and undo like every other edit. Defaults to false,\nand is defaulted on the way in so a project file written before the\nflag existed still loads.",
+          "type": "boolean"
         }
       },
       "required": [

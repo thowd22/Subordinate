@@ -1,4 +1,5 @@
-//! Track commands: add, insert, remove, reorder, rename, mute and lock.
+//! Track commands: add, insert, remove, reorder, rename, mute, solo, gain
+//! and lock.
 //!
 //! Track order is meaningful — video tracks composite top-down, so a later
 //! entry renders over an earlier one — which is why every command here
@@ -8,7 +9,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
-use sub_model::{Project, SequenceId, Track, TrackId, TrackKind};
+use sub_model::{GainDb, Project, SequenceId, Track, TrackId, TrackKind};
 
 use super::{check_insert_index, sequence_mut, track_mut};
 use crate::{Command, Inverse, codes};
@@ -357,6 +358,95 @@ impl Command for SetTrackMuted {
         } else {
             "Unmute track".to_owned()
         }
+    }
+}
+
+/// Solos or unsolos a track.
+///
+/// While any track in a sequence is soloed the mixer silences every track
+/// that is not, so solo is a lane property like mute: it is saved with the
+/// project and undone like any other edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetTrackSolo {
+    /// The sequence holding the track.
+    pub sequence: SequenceId,
+    /// The track to solo or unsolo.
+    pub track: TrackId,
+    /// The new state.
+    pub solo: bool,
+}
+
+impl SetTrackSolo {
+    /// Sets the solo flag of `track`.
+    #[must_use]
+    pub fn new(sequence: SequenceId, track: TrackId, solo: bool) -> Self {
+        Self {
+            sequence,
+            track,
+            solo,
+        }
+    }
+}
+
+impl Command for SetTrackSolo {
+    const KIND: &'static str = "track.set_solo";
+    const DESCRIPTION: &'static str = "Solo or unsolo a track.";
+
+    fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
+        let found = track_mut(project, self.sequence, self.track)?;
+        let previous = std::mem::replace(&mut found.solo, self.solo);
+        Ok(Inverse::new(Self::new(self.sequence, self.track, previous)))
+    }
+
+    fn label(&self) -> String {
+        if self.solo {
+            "Solo track".to_owned()
+        } else {
+            "Unsolo track".to_owned()
+        }
+    }
+}
+
+/// Sets a track's audio level.
+///
+/// The level is a [`GainDb`], so the command cannot carry a gain the model
+/// would reject; it applies on top of each clip's own gain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetTrackGain {
+    /// The sequence holding the track.
+    pub sequence: SequenceId,
+    /// The track to change.
+    pub track: TrackId,
+    /// The level the track ends up at, in decibels.
+    pub gain: GainDb,
+}
+
+impl SetTrackGain {
+    /// Sets the level of `track`.
+    #[must_use]
+    pub fn new(sequence: SequenceId, track: TrackId, gain: GainDb) -> Self {
+        Self {
+            sequence,
+            track,
+            gain,
+        }
+    }
+}
+
+impl Command for SetTrackGain {
+    const KIND: &'static str = "track.set_gain";
+    const DESCRIPTION: &'static str = "Set a track's audio level in decibels.";
+
+    fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
+        let found = track_mut(project, self.sequence, self.track)?;
+        let previous = std::mem::replace(&mut found.gain, self.gain);
+        Ok(Inverse::new(Self::new(self.sequence, self.track, previous)))
+    }
+
+    fn label(&self) -> String {
+        format!("Set track gain to {} dB", self.gain.decibels())
     }
 }
 

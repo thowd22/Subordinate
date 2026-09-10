@@ -2075,6 +2075,30 @@
       ],
       "type": "object"
     },
+    "SetTrackGain": {
+      "additionalProperties": false,
+      "description": "Sets a track's audio level.\n\nThe level is a [`GainDb`], so the command cannot carry a gain the model\nwould reject; it applies on top of each clip's own gain.",
+      "properties": {
+        "gain": {
+          "$ref": "#/$defs/GainDb",
+          "description": "The level the track ends up at, in decibels."
+        },
+        "sequence": {
+          "$ref": "#/$defs/SequenceId",
+          "description": "The sequence holding the track."
+        },
+        "track": {
+          "$ref": "#/$defs/TrackId",
+          "description": "The track to change."
+        }
+      },
+      "required": [
+        "sequence",
+        "track",
+        "gain"
+      ],
+      "type": "object"
+    },
     "SetTrackLocked": {
       "additionalProperties": false,
       "description": "Locks or unlocks a track.\n\nClip commands refuse to touch a locked track — see\n[`track_for_clip_edit`](super::track_for_clip_edit) — but this command\nreaches it either way, or a locked track could never be unlocked.",
@@ -2120,6 +2144,30 @@
         "sequence",
         "track",
         "muted"
+      ],
+      "type": "object"
+    },
+    "SetTrackSolo": {
+      "additionalProperties": false,
+      "description": "Solos or unsolos a track.\n\nWhile any track in a sequence is soloed the mixer silences every track\nthat is not, so solo is a lane property like mute: it is saved with the\nproject and undone like any other edit.",
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/SequenceId",
+          "description": "The sequence holding the track."
+        },
+        "solo": {
+          "description": "The new state.",
+          "type": "boolean"
+        },
+        "track": {
+          "$ref": "#/$defs/TrackId",
+          "description": "The track to solo or unsolo."
+        }
+      },
+      "required": [
+        "sequence",
+        "track",
+        "solo"
       ],
       "type": "object"
     },
@@ -2239,6 +2287,11 @@
       "additionalProperties": false,
       "description": "One lane of a sequence: an ordered list of clips, gaps and transitions.\n\nOTIO counterpart: `Track`, a `Composition` whose children are laid end to\nend in order.",
       "properties": {
+        "gain": {
+          "$ref": "#/$defs/GainDb",
+          "default": 0,
+          "description": "The lane's audio level in decibels, applied to every clip on it on top\nof the clip's own [`Clip::gain`].\n\nUnity by default, and defaulted on the way in so a project file\nwritten before the field existed still loads."
+        },
         "id": {
           "$ref": "#/$defs/TrackId",
           "description": "Stable identity, preserved across save, load and undo."
@@ -2267,6 +2320,11 @@
         "name": {
           "description": "Display name, shown in the track header (\"V1\", \"Dialogue\").",
           "type": "string"
+        },
+        "solo": {
+          "default": false,
+          "description": "Whether the lane is soloed: while any track in the sequence is soloed,\nthe tracks that are not contribute nothing to the mixer.\n\nSolo is a property of the lane rather than of the mixer so that it\nsurvives save, load and undo like every other edit. Defaults to false,\nand is defaulted on the way in so a project file written before the\nflag existed still loads.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -3144,6 +3202,17 @@
       }
     },
     {
+      "description": "Set a track's audio level in decibels.",
+      "kind": "command",
+      "name": "track.set_gain",
+      "params": {
+        "$ref": "#/$defs/SetTrackGain"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
       "description": "Lock or unlock a track against clip edits.",
       "kind": "command",
       "name": "track.set_locked",
@@ -3160,6 +3229,17 @@
       "name": "track.set_muted",
       "params": {
         "$ref": "#/$defs/SetTrackMuted"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Solo or unsolo a track.",
+      "kind": "command",
+      "name": "track.set_solo",
+      "params": {
+        "$ref": "#/$defs/SetTrackSolo"
       },
       "result": {
         "$ref": "#/$defs/AppliedResult"

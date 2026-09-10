@@ -10,6 +10,7 @@ pub mod app;
 pub mod audio_settings;
 pub mod diagnostics;
 pub mod dock;
+pub mod fade;
 pub mod history_panel;
 pub mod inspector;
 pub mod keymap;
@@ -77,6 +78,7 @@ pub use popout::{
 // media bin already exports a `duration_text` (a clip's length, not a wall
 // clock span) and a `MENU_TITLE`/`EMPTY_LABEL` pair belongs to the plugin
 // menu.
+pub use fade::{FadeEdge, FadeEdit, FadeRefusal, apply_fade, plan_fade};
 pub use recovery::{
     DISCARD_LABEL, NO_PROJECT_LABEL, PROMPT_TITLE, RECOVER_LABEL, RecoveryOutcome, RecoveryPrompt,
     SnapshotMenu, entry_label,
@@ -107,11 +109,14 @@ pub use thumbnails::{
 };
 pub use timeline::{ClipPlacement, TimelineView, TrackLayout, ZoomLevel};
 pub use timeline_panel::{
-    ClipMediaKind, MARKER_FLAG_HEIGHT, MARKER_FLAG_WIDTH, PanelLayout, StripTiles, TRIM_HANDLE_PX,
-    TimelineMetrics, TimelinePanel, TimelineResponse, Tool, TrimmedEdges, WheelInput,
-    clip_edits_allowed, strip_tiles,
+    ClipMediaKind, FADE_ALPHA, FADE_BAND_PX, FADE_COLOR, FADE_HANDLE_PX, MARKER_FLAG_HEIGHT,
+    MARKER_FLAG_WIDTH, PanelLayout, StripTiles, TRIM_HANDLE_PX, TimelineMetrics, TimelinePanel,
+    TimelineResponse, Tool, TrimmedEdges, WheelInput, clip_edits_allowed, strip_tiles,
 };
-pub use track_header::{HeaderLayout, MenuChoice, MenuEntry, TrackAction, TrackHeaderState};
+pub use track_header::{
+    HeaderLayout, HeaderOutcome, MenuChoice, MenuEntry, TrackAction, TrackHeaderState,
+    apply_actions,
+};
 pub use trim::{TrimEdge, TrimGroup, TrimRefusal, TrimStep, apply_trim, plan_trim};
 pub use viewer::{
     POPPED_OUT_LABEL, TransportAction, ViewerAction, ViewerFit, ViewerFrame, ViewerPanel,
@@ -187,6 +192,12 @@ pub mod codes {
     /// `reason` detail carries the [`SplitRefusal`](crate::split::SplitRefusal)
     /// id.
     pub const CLIP_SPLIT_REFUSED: ErrorCode = ErrorCode::from_static("ui.clip_split_refused");
+
+    /// A fade handle drag cannot become an edit: the clip is on a locked
+    /// track, it has left the sequence, or the fade is not representable. The
+    /// `reason` detail carries the [`FadeRefusal`](crate::fade::FadeRefusal)
+    /// id.
+    pub const CLIP_FADE_REFUSED: ErrorCode = ErrorCode::from_static("ui.clip_fade_refused");
     /// An item from the bin cannot be edited onto a track: the track is
     /// locked or of another kind, or the item has not been probed. The
     /// `reason` detail carries the

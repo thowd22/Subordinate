@@ -11,13 +11,13 @@ use serde::{Deserialize, Serialize};
 use sub_core::{SubResult, codes as core_codes};
 use sub_edit::commands::{
     AddTrack, CreateSequence, DeleteSequence, InsertSequence, InsertTrack, RemoveTrack,
-    RenameSequence, RenameTrack, ReorderTrack, SetSequenceSettings, SetTrackLocked, SetTrackMuted,
-    builtin_registry, track_for_clip_edit,
+    RenameSequence, RenameTrack, ReorderTrack, SetSequenceSettings, SetTrackGain, SetTrackLocked,
+    SetTrackMuted, SetTrackSolo, builtin_registry, track_for_clip_edit,
 };
 use sub_edit::{AnyCommand, Command, CommandEnvelope, History, Inverse, codes};
 use sub_model::{
-    Clip, ColorTags, MediaId, MediaItem, MediaPath, Project, Resolution, Sequence, SequenceId,
-    SequenceSettings, Track, TrackId, TrackKind, json,
+    Clip, ColorTags, GainDb, MediaId, MediaItem, MediaPath, Project, Resolution, Sequence,
+    SequenceId, SequenceSettings, Track, TrackId, TrackKind, json,
 };
 use sub_time::{Rational, RationalTime, TimeRange};
 
@@ -206,6 +206,33 @@ fn a_track_is_renamed_muted_and_locked_reversibly() {
 
     round_trip(&mut project, SetTrackLocked::new(sequence, tracks[0], true));
     assert!(project.sequences[0].tracks[0].locked);
+}
+
+#[test]
+fn a_track_is_soloed_and_levelled_reversibly() {
+    let (mut project, sequence, tracks, _) = fixture();
+
+    round_trip(&mut project, SetTrackSolo::new(sequence, tracks[2], true));
+    assert!(project.sequences[0].tracks[2].solo);
+
+    let quiet = GainDb::from_f64(-6.0).unwrap();
+    round_trip(&mut project, SetTrackGain::new(sequence, tracks[2], quiet));
+    assert_eq!(project.sequences[0].tracks[2].gain, quiet);
+
+    // The inverse carries the level the track had, not unity in general.
+    let mut history = History::new();
+    history
+        .apply(&mut project, SetTrackGain::new(sequence, tracks[2], quiet))
+        .unwrap();
+    let louder = GainDb::from_f64(3.0).unwrap();
+    history
+        .apply(&mut project, SetTrackGain::new(sequence, tracks[2], louder))
+        .unwrap();
+    history.undo(&mut project).unwrap();
+    assert_eq!(
+        project.sequences[0].tracks[2].gain, quiet,
+        "undo puts back the level the track was at, not unity"
+    );
 }
 
 /// A stand-in for the clip commands of TASK-4.2: all it does is go through
@@ -401,6 +428,8 @@ fn every_command_travels_as_an_envelope_and_comes_back() {
         RenameTrack::new(sequence, tracks[0], "Bed").to_envelope(),
         SetTrackMuted::new(sequence, tracks[0], true).to_envelope(),
         SetTrackLocked::new(sequence, tracks[0], true).to_envelope(),
+        SetTrackSolo::new(sequence, tracks[0], true).to_envelope(),
+        SetTrackGain::new(sequence, tracks[0], GainDb::from_f64(-3.0).unwrap()).to_envelope(),
         CreateSequence::new("Titles", SequenceSettings::default()).to_envelope(),
         RenameSequence::new(sequence, "Programme").to_envelope(),
         SetSequenceSettings::new(sequence, SequenceSettings::default()).to_envelope(),
@@ -511,6 +540,18 @@ fn labels_read_like_menu_entries() {
     assert_eq!(
         SetTrackLocked::new(sequence, track, true).label(),
         "Lock track"
+    );
+    assert_eq!(
+        SetTrackSolo::new(sequence, track, true).label(),
+        "Solo track"
+    );
+    assert_eq!(
+        SetTrackSolo::new(sequence, track, false).label(),
+        "Unsolo track"
+    );
+    assert_eq!(
+        SetTrackGain::new(sequence, track, GainDb::from_f64(-6.0).unwrap()).label(),
+        "Set track gain to -6 dB"
     );
     assert_eq!(
         SetTrackLocked::new(sequence, track, false).label(),
