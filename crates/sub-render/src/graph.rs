@@ -31,6 +31,7 @@ use sub_model::{Clip, ClipId, Resolution, Sequence, TrackId, TrackKind, Transfor
 use sub_time::{RationalTime, TimeRange};
 
 use crate::context::RenderContext;
+use crate::effect::{EffectCache, EffectFailure, EffectInstance};
 use crate::nv12::OUTPUT_FORMAT;
 
 /// Bytes of the uniform block the compositor shader reads.
@@ -314,6 +315,57 @@ where
     }
 }
 
+/// Where the compositor gets a clip's effect chain.
+///
+/// Effects hang off a clip, in the order the inspector lists them, and each
+/// one is a plugin declaration plus the values this clip binds. The graph
+/// asks for them per resolved clip rather than reading them off the model, so
+/// the compositor needs no opinion on where a project stores an effect and
+/// TASK-88 can hand it whatever the inspector has just edited.
+///
+/// Any `FnMut(&ResolvedClip) -> Vec<EffectInstance>` is a source, which is
+/// what tests and a project with no effects at all use.
+pub trait EffectSource {
+    /// The effects to run on `clip`, first applied first.
+    fn effects(&mut self, clip: &ResolvedClip<'_>) -> Vec<EffectInstance>;
+}
+
+impl<F> EffectSource for F
+where
+    F: FnMut(&ResolvedClip<'_>) -> Vec<EffectInstance>,
+{
+    fn effects(&mut self, clip: &ResolvedClip<'_>) -> Vec<EffectInstance> {
+        self(clip)
+    }
+}
+
+/// An [`EffectSource`] that gives every clip an empty chain.
+///
+/// What [`Compositor::render`] passes: the plain render is
+/// [`Compositor::render_with_effects`] with nothing to run.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoEffects;
+
+impl EffectSource for NoEffects {
+    fn effects(&mut self, _clip: &ResolvedClip<'_>) -> Vec<EffectInstance> {
+        Vec::new()
+    }
+}
+
+/// An effect that was declared on a clip but did not run.
+///
+/// The clip is still drawn, without that effect: a plugin whose WGSL does not
+/// compile costs the user one error in the inspector, not a black frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerEffectFailure {
+    /// The track the clip sits on.
+    pub track: TrackId,
+    /// The clip the effect was declared on.
+    pub clip: ClipId,
+    /// Which effect of that clip's chain, and why it was disabled.
+    pub failure: EffectFailure,
+}
+
 /// One layer of a composite: the clip that resolved on one video track, and
 /// what became of it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -329,6 +381,10 @@ pub struct LayerSummary {
     /// Where the picture landed, or `None` when the source had no picture
     /// ready and nothing was drawn for this layer.
     pub placement: Option<QuadTransform>,
+    /// How many of the clip's effects actually ran on this layer. Effects
+    /// that failed to compile are excluded, and listed in
+    /// [`FrameSummary::effect_failures`].
+    pub effects_applied: usize,
 }
 
 impl LayerSummary {
@@ -347,12 +403,25 @@ impl LayerSummary {
 pub struct FrameSummary {
     /// Every video track that had a clip under the playhead, bottom-up.
     pub layers: Vec<LayerSummary>,
+    /// Every effect that was declared on a drawn clip but did not run, in
+    /// the order the layers were prepared.
+    pub effect_failures: Vec<LayerEffectFailure>,
 }
 
 impl FrameSummary {
     /// The frontmost resolved layer, whether or not it was drawn.
     pub fn top(&self) -> Option<&LayerSummary> {
         self.layers.last()
+    }
+
+    /// True when some clip's effect could not run this frame.
+    pub fn has_effect_failures(&self) -> bool {
+        !self.effect_failures.is_empty()
+    }
+
+    /// How many effects ran across every layer.
+    pub fn effects_applied(&self) -> usize {
+        self.layers.iter().map(|layer| layer.effects_applied).sum()
     }
 
     /// How many layers were actually drawn.
@@ -453,6 +522,11 @@ pub struct Compositor {
     sampler: wgpu::Sampler,
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
+    effects: EffectCache,
+    /// One ping-pong pair per layer that runs effects, indexed by the order
+    /// the layers were prepared. A layer's chain must survive until the
+    /// composite pass samples it, so layers may not share one pair.
+    chains: Vec<EffectChain>,
 }
 
 impl Compositor {
@@ -512,6 +586,7 @@ impl Compositor {
             ],
         });
         let pipeline = build_pipeline(device, &bind_group_layout);
+        let effects = EffectCache::new(context.clone());
         Self {
             context,
             resolution,
@@ -522,6 +597,8 @@ impl Compositor {
             sampler,
             bind_group_layout,
             pipeline,
+            effects,
+            chains: Vec::new(),
         }
     }
 
@@ -579,6 +656,35 @@ impl Compositor {
         time: RationalTime,
         source: &mut dyn FrameSource,
     ) -> FrameSummary {
+        self.render_with_effects(sequence, time, source, &mut NoEffects)
+    }
+
+    /// The compiled effect pipelines, kept between frames.
+    pub fn effect_cache(&self) -> &EffectCache {
+        &self.effects
+    }
+
+    /// [`Compositor::render`] with each clip's plugin effects run first.
+    ///
+    /// A clip's chain runs in declaration order on the clip's own picture,
+    /// before the letterbox fit, the transform and the opacity: an effect
+    /// sees the source picture at source resolution, which is what makes the
+    /// same chain look the same whatever canvas it is composited onto. Each
+    /// pass reads the previous pass's output through a ping-pong pair of
+    /// offscreen textures, and the last output is what the composite draws.
+    ///
+    /// An effect whose shader will not compile is *disabled*: it is skipped,
+    /// the rest of the chain still runs, and the failure is reported in
+    /// [`FrameSummary::effect_failures`] with the compiler's own message for
+    /// the inspector to show. A clip therefore never disappears because a
+    /// plugin shipped bad WGSL.
+    pub fn render_with_effects(
+        &mut self,
+        sequence: &Sequence,
+        time: RationalTime,
+        source: &mut dyn FrameSource,
+        effects: &mut dyn EffectSource,
+    ) -> FrameSummary {
         self.resize(sequence.settings.resolution);
 
         // Ask every layer for its picture first: the source may hand back the
@@ -586,26 +692,47 @@ impl Compositor {
         // sized once the number of drawn layers is known.
         let mut summaries = Vec::with_capacity(sequence.tracks.len());
         let mut drawn = Vec::with_capacity(sequence.tracks.len());
+        let mut effect_failures = Vec::new();
+        let mut chain = 0;
         for resolved in resolve_layers_at(sequence, time) {
             let opacity = resolved.clip.opacity.as_f32();
-            let layer = source
+            let mut layer = source
                 .frame(&resolved)
-                .filter(|frame| frame.width > 0 && frame.height > 0)
-                .map(|frame| {
-                    let placement = QuadTransform::new(
-                        self.resolution,
-                        frame.width,
-                        frame.height,
-                        &resolved.clip.transform,
-                    );
-                    (frame, placement)
-                });
+                .filter(|frame| frame.width > 0 && frame.height > 0);
+            let mut applied = 0;
+            if let Some(frame) = layer.clone() {
+                let instances = effects.effects(&resolved);
+                if !instances.is_empty() {
+                    let slot = chain;
+                    chain += 1;
+                    let outcome = self.apply_effects(slot, &frame, &instances);
+                    applied = outcome.applied;
+                    effect_failures.extend(outcome.failures.into_iter().map(|failure| {
+                        LayerEffectFailure {
+                            track: resolved.track,
+                            clip: resolved.clip_id(),
+                            failure,
+                        }
+                    }));
+                    layer = Some(outcome.frame);
+                }
+            }
+            let layer = layer.map(|frame| {
+                let placement = QuadTransform::new(
+                    self.resolution,
+                    frame.width,
+                    frame.height,
+                    &resolved.clip.transform,
+                );
+                (frame, placement)
+            });
             summaries.push(LayerSummary {
                 track: resolved.track,
                 clip: resolved.clip_id(),
                 source_time: resolved.source_time,
                 opacity,
                 placement: layer.as_ref().map(|(_, placement)| *placement),
+                effects_applied: applied,
             });
             if let Some((frame, placement)) = layer {
                 drawn.push((frame, placement, opacity));
@@ -662,7 +789,145 @@ impl Compositor {
         }
         self.context.queue().submit([encoder.finish()]);
 
-        FrameSummary { layers: summaries }
+        FrameSummary {
+            layers: summaries,
+            effect_failures,
+        }
+    }
+
+    /// Run `instances` over `frame`, in order, into the ping-pong pair at
+    /// `slot`, and hand back what the composite should draw.
+    ///
+    /// Every effect is compiled first, so a chain whose effects all fail
+    /// costs no render pass at all and the input picture passes through
+    /// untouched.
+    fn apply_effects(
+        &mut self,
+        slot: usize,
+        frame: &SourceFrame,
+        instances: &[EffectInstance],
+    ) -> EffectOutcome {
+        let mut failures = Vec::new();
+        let mut passes = Vec::with_capacity(instances.len());
+        for (index, instance) in instances.iter().enumerate() {
+            match self.effects.compile(instance.desc()) {
+                Ok(pipeline) => passes.push((pipeline, instance.uniform_bytes())),
+                Err(error) => failures.push(EffectFailure {
+                    index,
+                    effect: instance.desc().key(),
+                    code: error.code(),
+                    message: error.to_string(),
+                }),
+            }
+        }
+        if passes.is_empty() {
+            return EffectOutcome {
+                frame: frame.clone(),
+                applied: 0,
+                failures,
+            };
+        }
+        self.reserve_chain(slot, frame.width, frame.height);
+
+        let device = self.context.device();
+        // One uniform buffer for the whole chain: a uniform binding may only
+        // start on a device boundary, so the blocks are spaced out to it.
+        let alignment = u64::from(device.limits().min_uniform_buffer_offset_alignment).max(1);
+        let widest = passes
+            .iter()
+            .map(|(pipeline, _)| pipeline.uniform_size())
+            .max()
+            .unwrap_or(1);
+        let stride = widest.div_ceil(alignment) * alignment;
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("effect params"),
+            size: stride * passes.len() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let chain = &self.chains[slot];
+        let mut bound = Vec::with_capacity(passes.len());
+        for (index, (pipeline, bytes)) in passes.iter().enumerate() {
+            let offset = stride * index as u64;
+            self.context.queue().write_buffer(&uniforms, offset, bytes);
+            let input = if index == 0 {
+                &frame.view
+            } else {
+                &chain.views[(index - 1) % 2]
+            };
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("effect pass"),
+                layout: self.effects.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &uniforms,
+                            offset,
+                            size: NonZeroU64::new(pipeline.uniform_size()),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(input),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(self.effects.sampler()),
+                    },
+                ],
+            });
+            bound.push(bind_group);
+        }
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("effect chain"),
+        });
+        for (index, (pipeline, _)) in passes.iter().enumerate() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("effect pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &chain.views[index % 2],
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // The quad covers the target, so nothing of the
+                        // previous frame survives the clear either way.
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline.pipeline());
+            pass.set_bind_group(0, &bound[index], &[]);
+            pass.draw(0..4, 0..1);
+        }
+        self.context.queue().submit([encoder.finish()]);
+
+        let last = (passes.len() - 1) % 2;
+        EffectOutcome {
+            frame: SourceFrame::new(chain.views[last].clone(), frame.width, frame.height),
+            applied: passes.len(),
+            failures,
+        }
+    }
+
+    /// Make sure the chain at `slot` holds a `width` x `height` ping-pong
+    /// pair, building or rebuilding it only when the picture size changes.
+    fn reserve_chain(&mut self, slot: usize, width: u32, height: u32) {
+        while self.chains.len() <= slot {
+            self.chains
+                .push(EffectChain::new(self.context.device(), width, height));
+        }
+        let chain = &self.chains[slot];
+        if chain.width != width || chain.height != height {
+            self.chains[slot] = EffectChain::new(self.context.device(), width, height);
+        }
     }
 
     /// Copy the target back to the CPU as tightly packed RGBA rows.
@@ -770,6 +1035,67 @@ impl Compositor {
                     },
                 ],
             })
+    }
+}
+
+/// What [`Compositor::apply_effects`] made of one clip's chain.
+#[derive(Debug)]
+struct EffectOutcome {
+    /// The picture to composite: the chain's last output, or the input
+    /// itself when nothing ran.
+    frame: SourceFrame,
+    /// How many effects ran.
+    applied: usize,
+    /// Effects that were skipped, with the reason.
+    failures: Vec<EffectFailure>,
+}
+
+/// The two offscreen textures one clip's effect chain ping-pongs between.
+///
+/// Kept between frames: a steady chain allocates once and then only when the
+/// source picture changes size.
+#[derive(Debug)]
+struct EffectChain {
+    width: u32,
+    height: u32,
+    /// The views bound and rendered into. The textures behind them are held
+    /// by `_textures`; a view does not keep its texture alive.
+    views: [wgpu::TextureView; 2],
+    _textures: [wgpu::Texture; 2],
+}
+
+impl EffectChain {
+    /// Build a pair of `width` x `height` targets in the composite format.
+    fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let texture = |label| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: width.max(1),
+                    height: height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: OUTPUT_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        };
+        let textures = [texture("effect chain a"), texture("effect chain b")];
+        let views = [
+            textures[0].create_view(&wgpu::TextureViewDescriptor::default()),
+            textures[1].create_view(&wgpu::TextureViewDescriptor::default()),
+        ];
+        Self {
+            width,
+            height,
+            views,
+            _textures: textures,
+        }
     }
 }
 

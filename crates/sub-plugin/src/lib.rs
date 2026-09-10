@@ -171,6 +171,8 @@ pub mod audio;
 pub mod bindings;
 pub mod capability;
 mod convert;
+#[cfg(feature = "render")]
+pub mod effect;
 mod interchange;
 pub mod manifest;
 pub mod mcp;
@@ -295,6 +297,12 @@ pub mod codes {
     /// A plugin offers or is asked for an MCP tool its manifest does not
     /// declare.
     pub const UNDECLARED_TOOL: ErrorCode = ErrorCode::from_static("plugin.undeclared_tool");
+    /// An `effect` plugin's declaration cannot be bound and the render
+    /// layer's own code for it could not be parsed. The render codes —
+    /// `render.invalid_effect_param` and `render.invalid_effect_shader` —
+    /// are what a caller normally sees.
+    pub const INVALID_EFFECT_DECLARATION: ErrorCode =
+        ErrorCode::from_static("plugin.invalid_effect_declaration");
     /// A plugin's manifest declares an MCP tool the component does not export.
     pub const MISSING_TOOL: ErrorCode = ErrorCode::from_static("plugin.missing_tool");
     /// A plugin's exported tool schema differs from the declared one.

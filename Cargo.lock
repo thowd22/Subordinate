@@ -4921,6 +4921,7 @@ dependencies = [
  "sub-edit",
  "sub-model",
  "sub-plugin",
+ "sub-render",
  "sub-time",
  "thiserror 2.0.20",
  "toml",
@@ -4933,6 +4934,7 @@ dependencies = [
 name = "sub-render"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "pollster 1.0.1",
  "sub-model",
  "sub-time",
