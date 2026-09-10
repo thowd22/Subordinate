@@ -149,11 +149,11 @@ fn parse(args: &[String]) -> Command {
         Some("--help" | "-h" | "help") => Command::Help,
         Some("diag") => match json_flags(args) {
             Ok(pretty) => Command::Diag { pretty },
-            Err(unknown) => unknown,
+            Err(unknown) => *unknown,
         },
         Some("schema") => match json_flags(args) {
             Ok(pretty) => Command::Schema { pretty },
-            Err(unknown) => unknown,
+            Err(unknown) => *unknown,
         },
         Some("new") => parse_new(args),
         Some("open") => parse_file(args, "open", |path, pretty| Command::Open { path, pretty }),
@@ -170,13 +170,17 @@ fn parse(args: &[String]) -> Command {
 
 /// Reads the `--compact`, `--pretty` and `--json` flags the JSON-printing
 /// subcommands share, or reports the first argument that is none of them.
-fn json_flags<'a>(args: impl Iterator<Item = &'a str>) -> Result<bool, Command> {
+///
+/// The error is boxed because `Command` is a large enum: several variants
+/// carry an options struct, and Windows takes the largest of them past the
+/// size clippy's `result_large_err` allows in a `Result`.
+fn json_flags<'a>(args: impl Iterator<Item = &'a str>) -> Result<bool, Box<Command>> {
     let mut pretty = true;
     for arg in args {
         match arg {
             "--compact" => pretty = false,
             "--pretty" | "--json" => pretty = true,
-            other => return Err(Command::Unknown(other.to_owned())),
+            other => return Err(Box::new(Command::Unknown(other.to_owned()))),
         }
     }
     Ok(pretty)

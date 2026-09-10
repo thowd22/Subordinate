@@ -218,10 +218,20 @@ jobs:
       # scan sub-media promotes from (it only considers factories at MARGINAL
       # or above), so macOS CI decodes in software. Hardware decode on Apple
       # silicon is covered by the manual `verify` tasks, not here.
+      # sub-ui's snapshot tests each build their own wgpu device, and on Linux
+      # that device is Mesa's lavapipe. Several of them rendering at once (the
+      # default is one test thread per core) crashes the driver: the job dies
+      # with "signal: 11, SIGSEGV" part way through whichever sub-ui test
+      # binary got there first, with no panic and no failing assertion. Running
+      # sub-ui one test at a time keeps a single software device alive at a
+      # time; every other crate still runs fully parallel.
       - name: Test
+        shell: bash
         env:
           GST_PLUGIN_FEATURE_RANK: ${{ runner.os == 'macOS' && 'vtdec:NONE,vtdec_hw:NONE' || '' }}
-        run: cargo test --workspace
+        run: |
+          cargo test --workspace --exclude sub-ui
+          cargo test -p sub-ui -- --test-threads=1
 
       # egui_kittest writes <name>.new.png and <name>.diff.png next to the
       # committed reference whenever a UI snapshot does not match (TASK-119).
