@@ -621,8 +621,10 @@ impl fmt::Display for World {
 
 /// `[capabilities]`: everything the sandbox opens only on request.
 ///
-/// The manifest only *declares* these; granting them is the install-time
-/// approval step, and enforcement is the host's (TASK-83, TASK-84). Absent
+/// The manifest only *declares* these. Granting them is the install-time
+/// approval step and enforcement is the host's, both in the crate's
+/// `capability` module: an approval store records what the user approved, and
+/// resolving it expands the roots into the sandbox's WASI preopens. Absent
 /// keys mean "not requested", which is why parsing rejects unknown ones.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

@@ -131,10 +131,21 @@
 //! interface version the plugin was built against, its WIT worlds, the
 //! capabilities it asks for and the MCP tools it contributes. [`schema`]
 //! exports its JSON Schema, committed at `docs/schema/plugin-manifest.json`.
+//!
+//! # The capability model
+//!
+//! A manifest only *asks*. [`capability`] is what the asking turns into
+//! (docs/PLAN.md §6.1): [`ApprovalStore`] records what the user approved when
+//! the plugin was installed and refuses to load a `plugin.toml` that has
+//! changed since, and [`ResolvedCapabilities`] expands the approved roots —
+//! `$PROJECT` and `$PLUGIN_DATA` — into the WASI [`Preopen`]s the sandbox opens
+//! and the gates every host function checks before it reaches a file, a socket
+//! or a shader compiler on a plugin's behalf. Nothing is granted by default.
 
 pub mod analyzer;
 pub mod audio;
 pub mod bindings;
+pub mod capability;
 mod convert;
 mod interchange;
 pub mod manifest;
@@ -142,6 +153,10 @@ pub mod mcp;
 pub mod menu;
 pub mod schema;
 
+pub use capability::{
+    Access, Approval, ApprovalStatus, ApprovalStore, ManifestDigest, PathVars, Preopen,
+    ResolvedCapabilities,
+};
 pub use manifest::{MANIFEST_FILE_NAME, Manifest, PluginId, World};
 
 pub use analyzer::{AnalysisContext, AnalysisJobs, Analyzer};
@@ -266,6 +281,35 @@ pub mod codes {
     pub const INVALID_MANIFEST: ErrorCode = ErrorCode::from_static("plugin.invalid_manifest");
     /// A `plugin.toml` could not be read from disk.
     pub const MANIFEST_UNREADABLE: ErrorCode = ErrorCode::from_static("plugin.manifest_unreadable");
+    /// A capability root is not written against `$PROJECT` or `$PLUGIN_DATA`,
+    /// or one of its segments is empty, relative or carries a NUL.
+    pub const INVALID_CAPABILITY_PATH: ErrorCode =
+        ErrorCode::from_static("plugin.invalid_capability_path");
+    /// A capability root names a path variable the host does not define.
+    pub const UNKNOWN_PATH_VARIABLE: ErrorCode =
+        ErrorCode::from_static("plugin.unknown_path_variable");
+    /// A capability root names `$PROJECT` while no project is open.
+    pub const UNSET_PATH_VARIABLE: ErrorCode = ErrorCode::from_static("plugin.unset_path_variable");
+    /// A plugin reached for a path, the network or shader compilation it was
+    /// not granted. The `capability` detail names which.
+    pub const CAPABILITY_DENIED: ErrorCode = ErrorCode::from_static("plugin.capability_denied");
+    /// A granted directory could not be opened for the sandbox.
+    pub const PREOPEN_FAILED: ErrorCode = ErrorCode::from_static("plugin.preopen_failed");
+    /// A plugin was loaded with no recorded install-time approval.
+    pub const NOT_APPROVED: ErrorCode = ErrorCode::from_static("plugin.not_approved");
+    /// A plugin's manifest changed since the user approved it, so the recorded
+    /// grant no longer applies and it must be approved again.
+    pub const APPROVAL_STALE: ErrorCode = ErrorCode::from_static("plugin.approval_stale");
+    /// The recorded approvals are not JSON this host can read.
+    pub const INVALID_APPROVALS: ErrorCode = ErrorCode::from_static("plugin.invalid_approvals");
+    /// The recorded approvals could not be read from disk.
+    pub const APPROVALS_UNREADABLE: ErrorCode =
+        ErrorCode::from_static("plugin.approvals_unreadable");
+    /// The approvals could not be written to disk.
+    pub const APPROVALS_UNWRITABLE: ErrorCode =
+        ErrorCode::from_static("plugin.approvals_unwritable");
+    /// A manifest digest is not 64 hex digits.
+    pub const INVALID_DIGEST: ErrorCode = ErrorCode::from_static("plugin.invalid_digest");
     /// An audio block format has a zero frame count, channel count or sample
     /// rate.
     pub const INVALID_BLOCK_FORMAT: ErrorCode =
