@@ -359,6 +359,7 @@ mod tests {
                 "bin.remove",
                 "bin.rename",
                 "clip.add",
+                "clip.insert",
                 "clip.move",
                 "clip.remove",
                 "clip.ripple_delete",

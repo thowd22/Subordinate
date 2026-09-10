@@ -89,8 +89,8 @@ pub use autosave::{
 };
 pub use bus::{DEFAULT_EVENT_CAPACITY, EventBus, EventReceiver};
 pub use clip::{
-    AddClip, MoveClip, RemoveClip, RestoreTrackItems, RippleDelete, SplitClip, TrackItems,
-    TrimClipIn, TrimClipOut,
+    AddClip, InsertClip, MoveClip, RemoveClip, RestoreTrackItems, RippleDelete, SplitClip,
+    TrackItems, TrimClipIn, TrimClipOut,
 };
 pub use command::{AnyCommand, BoxedCommand, Command, CommandEnvelope, CommandRegistry, Inverse};
 pub use commands::{builtin_registry, register_builtin};

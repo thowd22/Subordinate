@@ -751,6 +751,46 @@
       ],
       "type": "object"
     },
+    "InsertClip": {
+      "additionalProperties": false,
+      "description": "Puts a clip on a track at a timeline position, pushing what follows later.\n\nThis is the rippling counterpart of [`AddClip`]: nothing on the track is\noverwritten. Everything starting at or after `start` moves later by the\nclip's duration, and a clip straddling `start` is split there first so the\nhalf that follows the insert point rides the ripple with the rest. The head\nof that split keeps the original identity, exactly as [`SplitClip`] does.\n\nOnly this track ripples. An insert that must keep several tracks in step\nissues one command per track inside a history group, as the timeline does\nfor a drag.",
+      "properties": {
+        "clip": {
+          "$ref": "#/$defs/Clip",
+          "description": "The clip itself."
+        },
+        "sequence": {
+          "$ref": "#/$defs/SequenceId",
+          "description": "The sequence holding the track."
+        },
+        "start": {
+          "$ref": "#/$defs/RationalTime",
+          "description": "Where the clip starts, in sequence time."
+        },
+        "tail_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClipId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The identity given to the tail of a clip the insert point divides; a\nfresh one when absent."
+        },
+        "track": {
+          "$ref": "#/$defs/TrackId",
+          "description": "The track the clip lands on."
+        }
+      },
+      "required": [
+        "sequence",
+        "track",
+        "start",
+        "clip"
+      ],
+      "type": "object"
+    },
     "InsertMedia": {
       "additionalProperties": false,
       "description": "Puts a whole media item back where it was.\n\nThis is the inverse of [`RemoveMedia`], and therefore what redo runs after\nan [`ImportMedia`] is undone. Unlike [`ImportMedia`] it restores the item's\nposition in [`Project::media`] and in its bin, so the project file comes\nback byte for byte.",
@@ -2572,6 +2612,17 @@
       "name": "clip.add",
       "params": {
         "$ref": "#/$defs/AddClip"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Place a clip on a track at a timeline position, rippling what follows later.",
+      "kind": "command",
+      "name": "clip.insert",
+      "params": {
+        "$ref": "#/$defs/InsertClip"
       },
       "result": {
         "$ref": "#/$defs/AppliedResult"
