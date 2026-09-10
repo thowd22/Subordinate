@@ -25,6 +25,9 @@ sub-model = { version = "0.1.0", path = "../sub-model" }
 sub-time = { version = "0.1.0", path = "../sub-time" }
 wasmtime = { version = "48", default-features = false, features = [
     "component-model",
+    # The host compiles plugin components in-process, so it needs a compiler,
+    # and fuel metering and epoch interruption are code the compiler emits.
+    "cranelift",
     "runtime",
     "std",
 ] }
@@ -33,9 +36,18 @@ wasmtime = { version = "48", default-features = false, features = [
 # component-model preview 2 context the plugin worlds are built against.
 wasmtime-wasi = { version = "48", default-features = false, features = ["p2"] }
 
+[features]
+# Test-only: makes the build script compile the `tests/guests` components for
+# `wasm32-wasip2`. The crate switches it on for its own tests through the
+# dev-dependency below, so a plain build of the library compiles no WASM.
+test-guests = []
+
 [dev-dependencies]
 sub-command = { version = "0.1.0", path = "../sub-command" }
 sub-edit = { version = "0.1.0", path = "../sub-edit" }
+# Self dev-dependency: the only way to turn a feature on for this crate's own
+# test targets and nothing else.
+sub-plugin = { version = "0.1.0", path = ".", features = ["test-guests"] }
 
 [lints]
 workspace = true
