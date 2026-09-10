@@ -6,11 +6,18 @@
 //! synthesised here, and the actions they raise can be applied through the
 //! Command API and undone. That round trip is the contract of the panel: it
 //! mutates nothing itself, and everything it asks for is undoable.
+//!
+//! The last few tests drive the same panel through the shared `egui_kittest`
+//! harness instead: they click by accessibility label, and they hold the two
+//! view modes to committed snapshots.
+
+mod support;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use eframe::egui::{self, Pos2, Rect};
+use egui_kittest::kittest::Queryable;
 use sub_edit::History;
 use sub_edit::commands::{CreateBin, MoveBin, MoveToBin, RelinkMedia, RenameBin};
 use sub_model::media::{StreamInfo, VideoStream};
@@ -501,4 +508,99 @@ fn the_tree_collapses_and_the_breadcrumb_names_the_open_folder() {
     // disappears on the next frame.
     let (_, shapes) = frame(&ctx, &mut panel, &project, Vec::new(), Vec::new());
     assert!(!texts(&shapes).iter().any(|text| text == "Takes"));
+}
+
+/// The sample project's `Interviews` folder, which holds an item that is
+/// online and carries its metadata.
+fn fixture_interviews(project: &Project) -> BinId {
+    project
+        .root_bin
+        .children
+        .first()
+        .expect("the sample project has folders")
+        .id
+}
+
+#[test]
+fn the_list_view_matches_its_snapshot() {
+    // The root folder: the metadata columns over an offline item, which is
+    // the one row the list draws differently.
+    if !support::can_render() {
+        return;
+    }
+    let project = support::fixture_project();
+    let mut panel = MediaBinPanel::new();
+    panel.mode = BinViewMode::List;
+    let mut harness = support::panel_harness(|ui| {
+        panel.ui(ui, &project);
+    });
+    harness.run();
+    support::snapshot(&mut harness, "media_bin_list");
+}
+
+#[test]
+fn the_grid_view_matches_its_snapshot() {
+    // A folder deeper in, so the breadcrumb has something to say and the tile
+    // has a duration and a resolution to draw.
+    if !support::can_render() {
+        return;
+    }
+    let project = support::fixture_project();
+    let mut panel = MediaBinPanel::new();
+    panel.mode = BinViewMode::Grid;
+    panel.open(fixture_interviews(&project));
+    let mut harness = support::panel_harness(|ui| {
+        panel.ui(ui, &project);
+    });
+    harness.run();
+    support::snapshot(&mut harness, "media_bin_grid");
+}
+
+#[test]
+fn renaming_a_folder_through_the_harness_applies_and_undoes_a_command() {
+    let project = support::fixture_project();
+    let interviews = fixture_interviews(&project);
+    let original = project.root_bin.children[0].name.clone();
+
+    let mut panel = MediaBinPanel::new();
+    panel.open(interviews);
+    let mut harness = support::panel_harness_state(
+        (panel, project, History::new()),
+        |ui, (panel, project, history)| {
+            // The panel mutates nothing itself: what it raises is applied
+            // here, through the Command API, exactly as the app does it.
+            for action in panel.ui(ui, project) {
+                if let MediaBinAction::RenameBin { bin, name } = action {
+                    history
+                        .apply(project, RenameBin::new(bin, name))
+                        .expect("the rename applies");
+                }
+            }
+        },
+    );
+    harness.run();
+
+    // The toolbar carries two fields: the new-folder name, then the rename.
+    let field = harness
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .nth(1)
+        .expect("the rename field is in the tree");
+    field.click();
+    harness.run();
+    harness
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .nth(1)
+        .expect("the rename field is still there")
+        .type_text("Selects");
+    harness.run();
+    harness.get_by_label("Rename").click();
+    harness.run();
+
+    let (_, project, history) = harness.state_mut();
+    assert_eq!(
+        project.root_bin.children[0].name, "Selects",
+        "the folder took the typed name"
+    );
+    history.undo(project).expect("the rename undoes");
+    assert_eq!(project.root_bin.children[0].name, original);
 }

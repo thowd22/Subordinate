@@ -4,8 +4,15 @@
 //! painting — with no window and no GPU, so a click on the mute toggle can be
 //! synthesised here and the action it raises can be applied through the
 //! Command API and undone, which is the whole contract of the header column.
+//!
+//! The last two tests go through the shared `egui_kittest` harness instead:
+//! they click the toggles by their accessibility labels, and they hold a
+//! column carrying a muted track and a locked one to a committed snapshot.
+
+mod support;
 
 use eframe::egui::{self, Pos2, Rect, Vec2};
+use egui_kittest::kittest::Queryable;
 use sub_audio::MeterLevels;
 use sub_edit::commands::SetClipParams;
 use sub_edit::{Command, History, codes};
@@ -15,7 +22,7 @@ use sub_model::{Clip, MediaItem, MediaPath, Project, Sequence, Track, TrackItem,
 use sub_model::{ColorTags, media::StreamInfo, media::VideoStream};
 use sub_time::{Rational, RationalTime, TimeRange};
 use sub_ui::timeline_panel::TimelinePanel;
-use sub_ui::track_header::{HeaderLayout, TrackAction};
+use sub_ui::track_header::{HeaderLayout, TrackAction, TrackHeaderState};
 use sub_ui::{ClipMediaKind, clip_edits_allowed};
 
 /// The sequence timebase every test here uses.
@@ -571,4 +578,90 @@ fn renaming_from_the_menu_types_a_new_name_and_commits_it() {
     assert_eq!(project.sequences[0].tracks[0].name, "Dialogue");
     history.undo(&mut project).expect("undo");
     assert_eq!(project.sequences[0].tracks[0].name, "V1");
+}
+
+/// The size one header is painted at in the harness tests, in points.
+const HARNESS_HEADER: Vec2 = Vec2::new(180.0, 56.0);
+
+/// Paints `tracks` as a header column down the top left of `ui`, returning the
+/// action the frame's input asked for.
+fn header_column(
+    ui: &mut egui::Ui,
+    state: &mut TrackHeaderState,
+    tracks: &[Track],
+) -> Option<TrackAction> {
+    let mut action = None;
+    let mut top = ui.max_rect().min;
+    for (index, track) in tracks.iter().enumerate() {
+        let rect = Rect::from_min_size(top, HARNESS_HEADER);
+        action = state.ui(ui, rect, track, index, tracks.len()).or(action);
+        top.y += HARNESS_HEADER.y;
+    }
+    action
+}
+
+#[test]
+fn the_header_column_matches_its_snapshot_with_a_muted_and_a_locked_track() {
+    if !support::can_render() {
+        return;
+    }
+    let project = support::fixture_project();
+    let mut sequence = support::fixture_sequence(&project).clone();
+    assert!(
+        sequence.tracks.len() >= 2,
+        "the sample project's first sequence has tracks to mute and lock"
+    );
+    sequence.tracks[0].muted = true;
+    sequence.tracks[1].locked = true;
+
+    let mut state = TrackHeaderState::new();
+    let mut harness = support::panel_harness(|ui| {
+        header_column(ui, &mut state, &sequence.tracks);
+    });
+    harness.run();
+    support::snapshot(&mut harness, "track_headers_muted_and_locked");
+}
+
+#[test]
+fn the_harness_toggles_mute_and_lock_through_the_command_api() {
+    let (project, sequence) = scene(1);
+    let sequence_id = sequence.id;
+
+    let mut harness = support::panel_harness_state(
+        (TrackHeaderState::new(), project, History::new()),
+        move |ui, (state, project, history)| {
+            // Painting reads the project and applying it writes to it, so the
+            // tracks are taken first and the action applied afterwards.
+            let tracks = project.sequences[0].tracks.clone();
+            if let Some(action) = header_column(ui, state, &tracks) {
+                history
+                    .apply_boxed(project, action.into_command(sequence_id))
+                    .expect("the header's action applies");
+            }
+        },
+    );
+    harness.run();
+
+    harness.get_by_label("M").click();
+    harness.run();
+    assert!(
+        harness.state().1.sequences[0].tracks[0].muted,
+        "clicking the mute toggle muted the track through a command"
+    );
+
+    harness.get_by_label("L").click();
+    harness.run();
+    assert!(
+        harness.state().1.sequences[0].tracks[0].locked,
+        "clicking the lock toggle locked it"
+    );
+
+    let (_, project, history) = harness.state_mut();
+    history.undo(project).expect("the lock undoes");
+    history.undo(project).expect("the mute undoes");
+    let track = &project.sequences[0].tracks[0];
+    assert!(
+        !track.muted && !track.locked,
+        "undo put both flags back where they were"
+    );
 }
