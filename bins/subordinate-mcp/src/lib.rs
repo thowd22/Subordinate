@@ -11,6 +11,10 @@
 //!   schemas cannot drift from the methods they call.
 //! - [`backend`] — finding the running editor through its lock file, or
 //!   launching `subordinate-cli serve` when none is running.
+//! - [`resources`] — the project as readable resources: `project://current`,
+//!   `sequence://{id}` and `media://{id}`, with the caching hints that let a
+//!   client hold on to them.
+//! - [`watch`] — the editor's change events, carried to resource subscribers.
 //! - [`bridge`] — the [`bridge::Bridge`] itself, an `rmcp` server handler.
 //!
 //! ```no_run
@@ -34,11 +38,15 @@
 
 pub mod backend;
 pub mod bridge;
+pub mod resources;
 pub mod tools;
+pub mod watch;
 
 pub use backend::{Backend, Options};
 pub use bridge::Bridge;
+pub use resources::Resources;
 pub use tools::ToolSet;
+pub use watch::Watch;
 
 /// The error codes this binary produces.
 ///
@@ -55,6 +63,10 @@ pub mod codes {
     pub const LAUNCH_FAILED: ErrorCode = ErrorCode::from_static("mcp.launch_failed");
     /// The MCP session itself failed.
     pub const SESSION_FAILED: ErrorCode = ErrorCode::from_static("mcp.session_failed");
+    /// A resource URI names nothing this bridge serves.
+    pub const UNKNOWN_RESOURCE: ErrorCode = ErrorCode::from_static("mcp.unknown_resource");
+    /// The editor's change events could not be watched for resource updates.
+    pub const WATCH_FAILED: ErrorCode = ErrorCode::from_static("mcp.watch_failed");
 }
 
 #[cfg(test)]
@@ -68,6 +80,8 @@ mod tests {
             codes::CLI_NOT_FOUND,
             codes::LAUNCH_FAILED,
             codes::SESSION_FAILED,
+            codes::UNKNOWN_RESOURCE,
+            codes::WATCH_FAILED,
         ] {
             assert_eq!(code.domain(), "mcp");
             assert_eq!(
