@@ -16,6 +16,7 @@ pub mod media_bin;
 pub mod media_import;
 pub mod meter;
 pub mod plugins;
+pub mod plugins_panel;
 pub mod relink_dialog;
 pub mod sequence_tabs;
 pub mod shortcuts;
@@ -48,6 +49,9 @@ pub use meter::{
     PEAK_HOLD_SECONDS, WARN_COLOR, amplitude_fraction, amplitude_to_db, db_fraction,
 };
 pub use plugins::{EMPTY_LABEL, MENU_TITLE, PluginMenu, PluginMenuEntry, plugins_menu_ui};
+pub use plugins_panel::{
+    LoadStatus, PluginAction, PluginOutcome, PluginRow, PluginsPanel, open_folder,
+};
 pub use relink_dialog::{
     RELINK_JOB_KIND, RelinkDialog, is_certain, pick_replacement_file, pick_search_folder,
 };
@@ -119,4 +123,9 @@ pub mod codes {
     /// holds. The command keeps its menu entry and loses its shortcut.
     pub const PLUGIN_SHORTCUT_CONFLICT: ErrorCode =
         ErrorCode::from_static("ui.plugin_shortcut_conflict");
+
+    /// A plugin's install directory could not be handed to the platform's
+    /// file manager.
+    pub const PLUGIN_FOLDER_UNOPENABLE: ErrorCode =
+        ErrorCode::from_static("ui.plugin_folder_unopenable");
 }
