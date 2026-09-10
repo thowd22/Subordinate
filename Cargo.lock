@@ -4915,6 +4915,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sub-command",
  "sub-core",
  "sub-edit",
  "sub-model",

@@ -12,6 +12,12 @@
 //! therefore exactly one Rust `Error`, one `ProjectId` and one `Host` trait
 //! across all three worlds, and one `EffectDesc` across both effect worlds.
 //!
+//! The `importer` and `exporter` worlds get one submodule each. Both import
+//! `command-api`, so their bindgen invocations map that interface and `types`
+//! onto the ones generated here with `with`: a host implements the one `Host`
+//! trait and links it into any of the three worlds, and a `WitError` from an
+//! importer is the same Rust type as a `WitError` from a command plugin.
+//!
 //! The macro expansion carries no doc comments of its own beyond the ones
 //! written in the WIT, and its `Vec::from_raw_parts` lifting code is not
 //! `clippy::pedantic` clean, so the two lint groups are switched off for the
@@ -117,5 +123,33 @@ pub mod audio {
             "subordinate:plugin/command-api": super::subordinate::plugin::command_api,
         },
         additional_derives: [PartialEq],
+    });
+}
+
+/// The `importer` world: a plugin that turns a file into media items and
+/// sequences for the host to apply through the Command API.
+pub mod importer {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "importer",
+        additional_derives: [PartialEq, Eq, Hash],
+        with: {
+            "subordinate:plugin/types": crate::bindings::subordinate::plugin::types,
+            "subordinate:plugin/command-api": crate::bindings::subordinate::plugin::command_api,
+        },
+    });
+}
+
+/// The `exporter` world: a plugin that contributes export presets and an
+/// optional post-export hook.
+pub mod exporter {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "exporter",
+        additional_derives: [PartialEq, Eq, Hash],
+        with: {
+            "subordinate:plugin/types": crate::bindings::subordinate::plugin::types,
+            "subordinate:plugin/command-api": crate::bindings::subordinate::plugin::command_api,
+        },
     });
 }
