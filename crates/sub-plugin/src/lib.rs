@@ -24,7 +24,29 @@
 //! - `log(level, message)` — a line into the host's `tracing` subscriber,
 //!   tagged with the plugin id.
 //!
-//! [`bindings`] holds the generated host side of that world; [`convert`] maps
+//! # The effect worlds
+//!
+//! A WASM guest cannot touch the GPU and per-pixel loops in WASM are far too
+//! slow at picture size, so a GPU effect is *declared*, not executed, by its
+//! plugin (decision-6). The `effect` world exports one function,
+//! `describe() -> effect-desc`, which returns a parameter schema plus WGSL
+//! source and the name of its fragment entry point; the core compiles the
+//! shader, caches it by hash, builds the uniform struct from the declared
+//! parameters and runs it in the compositor (TASK-87). `describe` is called at
+//! load time and after a hot reload, never per frame, and per-clip parameter
+//! values live in the project model where ordinary undoable commands edit them.
+//!
+//! A parameter is a float, an int, a bool, a colour or one of a closed set of
+//! choices, each carrying its range and its default: see [`WitParamKind`].
+//!
+//! The `effect-cpu` world is `effect` plus an optional `process-cpu` export.
+//! **It is slow**: a whole frame is copied into the sandbox, looped over in
+//! WASM and copied back, so it is for small buffers only — thumbnails,
+//! analysis passes, test fixtures — and never for playback or export at
+//! picture size. A plugin that only ships a shader targets `effect` and
+//! exports nothing else.
+//!
+//! [`bindings`] holds the generated host side of those worlds; [`convert`] maps
 //! its records onto [`sub_core::SubError`], [`sub_time::RationalTime`] and the
 //! `sub_model` identifiers, so an implementation of the generated `Host` trait
 //! (TASK-84) never hand-builds a record.
@@ -47,6 +69,16 @@ pub mod bindings;
 mod convert;
 
 pub use bindings::Command;
+pub use bindings::effect::Effect;
+pub use bindings::effect::subordinate::plugin::effect_types;
+pub use bindings::effect::subordinate::plugin::effect_types::{
+    BoolParam as WitBoolParam, Color as WitColor, ColorParam as WitColorParam,
+    EffectDesc as WitEffectDesc, EnumParam as WitEnumParam, EnumVariant as WitEnumVariant,
+    FloatParam as WitFloatParam, Frame as WitFrame, IntParam as WitIntParam,
+    ParamBinding as WitParamBinding, ParamDesc as WitParamDesc, ParamKind as WitParamKind,
+    ParamValue as WitParamValue, PixelFormat as WitPixelFormat,
+};
+pub use bindings::effect_cpu::EffectCpu;
 pub use bindings::subordinate::plugin::command_api;
 pub use bindings::subordinate::plugin::command_api::{
     ClipMetadata, LogLevel, MarkerMetadata, ProjectMetadata, Resolution as WitResolution,
