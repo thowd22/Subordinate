@@ -412,6 +412,13 @@ impl SubordinateApp {
             } else if action == Action::ToggleSnapping {
                 let on = self.timeline.toggle_snapping();
                 log::debug!("timeline snapping is now {}", if on { "on" } else { "off" });
+            } else if action == Action::AddMarker {
+                // The playhead the marker lands on is the viewer's, which the
+                // timeline is handed before every frame; the panel raises the
+                // add as a command on the next one.
+                self.timeline.set_playhead(self.viewer.state.playhead());
+                let marker = self.timeline.add_marker_at_playhead();
+                log::debug!("marker {marker} dropped at the playhead");
             } else {
                 log::debug!("shortcut {} is not wired up yet", action.id());
             }
@@ -622,6 +629,11 @@ impl SubordinateApp {
                         group.label,
                         group.len()
                     );
+                }
+                for action in response.marker_actions {
+                    // Every marker gesture is one undoable command; they
+                    // reach the engine with the rest of the panel's actions.
+                    log::debug!("marker action is not wired up yet: {action:?}");
                 }
             }
             Panel::Inspector => {

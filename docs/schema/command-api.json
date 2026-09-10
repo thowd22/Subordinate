@@ -1539,6 +1539,30 @@
       ],
       "type": "object"
     },
+    "RenameMarker": {
+      "additionalProperties": false,
+      "description": "Gives a marker a new name.\n\nRenaming in place on the ruler is this command. The marker keeps its\nidentifier, its span and its note, so undo puts the old name back on the\nsame marker rather than on one that merely looks like it.\n\n```\nuse sub_edit::History;\nuse sub_edit::commands::{AddMarker, MarkerTarget, RenameMarker};\nuse sub_model::{Marker, Project, Sequence, SequenceSettings};\nuse sub_time::{Rational, RationalTime, TimeRange};\n\nlet mut project = Project::new(\"Doc cut\");\nlet sequence = Sequence::new(\"Main\", SequenceSettings::default());\nlet sequence_id = sequence.id;\nproject.sequences.push(sequence);\n\nlet at = RationalTime::new(48, Rational::FPS_24);\nlet marker = Marker::new(\"Marker\", TimeRange::empty_at(at));\nlet marker_id = marker.id;\nlet target = MarkerTarget::sequence(sequence_id);\nlet mut history = History::new();\nhistory\n    .apply(&mut project, AddMarker::new(target, marker))\n    .unwrap();\nhistory\n    .apply(&mut project, RenameMarker::new(target, marker_id, \"Reshoot\"))\n    .unwrap();\nassert_eq!(project.sequences[0].markers[0].name, \"Reshoot\");\n\nhistory.undo(&mut project).unwrap();\nassert_eq!(project.sequences[0].markers[0].name, \"Marker\");\n```",
+      "properties": {
+        "marker": {
+          "$ref": "#/$defs/MarkerId",
+          "description": "The marker to rename."
+        },
+        "name": {
+          "description": "The name it takes on.",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/MarkerTarget",
+          "description": "What the marker is anchored to."
+        }
+      },
+      "required": [
+        "target",
+        "marker",
+        "name"
+      ],
+      "type": "object"
+    },
     "RenameSequence": {
       "additionalProperties": false,
       "description": "Renames a sequence.",
@@ -2768,6 +2792,17 @@
       "name": "marker.remove",
       "params": {
         "$ref": "#/$defs/RemoveMarker"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Rename a marker.",
+      "kind": "command",
+      "name": "marker.rename",
+      "params": {
+        "$ref": "#/$defs/RenameMarker"
       },
       "result": {
         "$ref": "#/$defs/AppliedResult"

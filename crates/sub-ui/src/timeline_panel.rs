@@ -17,14 +17,15 @@
 //! `Painter` demands screen coordinates.
 
 use eframe::egui::{
-    Align2, Color32, Context, CornerRadius, FontId, Painter, Pos2, Rect, Response, Sense, Stroke,
-    StrokeKind, Ui, Vec2, Visuals, pos2,
+    Align2, Color32, Context, CornerRadius, FontId, Key, Painter, Pos2, Rect, Response, Sense,
+    Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder, Vec2, Visuals, pos2,
 };
-use sub_model::{Clip, MediaItem, Project, Sequence, Track, TrackKind};
+use sub_model::{Clip, Marker, MarkerId, MediaItem, Project, Sequence, Track, TrackKind};
 use sub_time::{Rational, RationalTime, TimeRange, Timecode, TimecodeRate};
 
+use crate::markers::{self, DEFAULT_MARKER_NAME, MarkerAction, MarkerState};
 use crate::selection::{ClipRef, MoveGroup, MoveRefusal, Selection, clips_in_marquee, plan_move};
-use crate::snapping::{self, SnapCandidate, SnapSettings};
+use crate::snapping::{self, SnapCandidate, SnapKind, SnapSettings};
 use crate::thumbnails::{ThumbnailCache, ZoomBucket, tile_time};
 use crate::timeline::{TimelineView, TrackLayout, ZoomLevel};
 use crate::track_header::{TrackAction, TrackHeaderState, empty_column_menu};
@@ -104,6 +105,43 @@ const PLAYHEAD_HEAD_HEIGHT: f32 = 7.0;
 
 /// The colour a snapped edge is flagged in while a scrub is landing on it.
 const SNAP_COLOR: Color32 = Color32::from_rgb(240, 208, 96);
+
+/// How wide a marker's flag on the ruler is, in points.
+///
+/// Wide enough to aim a pointer at without covering the timecode label that
+/// may sit beside it.
+pub const MARKER_FLAG_WIDTH: f32 = 9.0;
+
+/// How tall a marker's flag on the ruler is, in points.
+///
+/// The flag hangs from the bottom of the ruler, so it never collides with the
+/// playhead's head, which sits at the top.
+pub const MARKER_FLAG_HEIGHT: f32 = 11.0;
+
+/// How far either side of a marker's flag still counts as grabbing it, in
+/// points.
+const MARKER_GRAB_SLACK: f32 = 3.0;
+
+/// How much of its colour a marker's guide line down the lanes keeps.
+///
+/// Faint on purpose: a marker annotates the edit rather than being part of
+/// it, so its line must not read as a cut.
+const MARKER_GUIDE_ALPHA: u8 = 70;
+
+/// How wide the inline rename editor over a marker is, in points.
+const MARKER_RENAME_WIDTH: f32 = 110.0;
+
+/// The gap between a marker's flag and the name painted beside it, in points.
+const MARKER_NAME_GAP: f32 = 3.0;
+
+/// The colour a marker's name is painted in, over the ruler.
+const MARKER_NAME_COLOR: Color32 = Color32::from_rgb(226, 226, 230);
+
+/// How thick the outline around the selected marker's flag is, in points.
+const MARKER_SELECTED_WIDTH: f32 = 1.5;
+
+/// How tall the bar under a span marker is, in points.
+const MARKER_SPAN_HEIGHT: f32 = 3.0;
 
 /// The denominator a wheel zoom factor is approximated over.
 const ZOOM_RATIO_DENOMINATOR: u32 = 4096;
@@ -535,6 +573,21 @@ pub struct TimelinePanel {
     /// preview it; `Err` is why it will not be, which is what makes a refused
     /// drag visible before the button comes up.
     drag_plan: Option<Result<MoveGroup, MoveRefusal>>,
+    /// The ruler's markers: what is selected, dragged or being renamed.
+    marker_state: MarkerState,
+    /// Whether the pointer press in progress was claimed by a marker, in
+    /// which case it is a marker gesture and not a scrub.
+    marker_press: bool,
+    /// How far into the flag the marker being dragged was grabbed, in points.
+    ///
+    /// A flag is wide enough to aim at, so without this a marker would jump
+    /// by however far from its head the pointer came down. Pixels rather than
+    /// time on purpose: it is a property of the grip, not of the edit, and it
+    /// stays the same width as the view zooms.
+    marker_grab_offset: f32,
+    /// Marker actions raised from outside a painted frame — the `M` shortcut
+    /// — waiting for the next frame to report them.
+    pending_markers: Vec<MarkerAction>,
 }
 
 /// A gesture that started in the lanes and is still under the pointer.
@@ -585,6 +638,12 @@ pub struct TimelineResponse {
     pub clip_move: Option<MoveGroup>,
     /// Why the drag under the pointer cannot become an edit, while it cannot.
     pub refused: Option<MoveRefusal>,
+    /// The marker actions raised this frame, in the order they were raised.
+    ///
+    /// Every one of them is exactly one command
+    /// ([`MarkerAction::into_command`]), so dropping, dragging, renaming and
+    /// deleting a marker are all undoable.
+    pub marker_actions: Vec<MarkerAction>,
 }
 
 impl TimelinePanel {
@@ -610,6 +669,10 @@ impl TimelinePanel {
             gesture: None,
             marquee_base: Vec::new(),
             drag_plan: None,
+            marker_state: MarkerState::new(),
+            marker_press: false,
+            marker_grab_offset: 0.0,
+            pending_markers: Vec::new(),
         }
     }
 
@@ -653,6 +716,73 @@ impl TimelinePanel {
         match self.gesture {
             Some(Gesture::Marquee { origin, current }) => Some(Rect::from_two_pos(origin, current)),
             _ => None,
+        }
+    }
+
+    /// The ruler's marker state: what is selected, dragged or being renamed.
+    #[must_use]
+    pub const fn marker_state(&self) -> &MarkerState {
+        &self.marker_state
+    }
+
+    /// The marker state, mutably, for the selection to be set from elsewhere.
+    pub const fn marker_state_mut(&mut self) -> &mut MarkerState {
+        &mut self.marker_state
+    }
+
+    /// Asks for a marker at the playhead, as the `M` shortcut does.
+    ///
+    /// The marker is minted here and raised on the next painted frame as a
+    /// [`MarkerAction::Add`] in [`TimelineResponse::marker_actions`], so a
+    /// shortcut and a gesture reach the Command API by the same road. The new
+    /// identifier is returned so the caller can follow it.
+    ///
+    /// The playhead is view state, so nothing is added to the project until
+    /// the caller applies the command.
+    pub fn add_marker_at_playhead(&mut self) -> MarkerId {
+        let action = MarkerAction::add_at(self.playhead, DEFAULT_MARKER_NAME);
+        let id = action.marker();
+        self.pending_markers.push(action);
+        id
+    }
+
+    /// Where the flag of a marker starting at `time` sits on the ruler.
+    ///
+    /// `None` before the first painted frame, when the panel does not yet
+    /// know where it is.
+    #[must_use]
+    pub fn marker_flag_rect(&self, time: RationalTime) -> Option<Rect> {
+        let layout = self.last_layout?;
+        let x = layout.content.left() + self.view.pixel_of(time);
+        Some(Rect::from_min_size(
+            pos2(x, layout.ruler.bottom() - MARKER_FLAG_HEIGHT),
+            Vec2::new(MARKER_FLAG_WIDTH, MARKER_FLAG_HEIGHT),
+        ))
+    }
+
+    /// The marker whose flag `pos` lands on, if any.
+    ///
+    /// Later markers win: they are painted over earlier ones, so what the eye
+    /// says is on top is what the pointer grabs.
+    #[must_use]
+    pub fn marker_at(&self, sequence: &Sequence, pos: eframe::egui::Pos2) -> Option<MarkerId> {
+        sequence.markers.iter().rev().find_map(|marker| {
+            let rect = self
+                .marker_flag_rect(self.shown_start(marker))?
+                .expand2(Vec2::new(MARKER_GRAB_SLACK, 0.0));
+            rect.contains(pos).then_some(marker.id)
+        })
+    }
+
+    /// Where a marker's head is drawn, which during a drag is where the
+    /// pointer has taken it rather than where the project still has it.
+    fn shown_start(&self, marker: &Marker) -> RationalTime {
+        if self.marker_state.dragging() == Some(marker.id) {
+            self.marker_state
+                .drag_time()
+                .unwrap_or_else(|| marker.marked_range.start())
+        } else {
+            marker.marked_range.start()
         }
     }
 
@@ -980,6 +1110,7 @@ impl TimelinePanel {
             let input = wheel_input(ui, &layout);
             self.apply_wheel(input, layout.content.height(), tracks);
         }
+        let mut marker_actions = self.handle_markers(ui, &response, &layout, sequence);
         let seek = self.handle_scrub(&response, &layout, sequence);
         let shift = ui.input(|input| input.modifiers.shift);
         let lanes = if seek.is_some() {
@@ -1005,8 +1136,10 @@ impl TimelinePanel {
         self.paint_lanes(&painter, &layout, &visuals, project, sequence, &mut strips);
         self.thumbnails = thumbnails;
         self.paint_gesture(&painter, &layout, sequence);
+        self.paint_markers(&painter, &layout, sequence);
         self.paint_playhead(&painter, &layout);
         let actions = self.header_controls(ui, &layout, sequence);
+        marker_actions.extend(self.marker_rename_editor(ui, sequence));
         TimelineResponse {
             response,
             actions,
@@ -1015,6 +1148,251 @@ impl TimelinePanel {
             selection_changed: lanes.selection_changed,
             clip_move: lanes.clip_move,
             refused: lanes.refused,
+            marker_actions,
+        }
+    }
+
+    /// Turns a press, a drag, a double-click or a `Delete` on a marker into
+    /// the command it asks for.
+    ///
+    /// This runs before [`TimelinePanel::handle_scrub`] and claims the press
+    /// when it lands on a flag, so grabbing a marker drags it rather than
+    /// scrubbing the ruler out from under it. A press anywhere else on the
+    /// ruler is left to the scrub, and clears the selection.
+    fn handle_markers(
+        &mut self,
+        ui: &Ui,
+        response: &Response,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+    ) -> Vec<MarkerAction> {
+        // An undo, or another agent over the Command API, can take a marker
+        // away between frames; the selection that named it goes with it.
+        self.marker_state
+            .retain(|marker| sequence.marker(marker).is_some());
+        let mut actions = std::mem::take(&mut self.pending_markers);
+        let held = response.is_pointer_button_down_on();
+        let pointer = response.interact_pointer_pos();
+
+        // A double-click on a flag opens the rename editor. It arrives on the
+        // release, after the press has already begun and ended a drag that
+        // went nowhere, which raises no command.
+        if response.double_clicked()
+            && let Some(pos) = pointer
+            && let Some(marker) = self.marker_at(sequence, pos)
+            && let Some(found) = sequence.marker(marker)
+        {
+            self.marker_state.cancel_drag();
+            self.marker_state.begin_rename(marker, &found.name);
+            self.marker_press = false;
+            return actions;
+        }
+
+        if self.marker_state.dragging().is_some() {
+            if held && let Some(pos) = pointer {
+                let time = self.dragged_time(layout, pos.x, sequence);
+                self.marker_state.drag_to(time);
+            }
+            if !held {
+                actions.extend(self.marker_state.end_drag(sequence));
+                self.marker_press = false;
+            }
+            return actions;
+        }
+
+        if !held {
+            self.marker_press = false;
+        } else if !self.marker_press
+            && !self.scrubbing
+            && let Some(pos) = pointer
+            && let Some(marker) = self.marker_at(sequence, pos)
+            && let Some(found) = sequence.marker(marker)
+        {
+            self.marker_press = true;
+            let anchor = found.marked_range.start();
+            self.marker_grab_offset = pos.x - layout.content.left() - self.view.pixel_of(anchor);
+            self.marker_state.begin_drag(marker, anchor);
+        } else if !self.marker_press && !self.scrubbing && pointer.is_some() {
+            // A press on the ruler that missed every flag is a scrub, and
+            // deselects.
+            self.marker_state.select(None);
+        }
+
+        // Delete removes the selected marker, unless a name is being typed
+        // into, where Delete belongs to the text editor.
+        if self.marker_state.renaming().is_none()
+            && ui.input(|input| input.key_pressed(Key::Delete) || input.key_pressed(Key::Backspace))
+        {
+            actions.extend(self.marker_state.remove_selected());
+        }
+        actions
+    }
+
+    /// The instant the marker being dragged has been taken to.
+    ///
+    /// Snapped like every other time dropped on the timeline, so a marker
+    /// lands cleanly on a cut or on the playhead. The marker's own ends are
+    /// left out of the candidates: a marker cannot snap to where it already
+    /// is.
+    fn dragged_time(&mut self, layout: &PanelLayout, x: f32, sequence: &Sequence) -> RationalTime {
+        let rate = self.view.rate();
+        let head_px = x - layout.content.left() - self.marker_grab_offset;
+        let raw = self.view.time_at_pixel(round_px(head_px));
+        let raw = if raw.is_negative() {
+            RationalTime::zero(rate)
+        } else {
+            raw
+        };
+        self.collect_snap_candidates(sequence, true);
+        if let Some(dragged) = self
+            .marker_state
+            .dragging()
+            .and_then(|marker| sequence.marker(marker))
+        {
+            let start = dragged.marked_range.start();
+            let end = dragged.marked_range.end_exclusive();
+            self.candidates.retain(|candidate| {
+                candidate.kind != SnapKind::Marker
+                    || (candidate.time != start && candidate.time != end)
+            });
+        }
+        self.snap(raw).map_or(raw, |candidate| candidate.time)
+    }
+
+    /// Runs the inline rename editor over the marker being renamed, if one is.
+    ///
+    /// The editor commits on Enter and on losing focus and abandons the edit
+    /// on Escape, exactly as the track header's does, and opens with the old
+    /// name selected so the first keystroke replaces it.
+    fn marker_rename_editor(&mut self, ui: &mut Ui, sequence: &Sequence) -> Option<MarkerAction> {
+        let id = self.marker_state.renaming()?;
+        let marker = sequence.marker(id)?;
+        let rect = self
+            .marker_flag_rect(marker.marked_range.start())?
+            .translate(Vec2::new(MARKER_FLAG_WIDTH + MARKER_NAME_GAP, 0.0));
+        let rect =
+            Rect::from_min_size(rect.min, Vec2::new(MARKER_RENAME_WIDTH, MARKER_FLAG_HEIGHT));
+        let widget_id = ui.id().with(("marker_rename", id));
+        let mut text = self
+            .marker_state
+            .rename_text()
+            .unwrap_or_default()
+            .to_owned();
+        let focused = ui.memory(|memory| memory.has_focus(widget_id));
+        if self.marker_state.rename_is_fresh() {
+            crate::track_header::select_all(ui, widget_id, &text);
+            if focused {
+                self.marker_state.rename_focused();
+            }
+        }
+        let mut editor = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("marker_rename"));
+        let response = editor.put(
+            rect,
+            TextEdit::singleline(&mut text)
+                .id(widget_id)
+                .desired_width(rect.width())
+                .font(TextStyle::Small),
+        );
+        if let Some(buffer) = self.marker_state.rename_buffer() {
+            *buffer = text;
+        }
+        if !response.has_focus() && !response.lost_focus() {
+            response.request_focus();
+        }
+        if ui.input(|input| input.key_pressed(Key::Escape)) {
+            self.marker_state.cancel_rename();
+            return None;
+        }
+        if response.lost_focus() || ui.input(|input| input.key_pressed(Key::Enter)) {
+            return self.marker_state.commit_rename(&marker.name);
+        }
+        None
+    }
+
+    /// Paints the sequence's markers: a coloured flag on the ruler with the
+    /// name beside it, and a faint guide line of the same colour down the
+    /// lanes.
+    ///
+    /// The marker being dragged is painted where the pointer has taken it
+    /// rather than where the project still has it, so the drag reads as the
+    /// move it is about to become.
+    fn paint_markers(&self, painter: &Painter, layout: &PanelLayout, sequence: &Sequence) {
+        if sequence.markers.is_empty() {
+            return;
+        }
+        let ruler = painter.with_clip_rect(layout.ruler);
+        let lanes = painter.with_clip_rect(layout.content);
+        let selected = self.marker_state.selected();
+        let renaming = self.marker_state.renaming();
+        for marker in &sequence.markers {
+            let start = self.shown_start(marker);
+            let x = layout.content.left() + self.view.pixel_of(start);
+            if x < layout.content.left() - MARKER_FLAG_WIDTH || x > layout.content.right() + 1.0 {
+                continue;
+            }
+            let color = markers::marker_color(marker.id);
+            lanes.line_segment(
+                [
+                    pos2(x, layout.content.top()),
+                    pos2(x, layout.content.bottom()),
+                ],
+                Stroke::new(
+                    1.0,
+                    color.gamma_multiply(f32::from(MARKER_GUIDE_ALPHA) / 255.0),
+                ),
+            );
+            // A span marker gets a bar across what it covers, so a note over a
+            // passage reads as a passage rather than as a point.
+            if !marker.marked_range.is_empty() {
+                let end = layout.content.left()
+                    + self.view.pixel_of(start + marker.marked_range.duration());
+                ruler.rect_filled(
+                    Rect::from_min_max(
+                        pos2(x, layout.ruler.bottom() - MARKER_SPAN_HEIGHT),
+                        pos2(end, layout.ruler.bottom()),
+                    ),
+                    CornerRadius::ZERO,
+                    color,
+                );
+            }
+            let flag = Rect::from_min_size(
+                pos2(x, layout.ruler.bottom() - MARKER_FLAG_HEIGHT),
+                Vec2::new(MARKER_FLAG_WIDTH, MARKER_FLAG_HEIGHT),
+            );
+            ruler.rect_filled(flag, CornerRadius::same(2), color);
+            ruler.line_segment(
+                [pos2(x, layout.ruler.top()), pos2(x, layout.ruler.bottom())],
+                Stroke::new(1.0, color),
+            );
+            if selected == Some(marker.id) {
+                ruler.rect_stroke(
+                    flag.expand(1.0),
+                    CornerRadius::same(2),
+                    Stroke::new(MARKER_SELECTED_WIDTH, Color32::WHITE),
+                    StrokeKind::Outside,
+                );
+            }
+            // The name is the editor's while it is being renamed.
+            if renaming == Some(marker.id) || marker.name.is_empty() {
+                continue;
+            }
+            // Over a plate, because a marker can sit under a timecode label
+            // and the name has to stay readable when it does.
+            let galley = ruler.layout_no_wrap(
+                marker.name.clone(),
+                FontId::proportional(10.0),
+                MARKER_NAME_COLOR,
+            );
+            let top_left = pos2(
+                flag.right() + MARKER_NAME_GAP,
+                flag.center().y - galley.size().y / 2.0,
+            );
+            ruler.rect_filled(
+                Rect::from_min_size(top_left, galley.size()).expand(1.0),
+                CornerRadius::same(2),
+                Color32::from_black_alpha(NAME_PLATE_ALPHA),
+            );
+            ruler.galley(top_left, galley, MARKER_NAME_COLOR);
         }
     }
 
@@ -1039,6 +1417,12 @@ impl TimelinePanel {
         sequence: &Sequence,
     ) -> Option<RationalTime> {
         if self.gesture.is_some() {
+            return None;
+        }
+        // A press that grabbed a marker's flag belongs to that marker for as
+        // long as it lasts; the ruler under it does not scrub.
+        if self.marker_press || self.marker_state.dragging().is_some() {
+            self.scrubbing = false;
             return None;
         }
         let held = response.is_pointer_button_down_on();

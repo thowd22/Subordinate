@@ -626,7 +626,7 @@ impl TrackHeaderState {
 /// Opening the editor over a name is a request to replace it, as it is
 /// everywhere else a name is renamed in place, so the first keystroke should
 /// not append to the old name.
-fn select_all(ui: &Ui, id: eframe::egui::Id, text: &str) {
+pub(crate) fn select_all(ui: &Ui, id: eframe::egui::Id, text: &str) {
     let mut state = TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
     let end = CCursor::new(text.chars().count());
     state

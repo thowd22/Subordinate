@@ -1,4 +1,4 @@
-//! Marker commands: add, move and remove.
+//! Marker commands: add, move, rename and remove.
 //!
 //! A [`Marker`] lives either on a sequence, in sequence time, or on a clip, in
 //! that clip's source time (OTIO puts them in both places). One
@@ -260,5 +260,77 @@ impl Command for MoveMarker {
 
     fn label(&self) -> String {
         "Move marker".to_owned()
+    }
+}
+
+/// Gives a marker a new name.
+///
+/// Renaming in place on the ruler is this command. The marker keeps its
+/// identifier, its span and its note, so undo puts the old name back on the
+/// same marker rather than on one that merely looks like it.
+///
+/// ```
+/// use sub_edit::History;
+/// use sub_edit::commands::{AddMarker, MarkerTarget, RenameMarker};
+/// use sub_model::{Marker, Project, Sequence, SequenceSettings};
+/// use sub_time::{Rational, RationalTime, TimeRange};
+///
+/// let mut project = Project::new("Doc cut");
+/// let sequence = Sequence::new("Main", SequenceSettings::default());
+/// let sequence_id = sequence.id;
+/// project.sequences.push(sequence);
+///
+/// let at = RationalTime::new(48, Rational::FPS_24);
+/// let marker = Marker::new("Marker", TimeRange::empty_at(at));
+/// let marker_id = marker.id;
+/// let target = MarkerTarget::sequence(sequence_id);
+/// let mut history = History::new();
+/// history
+///     .apply(&mut project, AddMarker::new(target, marker))
+///     .unwrap();
+/// history
+///     .apply(&mut project, RenameMarker::new(target, marker_id, "Reshoot"))
+///     .unwrap();
+/// assert_eq!(project.sequences[0].markers[0].name, "Reshoot");
+///
+/// history.undo(&mut project).unwrap();
+/// assert_eq!(project.sequences[0].markers[0].name, "Marker");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameMarker {
+    /// What the marker is anchored to.
+    pub target: MarkerTarget,
+    /// The marker to rename.
+    pub marker: MarkerId,
+    /// The name it takes on.
+    pub name: String,
+}
+
+impl RenameMarker {
+    /// Renames the marker `marker` on `target` to `name`.
+    #[must_use]
+    pub fn new(target: MarkerTarget, marker: MarkerId, name: impl Into<String>) -> Self {
+        Self {
+            target,
+            marker,
+            name: name.into(),
+        }
+    }
+}
+
+impl Command for RenameMarker {
+    const KIND: &'static str = "marker.rename";
+    const DESCRIPTION: &'static str = "Rename a marker.";
+
+    fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
+        let index = self.target.index_of(project, self.marker)?;
+        let markers = self.target.markers_mut(project)?;
+        let previous = std::mem::replace(&mut markers[index].name, self.name.clone());
+        Ok(Inverse::new(Self::new(self.target, self.marker, previous)))
+    }
+
+    fn label(&self) -> String {
+        format!("Rename marker to {}", self.name)
     }
 }
