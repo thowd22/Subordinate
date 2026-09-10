@@ -705,7 +705,7 @@ mod tests {
         // The Premiere keys editors come for.
         assert_eq!(
             loaded.map.action_for(Key::C, Modifiers::NONE),
-            Some(Action::SplitAtPlayhead),
+            Some(Action::RazorTool),
             "C is the razor in Premiere"
         );
         assert_eq!(
@@ -765,10 +765,12 @@ mod tests {
                 binding.action.id()
             );
         }
-        let default_razor = ShortcutMap::default_map().chord_label_for(Action::SplitAtPlayhead);
+        // The marker moves from a bare M onto Ctrl+M in this map, and M is
+        // bound to nothing else, so the shipped chord must be gone.
+        let default_marker = ShortcutMap::default_map().chord_label_for(Action::AddMarker);
         assert!(
-            !painted.iter().any(|text| text == default_razor.as_str()),
-            "the help window still shows the default {default_razor}: {painted:?}"
+            !painted.iter().any(|text| text == default_marker.as_str()),
+            "the help window still shows the default {default_marker}: {painted:?}"
         );
     }
 

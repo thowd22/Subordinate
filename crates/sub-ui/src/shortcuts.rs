@@ -93,6 +93,10 @@ pub enum Action {
     AddMarker,
     /// Split the clips under the playhead (Ctrl+K).
     SplitAtPlayhead,
+    /// Pick the arrow, which selects and drags clips (V).
+    SelectTool,
+    /// Pick the razor, which cuts the clip it is clicked on (C).
+    RazorTool,
     /// Nudge the selection one frame earlier (comma).
     NudgeBack,
     /// Nudge the selection one frame later (period).
@@ -109,7 +113,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, in the order the help window lists them.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 20] = [
         Self::PlayBackward,
         Self::PausePlayback,
         Self::PlayForward,
@@ -122,6 +126,8 @@ impl Action {
         Self::SetOutPoint,
         Self::AddMarker,
         Self::SplitAtPlayhead,
+        Self::SelectTool,
+        Self::RazorTool,
         Self::NudgeBack,
         Self::NudgeForward,
         Self::Undo,
@@ -146,6 +152,8 @@ impl Action {
             Self::SetOutPoint => "marking.set_out_point",
             Self::AddMarker => "marking.add_marker",
             Self::SplitAtPlayhead => "editing.split_at_playhead",
+            Self::SelectTool => "editing.select_tool",
+            Self::RazorTool => "editing.razor_tool",
             Self::NudgeBack => "editing.nudge_back",
             Self::NudgeForward => "editing.nudge_forward",
             Self::Undo => "editing.undo",
@@ -171,6 +179,8 @@ impl Action {
             Self::SetOutPoint => "Set out point",
             Self::AddMarker => "Add marker",
             Self::SplitAtPlayhead => "Split at playhead",
+            Self::SelectTool => "Select tool",
+            Self::RazorTool => "Razor tool",
             Self::NudgeBack => "Nudge one frame back",
             Self::NudgeForward => "Nudge one frame forward",
             Self::Undo => "Undo",
@@ -194,6 +204,8 @@ impl Action {
             | Self::GoToEnd => Category::Transport,
             Self::SetInPoint | Self::SetOutPoint | Self::AddMarker => Category::Marking,
             Self::SplitAtPlayhead
+            | Self::SelectTool
+            | Self::RazorTool
             | Self::NudgeBack
             | Self::NudgeForward
             | Self::Undo
@@ -253,6 +265,8 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     Binding::new(Action::SetOutPoint, Modifiers::NONE, Key::O),
     Binding::new(Action::AddMarker, Modifiers::NONE, Key::M),
     Binding::new(Action::SplitAtPlayhead, Modifiers::COMMAND, Key::K),
+    Binding::new(Action::SelectTool, Modifiers::NONE, Key::V),
+    Binding::new(Action::RazorTool, Modifiers::NONE, Key::C),
     Binding::new(Action::NudgeBack, Modifiers::NONE, Key::Comma),
     Binding::new(Action::NudgeForward, Modifiers::NONE, Key::Period),
     Binding::new(Action::Undo, Modifiers::COMMAND, Key::Z),
@@ -686,6 +700,8 @@ mod tests {
             (Key::Comma, Modifiers::NONE, Action::NudgeBack),
             (Key::Period, Modifiers::NONE, Action::NudgeForward),
             (Key::K, Modifiers::COMMAND, Action::SplitAtPlayhead),
+            (Key::V, Modifiers::NONE, Action::SelectTool),
+            (Key::C, Modifiers::NONE, Action::RazorTool),
             (Key::Z, Modifiers::COMMAND, Action::Undo),
             (
                 Key::Z,

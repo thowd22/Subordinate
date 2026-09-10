@@ -37,7 +37,7 @@ use crate::media_bin::MediaBinPanel;
 use crate::popout::{PopoutViewer, popout_menu_ui};
 use crate::recovery::{RecoveryOutcome, RecoveryPrompt, SnapshotMenu};
 use crate::shortcuts::{Action, ShortcutMap, ShortcutsWindow};
-use crate::timeline_panel::TimelinePanel;
+use crate::timeline_panel::{TimelinePanel, Tool};
 use crate::viewer::{TransportAction, ViewerAction, ViewerFrame, ViewerPanel};
 
 /// How many tracks the shared meter bank has room for. A sequence with more
@@ -589,6 +589,17 @@ impl SubordinateApp {
             } else if action == Action::ToggleSnapping {
                 let on = self.timeline.toggle_snapping();
                 log::debug!("timeline snapping is now {}", if on { "on" } else { "off" });
+            } else if action == Action::SelectTool {
+                self.timeline.set_tool(Tool::Select);
+            } else if action == Action::RazorTool {
+                self.timeline.set_tool(Tool::Razor);
+            } else if action == Action::SplitAtPlayhead {
+                // The playhead a cut lands on is the viewer's, which the
+                // timeline is handed before every frame; the panel plans the
+                // cut on the next one, when it has the sequence to plan
+                // against.
+                self.timeline.set_playhead(self.viewer.state.playhead());
+                self.timeline.request_split_at_playhead();
             } else if action == Action::AddMarker {
                 // The playhead the marker lands on is the viewer's, which the
                 // timeline is handed before every frame; the panel raises the
@@ -810,6 +821,20 @@ impl SubordinateApp {
                     // entry in the undo stack.
                     log::debug!(
                         "clip move is not wired up yet: {} ({} clips)",
+                        group.label,
+                        group.len()
+                    );
+                }
+                if let Some(refusal) = response.split_refused {
+                    log::debug!("clip split refused: {}", refusal.id());
+                }
+                if let Some(group) = response.clip_split {
+                    // Planned, not applied, for the same reason a drag is:
+                    // applying it takes the engine handle the app does not
+                    // own yet, and it goes through `split::apply_split` so a
+                    // through-edit is one entry in the undo stack.
+                    log::debug!(
+                        "clip split is not wired up yet: {} ({} clips)",
                         group.label,
                         group.len()
                     );
