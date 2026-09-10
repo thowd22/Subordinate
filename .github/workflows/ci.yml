@@ -280,6 +280,20 @@ jobs:
           cargo test
           cargo fmt --all --check
 
+      # The OTIO interchange plugins are a second self-contained workspace
+      # holding two components — the `importer` world and the `command` world —
+      # plus the conversion crate both share. Everything but the component glue
+      # is tested on the host triple; the wasm build is what proves the glue
+      # still satisfies the WIT (TASK-101). Linux only, as above.
+      - name: First-party plugins (OpenTimelineIO)
+        if: runner.os == 'Linux'
+        working-directory: plugins/otio
+        run: |
+          cargo build --release --target wasm32-wasip2 --workspace
+          cargo test --workspace
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo fmt --all --check
+
       # Start the real app, paint a few empty frames and exit. This is what
       # proves eframe comes up on the wgpu backend on every OS (TASK-19 #3).
       - name: GUI smoke test (Linux)

@@ -1,0 +1,41 @@
+# The OpenTimelineIO interchange plugins, in their own workspace.
+#
+# The two components target wasm32-wasip2 and must stay out of the host
+# workspace's build and lint graph, exactly like `plugins/gain` and the TASK-9
+# spike guests. `otio-core` holds everything that is not component glue, so the
+# conversion in both directions is unit-tested on the host triple.
+[workspace]
+resolver = "3"
+members = ["otio-core", "otio-importer", "otio-exporter"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+# Reference plugin code is MIT OR Apache-2.0 like the WIT and the SDK, so a
+# plugin author may copy it under any licence.
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/thowd22/Subordinate"
+publish = false
+
+[workspace.dependencies]
+otio-core = { path = "otio-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wit-bindgen = "0.61"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = "thin"
+codegen-units = 1

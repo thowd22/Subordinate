@@ -1,0 +1,190 @@
+{
+  "id": "018f3c2e-0000-7000-8000-000000001001",
+  "name": "Demo",
+  "media": [
+    {
+      "id": "018f3c2e-0000-7000-8000-000000002001",
+      "name": "wide.mov",
+      "path": "footage/wide.mov",
+      "hash": null,
+      "info": null,
+      "proxy": "none",
+      "offline": false
+    },
+    {
+      "id": "018f3c2e-0000-7000-8000-000000002002",
+      "name": "close.mov",
+      "path": "footage/close.mov",
+      "hash": null,
+      "info": null,
+      "proxy": "none",
+      "offline": false
+    },
+    {
+      "id": "018f3c2e-0000-7000-8000-000000002003",
+      "name": "room-tone.wav",
+      "path": "audio/room-tone.wav",
+      "hash": null,
+      "info": null,
+      "proxy": "none",
+      "offline": false
+    }
+  ],
+  "root_bin": {
+    "id": "018f3c2e-0000-7000-8000-000000003001",
+    "name": "Demo",
+    "media": [],
+    "bins": []
+  },
+  "sequences": [
+    {
+      "id": "018f3c2e-0000-7000-8000-000000004001",
+      "name": "Edit",
+      "settings": {
+        "resolution": { "width": 1920, "height": 1080 },
+        "frame_rate": { "numerator": 24000, "denominator": 1001 },
+        "sample_rate": 48000,
+        "color": { "space": "rec709", "transfer": "bt1886", "primaries": "bt709" }
+      },
+      "tracks": [
+        {
+          "id": "018f3c2e-0000-7000-8000-000000005001",
+          "name": "V1",
+          "kind": "video",
+          "muted": false,
+          "locked": false,
+          "items": [
+            {
+              "clip": {
+                "id": "018f3c2e-0000-7000-8000-000000006001",
+                "name": "Wide",
+                "media": "018f3c2e-0000-7000-8000-000000002001",
+                "source_range": {
+                  "start": { "value": 0, "rate": { "numerator": 24000, "denominator": 1001 } },
+                  "duration": { "value": 48, "rate": { "numerator": 24000, "denominator": 1001 } }
+                },
+                "opacity": 1.0,
+                "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 0.0 },
+                "gain": 0.0,
+                "fade_in": { "value": 0, "rate": { "numerator": 24000, "denominator": 1001 } },
+                "fade_out": { "value": 0, "rate": { "numerator": 24000, "denominator": 1001 } },
+                "markers": []
+              }
+            },
+            {
+              "transition": {
+                "crossfade": {
+                  "in_offset": { "value": 12, "rate": { "numerator": 24000, "denominator": 1001 } },
+                  "out_offset": { "value": 12, "rate": { "numerator": 24000, "denominator": 1001 } }
+                }
+              }
+            },
+            {
+              "clip": {
+                "id": "018f3c2e-0000-7000-8000-000000006002",
+                "name": "Close",
+                "media": "018f3c2e-0000-7000-8000-000000002002",
+                "source_range": {
+                  "start": { "value": 24, "rate": { "numerator": 24000, "denominator": 1001 } },
+                  "duration": { "value": 96, "rate": { "numerator": 24000, "denominator": 1001 } }
+                },
+                "opacity": 1.0,
+                "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 0.0 },
+                "gain": 0.0,
+                "fade_in": { "value": 0, "rate": { "numerator": 24000, "denominator": 1001 } },
+                "fade_out": { "value": 0, "rate": { "numerator": 24000, "denominator": 1001 } },
+                "markers": [
+                  {
+                    "id": "018f3c2e-0000-7000-8000-000000007001",
+                    "name": "eyeline",
+                    "marked_range": {
+                      "start": { "value": 40, "rate": { "numerator": 24000, "denominator": 1001 } },
+                      "duration": { "value": 0, "rate": { "numerator": 24000, "denominator": 1001 } }
+                    },
+                    "note": "check the eyeline against the wide"
+                  }
+                ]
+              }
+            },
+            {
+              "gap": {
+                "duration": { "value": 24, "rate": { "numerator": 24000, "denominator": 1001 } }
+              }
+            },
+            {
+              "clip": {
+                "id": "018f3c2e-0000-7000-8000-000000006003",
+                "name": "Wide (tail)",
+                "media": "018f3c2e-0000-7000-8000-000000002001",
+                "source_range": {
+                  "start": { "value": 100, "rate": { "numerator": 24000, "denominator": 1001 } },
+                  "duration": { "value": 40, "rate": { "numerator": 24000, "denominator": 1001 } }
+                },
+                "opacity": 1.0,
+                "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 0.0 },
+                "gain": 0.0,
+                "fade_in": { "value": 0, "rate": { "numerator": 24000, "denominator": 1001 } },
+                "fade_out": { "value": 6, "rate": { "numerator": 24000, "denominator": 1001 } },
+                "markers": []
+              }
+            }
+          ]
+        },
+        {
+          "id": "018f3c2e-0000-7000-8000-000000005002",
+          "name": "A1",
+          "kind": "audio",
+          "muted": true,
+          "locked": false,
+          "items": [
+            {
+              "gap": {
+                "duration": { "value": 12, "rate": { "numerator": 24000, "denominator": 1001 } }
+              }
+            },
+            {
+              "clip": {
+                "id": "018f3c2e-0000-7000-8000-000000006004",
+                "name": "Room tone",
+                "media": "018f3c2e-0000-7000-8000-000000002003",
+                "source_range": {
+                  "start": { "value": 0, "rate": { "numerator": 24000, "denominator": 1001 } },
+                  "duration": { "value": 200, "rate": { "numerator": 24000, "denominator": 1001 } }
+                },
+                "opacity": 1.0,
+                "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 0.0 },
+                "gain": -6.0,
+                "fade_in": { "value": 0, "rate": { "numerator": 24000, "denominator": 1001 } },
+                "fade_out": { "value": 0, "rate": { "numerator": 24000, "denominator": 1001 } },
+                "markers": []
+              }
+            }
+          ]
+        }
+      ],
+      "markers": [
+        {
+          "id": "018f3c2e-0000-7000-8000-000000007002",
+          "name": "act one",
+          "marked_range": {
+            "start": { "value": 0, "rate": { "numerator": 24000, "denominator": 1001 } },
+            "duration": { "value": 48, "rate": { "numerator": 24000, "denominator": 1001 } }
+          },
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "018f3c2e-0000-7000-8000-000000004002",
+      "name": "Trailer",
+      "settings": {
+        "resolution": { "width": 3840, "height": 2160 },
+        "frame_rate": { "numerator": 25, "denominator": 1 },
+        "sample_rate": 44100,
+        "color": { "space": "rec709", "transfer": "bt1886", "primaries": "bt709" }
+      },
+      "tracks": [],
+      "markers": []
+    }
+  ]
+}

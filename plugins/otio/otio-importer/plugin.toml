@@ -1,0 +1,14 @@
+# What the host reads before any of this plugin's code runs (docs/PLAN.md §6.3).
+[plugin]
+id = "com.subordinate.otio-import"
+name = "OpenTimelineIO Import"
+version = "0.1.0"
+api = "0.1"
+worlds = ["importer"]
+
+[capabilities]
+# The importer only reads, and only inside the open project's folder: the host
+# mounts that at /project and refuses a path outside it before `import` is
+# called. No network, no shaders.
+fs_read = ["$PROJECT"]
+network = false

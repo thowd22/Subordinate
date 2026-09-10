@@ -1,0 +1,21 @@
+[package]
+name = "otio-importer"
+description = "Subordinate importer plugin: reads OpenTimelineIO JSON"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+# `cdylib` is what wasm32-wasip2 turns into a component; `rlib` lets the
+# mapping onto the WIT records be unit-tested on the host triple.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+otio-core = { workspace = true }
+wit-bindgen = { workspace = true }
+
+[lints]
+workspace = true
