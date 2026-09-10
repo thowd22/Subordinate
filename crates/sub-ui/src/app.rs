@@ -20,6 +20,7 @@ use sub_render::{
 use sub_time::RationalTime;
 
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +34,7 @@ use crate::dock::{DockLayout, Panel, layout_menu_ui};
 use crate::keymap::LoadedKeymap;
 use crate::media_bin::MediaBinPanel;
 use crate::popout::{PopoutViewer, popout_menu_ui};
+use crate::recovery::{RecoveryOutcome, RecoveryPrompt, SnapshotMenu};
 use crate::shortcuts::{Action, ShortcutMap, ShortcutsWindow};
 use crate::timeline_panel::TimelinePanel;
 use crate::viewer::{TransportAction, ViewerAction, ViewerFrame, ViewerPanel};
@@ -125,6 +127,13 @@ pub struct SubordinateApp {
     keymap: LoadedKeymap,
     /// The window listing every binding.
     shortcuts_window: ShortcutsWindow,
+    /// The file the open project came from, once one has been opened. The
+    /// autosave history hangs off it.
+    project_file: Option<PathBuf>,
+    /// The prompt an open shows when an autosave is ahead of the file.
+    recovery: RecoveryPrompt,
+    /// The restore list in the File menu.
+    snapshots: SnapshotMenu,
 }
 
 impl SubordinateApp {
@@ -198,7 +207,107 @@ impl SubordinateApp {
             needs_composite: true,
             keymap,
             shortcuts_window: ShortcutsWindow::new(),
+            project_file: None,
+            recovery: RecoveryPrompt::new(),
+            snapshots: SnapshotMenu::new(),
         })
+    }
+
+    /// Opens a project file, offering to recover a newer autosave first.
+    ///
+    /// The file is read and adopted whatever the autosave history says, so
+    /// the editor always ends up showing something; when a snapshot is ahead
+    /// of the file, the recovery prompt goes up over it and the user's answer
+    /// replaces the project or throws the history away
+    /// (`sub_edit::autosave::check_for_recovery`).
+    ///
+    /// # Errors
+    ///
+    /// - `ui.project_unreadable` when the file cannot be read.
+    /// - Whatever `sub_model::json::from_json` returns for its contents.
+    ///
+    /// A sidecar directory that cannot be listed is logged rather than
+    /// returned: it costs the user their autosave history, never their open.
+    pub fn open_project(&mut self, path: &Path) -> Result<(), SubError> {
+        let text = std::fs::read_to_string(path).map_err(|err| {
+            SubError::wrap(
+                crate::codes::PROJECT_UNREADABLE,
+                "a project cannot be read",
+                &err,
+            )
+            .with_detail("path", path.display().to_string())
+        })?;
+        let project = sub_model::json::from_json(&text)?;
+        self.adopt_project(project);
+        self.project_file = Some(path.to_path_buf());
+        if let Err(error) = self.snapshots.set_project(path) {
+            log::warn!("autosave history: [{}] {}", error.code, error.message);
+        }
+        match self.recovery.open_for(path) {
+            Ok(true) => log::info!("an autosave is newer than {}", path.display()),
+            Ok(false) => {}
+            Err(error) => log::warn!("autosave check: [{}] {}", error.code, error.message),
+        }
+        Ok(())
+    }
+
+    /// The file the open project came from, once one has been opened.
+    pub fn project_file(&self) -> Option<&Path> {
+        self.project_file.as_deref()
+    }
+
+    /// The autosave recovery prompt.
+    pub fn recovery(&mut self) -> &mut RecoveryPrompt {
+        &mut self.recovery
+    }
+
+    /// The snapshot restore list behind the File menu.
+    pub fn snapshots(&mut self) -> &mut SnapshotMenu {
+        &mut self.snapshots
+    }
+
+    /// Shows `project` in every panel, with the playhead back at the start.
+    ///
+    /// This is what opening a file and restoring a snapshot both do: a
+    /// snapshot is a whole project rather than an edit to one, so it replaces
+    /// the state instead of going through the history as a command.
+    pub fn adopt_project(&mut self, project: Project) {
+        let sequence = project
+            .sequences
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Sequence::new("Sequence", SequenceSettings::default()));
+        self.compositor = Compositor::for_sequence(self.render.clone(), &sequence);
+        self.viewer = ViewerPanel::for_sequence(&sequence);
+        self.scheduler = PlaybackScheduler::for_sequence(&sequence);
+        self.timeline = TimelinePanel::new(sequence.settings.frame_rate);
+        self.sequence = sequence;
+        self.project = project;
+        self.needs_composite = true;
+    }
+
+    /// Applies what the recovery prompt or the restore list handed back.
+    ///
+    /// A failure is logged and shown by the widget that raised it; it never
+    /// disturbs the project already open.
+    fn apply_recovery(&mut self, outcome: Option<RecoveryOutcome>) {
+        match outcome {
+            Some(RecoveryOutcome::Recovered(project)) => {
+                self.adopt_project(*project);
+                if let Err(error) = self.snapshots.refresh() {
+                    log::warn!("autosave history: [{}] {}", error.code, error.message);
+                }
+            }
+            Some(RecoveryOutcome::Discarded) => {
+                if let Err(error) = self.snapshots.refresh() {
+                    log::warn!("autosave history: [{}] {}", error.code, error.message);
+                }
+            }
+            Some(RecoveryOutcome::Failed(error)) => {
+                log::warn!("autosave: [{}] {}", error.code, error.message);
+            }
+            None => {}
+        }
     }
 
     /// The wgpu device shared with the compositor.
@@ -548,6 +657,13 @@ impl eframe::App for SubordinateApp {
                 self.render.backend_label(),
                 self.render.describe()
             ));
+            let mut restored = None;
+            ui.menu_button("File", |ui| {
+                ui.menu_button(crate::recovery::MENU_TITLE, |ui| {
+                    restored = self.snapshots.ui(ui);
+                });
+            });
+            self.apply_recovery(restored);
             ui.menu_button("View", |ui| {
                 layout_menu_ui(ui, &mut self.layout);
                 popout_menu_ui(ui, &mut self.popout);
@@ -562,6 +678,10 @@ impl eframe::App for SubordinateApp {
                 self.shortcuts_window.toggle();
             }
         });
+        // The prompt is drawn over everything else, because it is the first
+        // question an open asks.
+        let answered = self.recovery.ui(ui.ctx());
+        self.apply_recovery(answered);
         self.diagnostics.show(ui.ctx());
         self.apply_audio_settings(ui.ctx());
         self.shortcuts_window

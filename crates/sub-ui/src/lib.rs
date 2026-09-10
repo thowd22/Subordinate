@@ -17,6 +17,7 @@ pub mod media_import;
 pub mod meter;
 pub mod plugins;
 pub mod popout;
+pub mod recovery;
 pub mod relink_dialog;
 pub mod sequence_tabs;
 pub mod shortcuts;
@@ -53,6 +54,14 @@ pub use plugins::{EMPTY_LABEL, MENU_TITLE, PluginMenu, PluginMenuEntry, plugins_
 pub use popout::{
     CLOSE_LABEL, OPEN_LABEL, POPOUT_TITLE, PopoutShared, PopoutViewer, is_playback_action,
     playback_shortcuts, popout_content_ui, popout_menu_ui, popout_viewport_id, popout_viewport_ui,
+};
+// `duration_text` and the two label constants keep their module paths: the
+// media bin already exports a `duration_text` (a clip's length, not a wall
+// clock span) and a `MENU_TITLE`/`EMPTY_LABEL` pair belongs to the plugin
+// menu.
+pub use recovery::{
+    DISCARD_LABEL, NO_PROJECT_LABEL, PROMPT_TITLE, RECOVER_LABEL, RecoveryOutcome, RecoveryPrompt,
+    SnapshotMenu, entry_label,
 };
 pub use relink_dialog::{
     RELINK_JOB_KIND, RelinkDialog, is_certain, pick_replacement_file, pick_search_folder,
@@ -127,6 +136,9 @@ pub mod codes {
 
     /// The panel layout could not be written to the config directory.
     pub const LAYOUT_UNWRITABLE: ErrorCode = ErrorCode::from_static("ui.layout_unwritable");
+
+    /// A project file exists but could not be read or parsed.
+    pub const PROJECT_UNREADABLE: ErrorCode = ErrorCode::from_static("ui.project_unreadable");
 
     /// A plugin asked for a chord the editor or an earlier plugin already
     /// holds. The command keeps its menu entry and loses its shortcut.
