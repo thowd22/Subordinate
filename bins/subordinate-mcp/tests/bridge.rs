@@ -244,6 +244,89 @@ fn with_no_editor_running_the_bridge_launches_a_headless_one() {
     );
 }
 
+/// A plugin whose manifest contributes one MCP tool.
+fn install_plugin_with_a_tool(plugins: &Path, id: &str, tool: &str) {
+    let directory = plugins.join(id);
+    std::fs::create_dir_all(&directory).expect("a plugin directory");
+    std::fs::write(
+        directory.join("plugin.toml"),
+        format!(
+            "[plugin]\nid = \"{id}\"\nname = \"Demo\"\nversion = \"0.1.0\"\n\
+             api = \"0.1\"\nworlds = [\"command\", \"mcp-tools\"]\n\n\
+             [mcp.tools.{tool}]\ndescription = \"Cut the quiet bits\"\n\
+             schema = \"{tool}.json\"\n"
+        ),
+    )
+    .expect("a manifest");
+    std::fs::write(
+        directory.join(format!("{tool}.json")),
+        r#"{"type":"object","properties":{"threshold_db":{"type":"number"}}}"#,
+    )
+    .expect("a tool schema");
+}
+
+#[test]
+fn a_plugins_tools_are_offered_under_its_id_and_route_back_to_it() {
+    let directory = workspace("plugin-tools");
+    let engine = Engine::spawn(Project::new("Doc cut")).expect("an engine");
+    let endpoint = Endpoint::in_directory(directory.clone(), INSTANCE).expect("an endpoint");
+    let mut dispatcher = Dispatcher::new(engine.handle().clone());
+
+    let plugins = directory.join("plugins");
+    install_plugin_with_a_tool(&plugins, "com.example.demo", "cut_silence");
+    let registry = Arc::new(registry::PluginRegistry::new(registry::PluginDirs::new(
+        &plugins,
+    )));
+    registry::register_methods(&mut dispatcher, Arc::clone(&registry)).expect("the methods");
+    let server = Server::bind(endpoint, Arc::new(dispatcher)).expect("a bound server");
+
+    let bridge = bridge(Backend::connect(&options(&directory)).expect("the editor"));
+
+    // The plugin's tool is offered beside the compiled-in ones, named for the
+    // plugin that contributes it and carrying the manifest's description and
+    // schema.
+    let published = bridge.published_tools();
+    assert_eq!(published.len(), method_count() + 1);
+    let tool = published
+        .iter()
+        .find(|tool| tool.name == "com_example_demo_cut_silence")
+        .expect("the plugin's tool is published under its id");
+    assert_eq!(tool.title.as_deref(), Some("com.example.demo.cut_silence"));
+    assert_eq!(tool.description.as_deref(), Some("Cut the quiet bits"));
+    assert_eq!(tool.input_schema["type"], "object");
+
+    let plugin_tools = bridge.plugin_tools();
+    let route = plugin_tools
+        .route("com_example_demo_cut_silence")
+        .expect("the published name routes back to the plugin");
+    assert_eq!(route.plugin, "com.example.demo");
+    assert_eq!(route.tool, "cut_silence");
+
+    // Calling it is a call this bridge routes rather than refuses: it goes out
+    // as plugin.call_tool, which this editor does not serve yet (TASK-96), so
+    // the answer is the Command API's own stable code and not a protocol
+    // error.
+    let forwarded = bridge
+        .call(call(
+            "com_example_demo_cut_silence",
+            &json!({ "threshold_db": -40 }),
+        ))
+        .expect("a plugin tool is a tool this bridge serves");
+    assert_eq!(forwarded.is_error, Some(true));
+    let error = forwarded.structured_content.expect("structured content");
+    assert_eq!(error["code"], "command.unknown_method");
+
+    // A plugin switched off contributes nothing.
+    let id = sub_plugin::PluginId::parse("com.example.demo").expect("a valid id");
+    registry.set_enabled(&id, false).expect("disabled");
+    assert_eq!(bridge.published_tools().len(), method_count());
+    assert!(bridge.plugin_tools().is_empty());
+
+    drop(bridge);
+    server.shutdown().expect("the server stops");
+    engine.shutdown().expect("the engine stops");
+}
+
 /// The `subordinate-cli` this test run built, when there is one.
 ///
 /// Integration tests live in `target/<profile>/deps`, and the workspace's

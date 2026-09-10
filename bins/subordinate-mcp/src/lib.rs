@@ -8,7 +8,9 @@
 //!
 //! - [`tools`] — the tools, generated from the committed
 //!   `docs/schema/command-api.json` so names, descriptions and parameter
-//!   schemas cannot drift from the methods they call.
+//!   schemas cannot drift from the methods they call, plus the tools the
+//!   installed plugins contribute, fetched from the editor and published under
+//!   each plugin's id.
 //! - [`backend`] — finding the running editor through its lock file, or
 //!   launching `subordinate-cli serve` when none is running.
 //! - [`resources`] — the project as readable resources: `project://current`,
@@ -45,7 +47,7 @@ pub mod watch;
 pub use backend::{Backend, Options};
 pub use bridge::Bridge;
 pub use resources::Resources;
-pub use tools::ToolSet;
+pub use tools::{PluginTools, ToolSet};
 pub use watch::Watch;
 
 /// The error codes this binary produces.
@@ -67,6 +69,9 @@ pub mod codes {
     pub const UNKNOWN_RESOURCE: ErrorCode = ErrorCode::from_static("mcp.unknown_resource");
     /// The editor's change events could not be watched for resource updates.
     pub const WATCH_FAILED: ErrorCode = ErrorCode::from_static("mcp.watch_failed");
+    /// The plugin host's `plugin.tools` answered something that is not a tool
+    /// listing.
+    pub const PLUGIN_TOOLS_INVALID: ErrorCode = ErrorCode::from_static("mcp.plugin_tools_invalid");
 }
 
 #[cfg(test)]
@@ -82,6 +87,7 @@ mod tests {
             codes::SESSION_FAILED,
             codes::UNKNOWN_RESOURCE,
             codes::WATCH_FAILED,
+            codes::PLUGIN_TOOLS_INVALID,
         ] {
             assert_eq!(code.domain(), "mcp");
             assert_eq!(

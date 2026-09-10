@@ -161,6 +161,149 @@ impl ToolSet {
     }
 }
 
+/// The Command API method that lists the tools the installed plugins
+/// contribute.
+///
+/// Served by the plugin host beside `plugin.list`, so the bridge asks the
+/// running editor rather than reading plugin directories itself.
+pub const PLUGIN_TOOLS_METHOD: &str = "plugin.tools";
+
+/// The Command API method a plugin-contributed tool call is forwarded to.
+///
+/// The bridge routes by name: a tool the compiled-in schemas do not describe is
+/// looked up in [`PluginTools`], and its plugin id and plugin-local name are
+/// sent with the client's arguments.
+pub const PLUGIN_CALL_METHOD: &str = "plugin.call_tool";
+
+/// Where a plugin-contributed tool call goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginRoute {
+    /// The plugin that contributes the tool.
+    pub plugin: String,
+    /// The plugin-local tool name, as the plugin's own `call` takes it.
+    pub tool: String,
+}
+
+/// The tools the installed plugins contribute, as the editor last reported
+/// them.
+///
+/// Unlike [`ToolSet`], this is not compiled in: which plugins are installed and
+/// enabled is a property of the editor the bridge is talking to, so the list is
+/// fetched from `plugin.tools` and refreshed whenever a client lists tools.
+/// Each tool keeps the published name the host gave it — the plugin id with its
+/// dots turned into underscores, an underscore, then the plugin-local name — so
+/// two plugins' tools never collide and an agent can see which plugin a tool
+/// came from (docs/PLAN.md §6.2).
+#[derive(Debug, Clone, Default)]
+pub struct PluginTools {
+    /// The tools, in published-name order.
+    tools: Vec<Tool>,
+    /// Published tool name to the plugin and plugin-local name behind it.
+    routes: BTreeMap<String, PluginRoute>,
+}
+
+impl PluginTools {
+    /// Reads a `plugin.tools` result.
+    ///
+    /// # Errors
+    ///
+    /// Returns `mcp.plugin_tools_invalid` when the result is not the listing
+    /// the plugin host documents: a `tools` array of objects with a name, a
+    /// plugin id, a plugin-local name and an object input schema.
+    pub fn from_listing(listing: &Value) -> SubResult<Self> {
+        let rows = listing
+            .get("tools")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                SubError::new(
+                    codes::PLUGIN_TOOLS_INVALID,
+                    "a plugin tool listing has no tools array",
+                )
+            })?;
+        let mut parsed = Self::default();
+        for row in rows {
+            let text = |field: &str| -> SubResult<String> {
+                row.get(field)
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        SubError::new(
+                            codes::PLUGIN_TOOLS_INVALID,
+                            "a plugin tool is missing a field",
+                        )
+                        .with_detail("field", field.to_owned())
+                    })
+            };
+            let name = text("name")?;
+            let route = PluginRoute {
+                plugin: text("plugin")?,
+                tool: text("tool")?,
+            };
+            let schema = row
+                .get("input_schema")
+                .and_then(Value::as_object)
+                .cloned()
+                .ok_or_else(|| {
+                    SubError::new(
+                        codes::PLUGIN_TOOLS_INVALID,
+                        "a plugin tool's input schema is not an object",
+                    )
+                    .with_detail("tool", name.clone())
+                })?;
+
+            let mut tool = Tool::new_with_raw(
+                name.clone(),
+                row.get("description")
+                    .and_then(Value::as_str)
+                    .map(|description| description.to_owned().into()),
+                Arc::new(schema),
+            );
+            tool.title = row
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| Some(format!("{}.{}", route.plugin, route.tool)));
+            if parsed.routes.insert(name.clone(), route).is_some() {
+                return Err(SubError::new(
+                    codes::PLUGIN_TOOLS_INVALID,
+                    "two plugin tools share one published name",
+                )
+                .with_detail("tool", name));
+            }
+            parsed.tools.push(tool);
+        }
+        parsed
+            .tools
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(parsed)
+    }
+
+    /// Every plugin-contributed tool, in published-name order.
+    #[must_use]
+    pub fn tools(&self) -> &[Tool] {
+        &self.tools
+    }
+
+    /// Where a published tool name goes, or `None` for a name no plugin
+    /// contributes.
+    #[must_use]
+    pub fn route(&self, tool: &str) -> Option<&PluginRoute> {
+        self.routes.get(tool)
+    }
+
+    /// How many plugin-contributed tools there are.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.tools.len()
+    }
+
+    /// Whether no plugin contributes a tool.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
+}
+
 /// Parses one of the schema documents compiled into this build.
 fn compiled_in(text: &str) -> SubResult<Value> {
     serde_json::from_str(text).map_err(|error| {
@@ -232,8 +375,108 @@ fn resolve(reference: &str, defs: Option<&Map<String, Value>>) -> SubResult<Json
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMAND_API_SCHEMA, PLUGIN_API_SCHEMA, ToolSet, tool_name};
+    use super::{COMMAND_API_SCHEMA, PLUGIN_API_SCHEMA, PluginTools, ToolSet, tool_name};
     use serde_json::{Value, json};
+
+    /// A `plugin.tools` answer with two plugins' tools in it.
+    fn listing() -> Value {
+        json!({
+            "tools": [
+                {
+                    "name": "com_example_tint_tint",
+                    "title": "com.example.tint.tint",
+                    "description": "Tint a clip",
+                    "plugin": "com.example.tint",
+                    "tool": "tint",
+                    "input_schema": { "type": "object" },
+                },
+                {
+                    "name": "com_example_silence-cutter_cut_silence",
+                    "title": "com.example.silence-cutter.cut_silence",
+                    "description": "Cut the quiet bits",
+                    "plugin": "com.example.silence-cutter",
+                    "tool": "cut_silence",
+                    "input_schema": { "type": "object" },
+                },
+            ],
+        })
+    }
+
+    #[test]
+    fn plugin_tools_keep_their_prefixed_names_and_route_back_to_the_plugin() {
+        let plugins = PluginTools::from_listing(&listing()).expect("a listing");
+        assert_eq!(plugins.len(), 2);
+        let names: Vec<&str> = plugins
+            .tools()
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "com_example_silence-cutter_cut_silence",
+                "com_example_tint_tint",
+            ]
+        );
+        for tool in plugins.tools() {
+            assert!(
+                tool.name.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || character == '_' || character == '-'
+                }),
+                "{} is not a portable tool name",
+                tool.name,
+            );
+        }
+
+        let route = plugins
+            .route("com_example_tint_tint")
+            .expect("the tool routes somewhere");
+        assert_eq!(route.plugin, "com.example.tint");
+        assert_eq!(route.tool, "tint");
+        assert_eq!(
+            plugins
+                .tools()
+                .iter()
+                .find(|tool| tool.name == "com_example_tint_tint")
+                .and_then(|tool| tool.title.as_deref()),
+            Some("com.example.tint.tint"),
+        );
+        assert!(plugins.route("bin_create").is_none());
+    }
+
+    #[test]
+    fn an_empty_listing_contributes_nothing() {
+        let plugins = PluginTools::from_listing(&json!({ "tools": [] })).expect("a listing");
+        assert!(plugins.is_empty());
+        assert!(plugins.tools().is_empty());
+    }
+
+    #[test]
+    fn a_listing_that_is_not_one_is_a_stable_error() {
+        for answer in [
+            json!({}),
+            json!({ "tools": [{ "name": "a_b", "plugin": "a.b" }] }),
+            json!({ "tools": [{
+                "name": "a_b", "plugin": "a.b", "tool": "b", "input_schema": 7,
+            }] }),
+        ] {
+            let error = PluginTools::from_listing(&answer).expect_err("not a listing");
+            assert_eq!(error.code.as_str(), "mcp.plugin_tools_invalid");
+        }
+    }
+
+    #[test]
+    fn plugin_tools_never_collide_with_the_compiled_in_ones() {
+        let tools = ToolSet::committed().expect("the committed tool set");
+        let plugins = PluginTools::from_listing(&listing()).expect("a listing");
+        for tool in plugins.tools() {
+            assert!(
+                tools.method(tool.name.as_ref()).is_none(),
+                "{} shadows a Command API method",
+                tool.name,
+            );
+        }
+    }
 
     /// The committed schema, parsed.
     fn document() -> Value {

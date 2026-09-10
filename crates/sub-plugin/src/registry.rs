@@ -71,6 +71,7 @@ use sub_core::{SubError, SubResult};
 
 use crate::codes;
 use crate::manifest::{MANIFEST_FILE_NAME, Manifest, PluginId};
+use crate::mcp::{PublishedTool, ToolCatalog};
 
 /// The file recording which plugins the user switched off.
 pub const REGISTRY_STATE_FILE: &str = "plugins.json";
@@ -356,6 +357,102 @@ pub struct Removal {
     /// The directory that was deleted.
     #[schemars(with = "String")]
     pub directory: PathBuf,
+}
+
+/// The result of `plugin.tools`: every MCP tool the enabled plugins contribute.
+///
+/// The MCP bridge asks for this when a client lists tools, and publishes each
+/// row beside its own tools under the plugin-id prefix the row carries
+/// (docs/PLAN.md §6.2, §7). Nothing here is loaded from a component: the
+/// manifest is what the user approved on install, so a tool is listed as the
+/// manifest declares it whether or not the plugin is instantiated yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolListing {
+    /// The tools, sorted by published name.
+    pub tools: Vec<PublishedTool>,
+    /// The plugins whose tools could not be published, sorted by id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<ToolFailure>,
+}
+
+/// One plugin whose declared tools could not be published.
+///
+/// Reported per plugin, like a [`LoadFailure`]: a plugin with an unreadable or
+/// uncompilable tool schema hides its own tools and nobody else's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolFailure {
+    /// The plugin whose tools are missing from the listing.
+    pub id: PluginId,
+    /// The stable error code, e.g. `plugin.tool_schema_unreadable`.
+    pub code: String,
+    /// The one-line message.
+    pub message: String,
+    /// The error's details, e.g. the offending tool.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(with = "BTreeMap<String, Value>")]
+    pub details: BTreeMap<String, Value>,
+}
+
+impl ToolFailure {
+    /// Records `error` against the plugin it came from.
+    #[must_use]
+    pub fn new(id: PluginId, error: &SubError) -> Self {
+        Self {
+            id,
+            code: error.code.as_str().to_owned(),
+            message: error.message.clone(),
+            details: error.details.clone(),
+        }
+    }
+}
+
+/// The tools every enabled plugin in `scan` contributes.
+///
+/// Two plugins cannot normally collide on a published name — the prefix is the
+/// plugin id — but ids that differ only in where a dot falls would, so a
+/// colliding row is dropped and reported rather than silently shadowing the
+/// one already published.
+#[must_use]
+pub fn contributed_tools(scan: &Scan) -> ToolListing {
+    let mut listing = ToolListing::default();
+    let mut names: BTreeMap<String, PluginId> = BTreeMap::new();
+    for plugin in scan.enabled() {
+        if plugin.manifest.mcp.tools.is_empty() {
+            continue;
+        }
+        let catalog = match ToolCatalog::from_manifest(&plugin.manifest, &plugin.directory) {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                listing
+                    .failures
+                    .push(ToolFailure::new(plugin.id.clone(), &error));
+                continue;
+            }
+        };
+        for tool in catalog.published() {
+            if let Some(owner) = names.get(&tool.name) {
+                listing.failures.push(ToolFailure::new(
+                    plugin.id.clone(),
+                    &SubError::new(
+                        codes::DUPLICATE_TOOL,
+                        "two plugins publish the same MCP tool name",
+                    )
+                    .with_detail("tool", tool.name.clone())
+                    .with_detail("published_by", owner.as_str().to_owned()),
+                ));
+                continue;
+            }
+            names.insert(tool.name.clone(), plugin.id.clone());
+            listing.tools.push(tool);
+        }
+    }
+    listing
+        .tools
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    listing
+        .failures
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    listing
 }
 
 /// The enable/disable state, as it is stored.
@@ -730,11 +827,18 @@ pub const PLUGIN_ENABLE: &str = "plugin.enable";
 pub const PLUGIN_DISABLE: &str = "plugin.disable";
 /// `plugin.remove`: delete one plugin from disk.
 pub const PLUGIN_REMOVE: &str = "plugin.remove";
+/// `plugin.tools`: every MCP tool the enabled plugins contribute.
+pub const PLUGIN_TOOLS: &str = "plugin.tools";
 
 /// The parameters of `plugin.list`: none.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListParams {}
+
+/// The parameters of `plugin.tools`: none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolsParams {}
 
 /// The parameters of `plugin.enable`, `plugin.disable` and `plugin.remove`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -744,8 +848,8 @@ pub struct PluginParams {
     pub id: PluginId,
 }
 
-/// Puts `plugin.list`, `plugin.enable`, `plugin.disable` and `plugin.remove`
-/// on a [`Dispatcher`].
+/// Puts `plugin.list`, `plugin.enable`, `plugin.disable`, `plugin.remove` and
+/// `plugin.tools` on a [`Dispatcher`].
 ///
 /// They are queries, not commands: switching a plugin off changes what the
 /// host loads, never the project, so nothing goes on the undo stack (decision-7
@@ -755,7 +859,7 @@ pub struct PluginParams {
 ///
 /// # Errors
 ///
-/// `command.duplicate_method` when one of the four names is already served.
+/// `command.duplicate_method` when one of the five names is already served.
 pub fn register_methods(
     dispatcher: &mut Dispatcher,
     registry: Arc<PluginRegistry>,
@@ -791,12 +895,22 @@ pub fn register_methods(
         },
     )?;
 
+    let removing = Arc::clone(&registry);
     dispatcher.register::<PluginParams, Removal, _>(
         PLUGIN_REMOVE,
         "Delete an installed plugin's directory from disk.",
         move |_, params| {
             let params: PluginParams = typed(params)?;
-            to_value(&registry.remove(&params.id)?)
+            to_value(&removing.remove(&params.id)?)
+        },
+    )?;
+
+    dispatcher.register::<ToolsParams, ToolListing, _>(
+        PLUGIN_TOOLS,
+        "List every MCP tool the enabled plugins contribute, each under its plugin's id prefix.",
+        move |_, params| {
+            typed::<ToolsParams>(params)?;
+            to_value(&contributed_tools(&registry.scan()?))
         },
     )
 }
@@ -837,7 +951,7 @@ pub mod schema {
 
     use super::{
         EnableChange, ListParams, PLUGIN_DISABLE, PLUGIN_ENABLE, PLUGIN_LIST, PLUGIN_REMOVE,
-        PluginParams, Removal, Scan,
+        PLUGIN_TOOLS, PluginParams, Removal, Scan, ToolListing, ToolsParams,
     };
 
     /// The meta-schema the exported document conforms to.
@@ -889,6 +1003,12 @@ pub mod schema {
                 &mut generator,
                 PLUGIN_REMOVE,
                 "Delete an installed plugin's directory from disk.",
+            ),
+            method::<ToolsParams, ToolListing>(
+                &mut generator,
+                PLUGIN_TOOLS,
+                "List every MCP tool the enabled plugins contribute, each under its plugin's id \
+                 prefix.",
             ),
         ];
         // The dev-install and hot-reload methods are served by the same host
@@ -962,6 +1082,7 @@ pub mod schema {
                     "plugin.reload",
                     "plugin.remove",
                     "plugin.status",
+                    "plugin.tools",
                 ]
             );
         }
@@ -1013,8 +1134,9 @@ mod tests {
     use sub_model::Project;
 
     use super::{
-        InstallLocation, PLUGIN_DISABLE, PLUGIN_ENABLE, PLUGIN_LIST, PLUGIN_REMOVE, PluginDirs,
-        PluginRegistry, REGISTRY_STATE_FILE, default_user_dir, register_methods,
+        InstallLocation, PLUGIN_DISABLE, PLUGIN_ENABLE, PLUGIN_LIST, PLUGIN_REMOVE, PLUGIN_TOOLS,
+        PluginDirs, PluginRegistry, REGISTRY_STATE_FILE, contributed_tools, default_user_dir,
+        register_methods,
     };
     use crate::manifest::{PluginId, World};
 
@@ -1045,6 +1167,26 @@ mod tests {
     fn registry(root: &Path) -> PluginRegistry {
         PluginRegistry::new(PluginDirs::new(root.join("user")).with_project(root.join("project")))
     }
+
+    /// Writes a plugin directory whose manifest contributes one MCP tool.
+    fn install_with_tool(root: &Path, id: &str, tool: &str, schema: &str) -> PathBuf {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).expect("a plugin directory");
+        std::fs::write(
+            dir.join("plugin.toml"),
+            format!(
+                "[plugin]\nid = \"{id}\"\nname = \"Tooled\"\nversion = \"0.1.0\"\n\
+                 api = \"0.1\"\nworlds = [\"command\", \"mcp-tools\"]\n\n\
+                 [mcp.tools.{tool}]\ndescription = \"Does {tool}\"\nschema = \"{tool}.json\"\n"
+            ),
+        )
+        .expect("a manifest");
+        std::fs::write(dir.join(format!("{tool}.json")), schema).expect("a schema");
+        dir
+    }
+
+    /// A schema every tool in these tests uses.
+    const TOOL_SCHEMA: &str = r#"{"type":"object","properties":{"gain":{"type":"number"}}}"#;
 
     #[test]
     fn a_missing_plugin_directory_lists_nothing() {
@@ -1278,5 +1420,89 @@ mod tests {
         assert_eq!(error.code.as_str(), "command.invalid_params");
 
         engine.shutdown().expect("a clean shutdown");
+    }
+
+    #[test]
+    fn contributed_tools_are_published_under_each_plugin_id() {
+        let root = scratch("tools");
+        let user = root.join("user");
+        install_with_tool(&user, "com.example.one", "cut_silence", TOOL_SCHEMA);
+        install_with_tool(&user, "com.example.two", "tint", TOOL_SCHEMA);
+        // A plugin with no tools contributes none, and is not a failure.
+        install(&user, "com.example.plain", "Plain");
+
+        let listing = contributed_tools(&registry(&root).scan().expect("a scan"));
+        assert!(listing.failures.is_empty());
+        let names: Vec<&str> = listing
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["com_example_one_cut_silence", "com_example_two_tint"]
+        );
+        assert_eq!(listing.tools[0].plugin, "com.example.one");
+        assert_eq!(listing.tools[0].tool, "cut_silence");
+        assert_eq!(listing.tools[0].title, "com.example.one.cut_silence");
+        assert_eq!(listing.tools[0].description, "Does cut_silence");
+    }
+
+    #[test]
+    fn a_disabled_plugin_contributes_nothing() {
+        let root = scratch("tools-disabled");
+        install_with_tool(
+            &root.join("user"),
+            "com.example.one",
+            "cut_silence",
+            TOOL_SCHEMA,
+        );
+        let registry = registry(&root);
+        let id = PluginId::parse("com.example.one").expect("a valid id");
+        registry.set_enabled(&id, false).expect("disabled");
+
+        let listing = contributed_tools(&registry.scan().expect("a scan"));
+        assert!(listing.tools.is_empty());
+        assert!(listing.failures.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_tool_schema_hides_one_plugin_and_no_others() {
+        let root = scratch("tools-broken");
+        let user = root.join("user");
+        let broken = install_with_tool(&user, "com.example.bad", "cut_silence", TOOL_SCHEMA);
+        std::fs::remove_file(broken.join("cut_silence.json")).expect("the schema is removed");
+        install_with_tool(&user, "com.example.good", "tint", TOOL_SCHEMA);
+
+        let listing = contributed_tools(&registry(&root).scan().expect("a scan"));
+        assert_eq!(listing.tools.len(), 1);
+        assert_eq!(listing.tools[0].plugin, "com.example.good");
+        assert_eq!(listing.failures.len(), 1);
+        assert_eq!(listing.failures[0].id.as_str(), "com.example.bad");
+        assert_eq!(listing.failures[0].code, "plugin.tool_schema_unreadable");
+    }
+
+    #[test]
+    fn plugin_tools_is_served_over_the_command_api() {
+        let root = scratch("tools-method");
+        install_with_tool(
+            &root.join("user"),
+            "com.example.one",
+            "cut_silence",
+            TOOL_SCHEMA,
+        );
+        let engine = Engine::spawn(Project::new("Tools")).expect("an engine");
+        let mut dispatcher = Dispatcher::new(engine.handle().clone());
+        register_methods(&mut dispatcher, Arc::new(registry(&root))).expect("the methods");
+
+        let listing = dispatcher
+            .invoke(PLUGIN_TOOLS, None)
+            .expect("plugin.tools answers");
+        assert_eq!(listing["tools"][0]["name"], "com_example_one_cut_silence");
+        assert_eq!(listing["tools"][0]["plugin"], "com.example.one");
+        assert_eq!(listing["tools"][0]["tool"], "cut_silence");
+        assert!(listing["tools"][0]["input_schema"].is_object());
+
+        engine.shutdown().expect("the engine stops");
     }
 }

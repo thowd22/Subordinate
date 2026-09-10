@@ -382,6 +382,44 @@
       ],
       "type": "object"
     },
+    "PublishedTool": {
+      "additionalProperties": false,
+      "description": "One tool as `plugin.tools` publishes it over the Command API.\n\nThe MCP bridge turns a row of this straight into a tool: `name` is the tool\nname a client calls, `input_schema` its argument schema, and `plugin` and\n`tool` are what the bridge sends back when the tool is called.",
+      "properties": {
+        "description": {
+          "description": "The description from the manifest.",
+          "type": "string"
+        },
+        "input_schema": {
+          "description": "The argument schema from the manifest."
+        },
+        "name": {
+          "description": "The MCP tool name: the plugin id with dots turned into underscores, an\nunderscore, then the plugin-local name.",
+          "type": "string"
+        },
+        "plugin": {
+          "description": "The plugin that contributes the tool.",
+          "type": "string"
+        },
+        "title": {
+          "description": "The dotted, human-facing name: plugin id, a dot, the local name.",
+          "type": "string"
+        },
+        "tool": {
+          "description": "The plugin-local name, as the component's `call` takes it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "description",
+        "plugin",
+        "tool",
+        "input_schema"
+      ],
+      "type": "object"
+    },
     "ReloadError": {
       "description": "One error, flattened the way [`crate::registry::LoadFailure`] flattens one.",
       "properties": {
@@ -590,6 +628,62 @@
       ],
       "type": "object"
     },
+    "ToolFailure": {
+      "description": "One plugin whose declared tools could not be published.\n\nReported per plugin, like a [`LoadFailure`]: a plugin with an unreadable or\nuncompilable tool schema hides its own tools and nobody else's.",
+      "properties": {
+        "code": {
+          "description": "The stable error code, e.g. `plugin.tool_schema_unreadable`.",
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "description": "The error's details, e.g. the offending tool.",
+          "type": "object"
+        },
+        "id": {
+          "$ref": "#/$defs/PluginId",
+          "description": "The plugin whose tools are missing from the listing."
+        },
+        "message": {
+          "description": "The one-line message.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ToolListing": {
+      "description": "The result of `plugin.tools`: every MCP tool the enabled plugins contribute.\n\nThe MCP bridge asks for this when a client lists tools, and publishes each\nrow beside its own tools under the plugin-id prefix the row carries\n(docs/PLAN.md §6.2, §7). Nothing here is loaded from a component: the\nmanifest is what the user approved on install, so a tool is listed as the\nmanifest declares it whether or not the plugin is instantiated yet.",
+      "properties": {
+        "failures": {
+          "description": "The plugins whose tools could not be published, sorted by id.",
+          "items": {
+            "$ref": "#/$defs/ToolFailure"
+          },
+          "type": "array"
+        },
+        "tools": {
+          "description": "The tools, sorted by published name.",
+          "items": {
+            "$ref": "#/$defs/PublishedTool"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tools"
+      ],
+      "type": "object"
+    },
+    "ToolsParams": {
+      "additionalProperties": false,
+      "description": "The parameters of `plugin.tools`: none.",
+      "type": "object"
+    },
     "World": {
       "description": "A WIT world a plugin can implement (docs/PLAN.md §6.2).",
       "oneOf": [
@@ -714,6 +808,17 @@
       },
       "result": {
         "$ref": "#/$defs/Statuses"
+      }
+    },
+    {
+      "description": "List every MCP tool the enabled plugins contribute, each under its plugin's id prefix.",
+      "kind": "query",
+      "name": "plugin.tools",
+      "params": {
+        "$ref": "#/$defs/ToolsParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ToolListing"
       }
     }
   ],

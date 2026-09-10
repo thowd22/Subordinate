@@ -1,10 +1,11 @@
 ---
 id: TASK-81
 title: 'WIT mcp-tools world: plugin-contributed MCP tools'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@opus-task-81'
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-10 08:02'
+updated_date: '2026-09-10 08:54'
 labels:
   - plugins
   - mcp
@@ -27,18 +28,18 @@ Plugins extend the agent surface (§6.2, §7).
 <!-- AC:BEGIN -->
 - [x] #1 mcp-tools world exports tools() -> list<ToolDesc { name, description, json-schema }> and call(name, args-json) -> result-json
 - [x] #2 Manifest declares the tools; the host validates arguments against the schema before calling
-- [ ] #3 Tools appear through the MCP bridge with the plugin id as a prefix
+- [x] #3 Tools appear through the MCP bridge with the plugin id as a prefix
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Add an `mcp` interface (record tool-desc { name, description, json-schema }) and a `mcp-tools` world to wit/subordinate-plugin.wit: imports command-api, exports tools() -> list<tool-desc> and call(name, args-json) -> result<string, error>.
-2. Generate host bindings for the new world in sub-plugin (second bindgen! with `with` remapping so types and command-api stay the same Rust types as the command world).
-3. Add a host-side tool catalogue in sub-plugin: ToolDeclaration (the manifest's [mcp.tools.*] entry: name, description, JSON Schema) and ToolCatalog keyed by plugin id, which (a) rejects undeclared or mismatched tools returned by the plugin's tools(), (b) validates call arguments against the declared JSON Schema before dispatch (jsonschema crate, default-features off so no remote ref resolution), (c) exposes the plugin-id-prefixed MCP tool names and maps a prefixed name back to the plugin-local tool.
-4. New stable SubError codes under plugin.* for invalid plugin id, invalid tool name, invalid tool schema, undeclared tool and invalid tool arguments.
-5. Tests: WIT world links and its exports are callable shapes; catalogue accepts/rejects; schema validation passes and fails with field paths in details; prefixing and reverse lookup round-trip.
-6. Verify with cargo fmt --check, clippy --workspace --all-targets -D warnings and cargo test -p sub-plugin.
+1. sub-plugin::mcp: build a ToolCatalog straight from an installed plugin (manifest [mcp.tools.*] plus the schema file each entry names, read relative to the plugin directory), with a new plugin.tool_schema_unreadable code for a schema file that will not read.
+2. sub-plugin::registry: a new query method plugin.tools listing every enabled plugin's contributed tools as the bridge should publish them (prefixed mcp name, dotted title, description, input schema, plugin id, local name), plus per-plugin failures so one bad schema does not hide the rest. Registered in register_methods and exported in the plugin-api schema document (regenerate docs/schema/plugin-api.json).
+3. subordinate-mcp::tools: ToolSet gains plugin tools — extend_from_plugin_tools(Value) parses a plugin.tools result into rmcp Tools and a route table, plugin_route(name) maps a published name back to {plugin id, local tool}.
+4. subordinate-mcp::bridge: tools/list asks the editor for plugin.tools on a blocking task and appends them (a failure logs and leaves the static tools), and tools/call routes a plugin tool to plugin.call_tool with {id, tool, arguments}; the listing's cache hints drop to session scope when plugin tools are present.
+5. Tests: catalogue from a manifest directory; plugin.tools over a dispatcher with a temp plugin dir; ToolSet parsing, prefixing and reverse routing; bridge integration test that a plugin's tool appears in tools/list under its plugin-id prefix.
+6. Verify cargo fmt --check, clippy --workspace --all-targets -D warnings, cargo test -p sub-plugin -p subordinate-mcp.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -53,4 +54,16 @@ Naming: an MCP tool name is the plugin id with dots turned into underscores, the
 Verification: cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean (GStreamer prefix env exported for sub-media); cargo test -p sub-plugin 17 unit + 4 integration + 3 doc tests pass, including the_mcp_tools_world_links_against_the_same_host, which links the world into a wasmtime Linker with every import satisfied by the same TestHost the command world uses. cargo test -p spike-wasm-command-world (7 tests) also passes, which rebuilds the wasm32-wasip2 guest components against the edited WIT package, so the new interface and world parse under wit-bindgen as well as wasmtime bindgen. AC #1 and #2 checked on that evidence; AC #3 left unchecked (see the note above).
 
 2026-09-10: requeued; the wasmtime host (TASK-84), registry (TASK-85) and MCP bridge (TASK-93) now exist, so criterion 3 (plugin tools listed through the bridge with the plugin id prefix) can be completed.
+
+2026-09-10 (criterion 3): plugin-contributed tools now reach the MCP bridge. Host side: ToolCatalog::from_manifest builds a plugin's catalogue straight from its manifest's [mcp.tools.*] entries and the schema file each one names (new stable code plugin.tool_schema_unreadable), ToolCatalog::published gives the wire shape, and registry::contributed_tools walks a scan's enabled plugins into a ToolListing (per-plugin failures, so one unreadable schema hides only its own plugin, and a published-name collision is reported rather than shadowing). A fifth query method, plugin.tools, is registered beside plugin.list/enable/disable/remove and exported in docs/schema/plugin-api.json (regenerated with SUB_UPDATE_SCHEMA=1).
+
+Bridge side: subordinate_mcp::tools::PluginTools parses a plugin.tools answer into rmcp Tools plus a route table (mcp.plugin_tools_invalid for an answer that is not a listing). Bridge::published_tools refreshes that from the editor on every tools/list and appends the plugin tools to the compiled-in ones; a listing carrying plugin tools drops to a private, 30s cache hint because which plugins are installed is that editor's business, not the build's. A call naming a tool the compiled-in schemas do not describe is routed by plugin id to plugin.call_tool rather than refused, so TASK-96 only has to serve that method; an editor that does not serve plugin.tools yet keeps the previous answer instead of failing the listing.
+
+Verification: cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean (GStreamer prefix env exported); cargo test -p sub-plugin (134 unit + integration + doc tests), -p subordinate-mcp (32 unit, 5 bridge, plus the rest) and -p subordinate-cli all pass. The bridge integration test a_plugins_tools_are_offered_under_its_id_and_route_back_to_it installs a plugin declaring [mcp.tools.cut_silence], serves the registry over a real local socket, and asserts the bridge offers com_example_demo_cut_silence with the manifest's description and schema, routes a call to it back to that plugin, and drops it again when the plugin is disabled.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The mcp-tools WIT world and its host-side catalogue (criteria 1 and 2) are joined by the bridge path (criterion 3): plugin manifests' [mcp.tools.*] declarations become a ToolListing served by the new plugin.tools Command API method, and subordinate-mcp publishes each one as an MCP tool named for its plugin id, routing calls back to the declaring plugin. Verified with cargo fmt --all --check, cargo clippy --workspace --all-targets -D warnings, and cargo test -p sub-plugin -p subordinate-mcp -p subordinate-cli, including an integration test that lists a plugin's tool through the bridge over a real socket.
+<!-- SECTION:FINAL_SUMMARY:END -->

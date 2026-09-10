@@ -312,6 +312,10 @@ pub mod codes {
     pub const INVALID_TOOL_SCHEMA: ErrorCode = ErrorCode::from_static("plugin.invalid_tool_schema");
     /// One plugin declares the same MCP tool name twice.
     pub const DUPLICATE_TOOL: ErrorCode = ErrorCode::from_static("plugin.duplicate_tool");
+    /// A plugin's manifest declares an MCP tool whose schema file cannot be
+    /// read from the plugin directory.
+    pub const TOOL_SCHEMA_UNREADABLE: ErrorCode =
+        ErrorCode::from_static("plugin.tool_schema_unreadable");
     /// A plugin offers or is asked for an MCP tool its manifest does not
     /// declare.
     pub const UNDECLARED_TOOL: ErrorCode = ErrorCode::from_static("plugin.undeclared_tool");

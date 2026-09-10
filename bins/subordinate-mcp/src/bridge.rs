@@ -40,7 +40,7 @@ use tracing::{debug, warn};
 
 use crate::backend::Backend;
 use crate::resources::{self, Resources, Update};
-use crate::tools::ToolSet;
+use crate::tools::{PLUGIN_CALL_METHOD, PLUGIN_TOOLS_METHOD, PluginTools, ToolSet};
 use crate::watch::Watch;
 
 /// What an MCP client is told this server is for.
@@ -68,6 +68,14 @@ pub struct Bridge {
     watch: Arc<Watch>,
     /// What a pre-2026-07-28 client has subscribed to.
     legacy: Arc<Legacy>,
+    /// The tools the installed plugins contribute, as the editor last
+    /// reported them.
+    ///
+    /// The compiled-in tool set is the same for every user of a build; this is
+    /// not, because it depends on which plugins the editor has installed and
+    /// enabled, so it is refreshed on each `tools/list` and consulted when a
+    /// call names a tool the schemas do not describe.
+    plugins: Arc<Mutex<Arc<PluginTools>>>,
 }
 
 /// `resources/subscribe` state: the URIs one session asked to be told about.
@@ -94,6 +102,7 @@ impl Bridge {
             watch: Arc::new(Watch::new(Arc::clone(&backend))),
             backend,
             legacy: Arc::new(Legacy::default()),
+            plugins: Arc::new(Mutex::new(Arc::new(PluginTools::default()))),
         }
     }
 
@@ -101,6 +110,54 @@ impl Bridge {
     #[must_use]
     pub fn tools(&self) -> &ToolSet {
         &self.tools
+    }
+
+    /// The plugin-contributed tools as of the last refresh.
+    #[must_use]
+    pub fn plugin_tools(&self) -> Arc<PluginTools> {
+        Arc::clone(&self.plugins.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Asks the editor which tools its plugins contribute, and remembers the
+    /// answer.
+    ///
+    /// One Command API round trip, so it runs on a blocking task. An editor
+    /// that does not serve `plugin.tools` — an older build, or one started
+    /// without a plugin host — leaves the previous answer in place instead of
+    /// failing the listing: the engine's own tools are what most of a session
+    /// uses, and they are compiled in.
+    ///
+    /// # Errors
+    ///
+    /// Returns the editor's error when the call fails, and
+    /// `mcp.plugin_tools_invalid` when the answer is not a tool listing.
+    pub fn refresh_plugin_tools(&self) -> Result<Arc<PluginTools>, SubError> {
+        let listing = self.backend.invoke(PLUGIN_TOOLS_METHOD, None)?;
+        let plugins = Arc::new(PluginTools::from_listing(&listing)?);
+        *self.plugins.lock().unwrap_or_else(PoisonError::into_inner) = Arc::clone(&plugins);
+        Ok(plugins)
+    }
+
+    /// Every tool this bridge offers right now: the compiled-in ones and the
+    /// plugins' own.
+    ///
+    /// One Command API round trip, so it blocks; `tools/list` runs it on a
+    /// blocking task.
+    #[must_use]
+    pub fn published_tools(&self) -> Vec<rmcp::model::Tool> {
+        let plugins = match self.refresh_plugin_tools() {
+            Ok(plugins) => plugins,
+            Err(error) => {
+                debug!(
+                    code = error.code.as_str(),
+                    "the editor listed no plugin tools"
+                );
+                self.plugin_tools()
+            }
+        };
+        let mut tools = self.tools.tools().to_vec();
+        tools.extend(plugins.tools().iter().cloned());
+        tools
     }
 
     /// The project resources this bridge offers.
@@ -124,10 +181,7 @@ impl Bridge {
     /// tool-level error result.
     pub fn call(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
         let Some(method) = self.tools.method(&request.name) else {
-            return Err(McpError::invalid_params(
-                format!("no such tool: {}", request.name),
-                None,
-            ));
+            return self.call_plugin_tool(request);
         };
         let params = request.arguments.map(Value::Object);
         debug!(tool = %request.name, %method, "forwarding a tool call");
@@ -138,6 +192,53 @@ impl Bridge {
                 failure(&error)
             }
         })
+    }
+
+    /// Runs a call to a plugin-contributed tool.
+    ///
+    /// The published name carries the plugin id, so the call is one
+    /// `plugin.call_tool` round trip naming the plugin, its own tool name and
+    /// the client's arguments; the plugin host validates those against the
+    /// tool's declared schema before the plugin sees them.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol error only when no plugin contributes a tool by that
+    /// name; the editor's own failures come back as tool-level errors.
+    fn call_plugin_tool(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
+        let plugins = self.plugin_tools();
+        let Some(route) = plugins.route(&request.name) else {
+            return Err(McpError::invalid_params(
+                format!("no such tool: {}", request.name),
+                None,
+            ));
+        };
+        let arguments = request
+            .arguments
+            .map_or_else(|| Value::Object(serde_json::Map::new()), Value::Object);
+        let params = serde_json::json!({
+            "id": route.plugin,
+            "tool": route.tool,
+            "arguments": arguments,
+        });
+        debug!(
+            tool = %request.name,
+            plugin = %route.plugin,
+            "forwarding a plugin tool call",
+        );
+        Ok(
+            match self.backend.invoke(PLUGIN_CALL_METHOD, Some(params)) {
+                Ok(value) => success(&value),
+                Err(error) => {
+                    warn!(
+                        tool = %request.name,
+                        code = error.code.as_str(),
+                        "the plugin tool call failed",
+                    );
+                    failure(&error)
+                }
+            },
+        )
     }
 
     /// A receiver of every resource update from now on.
@@ -268,11 +369,26 @@ impl ServerHandler for Bridge {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        // The tools come from a schema compiled into this binary, so they are
-        // the same for every user of a build and cannot change under a session.
-        Ok(ListToolsResult::with_all_items(self.tools.tools().to_vec())
-            .with_ttl_ms(resources::TOOLS_TTL_MS)
-            .with_cache_scope(CacheScope::Public))
+        // The engine's tools come from a schema compiled into this binary, so
+        // they are the same for every user of a build and may be cached
+        // publicly for an hour. The plugins' tools are not: they are whatever
+        // the editor this bridge found has installed and enabled, so they are
+        // fetched here, and a listing that carries any of them is this user's
+        // alone and goes stale as soon as a plugin is switched on or off.
+        let bridge = self.clone();
+        let tools = tokio::task::spawn_blocking(move || bridge.published_tools())
+            .await
+            .map_err(|error| {
+                McpError::internal_error(format!("the tool list did not finish: {error}"), None)
+            })?;
+        let (ttl, scope) = if self.plugin_tools().is_empty() {
+            (resources::TOOLS_TTL_MS, CacheScope::Public)
+        } else {
+            (resources::LIST_TTL_MS, CacheScope::Private)
+        };
+        Ok(ListToolsResult::with_all_items(tools)
+            .with_ttl_ms(ttl)
+            .with_cache_scope(scope))
     }
 
     async fn list_resources(
