@@ -22,6 +22,10 @@ toml = { version = "1", default-features = false, features = ["parse", "display"
 sub-core = { version = "0.1.0", path = "../sub-core" }
 sub-edit = { version = "0.1.0", path = "../sub-edit" }
 sub-model = { version = "0.1.0", path = "../sub-model" }
+# Only for the `render` feature: lifting an effect plugin's declaration into
+# the compositor's types. Optional so a headless host — the MCP server loads
+# plugins and never opens a device — builds no wgpu.
+sub-render = { version = "0.1.0", path = "../sub-render", optional = true }
 sub-time = { version = "0.1.0", path = "../sub-time" }
 wasmtime = { version = "48", default-features = false, features = [
     "component-model",
@@ -37,6 +41,9 @@ wasmtime = { version = "48", default-features = false, features = [
 wasmtime-wasi = { version = "48", default-features = false, features = ["p2"] }
 
 [features]
+# Converts the WIT `effect` world's declarations into `sub-render`'s effect
+# types. On for anything that also composites: the editor and these tests.
+render = ["dep:sub-render"]
 # Test-only: makes the build script compile the `tests/guests` components for
 # `wasm32-wasip2`. The crate switches it on for its own tests through the
 # dev-dependency below, so a plain build of the library compiles no WASM.
@@ -47,7 +54,7 @@ sub-command = { version = "0.1.0", path = "../sub-command" }
 sub-edit = { version = "0.1.0", path = "../sub-edit" }
 # Self dev-dependency: the only way to turn a feature on for this crate's own
 # test targets and nothing else.
-sub-plugin = { version = "0.1.0", path = ".", features = ["test-guests"] }
+sub-plugin = { version = "0.1.0", path = ".", features = ["test-guests", "render"] }
 
 [lints]
 workspace = true

@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Cache key for a compiled effect: a digest of the shader source, its entry
+# point and the uniform layout derived from the plugin's parameters.
+blake3 = "1"
 sub-model = { path = "../sub-model" }
 sub-time = { path = "../sub-time" }
 pollster = "1.0"

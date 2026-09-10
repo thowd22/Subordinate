@@ -52,6 +52,29 @@ pub enum RenderError {
         /// What went wrong, as wgpu reported it.
         reason: String,
     },
+    /// A plugin declared an effect parameter that cannot be bound.
+    InvalidEffectParam {
+        /// The parameter's declared id.
+        param: String,
+        /// What is wrong with it.
+        reason: String,
+    },
+    /// A plugin's effect declaration cannot be compiled as written, before
+    /// the GPU is asked: no source, or an entry point that is not a name.
+    InvalidEffectShader {
+        /// What is wrong with the declaration.
+        reason: String,
+    },
+    /// A plugin's WGSL was rejected by the shader compiler.
+    ///
+    /// The effect is disabled and the message shown; the clip still renders
+    /// without it.
+    EffectCompileFailed {
+        /// The fragment entry point that was asked for.
+        entry: String,
+        /// The compiler's own message.
+        message: String,
+    },
     /// A frame's plane slice is too short for the geometry it claims.
     ShortPlane {
         /// Which plane fell short: `luma` or `chroma`.
@@ -77,6 +100,9 @@ impl RenderError {
             Self::ReadbackRingFull { .. } => "render.readback_ring_full",
             Self::ReadbackPending { .. } => "render.readback_pending",
             Self::ReadbackFailed { .. } => "render.readback_failed",
+            Self::InvalidEffectParam { .. } => "render.invalid_effect_param",
+            Self::InvalidEffectShader { .. } => "render.invalid_effect_shader",
+            Self::EffectCompileFailed { .. } => "render.effect_compile_failed",
             Self::ShortPlane { .. } => "render.short_plane",
         }
     }
@@ -102,6 +128,18 @@ impl fmt::Display for RenderError {
                 write!(f, "{pending} readback frames are still in flight")
             }
             Self::ReadbackFailed { reason } => write!(f, "frame readback failed: {reason}"),
+            Self::InvalidEffectParam { param, reason } => {
+                write!(f, "effect parameter {param}: {reason}")
+            }
+            Self::InvalidEffectShader { reason } => {
+                write!(f, "unusable effect declaration: {reason}")
+            }
+            Self::EffectCompileFailed { entry, message } => {
+                write!(
+                    f,
+                    "effect shader entry {entry} failed to compile: {message}"
+                )
+            }
             Self::ShortPlane { plane, have, need } => {
                 write!(f, "{plane} plane holds {have} bytes, {need} needed")
             }
@@ -167,6 +205,31 @@ mod tests {
             .code(),
             "render.short_plane"
         );
+    }
+
+    #[test]
+    fn effect_codes_are_stable() {
+        assert_eq!(
+            RenderError::InvalidEffectParam {
+                param: "amount".to_owned(),
+                reason: "default 2 is outside 0..=1".to_owned(),
+            }
+            .code(),
+            "render.invalid_effect_param"
+        );
+        assert_eq!(
+            RenderError::InvalidEffectShader {
+                reason: "the shader source is empty".to_owned(),
+            }
+            .code(),
+            "render.invalid_effect_shader"
+        );
+        let failed = RenderError::EffectCompileFailed {
+            entry: "fs_tint".to_owned(),
+            message: "unknown identifier".to_owned(),
+        };
+        assert_eq!(failed.code(), "render.effect_compile_failed");
+        assert!(failed.to_string().contains("unknown identifier"));
     }
 
     #[test]
