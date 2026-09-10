@@ -34,6 +34,17 @@ fn save(project: &Project, path: &Path) {
     std::fs::write(path, text).expect("the project file is writable");
 }
 
+/// Moves `path`'s modification time `by` into the past.
+fn backdate(path: &Path, by: std::time::Duration) {
+    let file = std::fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("the project file is writable");
+    let when = std::time::SystemTime::now() - by;
+    file.set_modified(when)
+        .expect("the modification time is settable");
+}
+
 /// The store holding `project_file`'s autosave history.
 fn store_for(project_file: &Path) -> SnapshotStore {
     SnapshotStore::for_project(project_file).expect("the path names a file")
@@ -49,6 +60,14 @@ fn store_for(project_file: &Path) -> SnapshotStore {
 fn project_with_history(dir: &Path, revisions: u64, keep: usize) -> (PathBuf, SnapshotStore) {
     let project_file = dir.join("doc-cut.sub");
     save(&Project::new("Saved"), &project_file);
+    // A snapshot is stamped from the wall clock floored to a millisecond,
+    // while the file carries whatever sub-millisecond modification time the
+    // filesystem recorded. On a fast machine the whole sequence below runs
+    // inside one millisecond, so the snapshots can come out stamped *behind*
+    // the file and nothing looks stale (seen on the macOS CI runner). Push the
+    // file's own time back so "the session ended without saving" is
+    // unambiguous, which is the shape these tests mean to set up.
+    backdate(&project_file, std::time::Duration::from_secs(5));
     let store = store_for(&project_file);
     for revision in 1..=revisions {
         let project = Project::new(format!("Revision {revision}"));
