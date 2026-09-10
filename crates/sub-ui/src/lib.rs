@@ -14,6 +14,7 @@ pub mod keymap;
 pub mod media_bin;
 pub mod media_import;
 pub mod meter;
+pub mod plugins;
 pub mod relink_dialog;
 pub mod sequence_tabs;
 pub mod shortcuts;
@@ -44,6 +45,7 @@ pub use meter::{
     CLIP_COLOR, CLIP_HOLD_SECONDS, MIN_DB, MeterState, NORMAL_COLOR, PEAK_FALL_DB_PER_SECOND,
     PEAK_HOLD_SECONDS, WARN_COLOR, amplitude_fraction, amplitude_to_db, db_fraction,
 };
+pub use plugins::{EMPTY_LABEL, MENU_TITLE, PluginMenu, PluginMenuEntry, plugins_menu_ui};
 pub use relink_dialog::{
     RELINK_JOB_KIND, RelinkDialog, is_certain, pick_replacement_file, pick_search_folder,
 };
@@ -97,4 +99,12 @@ pub mod codes {
 
     /// A keymap file exists but could not be read.
     pub const KEYMAP_UNREADABLE: ErrorCode = ErrorCode::from_static("ui.keymap_unreadable");
+
+    /// A plugin asked for a shortcut that is not a keyboard chord.
+    pub const PLUGIN_INVALID_CHORD: ErrorCode = ErrorCode::from_static("ui.plugin_invalid_chord");
+
+    /// A plugin asked for a chord the editor or an earlier plugin already
+    /// holds. The command keeps its menu entry and loses its shortcut.
+    pub const PLUGIN_SHORTCUT_CONFLICT: ErrorCode =
+        ErrorCode::from_static("ui.plugin_shortcut_conflict");
 }

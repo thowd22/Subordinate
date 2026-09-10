@@ -15,8 +15,8 @@ use sub_plugin::command_api::{
     ClipMetadata, Host, LogLevel, MarkerMetadata, ProjectMetadata, SequenceMetadata, TrackMetadata,
 };
 use sub_plugin::{
-    Command, WitError, WitProjectId, WitSequenceId, WitTrackId, marker_metadata, project_metadata,
-    sequence_metadata, track_clip_metadata, track_metadata,
+    Command, Commands, WitError, WitProjectId, WitSequenceId, WitTrackId, marker_metadata,
+    project_metadata, sequence_metadata, track_clip_metadata, track_metadata,
 };
 use sub_time::{Rational, RationalTime, TimeRange};
 
@@ -94,6 +94,10 @@ impl TestHost {
 }
 
 impl sub_plugin::types::Host for TestHost {}
+
+/// The registration records carry no host functions of their own; a host still
+/// declares that it serves the interface they live in.
+impl sub_plugin::command_menu::Host for TestHost {}
 
 impl Host for TestHost {
     fn run_command(
@@ -270,4 +274,17 @@ fn the_command_world_links_with_every_import_satisfied() {
     let mut linker = wasmtime::component::Linker::<TestHost>::new(&engine);
     Command::add_to_linker::<_, wasmtime::component::HasSelf<TestHost>>(&mut linker, |state| state)
         .expect("the command world's imports are all implemented");
+}
+
+#[test]
+fn the_commands_world_links_against_the_same_host() {
+    // The richer world with menu and shortcut registration imports the same
+    // `command-api`, so a host serving one serves both: the two worlds share
+    // their Rust types rather than each generating their own.
+    let engine = wasmtime::Engine::default();
+    let mut linker = wasmtime::component::Linker::<TestHost>::new(&engine);
+    Commands::add_to_linker::<_, wasmtime::component::HasSelf<TestHost>>(&mut linker, |state| {
+        state
+    })
+    .expect("the commands world's imports are all implemented");
 }

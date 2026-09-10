@@ -298,3 +298,66 @@ world command {
     /// encoding the Command API uses for parameters; so is the returned value.
     export run: func(project: project-id, args: string) -> result<string, error>;
 }
+
+/// What a plugin contributes to the host's menus and keyboard map, and what it
+/// is handed back when one of those entries is chosen.
+///
+/// Registration is data, not a callback: the host asks a plugin what commands
+/// it has once, at load time, and from then on the Plugins menu and the
+/// shortcut registry are answerable without instantiating anything.
+interface command-menu {
+    use types.{project-id};
+
+    /// One command a plugin contributes.
+    record command-desc {
+        /// Stable, plugin-local identifier, e.g. `cut-silence`. The host
+        /// qualifies it with the plugin id, so two plugins may use the same
+        /// one. Lowercase [a-z0-9_-] segments separated by `.`; it is the name
+        /// the host passes back to `run`, and renaming it breaks every keymap
+        /// entry naming it.
+        id: string,
+        /// The human-readable name shown in the Plugins menu.
+        title: string,
+        /// The chord the plugin would like, e.g. `Ctrl+Shift+K`, written the
+        /// way `keymap.toml` writes one. A request, not a claim: the host's own
+        /// actions and the user's keymap win, and a rejected chord leaves the
+        /// command reachable from the menu.
+        shortcut: option<string>,
+    }
+
+    /// What one invocation of a plugin command acts on.
+    ///
+    /// The project is named rather than handed over: a plugin still reaches it
+    /// only through `command-api`, so a command run is an ordinary sequence of
+    /// undoable commands that the host groups into one undo step.
+    record command-context {
+        /// The project the command was invoked on.
+        project: project-id,
+        /// The invocation's arguments as a JSON object, the same encoding the
+        /// Command API uses for parameters. `{}` when there are none.
+        args: string,
+    }
+}
+
+/// The command world with menu and shortcut registration: a plugin that
+/// contributes several named commands rather than one anonymous entry point.
+///
+/// `commands` is asked once when the plugin loads, and its answers become
+/// entries in the Plugins menu and requests on the shortcut registry. `run` is
+/// then called with the id of the entry the user chose. Everything it edits
+/// goes through the `command-api` import, and the host opens one undo group
+/// around the whole call, so a plugin command is one step on the undo stack no
+/// matter how many primitives it applies.
+world commands {
+    use types.{error};
+    use command-menu.{command-desc, command-context};
+
+    import command-api;
+
+    /// Every command this plugin contributes, in the order the menu lists them.
+    export commands: func() -> list<command-desc>;
+
+    /// Runs the command `id` names. The returned value is a JSON document, as
+    /// is `context.args`.
+    export run: func(id: string, context: command-context) -> result<string, error>;
+}
