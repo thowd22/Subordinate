@@ -50,6 +50,42 @@ const MASTER_METER_WIDTH: f32 = 120.0;
 /// How tall the master meter in the transport row is, in points.
 const MASTER_METER_HEIGHT: f32 = 8.0;
 
+/// What the docked panel says while the picture is in the pop-out window.
+pub const POPPED_OUT_LABEL: &str = "Showing in the pop-out window";
+
+/// Paints `frame` into a `size` area: black everywhere, with the canvas
+/// fitted into the middle, and returns the area it took.
+///
+/// This is the whole of drawing the preview, and it is a free function
+/// because the docked viewer panel and the pop-out window
+/// ([`crate::popout`]) both call it with the same [`egui::TextureId`]. The
+/// texture is sampled, never copied, so a second window costs one more quad
+/// and no render pass of its own.
+pub fn paint_picture(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    frame: Option<ViewerFrame>,
+) -> egui::Rect {
+    let (area, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter_at(area);
+    painter.rect_filled(area, 0.0, egui::Color32::BLACK);
+    let Some(frame) = frame else {
+        return area;
+    };
+    let fit = ViewerFit::new(area.width(), area.height(), frame.width, frame.height);
+    if fit.is_empty() {
+        return area;
+    }
+    let mut mesh = egui::Mesh::with_texture(frame.texture);
+    mesh.add_rect_with_uv(
+        fit.centred_in(area),
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+    painter.add(egui::Shape::mesh(mesh));
+    area
+}
+
 /// Casts a pixel or frame count to a float, at the painting boundary only.
 #[allow(
     clippy::cast_precision_loss,
@@ -547,6 +583,8 @@ pub struct ViewerPanel {
     pub state: ViewerState,
     /// Whether the panel claims the arrow and Home/End keys.
     pub keyboard: bool,
+    /// Whether the picture is showing in the pop-out window instead.
+    pub popped_out: bool,
     /// The master bus meter, fed from the mixer's meter bank.
     pub master_meter: MeterState,
 }
@@ -558,6 +596,7 @@ impl ViewerPanel {
         Self {
             state: ViewerState::new(rate),
             keyboard: true,
+            popped_out: false,
             master_meter: MeterState::new(),
         }
     }
@@ -568,6 +607,7 @@ impl ViewerPanel {
         Self {
             state: ViewerState::for_sequence(sequence),
             keyboard: true,
+            popped_out: false,
             master_meter: MeterState::new(),
         }
     }
@@ -589,7 +629,7 @@ impl ViewerPanel {
         // bottom up: reserve its height, then give the rest to the canvas.
         let available = ui.available_size();
         let picture_height = (available.y - SCRUB_HEIGHT - ui.spacing().item_spacing.y).max(0.0);
-        Self::picture_ui(ui, egui::vec2(available.x, picture_height), frame);
+        self.picture_ui(ui, egui::vec2(available.x, picture_height), frame);
         moved |= self.scrub_ui(ui);
         moved
     }
@@ -657,25 +697,22 @@ impl ViewerPanel {
         moved
     }
 
-    /// The picture: black everywhere, with the canvas fitted into the middle.
-    fn picture_ui(ui: &mut egui::Ui, size: egui::Vec2, frame: Option<ViewerFrame>) {
-        let (area, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-        let painter = ui.painter_at(area);
-        painter.rect_filled(area, 0.0, egui::Color32::BLACK);
-        let Some(frame) = frame else {
-            return;
-        };
-        let fit = ViewerFit::new(area.width(), area.height(), frame.width, frame.height);
-        if fit.is_empty() {
+    /// The picture, or a note that it is showing in the pop-out window.
+    fn picture_ui(&self, ui: &mut egui::Ui, size: egui::Vec2, frame: Option<ViewerFrame>) {
+        if !self.popped_out {
+            paint_picture(ui, size, frame);
             return;
         }
-        let mut mesh = egui::Mesh::with_texture(frame.texture);
-        mesh.add_rect_with_uv(
-            fit.centred_in(area),
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
+        // The picture is on the other window; the panel keeps its place in the
+        // dock and says where it went, so the tab is never a blank rectangle.
+        let area = paint_picture(ui, size, None);
+        ui.painter_at(area).text(
+            area.center(),
+            egui::Align2::CENTER_CENTER,
+            POPPED_OUT_LABEL,
+            egui::FontId::proportional(14.0),
+            ui.visuals().weak_text_color(),
         );
-        painter.add(egui::Shape::mesh(mesh));
     }
 
     /// The scrub bar: a track, the elapsed part of it, and the playhead.
