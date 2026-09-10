@@ -457,26 +457,42 @@ crates, `3` for dependencies, full debuginfo).
   numbers in the `RUST_BACKTRACE=1` output the tests print on failure. Because
   these are environment variables and not a profile in `Cargo.toml`, they apply
   to CI and to nothing else.
-- **sccache.** `Mozilla-Actions/sccache-action` runs before any cargo step and
-  `RUSTC_WRAPPER=sccache` with `SCCACHE_GHA_ENABLED=true` is set for the whole
-  job, backed by the Actions cache. `Swatinem/rust-cache` is keyed on
-  `Cargo.lock`, which changes on nearly every merge, so it misses constantly;
-  sccache is keyed on the individual compilation, so an unrelated lockfile edit
-  no longer forces a cold dependency build. Both are kept: rust-cache is the
-  fast path when the lockfile is untouched, sccache covers the misses.
-  `CARGO_INCREMENTAL=0` was already set, which sccache requires.
-  The wrapper deliberately stays set for the Clippy step too — cargo folds the
-  wrapper into its compiler fingerprint, so clearing it for one step would
-  invalidate every dependency and make clippy rebuild the world.
+- **sccache, on Windows and macOS only.** `Mozilla-Actions/sccache-action` runs
+  before any cargo step and `RUSTC_WRAPPER=sccache` with
+  `SCCACHE_GHA_ENABLED=true` is set for those jobs, backed by the Actions
+  cache. `Swatinem/rust-cache` is keyed on `Cargo.lock`, which changes on
+  nearly every merge, so it misses constantly; sccache is keyed on the
+  individual compilation, so an unrelated lockfile edit no longer forces a
+  cold dependency build. `CARGO_INCREMENTAL=0` was already set, which sccache
+  requires. The wrapper deliberately stays set for the Clippy step too — cargo
+  folds the wrapper into its compiler fingerprint, so clearing it for one step
+  would invalidate every dependency and make clippy rebuild the world.
+- **One compilation cache per job (TASK-126).** Stacking sccache on top of
+  `Swatinem/rust-cache` made Linux worse, not better. The two store the same
+  artifacts in the same place — the 10 GB per-repository Actions cache — so
+  keeping both roughly doubled the number of entries competing for that budget
+  and entries started being evicted between runs. A warm no-change rerun of
+  34419018398 showed Linux restoring neither cache in full: 331 rustc
+  invocations, 164 sccache hits against 167 misses, 13 minutes against the 5
+  the same job took with rust-cache alone — and the wrapper overhead paid on
+  top of every one of those misses. Linux therefore keeps rust-cache only;
+  Windows and macOS keep sccache, which is where the MSVC link step and the
+  lockfile churn make a compilation-keyed cache worth its cost and where the
+  36m → 8m win was measured. The switch is the `sccache` flag on each matrix
+  entry: it drives the job-level `RUSTC_WRAPPER` (empty means no wrapper, which
+  is how cargo reads it) and gates both the setup and the stats step. Before
+  turning both caches on for one job again, budget the Actions cache first.
 - **Windows Defender.** A Windows-only step adds the workspace, `~/.cargo`,
   `~/.rustup` and the sccache directory to the Defender exclusion list, plus
   `sccache.exe`, `rustc.exe` and `link.exe` as processes. Hosted runners run as
   administrator, so this succeeds; it is wrapped in `try`/`catch` and never
   fails the job if Microsoft changes that.
 
-The last step of each job runs `sccache --show-stats` (with `if: always()`), so
-the cache hit rate for that run is in the job log. That is the quickest way to
-tell a genuinely cold run from a regression in caching.
+The last step of each sccache job runs `sccache --show-stats` (with
+`if: always() && matrix.sccache`), so the cache hit rate for that run is in the
+job log. That is the quickest way to tell a genuinely cold run from a
+regression in caching; on Linux, where no wrapper runs, the equivalent signal
+is the wall time of the Build step.
 
 With this in place the job timeout is back to 40 minutes; it had been raised to
 60 as a stopgap. If a Windows run ever approaches that again, read the sccache
