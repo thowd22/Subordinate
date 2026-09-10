@@ -255,6 +255,9 @@ impl SubordinateApp {
                 log::debug!("transport now {}", self.scheduler.speed().label());
             } else if action == Action::ShowShortcutHelp {
                 self.shortcuts_window.toggle();
+            } else if action == Action::ToggleSnapping {
+                let on = self.timeline.toggle_snapping();
+                log::debug!("timeline snapping is now {}", if on { "on" } else { "off" });
             } else {
                 log::debug!("shortcut {} is not wired up yet", action.id());
             }
@@ -353,6 +356,9 @@ impl SubordinateApp {
         // handle; until then the sequence never changes, so one revision is
         // the whole story and the sync is a no-op after the first frame.
         timeline.sync(sequence, 0);
+        // The viewer owns the playhead; the timeline draws it and can ask for
+        // a new one, so it is handed the current value before it paints.
+        timeline.set_playhead(viewer.state.playhead());
         let mut moved = false;
         layout.ui(ui, |ui, panel| match panel {
             Panel::Viewer => moved |= viewer.ui(ui, Some(preview)),
@@ -366,6 +372,12 @@ impl SubordinateApp {
             }
             Panel::Timeline => {
                 let response = timeline.ui(ui, project, sequence);
+                if let Some(time) = response.seek {
+                    // Clicking or scrubbing the ruler moves the playhead,
+                    // which is view state rather than part of the edit, so it
+                    // is a seek and not a Command.
+                    moved |= viewer.state.seek_to(time);
+                }
                 for action in response.actions {
                     log::debug!("timeline action is not wired up yet: {action:?}");
                 }

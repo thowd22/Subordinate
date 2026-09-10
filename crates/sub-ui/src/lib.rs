@@ -19,6 +19,7 @@ pub mod plugins;
 pub mod relink_dialog;
 pub mod sequence_tabs;
 pub mod shortcuts;
+pub mod snapping;
 pub mod thumbnails;
 pub mod timeline;
 pub mod timeline_panel;
@@ -57,6 +58,10 @@ pub use sequence_tabs::{
 pub use shortcuts::{
     Action, Binding, Category, Conflict, DEFAULT_BINDINGS, HelpRow, ShortcutMap, ShortcutsWindow,
     help_rows,
+};
+pub use snapping::{
+    DEFAULT_THRESHOLD_PX, SnapCandidate, SnapKind, SnapSettings, collect_candidates, snap,
+    snapped_time, track_edges,
 };
 pub use thumbnails::{
     BUCKET_SIZES, DEFAULT_BUDGET_BYTES, DEFAULT_UPLOADS_PER_FRAME, ThumbnailCache,

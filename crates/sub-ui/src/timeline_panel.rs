@@ -23,6 +23,7 @@ use eframe::egui::{
 use sub_model::{Clip, MediaItem, Project, Sequence, Track, TrackKind};
 use sub_time::{Rational, RationalTime, Timecode, TimecodeRate};
 
+use crate::snapping::{self, SnapCandidate, SnapSettings};
 use crate::thumbnails::{ThumbnailCache, ZoomBucket, tile_time};
 use crate::timeline::{TimelineView, TrackLayout, ZoomLevel};
 use crate::track_header::{TrackAction, TrackHeaderState, empty_column_menu};
@@ -83,6 +84,25 @@ const NAME_PLATE_ALPHA: u8 = 150;
 
 /// How far from 1.0 a zoom factor has to be before it counts as a gesture.
 const ZOOM_EPSILON: f32 = 0.001;
+
+/// The colour the playhead is drawn in.
+///
+/// Deliberately outside the clip palette above — no clip is this colour — so
+/// the playhead reads as the one thing on the timeline that is not part of
+/// the edit.
+const PLAYHEAD_COLOR: Color32 = Color32::from_rgb(236, 84, 72);
+
+/// How wide the playhead line is, in points.
+const PLAYHEAD_WIDTH: f32 = 1.0;
+
+/// How wide the playhead's head in the ruler is, in points.
+const PLAYHEAD_HEAD_WIDTH: f32 = 9.0;
+
+/// How tall the playhead's head in the ruler is, in points.
+const PLAYHEAD_HEAD_HEIGHT: f32 = 7.0;
+
+/// The colour a snapped edge is flagged in while a scrub is landing on it.
+const SNAP_COLOR: Color32 = Color32::from_rgb(240, 208, 96);
 
 /// The denominator a wheel zoom factor is approximated over.
 const ZOOM_RATIO_DENOMINATOR: u32 = 4096;
@@ -455,6 +475,27 @@ pub struct TimelinePanel {
     last_layout: Option<PanelLayout>,
     /// The thumbnail textures the clip strips are painted from.
     thumbnails: ThumbnailCache,
+    /// Where the playhead is, in sequence time.
+    ///
+    /// The playhead is where the user is looking, not part of the edit, so it
+    /// is never project state and moving it is never a Command
+    /// (`sub_edit::playback`). The application owns the one true playhead in
+    /// the viewer and hands it to the panel each frame with
+    /// [`TimelinePanel::set_playhead`]; a click on the ruler asks for a new
+    /// one through [`TimelineResponse::seek`].
+    playhead: RationalTime,
+    /// Whether a time dropped on the timeline is pulled onto a snap target,
+    /// and how close counts.
+    snap: SnapSettings,
+    /// Whether a scrub started in the ruler is still under the pointer.
+    scrubbing: bool,
+    /// The snap targets gathered for the scrub in progress.
+    ///
+    /// Kept between frames so a scrub, which needs them every frame, does not
+    /// allocate after its first.
+    candidates: Vec<SnapCandidate>,
+    /// What the last reported seek snapped to, for painting the flag.
+    snapped: Option<SnapCandidate>,
 }
 
 /// What one painted frame of the panel produced.
@@ -467,6 +508,14 @@ pub struct TimelineResponse {
     pub response: Response,
     /// The track actions raised this frame, in the order they were raised.
     pub actions: Vec<TrackAction>,
+    /// Where the ruler was clicked or scrubbed to this frame, snapped.
+    ///
+    /// The panel has already moved its own playhead there so the frame it
+    /// paints is the frame the user asked for; the caller applies the same
+    /// time to the viewer and the playback scheduler, which own playback.
+    pub seek: Option<RationalTime>,
+    /// What [`TimelineResponse::seek`] snapped to, when it snapped.
+    pub snapped: Option<SnapCandidate>,
 }
 
 impl TimelinePanel {
@@ -483,7 +532,93 @@ impl TimelinePanel {
             waveforms: WaveformCache::new(),
             last_layout: None,
             thumbnails: ThumbnailCache::default(),
+            playhead: RationalTime::zero(rate),
+            snap: SnapSettings::default(),
+            scrubbing: false,
+            candidates: Vec::new(),
+            snapped: None,
         }
+    }
+
+    /// Where the playhead is, in sequence time.
+    #[must_use]
+    pub const fn playhead(&self) -> RationalTime {
+        self.playhead
+    }
+
+    /// Puts the playhead at `time`, clamped at the start of the sequence.
+    ///
+    /// This is how the application keeps the panel in step with the viewer
+    /// and the playback clock: the playhead is view state, so it is set, not
+    /// commanded.
+    pub fn set_playhead(&mut self, time: RationalTime) {
+        let rate = self.view.rate();
+        let time = time.rescaled_to(rate);
+        self.playhead = if time.is_negative() {
+            RationalTime::zero(rate)
+        } else {
+            time
+        };
+    }
+
+    /// Whether times dropped on the timeline snap, and how close counts.
+    #[must_use]
+    pub const fn snap_settings(&self) -> SnapSettings {
+        self.snap
+    }
+
+    /// The snap settings, mutably, to change the threshold or set the flag
+    /// from a restored workspace.
+    pub const fn snap_settings_mut(&mut self) -> &mut SnapSettings {
+        &mut self.snap
+    }
+
+    /// Turns snapping on or off, and reports the new state.
+    ///
+    /// This is what [`Action::ToggleSnapping`](crate::shortcuts::Action) —
+    /// `S` by default — is wired to.
+    pub const fn toggle_snapping(&mut self) -> bool {
+        self.snap.toggle()
+    }
+
+    /// The snap targets gathered by the last call to
+    /// [`TimelinePanel::collect_snap_candidates`].
+    #[must_use]
+    pub fn snap_candidates(&self) -> &[SnapCandidate] {
+        &self.candidates
+    }
+
+    /// Gathers the snap targets inside the viewport into the panel's buffer.
+    ///
+    /// `include_playhead` is what separates the two users of snapping: a clip
+    /// being dragged snaps to the playhead, but the playhead cannot snap to
+    /// itself, so a ruler scrub leaves it out. Everything else — clip edges,
+    /// markers, the head of the sequence — is the same for both.
+    ///
+    /// Only the clips the viewport touches are considered, through the same
+    /// indexes the painter uses, so this costs a binary search per track
+    /// rather than a walk of the sequence.
+    pub fn collect_snap_candidates(&mut self, sequence: &Sequence, include_playhead: bool) {
+        let playhead = include_playhead.then_some(self.playhead);
+        let mut candidates = std::mem::take(&mut self.candidates);
+        snapping::collect_candidates(
+            sequence,
+            &self.layouts,
+            playhead,
+            self.view.visible_range(),
+            &mut candidates,
+        );
+        self.candidates = candidates;
+    }
+
+    /// `time` pulled onto the nearest snap target within the threshold.
+    ///
+    /// Call [`TimelinePanel::collect_snap_candidates`] first. Returns the
+    /// candidate it landed on, or `None` when snapping is off or nothing is
+    /// close enough.
+    #[must_use]
+    pub fn snap(&self, time: RationalTime) -> Option<SnapCandidate> {
+        snapping::snap(&self.view, time, &self.candidates, self.snap)
     }
 
     /// The thumbnail textures the clip strips are painted from.
@@ -602,6 +737,10 @@ impl TimelinePanel {
             view.set_zoom(self.view.zoom());
             self.view = view;
             self.synced_revision = None;
+            // The playhead is an instant, not a frame number: it follows the
+            // sequence to its new timebase rather than staying at the same
+            // count of a different frame.
+            self.playhead = self.playhead.rescaled_to(rate);
         }
         if self.synced_revision == Some(revision) && self.layouts.len() == sequence.tracks.len() {
             return;
@@ -721,6 +860,7 @@ impl TimelinePanel {
             let input = wheel_input(ui, &layout);
             self.apply_wheel(input, layout.content.height(), tracks);
         }
+        let seek = self.handle_scrub(&response, &layout, sequence);
         self.prepare_waveforms(ui.ctx(), project, sequence, layout);
         let visuals = ui.visuals().clone();
         let painter = ui.painter().with_clip_rect(rect);
@@ -738,8 +878,107 @@ impl TimelinePanel {
         };
         self.paint_lanes(&painter, &layout, &visuals, project, sequence, &mut strips);
         self.thumbnails = thumbnails;
+        self.paint_playhead(&painter, &layout);
         let actions = self.header_controls(ui, &layout, sequence);
-        TimelineResponse { response, actions }
+        TimelineResponse {
+            response,
+            actions,
+            seek,
+            snapped: if seek.is_some() { self.snapped } else { None },
+        }
+    }
+
+    /// Turns a press or a drag in the ruler into a seek.
+    ///
+    /// A press in the ruler starts a scrub and every frame the button stays
+    /// down continues it, so a click and a drag are the same gesture: the
+    /// difference is only how long it lasts. The instant under the pointer is
+    /// snapped before it is reported, and the panel moves its own playhead
+    /// straight away so the frame it is about to paint already shows the
+    /// answer.
+    ///
+    /// A press anywhere else — a lane, the header column — is not a seek and
+    /// leaves the playhead alone; clip selection and dragging arrive with
+    /// TASK-30.
+    fn handle_scrub(
+        &mut self,
+        response: &Response,
+        layout: &PanelLayout,
+        sequence: &Sequence,
+    ) -> Option<RationalTime> {
+        let held = response.is_pointer_button_down_on();
+        let Some(pos) = response.interact_pointer_pos() else {
+            self.scrubbing = false;
+            return None;
+        };
+        if !self.scrubbing {
+            if !layout.ruler.contains(pos) {
+                self.scrubbing = false;
+                return None;
+            }
+            self.scrubbing = true;
+        }
+        if !held {
+            self.scrubbing = false;
+        }
+        let rate = self.view.rate();
+        let raw = self
+            .view
+            .time_at_pixel(round_px(pos.x - layout.content.left()));
+        let raw = if raw.is_negative() {
+            RationalTime::zero(rate)
+        } else {
+            raw
+        };
+        // The playhead is not a snap target for itself, so it is left out of
+        // the candidates a ruler scrub is resolved against.
+        self.collect_snap_candidates(sequence, false);
+        self.snapped = self.snap(raw);
+        let time = self.snapped.map_or(raw, |candidate| candidate.time);
+        self.playhead = time;
+        Some(time)
+    }
+
+    /// Paints the playhead: a line down the ruler and the lanes, with a head
+    /// in the ruler wide enough to aim at.
+    ///
+    /// Nothing is painted when the playhead is scrolled off screen. The line
+    /// is clipped to the ruler and the lanes so it never crosses the track
+    /// header column.
+    fn paint_playhead(&self, painter: &Painter, layout: &PanelLayout) {
+        let x = layout.content.left() + self.view.pixel_of(self.playhead);
+        if x < layout.content.left() - 1.0 || x > layout.content.right() + 1.0 {
+            return;
+        }
+        let over = painter.with_clip_rect(Rect::from_min_max(
+            pos2(layout.content.left(), layout.rect.top()),
+            layout.rect.max,
+        ));
+        if let Some(snapped) = self.snapped.filter(|_| self.scrubbing) {
+            let snap_x = layout.content.left() + self.view.pixel_of(snapped.time);
+            over.line_segment(
+                [
+                    pos2(snap_x, layout.content.top()),
+                    pos2(snap_x, layout.content.bottom()),
+                ],
+                Stroke::new(PLAYHEAD_WIDTH, SNAP_COLOR),
+            );
+        }
+        over.line_segment(
+            [pos2(x, layout.rect.top()), pos2(x, layout.content.bottom())],
+            Stroke::new(PLAYHEAD_WIDTH, PLAYHEAD_COLOR),
+        );
+        let half = PLAYHEAD_HEAD_WIDTH / 2.0;
+        let top = layout.ruler.top();
+        over.add(eframe::egui::Shape::convex_polygon(
+            vec![
+                pos2(x - half, top),
+                pos2(x + half, top),
+                pos2(x, top + PLAYHEAD_HEAD_HEIGHT),
+            ],
+            PLAYHEAD_COLOR,
+            Stroke::NONE,
+        ));
     }
 
     /// Uploads the waveform textures the clips about to be painted need.
