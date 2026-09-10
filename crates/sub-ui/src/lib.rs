@@ -20,6 +20,7 @@ pub mod plugins_panel;
 pub mod popout;
 pub mod recovery;
 pub mod relink_dialog;
+pub mod selection;
 pub mod sequence_tabs;
 pub mod shortcuts;
 pub mod snapping;
@@ -69,6 +70,10 @@ pub use recovery::{
 };
 pub use relink_dialog::{
     RELINK_JOB_KIND, RelinkDialog, is_certain, pick_replacement_file, pick_search_folder,
+};
+pub use selection::{
+    ClipRef, MoveGroup, MoveRefusal, PreviewedMove, Selection, apply_move, clips_in_marquee,
+    plan_move,
 };
 pub use sequence_tabs::{
     NewSequenceDialog, SequenceTabAction, SequenceTabs, SequenceViewState, default_sequence_name,
@@ -148,6 +153,11 @@ pub mod codes {
     /// holds. The command keeps its menu entry and loses its shortcut.
     pub const PLUGIN_SHORTCUT_CONFLICT: ErrorCode =
         ErrorCode::from_static("ui.plugin_shortcut_conflict");
+
+    /// A clip drag cannot become an edit: it would leave the sequence, cross
+    /// into a track of another kind, or touch a locked track. The `reason`
+    /// detail carries the [`MoveRefusal`](crate::selection::MoveRefusal) id.
+    pub const CLIP_MOVE_REFUSED: ErrorCode = ErrorCode::from_static("ui.clip_move_refused");
 
     /// A plugin's install directory could not be handed to the platform's
     /// file manager.
