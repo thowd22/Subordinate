@@ -5057,6 +5057,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "subordinate-bench"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sub-core",
+ "sub-media",
+ "sub-render",
+ "sub-test-support",
+ "sub-time",
+ "tracing",
+ "wgpu",
+]
+
+[[package]]
 name = "subordinate-cli"
 version = "0.1.0"
 dependencies = [
