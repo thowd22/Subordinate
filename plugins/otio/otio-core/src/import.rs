@@ -216,6 +216,13 @@ fn import_track(
                         "the clip {:?} references no file, so it was imported as a gap",
                         clip.name
                     ));
+                    if !clip.markers.is_empty() {
+                        notes.push(format!(
+                            "dropped {} marker(s) on the clip {:?} with it: a gap holds no markers",
+                            clip.markers.len(),
+                            clip.name
+                        ));
+                    }
                     items.push(ImportedItem::Gap(source_range.duration()));
                     continue;
                 };
