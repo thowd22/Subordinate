@@ -54,6 +54,7 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 use crate::command_api::{
     ClipMetadata, Host, LogLevel, MarkerMetadata, ProjectMetadata, SequenceMetadata, TrackMetadata,
 };
+use crate::expect::TimelineExpectation;
 use crate::manifest::{Manifest, PluginId, World};
 use crate::mcp::ToolCatalog;
 use crate::runtime::{Limits, PluginRuntime, PluginState, termination};
@@ -547,6 +548,7 @@ pub struct Harness {
     dispatcher: Arc<Dispatcher>,
     limits: Limits,
     args: String,
+    expectation: Option<TimelineExpectation>,
 }
 
 impl std::fmt::Debug for Harness {
@@ -554,6 +556,7 @@ impl std::fmt::Debug for Harness {
         f.debug_struct("Harness")
             .field("limits", &self.limits)
             .field("args", &self.args)
+            .field("expectation", &self.expectation)
             .finish_non_exhaustive()
     }
 }
@@ -572,6 +575,7 @@ impl Harness {
             dispatcher,
             limits: Limits::default(),
             args: DEFAULT_ARGS.to_owned(),
+            expectation: None,
         })
     }
 
@@ -587,6 +591,20 @@ impl Harness {
     #[must_use]
     pub fn with_args(mut self, args: impl Into<String>) -> Self {
         self.args = args.into();
+        self
+    }
+
+    /// The same harness asserting the timeline a command plugin leaves behind
+    /// against what the fixture declared (TASK-129).
+    ///
+    /// Without one, `project_state` still reports what changed but nothing
+    /// says whether the change was *right*: a plugin that trimmed 25 frames
+    /// instead of 15 passes exactly like one that got it right. With one, the
+    /// run also carries a `timeline_matches` check naming every clip that is
+    /// in the wrong place.
+    #[must_use]
+    pub fn with_expectation(mut self, expectation: TimelineExpectation) -> Self {
+        self.expectation = Some(expectation);
         self
     }
 
@@ -837,6 +855,8 @@ impl Harness {
             .with("changed", changed),
         );
 
+        self.assert_timeline(report);
+
         if !changed {
             report.push(Check::skip(
                 world,
@@ -869,6 +889,50 @@ impl Harness {
         // project the report describes.
         self.engine.redo()?;
         Ok(())
+    }
+
+    /// The other half of what a command plugin owes its fixture: not that the
+    /// timeline changed, but that it is now the timeline the fixture asked
+    /// for.
+    ///
+    /// A fixture that declares no expectation — no `fixture.expect.json`
+    /// beside it — skips this, which is the behaviour every run had before
+    /// TASK-129: the check is reported as skipped rather than passed, so a
+    /// reader can tell "nothing was asserted" from "the assertion held".
+    fn assert_timeline(&self, report: &mut TestReport) {
+        let world = World::Command;
+        let Some(expectation) = &self.expectation else {
+            report.push(Check::skip(
+                world,
+                "timeline_matches",
+                "the fixture declares no expected timeline, so only that the project changed was \
+                 checked",
+            ));
+            return;
+        };
+        let project = self.engine.snapshot();
+        let mismatches = expectation.mismatches(&project);
+        if mismatches.is_empty() {
+            report.push(Check::pass(
+                world,
+                "timeline_matches",
+                "the timeline after the run is the one the fixture declared",
+            ));
+            return;
+        }
+        report.push(
+            Check::fail(
+                world,
+                "timeline_matches",
+                format!(
+                    "the run left {} thing{} the fixture did not expect: {}",
+                    mismatches.len(),
+                    if mismatches.len() == 1 { "" } else { "s" },
+                    mismatches.join("; "),
+                ),
+            )
+            .with("mismatches", mismatches),
+        );
     }
 
     /// The `effect` world: describe it, then render a frame with it.

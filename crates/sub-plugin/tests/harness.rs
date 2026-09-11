@@ -21,6 +21,8 @@ use sub_command::Dispatcher;
 use sub_edit::Engine;
 use sub_edit::commands::{AddTrack, CreateSequence};
 use sub_model::{Project, SequenceSettings, TrackKind};
+use sub_plugin::TimelineExpectation;
+use sub_plugin::expect::{ClipExpectation, SequenceExpectation, TrackExpectation};
 use sub_plugin::harness::{CheckStatus, Harness, TestReport};
 use sub_plugin::manifest::{Manifest, PluginId};
 
@@ -236,4 +238,133 @@ fn a_plugin_whose_manifest_declares_a_world_it_does_not_export_fails_to_instanti
         instantiates.error.as_ref().expect("an error")["code"],
         "plugin.instantiate_failed",
     );
+}
+
+/// The fixture above with one 15-frame clip on its video track, so an
+/// expectation has something to be exact about.
+fn fixture_with_a_clip() -> Project {
+    let mut project = fixture();
+    let sequence = project
+        .sequences
+        .first_mut()
+        .expect("the fixture's sequence");
+    let rate = sequence.settings.frame_rate;
+    let range = sub_time::TimeRange::new(
+        sub_time::RationalTime::from_frames(0, rate),
+        sub_time::RationalTime::from_frames(15, rate),
+    )
+    .expect("a source range");
+    sequence
+        .tracks
+        .first_mut()
+        .expect("V1")
+        .items
+        .push(sub_model::TrackItem::Clip(sub_model::Clip::new(
+            "shot-a",
+            sub_model::MediaId::new(),
+            range,
+        )));
+    project
+}
+
+/// An expectation over the clip laid out above, stated in `rate` units: two
+/// tracks, the first holding one clip of `frames` frames at `start`.
+fn expectation(start: i64, frames: i64, rate: sub_time::Rational) -> TimelineExpectation {
+    TimelineExpectation {
+        sequences: vec![SequenceExpectation {
+            name: Some("Main".to_owned()),
+            tracks: vec![
+                TrackExpectation {
+                    name: Some("V1".to_owned()),
+                    kind: Some(TrackKind::Video),
+                    clips: vec![ClipExpectation {
+                        name: Some("shot-a".to_owned()),
+                        start: sub_time::RationalTime::from_frames(start, rate),
+                        duration: sub_time::RationalTime::from_frames(frames, rate),
+                    }],
+                },
+                TrackExpectation {
+                    name: Some("V2".to_owned()),
+                    kind: Some(TrackKind::Video),
+                    clips: Vec::new(),
+                },
+            ],
+        }],
+    }
+}
+
+/// Runs the editor guest over a fixture that declares `expected`.
+fn test_against(expected: Option<TimelineExpectation>) -> TestReport {
+    let engine = Engine::spawn(fixture_with_a_clip()).expect("an engine");
+    let dispatcher = Arc::new(Dispatcher::new(engine.handle().clone()));
+    let mut harness = Harness::new(engine.handle().clone(), dispatcher).expect("a wasm compiler");
+    if let Some(expected) = expected {
+        harness = harness.with_expectation(expected);
+    }
+    let id = "com.example.editor";
+    let plugin = PluginId::parse(id).expect("a plugin id");
+    let report = harness
+        .run(
+            &plugin,
+            &manifest(id, "command"),
+            Path::new("."),
+            guests::editor(),
+        )
+        .expect("the harness ran");
+    engine.shutdown().expect("the engine stops");
+    report
+}
+
+/// A fixture that states the timeline it expects gets it checked, at whatever
+/// timebase it stated it at: 15 frames at 24 fps is 30 at 48 (TASK-129).
+#[test]
+fn a_fixture_that_declares_the_timeline_it_expects_has_it_asserted() {
+    let rate = sub_model::SequenceSettings::default().frame_rate;
+    let report = test_against(Some(expectation(0, 15, rate)));
+    assert!(report.ok(), "{:#?}", report.checks);
+    let matched = check(&report, "timeline_matches");
+    assert_eq!(matched.status, CheckStatus::Pass, "{matched:?}");
+
+    let doubled = sub_time::Rational::new(rate.numerator() * 2, rate.denominator())
+        .expect("twice the fixture's rate");
+    let report = test_against(Some(expectation(0, 30, doubled)));
+    assert_eq!(
+        check(&report, "timeline_matches").status,
+        CheckStatus::Pass,
+        "the same instants at another timebase are the same timeline",
+    );
+}
+
+/// The failure the counts could not see: the clip is not the length the
+/// fixture said it would be, so the run fails and names both times exactly.
+#[test]
+fn a_timeline_that_is_not_what_the_fixture_declared_fails_the_run() {
+    let rate = sub_model::SequenceSettings::default().frame_rate;
+    let report = test_against(Some(expectation(0, 25, rate)));
+    assert!(!report.ok(), "{:#?}", report.checks);
+    let matched = check(&report, "timeline_matches");
+    assert_eq!(matched.status, CheckStatus::Fail);
+    let mismatches = matched.detail["mismatches"]
+        .as_array()
+        .expect("the mismatches");
+    assert_eq!(mismatches.len(), 1, "{mismatches:#?}");
+    let only = mismatches[0].as_str().expect("a mismatch");
+    assert!(only.contains("clips[0].duration"), "{only}");
+    assert!(only.contains("25@"), "{only}");
+    assert!(only.contains("15@"), "{only}");
+    // The rest of the command world's checks still ran and still passed.
+    assert_eq!(check(&report, "project_state").status, CheckStatus::Pass);
+    assert_eq!(check(&report, "undoable").status, CheckStatus::Pass);
+}
+
+/// And a fixture that declares nothing runs exactly as it did before: the
+/// timeline check is skipped, and the report is still ok.
+#[test]
+fn a_fixture_that_declares_no_expectation_is_unchanged() {
+    let report = test_against(None);
+    assert!(report.ok(), "{:#?}", report.checks);
+    assert_eq!(report.failed(), 0);
+    assert_eq!(check(&report, "timeline_matches").status, CheckStatus::Skip,);
+    assert_eq!(check(&report, "project_state").status, CheckStatus::Pass);
+    assert_eq!(check(&report, "undoable").status, CheckStatus::Pass);
 }

@@ -19,6 +19,12 @@
 //! directory, so `plugin test` answers on a machine where nothing else has
 //! been set up.
 //!
+//! A fixture may also declare the timeline it expects a command plugin to
+//! leave behind, in a sidecar beside it: `fixture/fixture.expect.json` for
+//! `fixture/fixture.sub` (TASK-129). Where one is there, the report carries a
+//! `timeline_matches` check that fails naming every clip in the wrong place;
+//! where there is none, nothing changes — the check is skipped.
+//!
 //! The answer is the harness's report as JSON, with the fixture and the
 //! component it ran alongside. It carries `ok`, which is what the CLI turns
 //! into an exit code: a failed check exits non-zero with the one-line summary
@@ -33,6 +39,7 @@ use serde_json::Value;
 use sub_command::Dispatcher;
 use sub_core::{SubError, SubResult, codes};
 use sub_edit::Engine;
+use sub_plugin::TimelineExpectation;
 use sub_plugin::dev::{DevInstall, WASM_FILE_NAME};
 use sub_plugin::manifest::PluginId;
 use sub_plugin::registry::{InstalledPlugin, PluginRegistry};
@@ -60,8 +67,9 @@ pub struct Options {
 ///
 /// `plugin.not_installed` when no plugin is installed under `id`,
 /// `plugin.load_failed` when the installed directory holds no component,
-/// `core.invalid_argument` when `--fixture` names a file that is not there or
-/// `--args` is not JSON, `plugin.engine_failed` when this build has no wasm
+/// `core.invalid_argument` when `--fixture` names a file that is not there,
+/// `--args` is not JSON or the fixture's `*.expect.json` sidecar is not an
+/// expectation document, `plugin.engine_failed` when this build has no wasm
 /// compiler, and whatever loading the fixture project or spawning the engine
 /// returns. A plugin that merely fails its checks is *not* an error: it comes
 /// back as a report whose `ok` is false.
@@ -95,11 +103,16 @@ pub fn run(id: &str, dirs: &crate::plugin::Options, options: &Options) -> SubRes
     let args = args(options)?;
     let scratch = Scratch::new(&id);
     let fixture = fixture(&installed, dev.as_ref(), options, &scratch)?;
-    let report = against(&id, &installed, &wasm, &fixture.path, &args)?;
+    let expectation = TimelineExpectation::beside(&fixture.path)?;
+    let declared = expectation
+        .as_ref()
+        .map(|(path, _)| path.display().to_string());
+    let report = against(&id, &installed, &wasm, &fixture.path, &args, expectation)?;
 
     let mut json = report.to_json()?;
     json["fixture"] = Value::String(fixture.path.display().to_string());
     json["fixture_source"] = Value::String(fixture.origin.to_owned());
+    json["expectation"] = declared.map_or(Value::Null, Value::String);
     json["component"] = Value::String(wasm.display().to_string());
     json["directory"] = Value::String(installed.directory.display().to_string());
     json["location"] = Value::String(installed.location.as_str().to_owned());
@@ -115,12 +128,17 @@ fn against(
     wasm: &Path,
     fixture: &Path,
     args: &str,
+    expectation: Option<(PathBuf, TimelineExpectation)>,
 ) -> SubResult<TestReport> {
     let (project, _) = crate::project::load(fixture)?;
     let engine = Engine::spawn(project)?;
     let dispatcher = Arc::new(Dispatcher::new(engine.handle().clone()));
     let tested = Harness::new(engine.handle().clone(), dispatcher)
         .map(|harness| harness.with_args(args))
+        .map(|harness| match expectation {
+            Some((_, expectation)) => harness.with_expectation(expectation),
+            None => harness,
+        })
         .and_then(|harness| harness.run(id, &installed.manifest, &installed.directory, wasm));
     let stopped = engine.shutdown();
     let report = tested?;
@@ -296,6 +314,41 @@ mod tests {
         };
         let error = run("com.example.one", &dirs(&root), &options).expect_err("not JSON");
         assert_eq!(error.code.as_str(), "core.invalid_argument");
+    }
+
+    /// A fixture's expectation sidecar is read before the plugin is loaded, so
+    /// a hand-written one with a typo is refused by name rather than turning
+    /// into a mystery check (TASK-129).
+    #[test]
+    fn an_expectation_sidecar_that_is_not_one_is_refused_naming_itself() {
+        let root = installed("expectation", "\"command\"", b"\0asm\x01\0\0\0");
+        let fixture = root.join("fixture.sub");
+        crate::project::new(&fixture, Some("Fixture"), true).expect("a fixture project");
+        std::fs::write(
+            sub_plugin::expect::sidecar_for(&fixture),
+            "{ \"sequences\": \"not a list\" }",
+        )
+        .expect("a sidecar");
+        let options = Options {
+            fixture: Some(fixture),
+            ..Options::default()
+        };
+        let error = run("com.example.one", &dirs(&root), &options).expect_err("not an expectation");
+        assert_eq!(error.code.as_str(), "core.invalid_argument");
+        assert!(
+            error.details.contains_key("path"),
+            "the sidecar names itself: {error:?}",
+        );
+    }
+
+    /// And a fixture with no sidecar runs exactly as it did before: the report
+    /// says it declared none.
+    #[test]
+    fn a_fixture_with_no_expectation_reports_none() {
+        let root = installed("no-expectation", "\"command\"", b"\0asm\x01\0\0\0");
+        let report =
+            run("com.example.one", &dirs(&root), &Options::default()).expect("a whole report");
+        assert_eq!(report["expectation"], serde_json::Value::Null);
     }
 
     #[test]

@@ -779,7 +779,28 @@ fn test_contract_section(world: World, crate_name: &str) -> String {
             "A command plugin is checked by asserting project state after `run`: the \
              harness runs the plugin against the fixture and reports what the project \
              looked like afterwards, so make the effect of a run something a caller \
-             can see — a clip added, a marker moved, a track renamed.\n"
+             can see — a clip added, a marker moved, a track renamed.\n\n\
+             Say what that should be, or nothing checks it. Write \
+             `fixture/fixture.expect.json` beside the fixture and the harness \
+             compares the timeline the run leaves behind against it, clip by clip, \
+             failing the run with a `timeline_matches` check that names every clip in \
+             the wrong place:\n\n\
+             ```json\n\
+             {\n\
+               \"sequences\": [\n\
+                 { \"tracks\": [\n\
+                   { \"name\": \"V1\", \"kind\": \"video\", \"clips\": [\n\
+                     { \"name\": \"shot-a\",\n\
+                       \"start\": { \"value\": 0, \"rate\": { \"numerator\": 24, \"denominator\": 1 } },\n\
+                       \"duration\": { \"value\": 15, \"rate\": { \"numerator\": 24, \"denominator\": 1 } } }\n\
+                   ] }\n\
+                 ] }\n\
+               ]\n\
+             }\n\
+             ```\n\n\
+             Times are exact `RationalTime` — a value at a rational rate — never \
+             seconds, and `start` is where the clip sits in sequence time. A fixture \
+             with no such file asserts nothing beyond that the project changed.\n"
                 .to_owned()
         }
         World::Effect => "An effect plugin is checked by rendering a frame: the harness compiles \
