@@ -360,10 +360,17 @@ jobs:
       # selection order, so that was every real export on Windows. Deranking it
       # to NONE is the same escape hatch as vtdec above, and the encoder probe
       # honours a NONE rank, so selection falls through to x264enc.
+      #
+      # The macOS runners are the same story on the encode side: the
+      # VideoToolbox encoders register, outrank x264enc and then fail inside
+      # the session output callback on the GPU-less hosts ("Failed to encode
+      # frame 0: -12902", run 34627554258), so sub-export's job tests died on
+      # every real export. Derank vtenc_h264 and vtenc_h265 alongside the
+      # decoders; hardware encode stays covered by the manual verify tasks.
       - name: Test
         shell: bash
         env:
-          GST_PLUGIN_FEATURE_RANK: ${{ runner.os == 'macOS' && 'vtdec:NONE,vtdec_hw:NONE' || runner.os == 'Windows' && 'mfh264enc:NONE,mfh265enc:NONE' || '' }}
+          GST_PLUGIN_FEATURE_RANK: ${{ runner.os == 'macOS' && 'vtdec:NONE,vtdec_hw:NONE,vtenc_h264:NONE,vtenc_h265:NONE' || runner.os == 'Windows' && 'mfh264enc:NONE,mfh265enc:NONE' || '' }}
           SUB_REQUIRE_SAMPLE_MEDIA: '1'
         run: cargo test --workspace -- --test-threads=1
 
