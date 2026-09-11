@@ -9,10 +9,18 @@ cargo run -p subordinate -- examples/sample-project/demo.sub
 ```
 
 The media is **not committed**. `scripts/get-sample-media.sh` (and its
-PowerShell twin) downloads three CC0 clips from Wikimedia Commons into
-`media/`, each pinned by URL, byte size and SHA-256, and writes a
-`media/manifest.json` recording where every file came from. A file that changed
-upstream fails the fetch rather than quietly changing what the project renders.
+PowerShell twin) downloads three CC0 clips into `media/`, each pinned by byte
+size and SHA-256, and writes a `media/manifest.json` recording where every file
+came from. A file whose bytes changed fails the fetch rather than quietly
+changing what the project renders.
+
+The clips are served from this project's own release,
+[`sample-media-v1`](https://github.com/thowd22/Subordinate/releases/tag/sample-media-v1),
+and checked against the `SHA256SUMS` published beside them as well as the pins
+in the script. They were first published on Wikimedia Commons, and the credits
+below keep those pages; nothing in the default fetch, and nothing in CI,
+contacts Wikimedia. `--upstream` (PowerShell: `-Upstream`) fetches from the
+original Commons URLs instead, for anyone who wants to re-verify provenance.
 
 ## What is in it
 
@@ -59,7 +67,10 @@ All three files are dedicated to the public domain under
 [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/). No attribution
 is required; it is given anyway.
 
-| File | Title | Author | Source |
+Each row's source is the Commons page the file was taken from; all three are
+mirrored as release assets under the names below.
+
+| File | Title | Author | Original source |
 | --- | --- | --- | --- |
 | `media/porters-paris-1921.webm` | *Ancienne et nouvelle tenue des porteurs des Pompes Funèbres de la Ville de Paris* (1921) | Le Saint Lucien | [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Ancienne_et_nouvelle_tenue_des_porteurs_des_Pompes_Fun%C3%A8bres_de_la_Ville_de_Paris_-_AI49294.webm) |
 | `media/crowned-pigeon.webm` | *Victorian Crowned Pigeon fighting* (2023) | Designism | [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Victorian_Crowned_Pigeon_fighting.webm) |

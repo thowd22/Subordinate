@@ -227,14 +227,22 @@ jobs:
         shell: bash
         run: ./scripts/gen-fixtures.sh
 
-      # ---------------- Sample project media (TASK-109) ----------------
-      # examples/sample-project/demo.sub plays three CC0 clips from Wikimedia
-      # Commons, each pinned by URL, size and SHA-256. They are never committed
-      # and only ~4.7 MB together, but they come off the public internet, so
-      # they are cached exactly as the fixtures are: one entry per OS keyed on
-      # the fetch script, restore-only on pull requests. A partial restore is
-      # safe -- the script keeps a file whose hash already matches and
-      # re-downloads anything else.
+      # ---------------- Sample project media (TASK-109, TASK-132) -------
+      # examples/sample-project/demo.sub plays three CC0 clips, each pinned by
+      # size and SHA-256. They are never committed and only ~4.7 MB together.
+      # They are served from this project's own release assets
+      # (releases/tag/sample-media-v1), not from Wikimedia Commons where they
+      # were first published: Wikimedia answered concurrent runs off shared
+      # runner egress with HTTP 429, and no CI run should depend on a
+      # third-party site. The Commons URLs stay in the script and the manifest
+      # for provenance and are never contacted here.
+      #
+      # The media is cached exactly as the fixtures are: one entry per OS keyed
+      # on both fetch scripts, restore-only on pull requests. On a warm restore
+      # the fetch step downloads nothing at all -- not even the checksum file,
+      # which the script only pulls when a file actually has to be fetched. A
+      # partial restore is safe: the script keeps a file whose hash already
+      # matches and re-downloads anything else.
       #
       # sub-ui's sample_project_render test decodes and composites this media;
       # without it that test skips itself rather than failing, so a fetch that
@@ -244,7 +252,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: examples/sample-project/media
-          key: sample-media-${{ runner.os }}-${{ hashFiles('scripts/get-sample-media.sh') }}
+          key: sample-media-${{ runner.os }}-${{ hashFiles('scripts/get-sample-media.sh', 'scripts/get-sample-media.ps1') }}
 
       - name: Fetch the sample project media (TASK-109)
         shell: bash
