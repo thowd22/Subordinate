@@ -957,9 +957,10 @@ Things that bite, all of them learned from a real run:
 - **`gst-discoverer-1.0` is in `gstreamer1.0-plugins-base-apps`**, not in
   `gstreamer1.0-tools`.
 - **Hardware encoders are ranked `NONE`.** GStreamer never autoplugs an
-  encoder, so `vah264enc` (and friends) carry rank `NONE`, and `sub-export`
-  treats a deranked element as unusable. The render steps set
-  `GST_PLUGIN_FEATURE_RANK=vah264enc:primary` for the element they pin.
+  encoder, so `vah264enc` (and friends) carry rank `NONE`. `sub-export` keeps a
+  deranked element out of its *automatic* selection order but plugs one that is
+  named explicitly (`--encoder vah264enc`, or an override in settings), so the
+  render steps need no `GST_PLUGIN_FEATURE_RANK`.
 - **`subordinate-bench` resolves its fixtures directory from the path it was
   compiled in.** A binary built elsewhere must be given `--fixtures`.
 - **box has no Vulkan driver.** The VA-API stack is there, but the compositor

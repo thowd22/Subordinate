@@ -254,15 +254,12 @@ jobs:
       # production export pipeline with NVENC pinned, then read back by the
       # discoverer. --verify makes the CLI probe the file itself; the separate
       # gst-discoverer-1.0 run is the independent check and the artifact.
+      # GStreamer registers hardware *encoders* at rank NONE - autoplug is
+      # never meant to pick an encoder - and sub-export keeps deranked elements
+      # out of the automatic order but plugs one that is named explicitly
+      # (TASK-134), so --encoder needs no GST_PLUGIN_FEATURE_RANK here. That
+      # the pin works on a stock registry is part of what this job verifies.
       - name: Render the sample project with NVENC
-        env:
-          # GStreamer registers hardware *encoders* at rank NONE - autoplug is
-          # never meant to pick an encoder - and sub-export refuses to plug an
-          # element a machine has deranked (export.encoder_unavailable, run
-          # 34606570134 on the AMD job). Lifting the rank for the element this
-          # job pins is what a user selecting a hardware encoder in the export
-          # panel effectively asks for; nothing else about the pipeline changes.
-          GST_PLUGIN_FEATURE_RANK: "nvh264enc:primary,nvh265enc:primary"
         run: |
           mkdir -p target/hardware
           xvfb-run -a ./dist/subordinate-cli render examples/sample-project/demo.sub \
@@ -407,11 +404,9 @@ jobs:
       - name: Fetch the sample project media
         run: ./scripts/get-sample-media.sh
 
+      # See the NVENC render step: the va plugin registers vah264enc at rank
+      # NONE, and an explicitly pinned encoder is honoured regardless.
       - name: Render the sample project with VA-API
-        env:
-          # See the NVENC render step: the va plugin registers vah264enc at
-          # rank NONE, and sub-export treats a deranked element as unusable.
-          GST_PLUGIN_FEATURE_RANK: "vah264enc:primary,vah265enc:primary"
         run: |
           mkdir -p target/hardware
           xvfb-run -a ./target/debug/subordinate-cli render examples/sample-project/demo.sub \

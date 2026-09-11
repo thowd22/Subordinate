@@ -180,6 +180,8 @@ pub struct ElementProbe {
     pub present: bool,
     /// Whether the instantiated element reached `READY`.
     pub ready: bool,
+    /// Whether this machine has ranked the factory `NONE`.
+    pub deranked: bool,
     /// Why it did not, when it did not: the GStreamer failure, rendered.
     pub detail: Option<String>,
 }
@@ -195,6 +197,7 @@ impl ElementProbe {
         Self {
             present: true,
             ready: true,
+            deranked: false,
             detail: None,
         }
     }
@@ -204,13 +207,37 @@ impl ElementProbe {
         Self {
             present: true,
             ready: false,
+            deranked: false,
             detail: Some(detail.into()),
         }
     }
+
+    /// The same result, marked as an element this machine ranks `NONE`.
+    ///
+    /// The rank is recorded rather than folded into `ready`, because the two
+    /// answer different questions: `ready` is "can this machine run it", the
+    /// rank is "should anything plug it without being asked".
+    #[must_use]
+    pub fn deranked(mut self) -> Self {
+        self.deranked = true;
+        if self.detail.is_none() {
+            self.detail = Some(DERANKED_DETAIL.to_owned());
+        }
+        self
+    }
 }
+
+/// What the probe says about an element this machine ranks `NONE`.
+const DERANKED_DETAIL: &str = "the element is ranked NONE on this machine";
 
 /// What the probe found about one catalogued encoder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a serialised report of four independent yes/no facts about one \
+              element; collapsing them into an enum would lose the ones that \
+              are true at the same time"
+)]
 pub struct EncoderStatus {
     /// The GStreamer element factory name, for example `nvh264enc`.
     pub element: String,
@@ -224,19 +251,39 @@ pub struct EncoderStatus {
     pub present: bool,
     /// Whether the element reached `READY`, which is what makes it usable.
     pub ready: bool,
+    /// Whether this machine ranks the factory `NONE`. Such an element is kept
+    /// out of the automatic order but still honoured when it is pinned.
+    #[serde(default)]
+    pub deranked: bool,
     /// Why it is unusable, when it is: the rendered GStreamer failure.
     pub detail: Option<String>,
 }
 
 impl EncoderStatus {
-    /// True when this encoder can actually be used for an export.
+    /// True when the automatic selection order may pick this encoder.
+    ///
+    /// A machine that ranks a factory `NONE` is saying "never plug this
+    /// without being asked", so a deranked element is never usable here even
+    /// when it runs: see [`EncoderStatus::is_pinnable`].
     pub fn is_usable(&self) -> bool {
+        self.present && self.ready && !self.deranked
+    }
+
+    /// True when this encoder works here and so may be used once something
+    /// names it explicitly.
+    ///
+    /// Naming an element *is* the decision a `NONE` rank exists to withhold:
+    /// every VA-API encoder ships ranked `NONE` by design, and `--encoder
+    /// vah264enc` is a user who has already chosen it.
+    pub fn is_pinnable(&self) -> bool {
         self.present && self.ready
     }
 
     /// A one-line description for the diagnostics panel.
     pub fn summary(&self) -> String {
-        let state = if self.ready {
+        let state = if self.ready && self.deranked {
+            "ready, ranked NONE (used only when pinned)".to_owned()
+        } else if self.ready {
             "ready".to_owned()
         } else if self.present {
             format!(
@@ -388,6 +435,7 @@ impl EncoderProbe {
                     hardware: entry.vendor.is_hardware(),
                     present: found.present,
                     ready: found.present && found.ready,
+                    deranked: found.deranked,
                     detail: found.detail,
                 }
             })
@@ -429,7 +477,10 @@ impl EncoderProbe {
     /// - `export.encoder_unavailable` when the override names a catalogued
     ///   encoder that this machine cannot use. The override is never silently
     ///   ignored: a user who pinned NVENC should be told it is gone rather
-    ///   than handed a software encode that takes twenty times as long.
+    ///   than handed a software encode that takes twenty times as long. An
+    ///   element that runs here but is ranked `NONE` is not such a case: the
+    ///   rank only keeps it out of the automatic order (every VA-API encoder
+    ///   ships ranked `NONE`), and naming it is the choice the rank defers.
     /// - `export.no_encoder` when nothing on this machine can encode `codec`.
     pub fn select(
         &self,
@@ -449,7 +500,7 @@ impl EncoderProbe {
                     .with_detail("element", element)
                     .with_detail("known", encoder_names(codec))
                 })?;
-            if !status.is_usable() {
+            if !status.is_pinnable() {
                 return Err(SubError::new(
                     codes::ENCODER_UNAVAILABLE,
                     format!("the selected {codec} encoder {element} is unavailable here"),
@@ -469,6 +520,7 @@ impl EncoderProbe {
             tracing::debug!(
                 codec = codec.as_str(),
                 element,
+                deranked = status.deranked,
                 "encoder chosen by override"
             );
             return Ok(status);
@@ -510,14 +562,25 @@ impl EncoderProbe {
 /// hardware and driver behind it are here": `nvh264enc` registers on any
 /// machine with the nvcodec plugin, and fails the state change when no NVIDIA
 /// device answers.
+///
+/// The rank is read too, but only recorded: a `NONE` rank keeps the element
+/// out of the automatic order without hiding whether it actually works, so an
+/// explicitly pinned encoder can still be plugged.
 fn probe_element(name: &str) -> ElementProbe {
-    if is_deranked(name) {
+    let probe = probe_ready(name);
+    if probe.present && is_deranked(name) {
         tracing::debug!(
             element = name,
-            "element deranked to NONE, treating it as unusable"
+            ready = probe.ready,
+            "element deranked to NONE, keeping it out of the automatic order"
         );
-        return ElementProbe::not_ready("the element is ranked NONE on this machine");
+        return probe.deranked();
     }
+    probe
+}
+
+/// Drives `name` to `READY` without looking at its rank.
+fn probe_ready(name: &str) -> ElementProbe {
     let element = match gst::ElementFactory::make(name).build() {
         Ok(element) => element,
         Err(err) => {
@@ -542,13 +605,14 @@ fn probe_element(name: &str) -> ElementProbe {
 /// Whether `name` has been deranked to `NONE`, by
 /// `GST_PLUGIN_FEATURE_RANK` or by the application itself.
 ///
-/// Rank `NONE` is how a machine says "never plug this": it is what keeps a
-/// decoder or encoder that registers but cannot work here out of every
+/// Rank `NONE` is how a machine says "never plug this unasked": it is what
+/// keeps a decoder or encoder that registers but cannot work here out of every
 /// autoplugged pipeline. Selection picks its elements by name rather than by
 /// autoplugging, so it has to honour that answer itself -- otherwise the one
 /// escape hatch a user (or a GPU-less CI runner) has does not reach the
-/// exporter. An element whose factory is gone counts as not deranked; the
-/// probe below then reports it missing.
+/// exporter. It is only the *automatic* order that honours it: an explicitly
+/// pinned element is the very decision the rank withholds. An element whose
+/// factory is gone counts as not deranked; the probe then reports it missing.
 fn is_deranked(name: &str) -> bool {
     gst::ElementFactory::find(name).is_some_and(|factory| factory.rank() == gst::Rank::NONE)
 }
@@ -571,7 +635,7 @@ pub fn element_is_usable(name: &str) -> bool {
         return usable;
     }
     let probe = probe_element(name);
-    let usable = probe.present && probe.ready;
+    let usable = probe.present && probe.ready && !probe.deranked;
     if let Ok(mut seen) = cache.lock() {
         seen.insert(name.to_owned(), usable);
     }
@@ -712,12 +776,13 @@ mod tests {
         assert!(probe.select(VideoCodec::Av1, &prefs).is_err());
     }
 
-    /// A machine says "never plug this" by ranking a factory NONE, and
+    /// A machine says "never plug this unasked" by ranking a factory NONE, and
     /// selection picks by name rather than by autoplugging, so the probe has
     /// to read that rank itself. The GPU-less Windows CI runners rank
-    /// `mfh264enc` NONE for exactly this reason.
+    /// `mfh264enc` NONE for exactly this reason. The element is still probed
+    /// for real, so a pinned encoder can be told apart from a broken one.
     #[test]
-    fn an_element_ranked_none_is_reported_present_but_unusable() {
+    fn an_element_ranked_none_is_reported_deranked_but_still_probed() {
         use gstreamer::prelude::PluginFeatureExtManual;
 
         let _ = gstreamer::init();
@@ -731,11 +796,76 @@ mod tests {
         factory.set_rank(rank);
 
         assert!(probe.present, "the factory is registered");
-        assert!(!probe.ready, "but a NONE rank means it is not to be used");
+        assert!(probe.deranked, "and this machine ranked it NONE");
+        assert!(probe.ready, "the element itself still runs here");
         assert!(
             probe.detail.is_some_and(|why| why.contains("NONE")),
-            "the reason says so"
+            "and the reason says why it is kept out of the order"
         );
+    }
+
+    /// The catalogue order is the automatic order, and a deranked element is
+    /// not in it: this is what keeps `mfh264enc` off the GPU-less Windows
+    /// runners and `vah264enc` out of an unasked-for export.
+    #[test]
+    fn automatic_selection_skips_a_deranked_encoder() {
+        let probe = EncoderProbe::from_probe("linux", &|name: &str| match name {
+            "vah264enc" => ElementProbe::ready().deranked(),
+            "x264enc" => ElementProbe::ready(),
+            _ => ElementProbe::missing(),
+        });
+        let va = probe.status("vah264enc").expect("vah264enc catalogued");
+        assert!(va.present && va.ready, "the element runs here");
+        assert!(!va.is_usable(), "but the automatic order must not pick it");
+        assert!(va.is_pinnable(), "naming it is still allowed");
+        assert!(va.summary().contains("ranked NONE"), "{}", va.summary());
+        assert_eq!(
+            probe
+                .select(VideoCodec::H264, &EncoderPreferences::new())
+                .unwrap()
+                .element,
+            "x264enc"
+        );
+        assert_eq!(
+            probe
+                .usable(VideoCodec::H264)
+                .iter()
+                .map(|status| status.element.as_str())
+                .collect::<Vec<_>>(),
+            vec!["x264enc"]
+        );
+    }
+
+    /// Every VA-API encoder ships ranked NONE, so pinning one has to work
+    /// without `GST_PLUGIN_FEATURE_RANK` (TASK-134).
+    #[test]
+    fn a_pinned_encoder_is_used_even_when_it_is_ranked_none() {
+        let probe = EncoderProbe::from_probe("linux", &|name: &str| match name {
+            "vah264enc" => ElementProbe::ready().deranked(),
+            "x264enc" => ElementProbe::ready(),
+            _ => ElementProbe::missing(),
+        });
+        let mut prefs = EncoderPreferences::new();
+        prefs.set_override(VideoCodec::H264, "vah264enc").unwrap();
+        assert_eq!(
+            probe.select(VideoCodec::H264, &prefs).unwrap().element,
+            "vah264enc"
+        );
+    }
+
+    /// Deranking is not a way to make a broken element usable: an element that
+    /// cannot reach READY is still refused when it is pinned.
+    #[test]
+    fn a_pinned_encoder_that_cannot_run_is_still_refused() {
+        let probe = EncoderProbe::from_probe("linux", &|name: &str| match name {
+            "vah264enc" => ElementProbe::not_ready("no VA driver").deranked(),
+            "x264enc" => ElementProbe::ready(),
+            _ => ElementProbe::missing(),
+        });
+        let mut prefs = EncoderPreferences::new();
+        prefs.set_override(VideoCodec::H264, "vah264enc").unwrap();
+        let err = probe.select(VideoCodec::H264, &prefs).unwrap_err();
+        assert_eq!(err.code, crate::codes::ENCODER_UNAVAILABLE);
     }
 
     #[test]
@@ -850,6 +980,7 @@ mod tests {
         assert_eq!(encoders[0]["vendor"], "nvenc");
         assert_eq!(encoders[0]["hardware"], true);
         assert_eq!(encoders[0]["ready"], false);
+        assert_eq!(encoders[0]["deranked"], false);
         let round_tripped: EncoderProbe = serde_json::from_value(json).expect("round-trip");
         assert_eq!(round_tripped, probe);
     }
