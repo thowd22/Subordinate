@@ -1789,9 +1789,9 @@ it and then:
 .\fresh-install-check.ps1 -Project .\demo.sub
 ```
 
-Record the result -- OS version, GPU, encoder used, pass or fail -- in the
-[fresh-machine install verification log](../backlog/docs/) beside the CI runs,
-and open a blocking task for any failure before the release goes out.
+Record the result -- OS version, GPU, encoder used, pass or fail -- in
+`backlog/docs/doc-4 - Fresh-machine-install-verification-log.md` beside the CI
+runs, and open a blocking task for any failure before the release goes out.
 
 ### What is not covered
 

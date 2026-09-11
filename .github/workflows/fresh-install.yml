@@ -42,11 +42,6 @@ name: Fresh-machine install
 # uploaded by earlier jobs of a run are downloadable from within it.
 
 on:
-  # TEMPORARY (TASK-110): GitHub refuses workflow_dispatch for a workflow file
-  # that is not on the default branch, so the verification runs are triggered
-  # by pushing this branch. Removed before the task is finished.
-  push:
-    branches: [task/task-110]
   workflow_dispatch:
     inputs:
       release_run_id:
