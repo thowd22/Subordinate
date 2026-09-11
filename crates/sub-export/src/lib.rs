@@ -13,12 +13,21 @@
 //! and the container's muxer, with every timestamp computed exactly from the
 //! sequence's rational frame rate.
 
+//! The job layer lives in [`job`]: the loop around the pipeline that reports
+//! frames done, an ETA and encoder statistics, stops on a cancel token, and
+//! deletes the part-written file when an export does not reach its end.
+
 pub mod encoder;
+pub mod job;
 pub mod pipeline;
 
 pub use encoder::{
     CODECS, ElementProbe, EncoderPreferences, EncoderProbe, EncoderStatus, EncoderVendor,
     VideoCodec, element_is_usable, encoder_names,
+};
+pub use job::{
+    DEFAULT_PROGRESS_INTERVAL, EXPORT_JOB_KIND, EncoderStats, ExportEvent, ExportJob,
+    ExportJobHandle, ExportProgress, spawn_export_job,
 };
 pub use pipeline::{
     AUDIO_CODECS, AudioCodec, AudioFrameSource, BYTES_PER_PIXEL, CONTAINERS, Container,
