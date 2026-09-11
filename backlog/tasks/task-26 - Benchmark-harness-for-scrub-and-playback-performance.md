@@ -1,11 +1,11 @@
 ---
 id: TASK-26
 title: Benchmark harness for scrub and playback performance
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-26'
 created_date: '2026-09-08 21:04'
-updated_date: '2026-09-10 10:11'
+updated_date: '2026-09-11 04:18'
 labels:
   - test
   - media
@@ -27,7 +27,7 @@ Phase 1 exit criteria are numeric; a repeatable harness prevents regressions.
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 A criterion or custom benchmark measures decode-to-texture latency and sustained scrub fps on the 1080p and 4K fixtures
-- [ ] #2 Results are written as JSON and summarised in CI logs on Linux
+- [x] #2 Results are written as JSON and summarised in CI logs on Linux
 - [x] #3 Baseline numbers are recorded in docs/PERFORMANCE.md
 <!-- AC:END -->
 
@@ -62,10 +62,12 @@ Verification on this machine (WSL2, Ryzen 9 9900X, Mesa lavapipe software Vulkan
 - Two release runs of the harness itself against the real 1080p and 4K fixtures; the second (idle machine) is the baseline table in docs/PERFORMANCE.md, and the spread between the runs is about 10%.
 
 AC #2 is half proven and left unchecked: the JSON report is written and its shape is covered by a test, but the CI half (the 'Scrub and playback benchmark (Linux)' step, its tee into the job log and $GITHUB_STEP_SUMMARY, and the perf-report artifact upload) cannot be exercised from this environment -- it needs a push to GitHub Actions, which this worktree must not do. The workflow YAML was parsed to confirm the steps land in the right place and the exact command was run locally.
+
+2026-09-10 supervisor verification: CI run 34552151253 (ubuntu-26.04) ran the 'Scrub and playback benchmark (Linux)' step and uploaded the perf-report artifact containing perf.json (schema_version 1, adapter llvmpipe software, 1080p playback scenario with decode timing percentiles). Criterion 2 met; hardware numbers come from TASK-116/118 on GPU runners.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added bins/subordinate-bench: a custom benchmark harness that measures decode-to-texture latency and sustained playback and scrub frame rates on the 1080p and 4K fixtures through the real Decoder and Nv12Converter paths, writes a versioned JSON report (--out, default target/bench/perf.json) and prints a log summary. Baselines and how to read them are recorded in docs/PERFORMANCE.md, with a pointer from docs/DEVELOPMENT.md, and CI gains a Linux-only step that runs the harness, tees the summary into the job log and step summary, and uploads the report as the perf-report artifact. Verified with cargo fmt, clippy -D warnings across the workspace, 23 unit tests, and two release runs against the real fixtures; AC #2 stays unchecked because the CI half cannot be exercised without pushing to GitHub Actions.
+Benchmark harness measuring decode-to-texture latency and scrub/playback throughput on the fixtures, writing perf.json; runs in Linux CI and uploads the report as an artifact. Baselines recorded in docs/PERFORMANCE.md.
 <!-- SECTION:FINAL_SUMMARY:END -->
