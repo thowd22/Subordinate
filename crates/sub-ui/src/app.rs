@@ -43,6 +43,7 @@ use sub_audio::{AudioOutput, CpalBackend, MeterBank, OutputOptions};
 use crate::audio_settings::{AudioSettingsAction, AudioSettingsPanel};
 use crate::diagnostics::DiagnosticsPanel;
 use crate::dock::{DockLayout, Panel, layout_menu_ui};
+use crate::fullscreen::{FullscreenAction, FullscreenState, monitor_picker_ui};
 use crate::history_panel::{HistoryAction, HistoryList, edit_menu_ui};
 use crate::inspector::{InspectorPanel, InspectorResponse};
 use crate::keymap::LoadedKeymap;
@@ -251,6 +252,9 @@ pub struct SubordinateApp {
     inspector: InspectorPanel,
     /// Where the panels are docked, as read from the user's `layout.json`.
     layout: DockLayout,
+    /// Which display the pop-out goes fullscreen on, as read from the user's
+    /// `fullscreen.json` and written back when it changes.
+    fullscreen: FullscreenState,
     /// The compositor output as egui knows it, and the canvas it was
     /// registered at, so a resolution change re-registers rather than
     /// stretching a texture that no longer exists.
@@ -309,6 +313,10 @@ impl SubordinateApp {
         // read costs the user their arrangement, never their session.
         let layout = DockLayout::load();
         layout.log_problems();
+        // So is the fullscreen display: a review setup is remembered between
+        // sessions, and a file that cannot be read costs the user one click.
+        let fullscreen = FullscreenState::load();
+        fullscreen.log_problems();
         let meters = Arc::new(MeterBank::new(METERED_TRACKS));
         let audio_control = Rc::new(RefCell::new(None));
         let scrub_control = Rc::new(RefCell::new(None));
@@ -320,13 +328,7 @@ impl SubordinateApp {
             Rc::clone(&scrub_control),
             Rc::clone(&scrub_settings),
         );
-        let mut popout = PopoutViewer::new();
-        if let Some(position) = options.popout_position {
-            popout.set_position(position);
-        }
-        if options.open_popout {
-            popout.open();
-        }
+        let popout = startup_popout(&options, fullscreen.state.monitor_index());
         let startup_project = options.project.clone();
         let mut app = Self {
             render,
@@ -357,6 +359,7 @@ impl SubordinateApp {
             timeline,
             inspector: InspectorPanel::new(),
             layout: layout.layout,
+            fullscreen: fullscreen.state,
             preview: None,
             needs_composite: true,
             keymap,
@@ -710,6 +713,38 @@ impl SubordinateApp {
     /// The viewer's pop-out window.
     pub fn popout(&mut self) -> &mut PopoutViewer {
         &mut self.popout
+    }
+
+    /// Which display the pop-out goes fullscreen on.
+    pub const fn fullscreen(&mut self) -> &mut FullscreenState {
+        &mut self.fullscreen
+    }
+
+    /// Applies what the monitor picker asked for.
+    ///
+    /// The picker has already recorded the chosen display in
+    /// [`SubordinateApp::fullscreen`]; this is what the pop-out window is told
+    /// about it, and what writes the choice out so the next session starts on
+    /// the same display.
+    fn apply_fullscreen(&mut self, action: Option<FullscreenAction>) {
+        let Some(action) = action else {
+            return;
+        };
+        match action {
+            FullscreenAction::Choose(_) => {
+                self.popout.set_monitor(self.fullscreen.monitor_index());
+            }
+            FullscreenAction::Enter => {
+                self.popout.set_monitor(self.fullscreen.monitor_index());
+                self.popout.set_fullscreen(true);
+            }
+            FullscreenAction::Leave => self.popout.set_fullscreen(false),
+        }
+        match self.fullscreen.persist() {
+            Ok(true) => log::debug!("fullscreen display saved"),
+            Ok(false) => {}
+            Err(error) => log::warn!("fullscreen: [{}] {}", error.code, error.message),
+        }
     }
 
     /// Runs the pop-out window for this frame and applies what it saw.
@@ -1340,6 +1375,11 @@ impl eframe::App for SubordinateApp {
             Ok(false) => {}
             Err(error) => log::warn!("layout: [{}] {}", error.code, error.message),
         }
+        match self.fullscreen.persist() {
+            Ok(true) => log::debug!("fullscreen display saved"),
+            Ok(false) => {}
+            Err(error) => log::warn!("fullscreen: [{}] {}", error.code, error.message),
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1354,10 +1394,19 @@ impl eframe::App for SubordinateApp {
             ));
             self.file_menu_ui(ui);
             self.edit_menu_ui(ui);
+            // The picker lists whatever displays this platform lets the editor
+            // describe, which is at least the one the editor is on.
+            self.fullscreen.refresh_from_context(ui.ctx());
+            let mut fullscreen_action = None;
+            let popout_is_fullscreen = self.popout.is_fullscreen();
             ui.menu_button("View", |ui| {
                 layout_menu_ui(ui, &mut self.layout);
                 popout_menu_ui(ui, &mut self.popout);
+                ui.separator();
+                fullscreen_action =
+                    monitor_picker_ui(ui, &mut self.fullscreen, popout_is_fullscreen);
             });
+            self.apply_fullscreen(fullscreen_action);
             if ui.button("Hardware diagnostics").clicked() {
                 self.diagnostics.open = !self.diagnostics.open;
             }
@@ -1510,6 +1559,23 @@ fn wgpu_configuration() -> eframe::egui_wgpu::WgpuConfiguration {
         }));
     }
     configuration
+}
+
+/// The pop-out viewer as this run's options and saved settings leave it.
+///
+/// `monitor` is the display the user last chose to go fullscreen on, so the
+/// choice is in force from the first frame rather than from the first visit to
+/// the View menu.
+fn startup_popout(options: &AppOptions, monitor: Option<usize>) -> PopoutViewer {
+    let mut popout = PopoutViewer::new();
+    if let Some(position) = options.popout_position {
+        popout.set_position(position);
+    }
+    popout.set_monitor(monitor);
+    if options.open_popout {
+        popout.open();
+    }
+    popout
 }
 
 /// Native options for the main window.
