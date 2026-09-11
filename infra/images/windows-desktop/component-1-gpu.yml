@@ -1,0 +1,79 @@
+name: SubordinateWindowsDesktopGpu
+description: Preinstalls the AWS-published NVIDIA driver on the RunsOn Windows image (TASK-138, component 1 of 4).
+schemaVersion: 1.0
+
+phases:
+  - name: build
+    steps:
+      - name: AwsCli
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $ErrorActionPreference = 'Stop'
+              if (Get-Command aws.exe -ErrorAction SilentlyContinue) {
+                aws --version
+              } else {
+                'installing the AWS CLI'
+                $msi = "$env:TEMP\AWSCLIV2.msi"
+                curl.exe -sS -L -o $msi https://awscli.amazonaws.com/AWSCLIV2.msi
+                $p = Start-Process -Wait -PassThru msiexec.exe -ArgumentList '/i', $msi, '/qn', '/norestart'
+                if ($p.ExitCode -ne 0) { throw "AWS CLI install failed ($($p.ExitCode))" }
+                $env:PATH = "$env:PATH;C:\Program Files\Amazon\AWSCLIV2"
+                [Environment]::SetEnvironmentVariable('PATH', [Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';C:\Program Files\Amazon\AWSCLIV2', 'Machine')
+                & 'C:\Program Files\Amazon\AWSCLIV2\aws.exe' --version
+              }
+
+      # ------------------------------------------------------- NVIDIA driver
+      - name: NvidiaDriver
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $ErrorActionPreference = 'Stop'
+              $sw = [Diagnostics.Stopwatch]::StartNew()
+              # The AWS driver bucket is world-readable AND world-listable over
+              # plain HTTPS. Do not use `aws s3 cp`: the instance role is not
+              # granted anything in that account (TASK-115, run 34617932919).
+              $bucket = 'https://ec2-windows-nvidia-drivers.s3.amazonaws.com'
+              [xml]$list = (Invoke-WebRequest -UseBasicParsing "$bucket/?list-type=2&prefix=latest/").Content
+              $key = $list.ListBucketResult.Contents |
+                     Where-Object { $_.Key -like '*.exe' } |
+                     Sort-Object Key -Descending | Select-Object -First 1 -ExpandProperty Key
+              if (-not $key) { throw 'no .exe under s3://ec2-windows-nvidia-drivers/latest/' }
+              "driver=$key"
+              $exe = Join-Path $env:TEMP (Split-Path $key -Leaf)
+              curl.exe -sS -L -o $exe "$bucket/$key"
+              if ($LASTEXITCODE -ne 0) { throw "driver download failed ($LASTEXITCODE)" }
+              # -s silent, -n no reboot. 1/1641/3010 only ask for a restart.
+              $p = Start-Process -Wait -PassThru -FilePath $exe -ArgumentList '-s', '-n'
+              "installer exit code = $($p.ExitCode)"
+              if ($p.ExitCode -notin 0, 1, 1641, 3010) { throw "driver install failed ($($p.ExitCode))" }
+              Remove-Item $exe -Force -ErrorAction SilentlyContinue
+              $sw.Stop()
+              "NVIDIA driver installed in {0:N0}s" -f $sw.Elapsed.TotalSeconds
+
+      # The driver is installed on a build instance that has the T4 attached,
+      # so a reboot here also proves it survives one and leaves the image in
+      # the state a runner will boot into.
+      - name: RebootAfterDriver
+        action: Reboot
+        onFailure: Abort
+        inputs:
+          delaySeconds: 10
+
+      - name: NvidiaSmi
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $smi = "$env:SystemRoot\System32\nvidia-smi.exe"
+              if (-not (Test-Path $smi)) { throw 'nvidia-smi.exe is not there after the driver install' }
+              & $smi
+              if ($LASTEXITCODE -ne 0) { throw "nvidia-smi failed ($LASTEXITCODE)" }
+              # Which adapter drives the console matters: the editor is a wgpu
+              # application and has to be able to create a swapchain on the
+              # desktop the auto-logon user sees.
+              Get-CimInstance Win32_VideoController | Format-List Name, DriverVersion, VideoModeDescription, Status | Out-String
+
+      # -------------------------------------------- test user and auto-logon

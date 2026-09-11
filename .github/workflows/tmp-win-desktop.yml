@@ -1,129 +1,131 @@
-name: TEMP windows desktop recon
+name: TEMP windows desktop
 
-# TEMPORARY (TASK-138). Deleted before the task is finished. Exists only so the
-# Windows desktop AMI work can be iterated on a branch: RunsOn reads
-# .github/runs-on.yml from the default branch only, and a brand new workflow
-# file cannot be workflow_dispatch-ed from a branch, so this one is triggered
-# by pushes to task/task-138 and spells its runner out with inline labels.
+# TEMPORARY (TASK-138). Deleted before the task is finished; the job below
+# moves into gpu-smoke.yml. It lives here because RunsOn reads
+# .github/runs-on.yml from the default branch only, so a runner defined on a
+# branch is invisible and has to be spelled out with inline labels, and a brand
+# new workflow file cannot be workflow_dispatch-ed from a branch either.
 on:
   push:
     branches: [task/task-138]
   workflow_dispatch:
 
 jobs:
-  recon:
-    name: Recon the stock RunsOn Windows image
-    # No GPU needed to learn what is on the image; m7i.large Windows is about a
-    # quarter of the price of g4dn.xlarge.
-    runs-on: runs-on=${{ github.run_id }}/image=windows22-full-x64/family=m7i.large/spot=false
-    timeout-minutes: 25
+  nvidia-desktop-windows:
+    name: NVIDIA T4 desktop (g4dn.xlarge, Windows Server 2022, console session)
+    runs-on: runs-on=${{ github.run_id }}/ami=AMI_ID/family=g4dn.xlarge/spot=false
+    timeout-minutes: 20
     defaults:
       run:
         shell: pwsh
+    env:
+      SCRIPTS: infra/images/windows-desktop/jobscripts
     steps:
-      # Native commands that "fail" (query user with nobody logged on) leave
-      # $LASTEXITCODE set, and the pwsh step wrapper exits with it. Every step
-      # here therefore ends by clearing it.
-      - name: Sessions, users and RDP
-        run: |
-          "--- query session ---"
-          cmd /c "query session" 2>&1
-          "--- local users ---"
-          Get-LocalUser | Format-Table Name, Enabled -AutoSize | Out-String -Width 200
-          "--- non-Microsoft scheduled tasks ---"
-          Get-ScheduledTask | Where-Object { $_.TaskPath -notlike '\Microsoft\*' } | Format-Table TaskPath, TaskName, State -AutoSize | Out-String -Width 200
-          "--- SSM agent (Image Builder needs it on the base image) ---"
-          Get-Service AmazonSSMAgent -ErrorAction SilentlyContinue | Format-List Name, Status, StartType | Out-String
-          if (-not (Get-Service AmazonSSMAgent -ErrorAction SilentlyContinue)) { "::warning::no AmazonSSMAgent service" }
-          Get-ChildItem 'C:\Program Files\Amazon\SSM' -ErrorAction SilentlyContinue | Format-Table Name -AutoSize | Out-String
-          $global:LASTEXITCODE = 0
+      - uses: actions/checkout@v4
 
-      - name: Toolchain already on the image
+      - name: Instance, GPU and image facts
         run: |
-          foreach ($exe in 'python', 'py', 'pip', 'choco', 'winget', 'git', 'aws', 'curl') {
-            $c = Get-Command $exe -ErrorAction SilentlyContinue
-            "{0,-10} {1}" -f $exe, $(if ($c) { $c.Source } else { 'ABSENT' })
-          }
-          if (Get-Command python -ErrorAction SilentlyContinue) { python --version }
-          if (Get-Command aws -ErrorAction SilentlyContinue) { aws --version }
-          Get-PSDrive C | Format-Table Name, @{n='UsedGB';e={[int]($_.Used/1GB)}}, @{n='FreeGB';e={[int]($_.Free/1GB)}} -AutoSize | Out-String
-          $global:LASTEXITCODE = 0
+          "runner=$env:RUNNER_NAME ami=$env:RUNS_ON_AMI_ID instance=$env:RUNS_ON_INSTANCE_TYPE"
+          (Get-CimInstance Win32_OperatingSystem).Caption
+          Get-Content C:\SubordinateTest\image.json
+          & "$env:SystemRoot\System32\nvidia-smi.exe"
+          if ($LASTEXITCODE -ne 0) { throw "nvidia-smi failed ($LASTEXITCODE)" }
+          Get-CimInstance Win32_VideoController | Format-List Name, DriverVersion, VideoModeDescription | Out-String
 
-      - name: Prototype - install the release MSI silently
+      - name: The desktop session is up
         run: |
           $ErrorActionPreference = 'Stop'
-          $rels = Invoke-RestMethod -UseBasicParsing -Uri 'https://api.github.com/repos/thowd22/Subordinate/releases?per_page=30'
-          $rel = $rels | Where-Object { $_.tag_name -like 'v*' -and ($_.assets | Where-Object { $_.name -like '*.msi' }) } | Select-Object -First 1
-          if (-not $rel) { throw 'no v* release with an .msi asset' }
-          $asset = $rel.assets | Where-Object { $_.name -like '*.msi' } | Select-Object -First 1
-          "release=$($rel.tag_name) asset=$($asset.name) size=$($asset.size)"
-          $msi = Join-Path $env:RUNNER_TEMP $asset.name
-          curl.exe -sS -L -o "$msi" $asset.browser_download_url
-          $log = Join-Path $env:RUNNER_TEMP 'msi.log'
-          $p = Start-Process -Wait -PassThru msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$log`""
-          "msiexec exit=$($p.ExitCode)"
-          if ($p.ExitCode -ne 0) { Get-Content $log -Tail 60; throw 'msi install failed' }
-          Get-ChildItem 'C:\Program Files\Subordinate\bin' -Filter *.exe | Format-Table Name, Length -AutoSize | Out-String -Width 200
-          Get-ItemProperty 'HKLM:\SOFTWARE\Subordinate' | Format-List InstallDir, Version | Out-String
-          Get-ChildItem 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Subordinate' -ErrorAction SilentlyContinue | Format-Table Name, FullName -AutoSize | Out-String -Width 200
-          $global:LASTEXITCODE = 0
+          Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1
+          # The helper only runs in a logged-on console session, so a fresh
+          # heartbeat is the proof that the auto-logon happened.
+          $deadline = (Get-Date).AddMinutes(3)
+          do {
+            $beat = Get-InteractiveHelper
+            if ($beat) { break }
+            Start-Sleep 5
+          } while ((Get-Date) -lt $deadline)
+          if (-not $beat) {
+            cmd /c "query session"
+            throw 'no interactive helper: the auto-logon did not happen'
+          }
+          "helper:  session=$($beat.session) user=$($beat.user) desktop=$($beat.desktop) pid=$($beat.pid)"
+          if ([int]$beat.session -eq 0) { throw 'the helper is in session 0, which has no desktop' }
+          "this job: session=$((Get-Process -Id $PID).SessionId) user=$(whoami)"
+          $r = Invoke-InteractiveScript -Name 'hello' -Script 'Add-Type -AssemblyName System.Windows.Forms; "session " + (Get-Process -Id $PID).SessionId + " as " + $env:USERNAME + " on " + [System.Windows.Forms.SystemInformation]::VirtualScreen'
+          $r.Output
+          if ($r.ExitCode -ne 0) { throw 'the interactive helper could not run a script' }
 
-      - name: Prototype - app and MCP in session 0
-        continue-on-error: true
-        run: |
-          $bin = 'C:\Program Files\Subordinate\bin'
-          $out = Join-Path $env:RUNNER_TEMP 'smoke.out'
-          $err = Join-Path $env:RUNNER_TEMP 'smoke.err'
-          $p = Start-Process -PassThru -FilePath "$bin\subordinate.exe" -ArgumentList '--smoke-test' -RedirectStandardOutput $out -RedirectStandardError $err
-          if (-not $p.WaitForExit(180000)) { $p.Kill(); 'TIMED OUT' } else { "exit=$($p.ExitCode)" }
-          '--- stdout ---'; Get-Content $out -ErrorAction SilentlyContinue
-          '--- stderr ---'; Get-Content $err -ErrorAction SilentlyContinue | Select-Object -Last 40
-          '--- subordinate-mcp over stdio, no editor running ---'
-          $req = @(
-            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"recon","version":"0"}}}',
-            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_new","arguments":{}}}',
-            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"timeline_get_state","arguments":{}}}'
-          ) -join "`n"
-          $reqFile = Join-Path $env:RUNNER_TEMP 'mcp-in.jsonl'
-          Set-Content -Encoding ASCII $reqFile ($req + "`n")
-          $mcpOut = Join-Path $env:RUNNER_TEMP 'mcp-out.jsonl'
-          $mcpErr = Join-Path $env:RUNNER_TEMP 'mcp-err.txt'
-          $m = Start-Process -PassThru -FilePath "$bin\subordinate-mcp.exe" -RedirectStandardInput $reqFile -RedirectStandardOutput $mcpOut -RedirectStandardError $mcpErr
-          if (-not $m.WaitForExit(120000)) { $m.Kill(); 'MCP TIMED OUT' } else { "mcp exit=$($m.ExitCode)" }
-          '--- mcp stdout ---'; Get-Content $mcpOut -ErrorAction SilentlyContinue
-          '--- mcp stderr ---'; Get-Content $mcpErr -ErrorAction SilentlyContinue | Select-Object -Last 30
-          $global:LASTEXITCODE = 0
-
-      - name: Prototype - desktop screenshot from session 0
-        continue-on-error: true
-        run: |
-          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-          $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
-          "virtual screen = $($b.Width)x$($b.Height)"
-          $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
-          $g = [System.Drawing.Graphics]::FromImage($bmp)
-          $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
-          $path = Join-Path $env:RUNNER_TEMP 'session0.png'
-          $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
-          "saved $path ($((Get-Item $path).Length) bytes)"
-
-      - name: Prototype - Python and pywinauto
-        continue-on-error: true
+      - name: Stage the sample project and the automation scripts
         run: |
           $ErrorActionPreference = 'Stop'
-          if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-            'python absent - the component installs it'
-          } else {
-            python -m pip install --disable-pip-version-check --no-input --no-warn-script-location pywinauto comtypes
-            python -c "import pywinauto; print('pywinauto', pywinauto.__version__)"
-          }
-          $global:LASTEXITCODE = 0
+          & .\scripts\get-sample-media.ps1
+          $dest = 'C:\SubordinateTest\sample-project'
+          Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item examples\sample-project $dest -Recurse
+          Copy-Item "$env:SCRIPTS\import-click.py" C:\SubordinateTest\import-click.py -Force
+          New-Item -ItemType Directory -Force -Path C:\SubordinateTest\shots | Out-Null
+          Get-ChildItem $dest -Recurse -File | Select-Object FullName, Length | Format-Table -AutoSize | Out-String -Width 200
 
-      - name: Upload recon screenshot
+      - name: Launch Subordinate from the Start Menu shortcut
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1
+          $r = Invoke-InteractiveScript -Name 'launch' -TimeoutSeconds 240 `
+                 -Script (Get-Content "$env:SCRIPTS\launch.ps1" -Raw)
+          $r.Output
+          if ($r.ExitCode -ne 0) { throw 'the editor did not come up on the desktop' }
+
+      - name: Screenshot the desktop
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1
+          # The helper runs a queued script with no arguments, so the file name
+          # arrives as a prepended assignment.
+          $script = "`$ShotName = '01-editor'`r`n" + (Get-Content "$env:SCRIPTS\screenshot.ps1" -Raw)
+          $r = Invoke-InteractiveScript -Name 'shot1' -Script $script
+          $r.Output
+          if ($r.ExitCode -ne 0) { throw 'the desktop screenshot failed' }
+
+      - name: Click the media bin Import button through UI Automation
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1
+          $r = Invoke-InteractiveScript -Name 'import' -TimeoutSeconds 300 `
+                 -Script (Get-Content "$env:SCRIPTS\import-click.ps1" -Raw)
+          $r.Output
+          if ($r.ExitCode -ne 0) { throw "the Import click did not open the file dialog (exit $($r.ExitCode))" }
+
+      - name: MCP round-trip against the editor on screen
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1
+          $r = Invoke-InteractiveScript -Name 'mcp' -TimeoutSeconds 240 `
+                 -Script (Get-Content "$env:SCRIPTS\mcp-roundtrip.ps1" -Raw)
+          $r.Output
+          if ($r.ExitCode -ne 0) { throw 'the MCP round-trip failed' }
+
+      - name: Final screenshot, then collect everything
+        if: always()
+        continue-on-error: true
+        run: |
+          Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1 -ErrorAction SilentlyContinue
+          try {
+            $r = Invoke-InteractiveScript -Name 'finish' -Script (Get-Content "$env:SCRIPTS\finish.ps1" -Raw)
+            $r.Output
+          } catch { "could not take the final screenshot: $_" }
+          Copy-Item C:\SubordinateTest\shots\*.png $env:RUNNER_TEMP -ErrorAction SilentlyContinue
+          Copy-Item C:\SubordinateTest\mcp-out.jsonl, C:\SubordinateTest\mcp-err.txt, C:\SubordinateTest\app.err $env:RUNNER_TEMP -ErrorAction SilentlyContinue
+          Get-ChildItem C:\SubordinateTest\out -ErrorAction SilentlyContinue | Format-Table Name, Length -AutoSize | Out-String
+          Get-ChildItem $env:RUNNER_TEMP -File | Where-Object { $_.Name -match 'png|jsonl|err' } | Format-Table Name, Length -AutoSize | Out-String
+
+      - name: Upload the desktop screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: recon-session0
-          path: ${{ runner.temp }}/session0.png
+          name: windows-desktop-screenshots
+          path: |
+            ${{ runner.temp }}/*.png
+            ${{ runner.temp }}/mcp-*.jsonl
+            ${{ runner.temp }}/*.err
+            ${{ runner.temp }}/mcp-err.txt
           if-no-files-found: warn

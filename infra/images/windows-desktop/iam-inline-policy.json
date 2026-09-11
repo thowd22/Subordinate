@@ -1,0 +1,31 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadTestMedia",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::subordinate-test-media-731537225673",
+        "arn:aws:s3:::subordinate-test-media-731537225673/*"
+      ]
+    },
+    {
+      "Sid": "WriteBuildLogs",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject"],
+      "Resource": "arn:aws:s3:::subordinate-test-media-731537225673/imagebuilder-logs/*"
+    },
+    {
+      "Sid": "StoreTheGeneratedPassword",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:TagResource"
+      ],
+      "Resource": "arn:aws:secretsmanager:us-east-1:731537225673:secret:subordinate/windows-desktop-ami/*"
+    }
+  ]
+}

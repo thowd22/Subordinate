@@ -1,0 +1,28 @@
+{
+  "name": "subordinate-windows-desktop",
+  "description": "RunsOn windows22-full-x64 plus everything a human-style UI test needs (TASK-138).",
+  "semanticVersion": "SEMANTIC_VERSION",
+  "parentImage": "PARENT_IMAGE",
+  "components": [
+    { "componentArn": "COMPONENT_ARN_1" },
+    { "componentArn": "COMPONENT_ARN_2" },
+    { "componentArn": "COMPONENT_ARN_3" },
+    { "componentArn": "COMPONENT_ARN_4" }
+  ],
+  "blockDeviceMappings": [
+    {
+      "deviceName": "/dev/sda1",
+      "ebs": {
+        "volumeSize": 80,
+        "volumeType": "gp3",
+        "deleteOnTermination": true,
+        "encrypted": false
+      }
+    }
+  ],
+  "workingDirectory": "C:\\Windows\\Temp",
+  "tags": {
+    "Project": "Subordinate",
+    "Task": "TASK-138"
+  }
+}

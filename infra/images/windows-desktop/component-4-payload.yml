@@ -1,0 +1,156 @@
+name: SubordinateWindowsDesktopPayload
+description: Subordinate MSI, Python with pywinauto and the 4K test clip (TASK-138, component 4 of 4).
+schemaVersion: 1.0
+
+parameters:
+  - TestUser:
+      type: string
+      default: subtest
+      description: The auto-logon user, checked by the validate phase.
+  - MediaBucket:
+      type: string
+      default: subordinate-test-media-731537225673
+      description: Private bucket holding the test clip.
+  - MediaKey:
+      type: string
+      default: meld-4k60-excerpt-2min.mkv
+      description: Object key of the test clip.
+  - MediaSha256:
+      type: string
+      default: 63afa28c05a78ebcd2b678442721e7ac600f0525dbd4ad97175981ace3e62582
+      description: Expected SHA-256 of the test clip.
+  - ReleaseRepo:
+      type: string
+      default: thowd22/Subordinate
+      description: GitHub repository whose newest v* release supplies the MSI.
+
+phases:
+  - name: build
+    steps:
+      - name: InstallMsi
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $ErrorActionPreference = 'Stop'
+              $repo = '{{ ReleaseRepo }}'
+              $rels = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$repo/releases?per_page=30"
+              $rel = $rels |
+                     Where-Object { $_.tag_name -like 'v*' -and ($_.assets | Where-Object { $_.name -like '*.msi' }) } |
+                     Select-Object -First 1
+              if (-not $rel) { throw "no v* release of $repo carries an .msi" }
+              $asset = $rel.assets | Where-Object { $_.name -like '*.msi' } | Select-Object -First 1
+              "release=$($rel.tag_name) asset=$($asset.name)"
+              $msi = Join-Path $env:TEMP $asset.name
+              curl.exe -sS -L -o $msi $asset.browser_download_url
+              if ($LASTEXITCODE -ne 0) { throw "msi download failed ($LASTEXITCODE)" }
+              $log = Join-Path $env:TEMP 'subordinate-msi.log'
+              $p = Start-Process -Wait -PassThru msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$log`""
+              if ($p.ExitCode -ne 0) { Get-Content $log -Tail 40; throw "msiexec failed ($($p.ExitCode))" }
+              foreach ($exe in 'subordinate.exe', 'subordinate-cli.exe', 'subordinate-mcp.exe') {
+                $path = "C:\Program Files\Subordinate\bin\$exe"
+                if (-not (Test-Path $path)) { throw "$exe missing from the install" }
+                "installed  $path"
+              }
+              $lnk = 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Subordinate\Subordinate.lnk'
+              if (-not (Test-Path $lnk)) { throw 'the Start Menu shortcut is missing' }
+              "installed  $lnk"
+              # Record what went in, so a job (and a human reading a failure)
+              # can see which release this image carries.
+              @{ release = $rel.tag_name; asset = $asset.name; installed = (Get-Date).ToUniversalTime().ToString('s') } |
+                ConvertTo-Json | Set-Content -Encoding ASCII 'C:\SubordinateTest\image.json'
+              Remove-Item $msi -Force -ErrorAction SilentlyContinue
+
+      - name: PythonAndPywinauto
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $ErrorActionPreference = 'Stop'
+              # The image does have a Python, but it is the runner's
+              # hostedtoolcache copy, which is only on PATH inside a job.
+              # The interactive helper runs as a different user in a different
+              # session, so this installs a machine-wide one it can see.
+              'installing Python for all users'
+              $exe = Join-Path $env:TEMP 'python-installer.exe'
+              curl.exe -sS -L -o $exe https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe
+              $p = Start-Process -Wait -PassThru $exe -ArgumentList '/quiet', 'InstallAllUsers=1', 'PrependPath=1', 'Include_test=0'
+              if ($p.ExitCode -ne 0) { throw "python install failed ($($p.ExitCode))" }
+              Remove-Item $exe -Force -ErrorAction SilentlyContinue
+              $machine = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
+              $env:PATH = "$machine;$env:PATH"
+              $python = 'C:\Program Files\Python312\python.exe'
+              if (-not (Test-Path $python)) { throw "no python at $python" }
+              Set-Alias python $python
+              python --version
+              # pywinauto drives the app through UI Automation, which is how a
+              # job finds egui's AccessKit tree. comtypes is its COM binding.
+              & $python -m pip install --disable-pip-version-check --no-input --no-warn-script-location pywinauto comtypes
+              & $python -c "import pywinauto, comtypes; print('pywinauto', pywinauto.__version__)"
+              if ($LASTEXITCODE -ne 0) { throw 'pywinauto did not import' }
+
+      - name: TestMedia
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $ErrorActionPreference = 'Stop'
+              $bucket = '{{ MediaBucket }}'
+              $key = '{{ MediaKey }}'
+              $want = '{{ MediaSha256 }}'
+              New-Item -ItemType Directory -Force -Path C:\SubordinateTest | Out-Null
+              $aws = 'C:\Program Files\Amazon\AWSCLIV2\aws.exe'
+              if (-not (Test-Path $aws)) { $aws = (Get-Command aws.exe).Source }
+              $dest = "C:\SubordinateTest\$key"
+              & $aws s3 cp "s3://$bucket/$key" $dest --no-progress
+              if ($LASTEXITCODE -ne 0) { throw "could not fetch s3://$bucket/$key - is the build instance profile in the bucket policy?" }
+              $got = (Get-FileHash $dest -Algorithm SHA256).Hash.ToLower()
+              if ($got -ne $want) { throw "sha256 mismatch: got $got want $want" }
+              "media  $dest  $((Get-Item $dest).Length) bytes  sha256 ok"
+              # The job and the interactive helper both read and write here.
+              icacls C:\SubordinateTest /grant 'Users:(OI)(CI)M' | Out-Null
+
+      - name: Summary
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              '--- image contents ---'
+              Get-Content C:\SubordinateTest\image.json
+              Get-ChildItem C:\SubordinateTest | Format-Table Name, Length -AutoSize | Out-String -Width 120
+              Get-ChildItem C:\SubordinateTest\bin | Format-Table Name, Length -AutoSize | Out-String -Width 120
+              '--- runsOn bits, which must still be here ---'
+              foreach ($p in 'C:\actions-runner\run.cmd', 'C:\runs-on') {
+                "{0,-32} {1}" -f $p, (Test-Path $p)
+              }
+              Get-ChildItem C:\runs-on -ErrorAction SilentlyContinue | Format-Table Name -AutoSize | Out-String
+
+  - name: validate
+    steps:
+      - name: Validate
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $ErrorActionPreference = 'Stop'
+              foreach ($p in @(
+                'C:\Program Files\Subordinate\bin\subordinate.exe',
+                'C:\Program Files\Subordinate\bin\subordinate-mcp.exe',
+                'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Subordinate\Subordinate.lnk',
+                'C:\SubordinateTest\{{ MediaKey }}',
+                'C:\SubordinateTest\bin\interactive-helper.ps1',
+                'C:\SubordinateTest\bin\InteractiveSession.psm1',
+                'C:\actions-runner\run.cmd'
+              )) {
+                if (-not (Test-Path $p)) { throw "missing: $p" }
+                "ok  $p"
+              }
+              if (-not (Get-ScheduledTask -TaskName 'SubordinateInteractiveHelper' -ErrorAction SilentlyContinue)) {
+                throw 'the SubordinateInteractiveHelper task is not registered'
+              }
+              $wl = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+              if ($wl.AutoAdminLogon -ne '1') { throw 'AutoAdminLogon is not set' }
+              if ($wl.DefaultUserName -ne '{{ TestUser }}') { throw "DefaultUserName is $($wl.DefaultUserName)" }
+              & "$env:SystemRoot\System32\nvidia-smi.exe" --query-gpu=name,driver_version --format=csv,noheader
+              if ($LASTEXITCODE -ne 0) { throw 'nvidia-smi failed' }
+              'validate ok'

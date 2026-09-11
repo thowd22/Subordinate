@@ -1,0 +1,18 @@
+{
+  "name": "subordinate-windows-desktop",
+  "description": "Keeps the AMI in us-east-1 only, where the RunsOn stack lives (TASK-138).",
+  "distributions": [
+    {
+      "region": "us-east-1",
+      "amiDistributionConfiguration": {
+        "name": "subordinate-windows-desktop-{{ imagebuilder:buildDate }}",
+        "description": "RunsOn windows22-full-x64 plus the NVIDIA driver, an auto-logon desktop session, the Subordinate MSI, pywinauto and the 4K test clip.",
+        "amiTags": {
+          "Project": "Subordinate",
+          "Task": "TASK-138",
+          "Runner": "gpu-nvidia-desktop-windows"
+        }
+      }
+    }
+  ]
+}
