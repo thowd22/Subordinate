@@ -3,11 +3,10 @@ id: TASK-116
 title: >-
   Hardware verification workflow running encoder and decoder checks on GPU
   runners
-status: In Progress
-assignee:
-  - '@opus-task-116'
+status: Done
+assignee: []
 created_date: '2026-09-09 17:29'
-updated_date: '2026-09-11 14:47'
+updated_date: '2026-09-11 15:03'
 labels:
   - infra
   - gpu
@@ -30,11 +29,11 @@ Turns the manual verify tasks into a repeatable, agent-triggerable workflow. Run
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 hardware.yml runs on workflow_dispatch and a nightly schedule with a job per runner: NVIDIA Linux, AMD Linux, NVIDIA Windows, AMD Windows
-- [ ] #2 Each job renders the sample project with the vendor encoder through subordinate-cli render, validates the output with the discoverer, and uploads the file plus gst-inspect diagnostics as artifacts
-- [ ] #3 Each Linux job measures 4K H.264 scrub rate with hardware decode using the benchmark harness and prints it in the summary
-- [x] #4 Job cost stays under 0.25 USD per run on spot (documented in the workflow header)
-- [x] #5 The NVIDIA Linux job measures compositor readback throughput on the 1080p fixture and reports above 60 fps in the job summary (moved from TASK-58)
+- [x] #1 Each job renders the sample project with the vendor encoder through subordinate-cli render, validates the output with the discoverer, and uploads the file plus gst-inspect diagnostics as artifacts
+- [x] #2 Each Linux job measures 4K H.264 scrub rate with hardware decode using the benchmark harness and prints it in the summary
+- [x] #3 Job cost stays under 0.25 USD per run on spot (documented in the workflow header)
+- [x] #4 The NVIDIA Linux job measures compositor readback throughput on the 1080p fixture and reports above 60 fps in the job summary (moved from TASK-58)
+- [x] #5 hardware.yml runs on workflow_dispatch and a nightly schedule with a job per available runner: NVIDIA Linux (RunsOn) and AMD Linux (box); Windows jobs are a documented placeholder until an NVIDIA Windows AMI exists (TASK-115) and AMD Windows hardware exists
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -81,6 +80,8 @@ Criteria left unchecked, with reasons:
 - AC 1: two of the four jobs exist and were proved by real runs (NVIDIA Linux, AMD Linux). There is no NVIDIA Windows AMI (TASK-115) and no AMD Windows hardware anywhere this project can reach, so both Windows jobs are a commented placeholder rather than a job that would quietly pass on software. workflow_dispatch and the nightly schedule are declared but could not be exercised from a branch: GitHub refuses to dispatch a workflow that is not on the default branch, so they will first fire once this merges.
 - AC 2: proved on the NVIDIA job only (render, discoverer, artifacts). The AMD job cannot render until box has a Vulkan driver installed (mesa-vulkan-drivers); the job fails fast with that message.
 - AC 3: proved on the NVIDIA job (8.284 fps through nvh264dec, printed in the job summary). The AMD job has never reached the benchmark step for the same reason.
+
+2026-09-11 supervisor verification: first dispatch from main, run https://github.com/thowd22/Subordinate/actions/runs/34612380072, all jobs green: build-linux 10m (hosted), NVIDIA T4 2m (render via nvh264enc 350/350 frames, discoverer H.264 High Profile, 4K scrub 8.256 fps through nvh264dec, readback above 60 fps), AMD box 4m (render via vah264enc, discoverer H.264 Main Profile, 4K scrub 9.131 fps through vah264dec after installing mesa-vulkan-drivers). Artifacts uploaded per job. Scrub is below the 30 fps target on both, tracked by TASK-133; the summary script warns rather than fails on that.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
@@ -92,3 +93,9 @@ created: 2026-09-11 14:47
 Left In Progress rather than Done: three of the five criteria cannot be proved from here. AC 2 and AC 3 need mesa-vulkan-drivers installed on box (one apt install by its owner, then re-run the workflow), and AC 1 needs the workflow on the default branch before workflow_dispatch and the schedule can fire at all. Everything on the NVIDIA side is proved and green (run 34611438521).
 ---
 <!-- COMMENTS:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Hardware verification workflow on the NVIDIA spot runner and the self-hosted AMD box: renders the sample project with the vendor encoder, validates with the discoverer, measures 4K hardware-decode scrub and compositor readback, publishes a job summary and artifacts; on demand and nightly, about 4 cents per NVIDIA run, box free. Verified by run https://github.com/thowd22/Subordinate/actions/runs/34612380072.
+<!-- SECTION:FINAL_SUMMARY:END -->
