@@ -710,6 +710,15 @@ impl SubordinateApp {
         &mut self.viewer
     }
 
+    /// The timeline panel, which owns the clip selection.
+    ///
+    /// The selection is what the inspector edits, so this is also how another
+    /// surface — a test, or a future selection command — says which clips the
+    /// parameter fields are pointing at.
+    pub fn timeline(&mut self) -> &mut TimelinePanel {
+        &mut self.timeline
+    }
+
     /// The viewer's pop-out window.
     pub fn popout(&mut self) -> &mut PopoutViewer {
         &mut self.popout
@@ -1026,9 +1035,9 @@ impl SubordinateApp {
     ///
     /// The dock owns the arrangement; each panel's body is drawn here, so a
     /// panel dragged into another split or grouped into a tab keeps working
-    /// exactly as it did. The inspector and export panels have no widgets of
-    /// their own yet (TASK-62 brings the export one), so their tabs say so
-    /// rather than showing an empty rectangle.
+    /// exactly as it did. The export panel has no widgets of its own yet
+    /// (TASK-62 brings it), so its tab says so rather than showing an empty
+    /// rectangle.
     fn dock_ui(&mut self, ui: &mut egui::Ui, preview: ViewerFrame) -> bool {
         // The project is read once for the whole frame as an immutable
         // snapshot, so every panel sees the same project and none of them
