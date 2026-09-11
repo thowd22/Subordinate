@@ -253,11 +253,18 @@ jobs:
         env:
           REPO: ${{ github.repository }}
           SHA: ${{ needs.resolve.outputs.head_sha }}
+          HARNESS_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # The project and its media come from the commit the packages were
+          # built at, so what is opened is what they were built from. The check
+          # script is this workflow's own harness, so it comes from the commit
+          # running the workflow -- otherwise a release built before this task
+          # would have no harness to fetch at all.
           raw="https://raw.githubusercontent.com/$REPO/$SHA"
+          harness="https://raw.githubusercontent.com/$REPO/$HARNESS_SHA"
           curl -fsSL -o stage/demo.sub "$raw/examples/sample-project/demo.sub"
-          curl -fsSL -o stage/fresh-install-check.sh "$raw/scripts/fresh-install-check.sh"
+          curl -fsSL -o stage/fresh-install-check.sh "$harness/scripts/fresh-install-check.sh"
           curl -fsSL -o get-sample-media.sh "$raw/scripts/get-sample-media.sh"
           chmod +x get-sample-media.sh stage/fresh-install-check.sh
           ./get-sample-media.sh --out "$PWD/stage/media"
@@ -356,11 +363,13 @@ jobs:
         env:
           REPO: ${{ github.repository }}
           SHA: ${{ needs.resolve.outputs.head_sha }}
+          HARNESS_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           raw="https://raw.githubusercontent.com/$REPO/$SHA"
+          harness="https://raw.githubusercontent.com/$REPO/$HARNESS_SHA"
           curl -fsSL -o stage/demo.sub "$raw/examples/sample-project/demo.sub"
-          curl -fsSL -o fresh-install-check.sh "$raw/scripts/fresh-install-check.sh"
+          curl -fsSL -o fresh-install-check.sh "$harness/scripts/fresh-install-check.sh"
           curl -fsSL -o get-sample-media.sh "$raw/scripts/get-sample-media.sh"
           chmod +x get-sample-media.sh fresh-install-check.sh
           ./get-sample-media.sh --out "$PWD/stage/media"
@@ -506,12 +515,14 @@ jobs:
         env:
           REPO: ${{ github.repository }}
           SHA: ${{ needs.resolve.outputs.head_sha }}
+          HARNESS_SHA: ${{ github.sha }}
         run: |
           $stage = "$env:RUNNER_TEMP\stage"
           $raw = "https://raw.githubusercontent.com/$env:REPO/$env:SHA"
+          $harness = "https://raw.githubusercontent.com/$env:REPO/$env:HARNESS_SHA"
           $ProgressPreference = 'SilentlyContinue'
           Invoke-WebRequest -UseBasicParsing -Uri "$raw/examples/sample-project/demo.sub" -OutFile "$stage\demo.sub"
-          Invoke-WebRequest -UseBasicParsing -Uri "$raw/scripts/fresh-install-check.ps1" -OutFile "$stage\fresh-install-check.ps1"
+          Invoke-WebRequest -UseBasicParsing -Uri "$harness/scripts/fresh-install-check.ps1" -OutFile "$stage\fresh-install-check.ps1"
           Invoke-WebRequest -UseBasicParsing -Uri "$raw/scripts/get-sample-media.ps1" -OutFile "$stage\get-sample-media.ps1"
           & "$stage\get-sample-media.ps1" -OutDir "$stage\media"
           Get-ChildItem "$stage\media" | Format-Table Name, Length | Out-String | Write-Host
@@ -636,14 +647,16 @@ jobs:
           REPO: ${{ github.repository }}
           RUN_ID: ${{ needs.resolve.outputs.run_id }}
           SHA: ${{ needs.resolve.outputs.head_sha }}
+          HARNESS_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           cd "$WORK"
           gh run download "$RUN_ID" --repo "$REPO" --name subordinate-appimage --dir .
           rm -f host-libraries.txt
           raw="https://raw.githubusercontent.com/$REPO/$SHA"
+          harness="https://raw.githubusercontent.com/$REPO/$HARNESS_SHA"
           curl -fsSL -o demo.sub "$raw/examples/sample-project/demo.sub"
-          curl -fsSL -o fresh-install-check.sh "$raw/scripts/fresh-install-check.sh"
+          curl -fsSL -o fresh-install-check.sh "$harness/scripts/fresh-install-check.sh"
           curl -fsSL -o get-sample-media.sh "$raw/scripts/get-sample-media.sh"
           chmod +x get-sample-media.sh fresh-install-check.sh
           ./get-sample-media.sh --out "$WORK/media"
@@ -703,15 +716,17 @@ jobs:
           REPO: ${{ github.repository }}
           RUN_ID: ${{ needs.resolve.outputs.run_id }}
           SHA: ${{ needs.resolve.outputs.head_sha }}
+          HARNESS_SHA: ${{ github.sha }}
         run: |
           $stage = "$env:RUNNER_TEMP\fresh-install"
           Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           gh run download $env:RUN_ID --repo $env:REPO --name subordinate-msi --dir $stage
           $raw = "https://raw.githubusercontent.com/$env:REPO/$env:SHA"
+          $harness = "https://raw.githubusercontent.com/$env:REPO/$env:HARNESS_SHA"
           $ProgressPreference = 'SilentlyContinue'
           Invoke-WebRequest -UseBasicParsing -Uri "$raw/examples/sample-project/demo.sub" -OutFile "$stage\demo.sub"
-          Invoke-WebRequest -UseBasicParsing -Uri "$raw/scripts/fresh-install-check.ps1" -OutFile "$stage\fresh-install-check.ps1"
+          Invoke-WebRequest -UseBasicParsing -Uri "$harness/scripts/fresh-install-check.ps1" -OutFile "$stage\fresh-install-check.ps1"
           Invoke-WebRequest -UseBasicParsing -Uri "$raw/scripts/get-sample-media.ps1" -OutFile "$stage\get-sample-media.ps1"
           & "$stage\get-sample-media.ps1" -OutDir "$stage\media"
 
