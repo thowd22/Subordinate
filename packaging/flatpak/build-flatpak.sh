@@ -21,6 +21,12 @@ repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 manifest=$repo_root/packaging/flatpak/io.github.thowd22.Subordinate.yml
 app_id=io.github.thowd22.Subordinate
 runtime_version=25.08
+# The manifest declares no branch, so flatpak-builder would default to
+# "master"; `flatpak build-bundle` then has to be told the same name or it
+# fails with "no such ref". "stable" is what Flathub publishes under, so both
+# sides say stable and a user installing the bundle gets the branch they would
+# get from a remote.
+app_branch=stable
 
 install_deps=0
 bundle=1
@@ -62,11 +68,11 @@ version=$(sed -n '/^\[workspace.package\]/,/^\[/p' "$repo_root/Cargo.toml" |
     sed -n 's/^version = "\(.*\)"/\1/p' | head -n1)
 
 flatpak-builder --user --force-clean --disable-rofiles-fuse \
-    --repo="$out_dir/repo" \
+    --default-branch="$app_branch" --repo="$out_dir/repo" \
     "$out_dir/build" "$manifest"
 
 if [ "$bundle" -eq 1 ]; then
     out_file=$out_dir/Subordinate-$version.flatpak
-    flatpak build-bundle "$out_dir/repo" "$out_file" "$app_id" "$runtime_version"
+    flatpak build-bundle "$out_dir/repo" "$out_file" "$app_id" "$app_branch"
     echo "==> built $out_file"
 fi
