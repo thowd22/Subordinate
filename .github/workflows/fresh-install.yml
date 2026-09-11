@@ -1,0 +1,830 @@
+name: Fresh-machine install
+
+# TASK-110, the phase 7 exit criterion: the packages a user downloads install
+# and work on machines that have never built the project.
+#
+# This is not what packaging.yml and windows-packaging.yml do. Their install
+# smoke steps run on the machine that just built the package, which still has
+# the Rust toolchain, the GStreamer development files and, on Windows,
+# C:\gstreamer on PATH. Such a machine cannot tell a package that carries its
+# dependencies from one that found them lying around. So every job here starts
+# from a machine that has never seen this project, downloads nothing but the
+# package, and installs it the way a user would:
+#
+#   appimage  a clean ubuntu:24.04 and a clean fedora:41 container. The hosted
+#             runner is only the delivery van: it fetches the artifact and the
+#             sample media and hands a staging directory to the container,
+#             which has no toolchain, no GStreamer and no source tree.
+#   flatpak   the hosted ubuntu-26.04 runner itself, which has never built
+#             this project and does not even have flatpak until this job
+#             installs it.
+#   msi       a hosted windows-latest runner, with PATH rebuilt to the
+#             installed bin directory and Windows and nothing else.
+#
+# The sequence each of them runs is the same, and lives in
+# scripts/fresh-install-check.sh (and its PowerShell twin) rather than in this
+# file, so that a person checking a download on a physical machine runs
+# exactly what CI runs. See docs/DEVELOPMENT.md, "Fresh-machine install
+# verification".
+#
+# macOS is deferred with TASK-105/117 until the user's Apple silicon Mac
+# arrives: there is no dmg to install yet.
+#
+# ----------------------------------------------------------------- inputs ---
+# The packages come from a release.yml run -- the same artifacts a release
+# publishes -- rather than being rebuilt here, because a package rebuilt for
+# the test is not the package the user gets. `release_run_id` names that run;
+# empty means the latest successful one, which for a repository that has not
+# tagged yet is release.yml's dry run.
+#
+# workflow_call is here so release.yml can gate a tag on this check later:
+# it would pass `release_run_id: ${{ github.run_id }}`, since artifacts
+# uploaded by earlier jobs of a run are downloadable from within it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: 'release.yml run id to take the packages from (empty: the latest successful run)'
+        type: string
+        default: ''
+      hardware:
+        description: >-
+          Also run on the self-hosted machines with real GPUs (box, yodaddy).
+          A string rather than a boolean for the same reason packaging.yml uses
+          one: for events that are not workflow_call the `inputs` context is
+          empty, and an empty string compares equal to a boolean false, so a
+          boolean guard would behave differently on a dispatch than on a call.
+        type: string
+        default: 'false'
+  workflow_call:
+    inputs:
+      release_run_id:
+        type: string
+        default: ''
+      hardware:
+        type: string
+        default: 'false'
+
+permissions:
+  contents: read
+  # gh run download reads another run's artifacts.
+  actions: read
+
+concurrency:
+  group: fresh-install-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # demo.sub carries two sequences, so the render has to name one.
+  SEQUENCE: Main cut
+  # H.264 in MKV with FLAC audio: the video codec every encoder candidate
+  # speaks, and an audio codec no runtime is ever short of, so a machine is
+  # never failed for want of an AAC encoder (see packaging.yml's notes on
+  # avenc_aac's rank). One second of the sequence is enough to prove decode,
+  # composite, mix and encode; this workflow is about the install, not the
+  # throughput, which hardware.yml measures.
+  PRESET: mezzanine
+  RANGE: "0:25"
+
+jobs:
+  # ---------------------------------------------------------------- resolve --
+  # One place decides which packages every job below installs, so a matrix leg
+  # cannot silently test a different build from its neighbour.
+  resolve:
+    name: Resolve the release run
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    outputs:
+      run_id: ${{ steps.pick.outputs.run_id }}
+      run_url: ${{ steps.pick.outputs.run_url }}
+      head_sha: ${{ steps.pick.outputs.head_sha }}
+      mode: ${{ steps.pick.outputs.mode }}
+    steps:
+      - name: Pick the run and check its artifacts
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WANTED: ${{ inputs.release_run_id }}
+        run: |
+          set -euo pipefail
+          if [ -n "${WANTED:-}" ]; then
+            run_id=$WANTED
+          else
+            run_id=$(gh run list --repo "$REPO" --workflow release.yml \
+              --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+            [ -n "$run_id" ] || {
+              echo "::error::no successful release.yml run to take packages from; run it once (its dry run is the default mode) and try again"
+              exit 1
+            }
+          fi
+
+          view=$(gh run view "$run_id" --repo "$REPO" \
+            --json url,headSha,headBranch,event,conclusion,displayTitle)
+          url=$(echo "$view" | jq -r .url)
+          sha=$(echo "$view" | jq -r .headSha)
+          branch=$(echo "$view" | jq -r .headBranch)
+          conclusion=$(echo "$view" | jq -r .conclusion)
+          title=$(echo "$view" | jq -r .displayTitle)
+          [ "$conclusion" = "success" ] || {
+            echo "::error::release run $run_id concluded '$conclusion'; its packages are not trustworthy"
+            exit 1
+          }
+
+          # Both modes of release.yml upload the same three artifacts; the
+          # publish mode additionally creates a release. Recorded so the
+          # summary can say which one these packages came from.
+          mode="dry run"
+          case "$branch" in v*) mode="tag $branch" ;; esac
+
+          # A missing or expired artifact has to fail here, not four jobs from
+          # now with an unhelpful "no artifact matches".
+          names=$(gh api "repos/$REPO/actions/runs/$run_id/artifacts" --paginate \
+            --jq '.artifacts[] | select(.expired | not) | .name')
+          echo "unexpired artifacts on run $run_id:"
+          echo "$names" | sed 's/^/  /'
+          for want in subordinate-appimage subordinate-flatpak subordinate-msi; do
+            printf '%s\n' "$names" | grep -qx "$want" || {
+              echo "::error::run $run_id has no unexpired $want artifact"
+              exit 1
+            }
+          done
+
+          {
+            echo "run_id=$run_id"
+            echo "run_url=$url"
+            echo "head_sha=$sha"
+            echo "mode=$mode"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Packages under test"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| release run | [$run_id]($url) |"
+            echo "| title | $title |"
+            echo "| mode | $mode |"
+            echo "| branch | \`$branch\` |"
+            echo "| commit | \`$sha\` |"
+            echo
+            echo "The sample project and its media are fetched at that commit, so the"
+            echo "project being opened is the one these packages were built from."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --------------------------------------------------------------- AppImage --
+  # Two distros, neither of them the one the AppImage was built on in the case
+  # of Fedora, and neither of them ever host to a build of this project. The
+  # container is the fresh machine; the runner around it only carries the file
+  # in, which is what a USB stick or a browser download does for a user.
+  appimage:
+    name: AppImage on a clean ${{ matrix.target }}
+    needs: resolve
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest system the package claims (its own glibc floor).
+          - target: ubuntu-24.04
+            image: ubuntu:24.04
+            # Only what a desktop has and a bare container does not: the
+            # graphics and audio client libraries build-appimage.sh
+            # deliberately excludes from the bundle, plus Mesa's software
+            # rasterisers and an X server, which stand in for the display a
+            # container has no other way to get. No toolchain, no GStreamer.
+            install: |
+              set -eu
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update >/dev/null
+              apt-get install -y -q --no-install-recommends \
+                libgl1 libegl1 libglx0 libglvnd0 libgbm1 libdrm2 \
+                libgl1-mesa-dri mesa-vulkan-drivers libvulkan1 libvdpau1 \
+                libva2 libva-drm2 libva-x11-2 \
+                libx11-6 libx11-xcb1 libxau6 libxdmcp6 libxext6 libxfixes3 libxrender1 \
+                libxi6 libxrandr2 libxcursor1 libxinerama1 \
+                libxcb1 libxcb-dri2-0 libxcb-dri3-0 libxcb-glx0 libxcb-present0 \
+                libxcb-randr0 libxcb-render0 libxcb-shape0 libxcb-shm0 libxcb-sync1 \
+                libxcb-xfixes0 libxcb-xkb1 libxkbcommon0 libxkbcommon-x11-0 xkb-data \
+                libwayland-client0 libwayland-cursor0 libwayland-egl1 \
+                libasound2t64 libpulse0 libdbus-1-3 libsystemd0 libudev1 libselinux1 \
+                xvfb xfonts-base >/dev/null
+              mkdir -p /tmp/.X11-unix
+          # The second distro the package promises, and the one that caught
+          # the glibc floor in the first place (packaging.yml, run 34626701087).
+          - target: fedora-41
+            image: fedora:41
+            install: |
+              set -eu
+              dnf install -y -q --setopt=install_weak_deps=False \
+                mesa-libGL mesa-libEGL mesa-libgbm mesa-dri-drivers mesa-vulkan-drivers \
+                vulkan-loader libvdpau libdrm libva \
+                libX11 libX11-xcb libxcb libXext libXrender libXi libXrandr \
+                libXcursor libXinerama libxkbcommon libxkbcommon-x11 xkeyboard-config \
+                libwayland-client libwayland-cursor libwayland-egl \
+                alsa-lib pulseaudio-libs dbus-libs systemd-libs \
+                xorg-x11-server-Xvfb xorg-x11-fonts-misc >/dev/null
+              mkdir -p /tmp/.X11-unix
+    steps:
+      - name: Download the AppImage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ needs.resolve.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p stage
+          gh run download "$RUN_ID" --repo "$REPO" --name subordinate-appimage --dir stage
+          # Build evidence, not something a user downloads.
+          rm -f stage/host-libraries.txt
+          ls -l stage
+
+      # No checkout anywhere in this workflow: a fresh machine has no source
+      # tree, and the project the packages were built from is fetched by URL
+      # at the release run's commit instead.
+      - name: Fetch the sample project and its media
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.head_sha }}
+          HARNESS_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # The project and its media come from the commit the packages were
+          # built at, so what is opened is what they were built from. The check
+          # script is this workflow's own harness, so it comes from the commit
+          # running the workflow -- otherwise a release built before this task
+          # would have no harness to fetch at all.
+          raw="https://raw.githubusercontent.com/$REPO/$SHA"
+          harness="https://raw.githubusercontent.com/$REPO/$HARNESS_SHA"
+          curl -fsSL -o stage/demo.sub "$raw/examples/sample-project/demo.sub"
+          curl -fsSL -o stage/fresh-install-check.sh "$harness/scripts/fresh-install-check.sh"
+          curl -fsSL -o get-sample-media.sh "$raw/scripts/get-sample-media.sh"
+          chmod +x get-sample-media.sh stage/fresh-install-check.sh
+          ./get-sample-media.sh --out "$PWD/stage/media"
+          ls -l stage stage/media
+
+      - name: Install and run on a clean ${{ matrix.target }}
+        env:
+          IMAGE: ${{ matrix.image }}
+          INSTALL: ${{ matrix.install }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$INSTALL" > stage/install.sh
+
+          # The adapter: how this package is reached. Everything else the
+          # check does is package-agnostic and lives in the shared script.
+          cat > stage/adapter.sh <<'ADAPTER'
+          SUB_PACKAGE_LABEL="AppImage"
+          # A desktop double-clicks the AppImage and libfuse mounts it. A
+          # container has no /dev/fuse, so the same runtime's own
+          # --appimage-extract unpacks the identical AppDir; doing it once also
+          # saves unsquashing 110 MB on every one of the dozen calls below.
+          appimage=$(ls "$PWD"/Subordinate-*-x86_64.AppImage)
+          chmod +x "$appimage"
+          if [ ! -x "$PWD/squashfs-root/AppRun" ]; then
+              "$appimage" --appimage-extract >/dev/null
+          fi
+          apprun=$PWD/squashfs-root/AppRun
+          sub_gui() { "$apprun" "$@"; }
+          sub_cli() { SUB_APPIMAGE_TOOL=subordinate-cli "$apprun" "$@"; }
+          sub_tool() { tool=$1; shift; SUB_APPIMAGE_TOOL=$tool "$apprun" "$@"; }
+          ADAPTER
+
+          docker run --rm \
+            -e SEQUENCE -e PRESET -e RANGE \
+            -v "$PWD/stage:/fresh" -w /fresh "$IMAGE" \
+            sh -c 'sh install.sh && sh fresh-install-check.sh \
+              --adapter /fresh/adapter.sh --project /fresh/demo.sub --out /fresh/out \
+              --preset "$PRESET" --sequence "$SEQUENCE" --range "$RANGE" --strict'
+
+      - name: Job summary
+        if: always()
+        env:
+          TARGET: ${{ matrix.target }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          {
+            echo "### AppImage on a clean $TARGET (\`$IMAGE\`)"
+            echo
+            if [ -f stage/out/facts.txt ]; then
+              echo "| fact | value |"
+              echo "|---|---|"
+              sed 's/=/|/' stage/out/facts.txt | sed 's/^/| /; s/$/ |/'
+            else
+              echo "The check did not get far enough to record anything."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fresh-install-appimage-${{ matrix.target }}
+          path: |
+            stage/out/facts.txt
+            stage/out/*.json
+            stage/out/*.txt
+            stage/out/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ---------------------------------------------------------------- Flatpak --
+  # The hosted runner itself this time, with no container: a Flatpak needs
+  # bubblewrap and user namespaces, which a plain unprivileged container does
+  # not give it. The runner has never built this project and has no flatpak
+  # until the first step puts one there, which is close enough to a user's
+  # desktop for what this proves -- and unlike the AppImage, the Flatpak takes
+  # its GStreamer from the freedesktop runtime, so this also checks that the
+  # runtime it asks for is actually installable today.
+  flatpak:
+    name: Flatpak on a clean ubuntu-26.04
+    needs: resolve
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    steps:
+      - name: Download the Flatpak bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ needs.resolve.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p stage
+          gh run download "$RUN_ID" --repo "$REPO" --name subordinate-flatpak --dir stage
+          ls -l stage
+
+      - name: Fetch the sample project and its media
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.head_sha }}
+          HARNESS_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          raw="https://raw.githubusercontent.com/$REPO/$SHA"
+          harness="https://raw.githubusercontent.com/$REPO/$HARNESS_SHA"
+          curl -fsSL -o stage/demo.sub "$raw/examples/sample-project/demo.sub"
+          curl -fsSL -o fresh-install-check.sh "$harness/scripts/fresh-install-check.sh"
+          curl -fsSL -o get-sample-media.sh "$raw/scripts/get-sample-media.sh"
+          chmod +x get-sample-media.sh fresh-install-check.sh
+          ./get-sample-media.sh --out "$PWD/stage/media"
+
+      - name: Install flatpak and the bundle
+        run: |
+          set -euo pipefail
+          # flatpak itself is not on the runner image; Xvfb stands in for the
+          # display a headless runner does not have.
+          sudo apt-get update >/dev/null || sudo apt-get update >/dev/null
+          sudo apt-get install -y -q --no-install-recommends flatpak xvfb xfonts-base >/dev/null
+          flatpak --version
+          # Per-user, as a desktop user installing a downloaded bundle would.
+          flatpak remote-add --if-not-exists --user flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+          bundle=$(ls stage/Subordinate-*.flatpak)
+          flatpak install --user --noninteractive --bundle "$bundle"
+          # The codec set the export presets need lives in this runtime
+          # extension; asking for it by name makes a missing one a visible
+          # install failure rather than an unexplained "no encoder".
+          flatpak install --user --noninteractive flathub \
+            org.freedesktop.Platform.codecs-extra//25.08-extra ||
+            echo "::warning::could not install codecs-extra explicitly"
+          flatpak list --user
+
+      - name: Run the fresh-install check through the Flatpak
+        run: |
+          set -euo pipefail
+          work=$PWD/stage
+          cat > adapter.sh <<ADAPTER
+          SUB_PACKAGE_LABEL="Flatpak"
+          app=io.github.thowd22.Subordinate
+          work=$work
+          sub_gui() {
+              flatpak run --user --filesystem="\$work" --device=dri \\
+                  --env=LIBGL_ALWAYS_SOFTWARE=1 --unset-env=VK_DRIVER_FILES \\
+                  --unset-env=VK_ICD_FILENAMES "\$app" "\$@"
+          }
+          sub_cli() {
+              flatpak run --user --filesystem="\$work" --command=subordinate-cli "\$app" "\$@"
+          }
+          sub_tool() {
+              tool=\$1
+              shift
+              flatpak run --user --filesystem="\$work" --command="\$tool" "\$app" "\$@"
+          }
+          ADAPTER
+          cat adapter.sh
+          # Not --strict: a hosted runner image carries a Rust toolchain of its
+          # own, which this check never uses but cannot remove. It has no
+          # GStreamer, and the step below says so.
+          command -v gst-inspect-1.0 >/dev/null 2>&1 &&
+            echo "::warning::this runner image carries GStreamer of its own; the sandbox still uses the runtime's" ||
+            echo "no host GStreamer: the Flatpak's runtime is the only one here"
+          sh fresh-install-check.sh --adapter "$PWD/adapter.sh" \
+            --project "$work/demo.sub" --out "$work/out" \
+            --preset "$PRESET" --sequence "$SEQUENCE" --range "$RANGE"
+
+      - name: Uninstall
+        if: always()
+        run: |
+          flatpak uninstall --user --noninteractive io.github.thowd22.Subordinate || true
+          flatpak list --user
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### Flatpak on a clean ubuntu-26.04 runner"
+            echo
+            if [ -f stage/out/facts.txt ]; then
+              echo "| fact | value |"
+              echo "|---|---|"
+              sed 's/=/|/' stage/out/facts.txt | sed 's/^/| /; s/$/ |/'
+            else
+              echo "The check did not get far enough to record anything."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fresh-install-flatpak
+          path: |
+            stage/out/facts.txt
+            stage/out/*.json
+            stage/out/*.txt
+            stage/out/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  # -------------------------------------------------------------------- MSI --
+  # windows-packaging.yml installs the MSI on the machine that built it, which
+  # by then has GStreamer 1.28 installed system-wide and on PATH. This runner
+  # has never had either. PATH is rebuilt inside the check script to the
+  # installed bin directory plus Windows, so nothing the image happens to
+  # carry can stand in for the bundled runtime.
+  msi:
+    name: MSI on a clean windows-latest
+    needs: resolve
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Prove this machine has no GStreamer
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Host "os: $($os.Caption) $($os.Version)"
+          Get-CimInstance Win32_VideoController |
+            Select-Object Name, DriverVersion | Format-Table -AutoSize | Out-String | Write-Host
+          if (Test-Path 'C:\gstreamer') {
+            Write-Host "::error::C:\gstreamer exists on this runner image"
+            exit 1
+          }
+          if (Get-Command gst-inspect-1.0 -ErrorAction SilentlyContinue) {
+            Write-Host "::error::gst-inspect-1.0 is already on PATH"
+            exit 1
+          }
+          if ($env:GSTREAMER_1_0_ROOT_MSVC_X86_64) {
+            Write-Host "::error::GSTREAMER_1_0_ROOT_MSVC_X86_64 is already set"
+            exit 1
+          }
+          Write-Host 'no GStreamer anywhere on this machine: the MSI has to bring its own'
+          # The image ships a Rust toolchain nobody here asks for. Recorded,
+          # not removed: what matters is that nothing below compiles anything.
+          $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+          if ($cargo) { Write-Host "note: the image has cargo at $($cargo.Source); this job never invokes it" }
+
+      - name: Download the MSI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ needs.resolve.outputs.run_id }}
+        run: |
+          $stage = "$env:RUNNER_TEMP\stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          gh run download $env:RUN_ID --repo $env:REPO --name subordinate-msi --dir $stage
+          Get-ChildItem $stage | Format-Table Name, Length | Out-String | Write-Host
+
+      - name: Fetch the sample project and its media
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.head_sha }}
+          HARNESS_SHA: ${{ github.sha }}
+        run: |
+          $stage = "$env:RUNNER_TEMP\stage"
+          $raw = "https://raw.githubusercontent.com/$env:REPO/$env:SHA"
+          $harness = "https://raw.githubusercontent.com/$env:REPO/$env:HARNESS_SHA"
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -UseBasicParsing -Uri "$raw/examples/sample-project/demo.sub" -OutFile "$stage\demo.sub"
+          Invoke-WebRequest -UseBasicParsing -Uri "$harness/scripts/fresh-install-check.ps1" -OutFile "$stage\fresh-install-check.ps1"
+          Invoke-WebRequest -UseBasicParsing -Uri "$raw/scripts/get-sample-media.ps1" -OutFile "$stage\get-sample-media.ps1"
+          & "$stage\get-sample-media.ps1" -OutDir "$stage\media"
+          Get-ChildItem "$stage\media" | Format-Table Name, Length | Out-String | Write-Host
+
+      - name: Install silently
+        run: |
+          $msi = (Get-ChildItem "$env:RUNNER_TEMP\stage\Subordinate-*-x86_64.msi")[0].FullName
+          Write-Host "installing $msi ($([math]::Round((Get-Item $msi).Length / 1MB, 1)) MiB)"
+          $log = "$env:GITHUB_WORKSPACE\install.log"
+          $p = Start-Process msiexec -ArgumentList "/i", "`"$msi`"", "/qn", "/norestart", "/l*v", "`"$log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Get-Content $log -Tail 80
+            Write-Host "::error::msiexec /i exited $($p.ExitCode)"
+            exit 1
+          }
+          $root = "$env:ProgramFiles\Subordinate"
+          if (-not (Test-Path $root)) { Write-Host "::error::nothing was installed"; exit 1 }
+          $size = (Get-ChildItem $root -Recurse -File | Measure-Object -Property Length -Sum).Sum
+          Write-Host "installed to $root, $([math]::Round($size / 1MB, 1)) MiB"
+          $shortcut = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Subordinate\Subordinate.lnk"
+          if (-not (Test-Path $shortcut)) { Write-Host "::error::no Start Menu shortcut"; exit 1 }
+          Write-Host 'Start Menu entry present, as a user would find it'
+
+      - name: Run the fresh-install check from the installed package
+        env:
+          RUST_LOG: info
+        run: |
+          $stage = "$env:RUNNER_TEMP\stage"
+          & "$stage\fresh-install-check.ps1" -Project "$stage\demo.sub" `
+            -Out "$env:GITHUB_WORKSPACE\out" -Preset $env:PRESET -Sequence $env:SEQUENCE `
+            -Range $env:RANGE -Strict
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Uninstall silently
+        if: always()
+        run: |
+          $msi = (Get-ChildItem "$env:RUNNER_TEMP\stage\Subordinate-*-x86_64.msi" -ErrorAction SilentlyContinue)
+          if (-not $msi) { Write-Host 'no MSI to uninstall'; exit 0 }
+          $log = "$env:GITHUB_WORKSPACE\uninstall.log"
+          $p = Start-Process msiexec -ArgumentList "/x", "`"$($msi[0].FullName)`"", "/qn", "/norestart", "/l*v", "`"$log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Get-Content $log -Tail 80
+            Write-Host "::error::msiexec /x exited $($p.ExitCode)"
+            exit 1
+          }
+          $root = "$env:ProgramFiles\Subordinate"
+          if (Test-Path $root) {
+            Write-Host "::error::$root survived the uninstall:"
+            Get-ChildItem $root -Recurse | Select-Object -First 40 -ExpandProperty FullName
+            exit 1
+          }
+          if (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Subordinate") {
+            Write-Host '::error::the Start Menu folder survived the uninstall'
+            exit 1
+          }
+          Write-Host 'uninstalled: install tree, Start Menu entry and registry key all gone'
+
+      - name: Job summary
+        if: always()
+        run: |
+          $facts = "$env:GITHUB_WORKSPACE\out\facts.txt"
+          $lines = @('### MSI on a clean windows-latest runner', '')
+          if (Test-Path $facts) {
+            $lines += '| fact | value |'
+            $lines += '|---|---|'
+            foreach ($line in Get-Content $facts) {
+              $parts = $line -split '=', 2
+              if ($parts.Count -eq 2) { $lines += "| $($parts[0]) | $($parts[1]) |" }
+            }
+          } else {
+            $lines += 'The check did not get far enough to record anything.'
+          }
+          $lines | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fresh-install-msi
+          path: |
+            out/facts.txt
+            out/*.json
+            out/*.txt
+            out/*.log
+            install.log
+            uninstall.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ------------------------------------------------- optional: real hardware --
+  # Off by default. The standard run is hosted-only and short, because that is
+  # what a release can afford to wait for and what can be trusted to be
+  # available. These two are machines in the user's house: box is a mini PC, and
+  # yodaddy is the user's daily-use Windows desktop. They add the one thing the
+  # hosted runners cannot give -- a real GPU, so the "best available encoder"
+  # the check picks is a hardware one -- and they are the closest thing to the
+  # physical fresh machine the runbook describes.
+  #
+  # Neither is a fresh machine in the strict sense, so --strict is off and the
+  # check records what they already had instead of failing on it.
+  box:
+    name: AppImage on box (self-hosted, AMD GPU)
+    if: inputs.hardware == 'true'
+    needs: resolve
+    runs-on: [self-hosted, linux, box, amd-gpu]
+    timeout-minutes: 40
+    env:
+      # A real GPU can encode a real preset: H.264 in MP4 with AAC, the same
+      # one hardware.yml renders, so the numbers are comparable.
+      PRESET: youtube-1080p
+    steps:
+      - name: Work in a scratch directory
+        run: |
+          set -euo pipefail
+          work=$RUNNER_TEMP/fresh-install
+          rm -rf "$work"
+          mkdir -p "$work"
+          echo "WORK=$work" >> "$GITHUB_ENV"
+
+      - name: Download the AppImage and the sample project
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ needs.resolve.outputs.run_id }}
+          SHA: ${{ needs.resolve.outputs.head_sha }}
+          HARNESS_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cd "$WORK"
+          gh run download "$RUN_ID" --repo "$REPO" --name subordinate-appimage --dir .
+          rm -f host-libraries.txt
+          raw="https://raw.githubusercontent.com/$REPO/$SHA"
+          harness="https://raw.githubusercontent.com/$REPO/$HARNESS_SHA"
+          curl -fsSL -o demo.sub "$raw/examples/sample-project/demo.sub"
+          curl -fsSL -o fresh-install-check.sh "$harness/scripts/fresh-install-check.sh"
+          curl -fsSL -o get-sample-media.sh "$raw/scripts/get-sample-media.sh"
+          chmod +x get-sample-media.sh fresh-install-check.sh
+          ./get-sample-media.sh --out "$WORK/media"
+
+      - name: Install and run
+        run: |
+          set -euo pipefail
+          cd "$WORK"
+          cat > adapter.sh <<'ADAPTER'
+          SUB_PACKAGE_LABEL="AppImage"
+          appimage=$(ls "$PWD"/Subordinate-*-x86_64.AppImage)
+          chmod +x "$appimage"
+          if [ ! -x "$PWD/squashfs-root/AppRun" ]; then
+              "$appimage" --appimage-extract >/dev/null
+          fi
+          apprun=$PWD/squashfs-root/AppRun
+          sub_gui() { "$apprun" "$@"; }
+          sub_cli() { SUB_APPIMAGE_TOOL=subordinate-cli "$apprun" "$@"; }
+          sub_tool() { tool=$1; shift; SUB_APPIMAGE_TOOL=$tool "$apprun" "$@"; }
+          ADAPTER
+          sh fresh-install-check.sh --adapter "$WORK/adapter.sh" \
+            --project "$WORK/demo.sub" --out "$WORK/out" \
+            --preset "$PRESET" --sequence "$SEQUENCE" --range "$RANGE"
+
+      - name: Job summary and cleanup
+        if: always()
+        run: |
+          {
+            echo "### AppImage on box (self-hosted, AMD)"
+            echo
+            if [ -f "$WORK/out/facts.txt" ]; then
+              echo "| fact | value |"
+              echo "|---|---|"
+              sed 's/=/|/' "$WORK/out/facts.txt" | sed 's/^/| /; s/$/ |/'
+            else
+              echo "The check did not get far enough to record anything."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Nothing was installed system-wide and nothing is left behind.
+          rm -rf "$WORK"
+
+  yodaddy:
+    name: MSI on yodaddy (self-hosted, the user's Windows desktop)
+    if: inputs.hardware == 'true'
+    needs: resolve
+    runs-on: [self-hosted, windows, yodaddy, amd-gpu]
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PRESET: youtube-1080p
+    steps:
+      - name: Download the MSI and the sample project
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ needs.resolve.outputs.run_id }}
+          SHA: ${{ needs.resolve.outputs.head_sha }}
+          HARNESS_SHA: ${{ github.sha }}
+        run: |
+          $stage = "$env:RUNNER_TEMP\fresh-install"
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          gh run download $env:RUN_ID --repo $env:REPO --name subordinate-msi --dir $stage
+          $raw = "https://raw.githubusercontent.com/$env:REPO/$env:SHA"
+          $harness = "https://raw.githubusercontent.com/$env:REPO/$env:HARNESS_SHA"
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -UseBasicParsing -Uri "$raw/examples/sample-project/demo.sub" -OutFile "$stage\demo.sub"
+          Invoke-WebRequest -UseBasicParsing -Uri "$harness/scripts/fresh-install-check.ps1" -OutFile "$stage\fresh-install-check.ps1"
+          Invoke-WebRequest -UseBasicParsing -Uri "$raw/scripts/get-sample-media.ps1" -OutFile "$stage\get-sample-media.ps1"
+          & "$stage\get-sample-media.ps1" -OutDir "$stage\media"
+
+      # This is somebody's desktop. It gets the package installed and taken off
+      # again, and every file this job writes lives under RUNNER_TEMP.
+      - name: Install silently
+        run: |
+          $msi = (Get-ChildItem "$env:RUNNER_TEMP\fresh-install\Subordinate-*-x86_64.msi")[0].FullName
+          $log = "$env:RUNNER_TEMP\fresh-install\install.log"
+          $p = Start-Process msiexec -ArgumentList "/i", "`"$msi`"", "/qn", "/norestart", "/l*v", "`"$log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Get-Content $log -Tail 80
+            Write-Host "::error::msiexec /i exited $($p.ExitCode)"
+            exit 1
+          }
+          Write-Host "installed to $env:ProgramFiles\Subordinate"
+
+      - name: Run the fresh-install check from the installed package
+        run: |
+          $stage = "$env:RUNNER_TEMP\fresh-install"
+          & "$stage\fresh-install-check.ps1" -Project "$stage\demo.sub" `
+            -Out "$stage\out" -Preset $env:PRESET -Sequence $env:SEQUENCE -Range $env:RANGE
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Job summary
+        if: always()
+        run: |
+          $facts = "$env:RUNNER_TEMP\fresh-install\out\facts.txt"
+          $lines = @('### MSI on yodaddy (self-hosted, AMD RX 9070 XT)', '')
+          if (Test-Path $facts) {
+            $lines += '| fact | value |'
+            $lines += '|---|---|'
+            foreach ($line in Get-Content $facts) {
+              $parts = $line -split '=', 2
+              if ($parts.Count -eq 2) { $lines += "| $($parts[0]) | $($parts[1]) |" }
+            }
+          } else {
+            $lines += 'The check did not get far enough to record anything.'
+          }
+          $lines | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      # Always, and before the scratch directory goes: leaving a package
+      # installed on the user's daily machine is not this workflow's business.
+      - name: Uninstall and leave nothing behind
+        if: always()
+        run: |
+          $msi = (Get-ChildItem "$env:RUNNER_TEMP\fresh-install\Subordinate-*-x86_64.msi" -ErrorAction SilentlyContinue)
+          if ($msi) {
+            $p = Start-Process msiexec -ArgumentList "/x", "`"$($msi[0].FullName)`"", "/qn", "/norestart" -Wait -PassThru
+            Write-Host "msiexec /x exited $($p.ExitCode)"
+          }
+          if (Test-Path "$env:ProgramFiles\Subordinate") {
+            Write-Host "::error::$env:ProgramFiles\Subordinate survived the uninstall"
+          }
+          Remove-Item -Recurse -Force "$env:RUNNER_TEMP\fresh-install" -ErrorAction SilentlyContinue
+          Write-Host 'uninstalled; the scratch directory is gone'
+
+  # ----------------------------------------------------------------- report --
+  report:
+    name: Result
+    if: always()
+    needs: [resolve, appimage, flatpak, msi, box, yodaddy]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Write the table and fail if any machine failed
+        env:
+          RESOLVE: ${{ needs.resolve.result }}
+          APPIMAGE: ${{ needs.appimage.result }}
+          FLATPAK: ${{ needs.flatpak.result }}
+          MSI: ${{ needs.msi.result }}
+          BOX: ${{ needs.box.result }}
+          YODADDY: ${{ needs.yodaddy.result }}
+          RUN_ID: ${{ needs.resolve.outputs.run_id }}
+          RUN_URL: ${{ needs.resolve.outputs.run_url }}
+          MODE: ${{ needs.resolve.outputs.mode }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Fresh-machine install verification"
+            echo
+            echo "Packages from release run [${RUN_ID:-unknown}](${RUN_URL:-#}) (${MODE:-unknown})."
+            echo
+            echo "| Machine | Package | GPU | Result |"
+            echo "|---|---|---|---|"
+            echo "| clean ubuntu:24.04 and fedora:41 containers | AppImage | none | $APPIMAGE |"
+            echo "| clean ubuntu-26.04 hosted runner | Flatpak | none | $FLATPAK |"
+            echo "| clean windows-latest hosted runner | MSI | none | $MSI |"
+            echo "| box (self-hosted, optional) | AppImage | AMD Cezanne | $BOX |"
+            echo "| yodaddy (self-hosted, optional) | MSI | AMD RX 9070 XT | $YODADDY |"
+            echo
+            echo "Per-machine OS versions and the encoder each one chose are in the"
+            echo "job summaries above and in the \`fresh-install-*\` artifacts."
+            echo
+            echo "_macOS is deferred with TASK-105/117: there is no dmg to install yet._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          failed=0
+          for result in "$RESOLVE" "$APPIMAGE" "$FLATPAK" "$MSI" "$BOX" "$YODADDY"; do
+            case "$result" in success | skipped) ;; *) failed=1 ;; esac
+          done
+          [ "$failed" -eq 0 ] || {
+            echo "::error::at least one fresh machine could not install and run the package"
+            exit 1
+          }
+          echo "every fresh machine installed the package and ran the sample project"
