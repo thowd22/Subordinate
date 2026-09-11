@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-11 00:06'
+updated_date: '2026-09-11 07:48'
 labels:
   - infra
   - ci
@@ -30,3 +31,9 @@ After TASK-125 the Windows job briefly ran in 8 minutes, but run 34539791304 sho
 - [ ] #2 The top five slowest Windows test binaries are listed in the notes with their durations, and any test moved or gated is justified in ci.yml comments
 - [ ] #3 Windows timeout lowered back to 40 minutes and no run in the following three merges is cancelled at the limit
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-09-11 supervisor measurement: warm no-change rerun of run 34564826872 gives windows-latest 19m26s (Build 7m, Test 7m, Clippy under 2m), inside the 20-minute criterion for that run. The cancelled-at-timeout pattern came from cold-cache runs; criterion 3 (timeout back to 40 and three merges without a cancellation) still needs doing, and the slowest Windows test binaries should be listed (criterion 2).
+<!-- SECTION:NOTES:END -->

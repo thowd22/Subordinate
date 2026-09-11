@@ -1,11 +1,11 @@
 ---
 id: TASK-109
 title: Sample project with CC-licensed media
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-109'
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-11 04:56'
+updated_date: '2026-09-11 07:48'
 labels:
   - docs
   - test
@@ -28,7 +28,7 @@ A ready-made project demonstrates the editor and feeds the CI render test.
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 A small sample project with two sequences, a few clips, a crossfade, markers and an applied effect, using CC0 media downloaded by a script
-- [ ] #2 Opens without relinking on all three OSes
+- [x] #2 Opens without relinking on all three OSes
 - [x] #3 Used by the CI render test
 <!-- AC:END -->
 
@@ -70,10 +70,12 @@ demo.sub: 'Porters, wide' now carries com.subordinate.color -- exposure +1 stop,
 Criterion 2: added SUB_REQUIRE_SAMPLE_MEDIA, which turns the render test's missing-media skip into a failure, and set it on the CI test step, which already runs on Linux, Windows and macOS after the fetch step. A green test job on each OS is then real evidence that demo.sub opened with every media path resolved and nothing to relink, rather than a silent skip. That evidence does not exist yet: this agent may not push, so no CI run has been made on this branch. Left unchecked.
 
 Verified here: cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean (exit 0); cargo test -p sub-model -p sub-test-support -p sub-edit -p sub-plugin all green (sub-model 88 lib tests plus 6 in demo_project, including the new stored-effect and pre-effects-file tests, and the regenerated docs/schema/project-v1.schema.json passes committed_schema_is_up_to_date); cargo test -p sub-ui --test sample_project_render -- --test-threads=1 with SUB_REQUIRE_SAMPLE_MEDIA=1 and the media really fetched from the sample-media-v1 release: 12 of 12 passing on llvmpipe, no skip line, including the grade the project itself stores lifting the canvas more than eight codes with no effect failures.
+
+2026-09-11 supervisor verification: CI run 34564826872 (merge of task/task-109) is green on all three OSes and its windows-latest and macos-latest logs each show 36 demo/sample-project tests passing (demo_project.rs, sample_project_render.rs, sample_media_catalogue.rs), so the sample project opens without relinking on Windows, macOS and Linux.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-The sample project now carries the applied effect the criterion asks for: sub-model gained a minimal, additive clip effect stack (ClipEffect + EffectValue in Fixed6, model.invalid_effect, no schema bump because the field is serde-defaulted exactly as earlier additive fields were), examples/sample-project/demo.sub applies the first-party com.subordinate.color grade to the wide shot, and the CI render test reads that effect out of the project and binds it against plugins/color's own declaration instead of hard-coding one. Verified with cargo fmt --all --check, clippy -D warnings over the workspace, the sub-model/sub-edit/sub-plugin/sub-test-support suites and a real run of sample_project_render over the fetched CC0 media (12 of 12, no skip). Criterion 2 stays unchecked: SUB_REQUIRE_SAMPLE_MEDIA now makes the CI test job on each OS prove the project opens with every path resolved, but this agent cannot push, so no three-OS run exists yet.
+Sample project (examples/sample-project/demo.sub) with two sequences, clips, a crossfade, markers and an applied effect (minimal effect stack added to sub-model with migration), media fetched from the sample-media-v1 GitHub release with checksums; opens on all three OSes in CI and feeds the CI render test.
 <!-- SECTION:FINAL_SUMMARY:END -->
