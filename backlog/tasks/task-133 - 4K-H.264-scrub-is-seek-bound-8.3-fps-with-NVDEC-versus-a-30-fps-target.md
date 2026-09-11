@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-task-133'
 created_date: '2026-09-11 14:48'
-updated_date: '2026-09-11 18:42'
+updated_date: '2026-09-11 19:40'
 labels:
   - media
   - performance
@@ -114,6 +114,8 @@ The hardware half needs the NVIDIA runner this environment does not have. The so
 cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean; cargo test -p sub-media -p subordinate-bench all green, including seek_fixtures (which judges a seek by the burnt-in timecode and by the whole picture, the AC #3 evidence) and index_fixtures. New unit tests: the accurate aim opens a picture early, names its instant in the container's timeline and declines when the index cannot answer; the seek flags say which kind of seek was asked for; only an index can say whether a target is inside the file.
 
 Validation (second pass): cargo fmt --all --check clean, cargo clippy --workspace --all-targets -- -D warnings clean, cargo test -p sub-media -p subordinate-bench green, and cargo test --workspace --exclude sub-ui green (sub-ui's snapshot suite was not run here; it does not exercise the seek path directly). cargo doc -p sub-media --no-deps raises nothing new. AC #1 and AC #3 stay checked: AC #1's split is still reported per scrub scenario (its halves now bill the reference chain to the seek, which the harness prints), and AC #3's evidence is seek_fixtures, which judges every seek by the burnt-in timecode and by the whole picture and still passes -- the VFR regression this pass found and fixed is exactly that gate doing its job. AC #2 remains unchecked.
+
+2026-09-11 supervisor measurement after the second merge (hardware run 34635562025, box APU, vah264dec): 4K scrub 9.898 fps (seek p50 11.3 ms, decode-forward p50 63.5 ms, still 14.2 pictures per seek); 1080p scrub 22.7 fps with 14 frames per seek. The delivered change removed unshown pictures from delivery but every step still decodes about half a GOP, so the decode count per step is unchanged. The NVIDIA job of that run failed at runner launch (RunsOn capacity while two T4 jobs were already running), so no T4 number this time. Next pass must change the seek strategy itself: for a forward step inside the current GOP continue decoding from the last decoded picture without a flushing seek, and keep the current GOP's decoded pictures in the frame cache so backward steps hit; measure frames-decoded-per-step, which should drop from 14 to about 1 for sequential scrubbing.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
