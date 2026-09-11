@@ -402,6 +402,9 @@ fn cargo_toml(crate_name: &str, display: &str, world: World, sdk_path: Option<&P
          [lib]\n\
          crate-type = [\"cdylib\"]\n\
          \n\
+         # One dependency is the whole list: the SDK re-exports `serde_json` and\n\
+         # its `json!` macro, so a plugin never adds a JSON crate to write its\n\
+         # answers or read its arguments.\n\
          [dependencies]\n\
          {sdk}\n\
          \n\
@@ -460,8 +463,11 @@ fn command_lib_rs(id: &PluginId, display: &str) -> String {
          //! and answers with a JSON object. Every edit goes through the Command API\n\
          //! on `Project`, so a plugin edit is an ordinary undoable command that the\n\
          //! GUI, the CLI and the MCP bridge all see identically.\n\
+         //!\n\
+         //! Both documents are built with the `serde_json` the SDK re-exports, so\n\
+         //! `Cargo.toml` stays at its one dependency however involved they get.\n\
          \n\
-         use subordinate_sdk::{{Guest, Project, ProjectId, Result, export, info}};\n\
+         use subordinate_sdk::{{Guest, Project, ProjectId, Result, export, info, json, serde_json}};\n\
          \n\
          /// The component this crate exports.\n\
          struct Plugin;\n\
@@ -471,14 +477,16 @@ fn command_lib_rs(id: &PluginId, display: &str) -> String {
          \x20       info(\"{id} starting\");\n\
          \x20       let project = Project::new(project);\n\
          \x20       let sequences = project.sequences()?;\n\
+         \x20       // The caller's arguments, defaulting to null when it sent none.\n\
+         \x20       let args: serde_json::Value = serde_json::from_str(&args).unwrap_or_default();\n\
          \n\
          \x20       // Replace this with the edit itself: build a parameter struct from\n\
          \x20       // `subordinate_sdk::params` and hand it to `project.run(&params)`.\n\
-         \x20       Ok(format!(\n\
-         \x20           r#\"{{{{\"sequences\":{{}},\"args_bytes\":{{}}}}}}\"#,\n\
-         \x20           sequences.len(),\n\
-         \x20           args.len(),\n\
-         \x20       ))\n\
+         \x20       Ok(json!({{\n\
+         \x20           \"sequences\": sequences.len(),\n\
+         \x20           \"args\": args,\n\
+         \x20       }})\n\
+         \x20       .to_string())\n\
          \x20   }}\n\
          }}\n\
          \n\
@@ -592,7 +600,7 @@ fn mcp_lib_rs(display: &str, crate_name: &str) -> String {
          //! undoable command like any other edit.\n\
          \n\
          use subordinate_sdk::bindings::ToolDesc;\n\
-         use subordinate_sdk::{{Guest, Result, error, export, open_projects}};\n\
+         use subordinate_sdk::{{Guest, Result, error, export, json, open_projects}};\n\
          \n\
          /// The tool this plugin contributes, as `plugin.toml` declares it.\n\
          const TOOL: &str = \"{tool}\";\n\
@@ -620,7 +628,9 @@ fn mcp_lib_rs(display: &str, crate_name: &str) -> String {
          \x20           Some(project) => project.sequences()?.len(),\n\
          \x20           None => 0,\n\
          \x20       }};\n\
-         \x20       Ok(format!(r#\"{{{{\"sequences\":{{sequences}}}}}}\"#))\n\
+         \x20       // `json!` comes from the SDK, so this crate needs no JSON\n\
+         \x20       // dependency of its own.\n\
+         \x20       Ok(json!({{ \"sequences\": sequences }}).to_string())\n\
          \x20   }}\n\
          }}\n\
          \n\
@@ -720,6 +730,9 @@ fn claude_md(id: &PluginId, display: &str, world: World, crate_name: &str) -> St
          lands on the host's undo stack.\n\
          - Never compute timeline positions in floating point. `RationalTime` is \
          exact; seconds are not.\n\
+         - `Cargo.toml` has one dependency and wants no more: the SDK re-exports \
+         `serde_json` and its `json!` macro for every JSON document that crosses \
+         the boundary, so there is nothing to add before writing an answer.\n\
          - Keep `plugin.toml` truthful: the host refuses anything it declares that \
          the component does not export, and an undeclared capability is a denied \
          one.\n",
@@ -742,9 +755,13 @@ fn interface_section(world: World) -> &'static str {
              fn run(project: ProjectId, args: String) -> Result<String>\n\
              ```\n\n\
              One entry point. `args` is a JSON object the caller supplied and the \
-             answer is a JSON object of your own shape. The host opens one undo \
-             group around the call, so however many primitives you apply, the user \
-             undoes the whole thing in one step.\n"
+             answer is a JSON object of your own shape. Build both with the \
+             `serde_json` the SDK re-exports — \
+             `Ok(subordinate_sdk::json!({ \"clips\": added }).to_string())` — rather \
+             than with `format!` over hand-written braces, and parse `args` with \
+             `subordinate_sdk::serde_json`. The host opens one undo group around the \
+             call, so however many primitives you apply, the user undoes the whole \
+             thing in one step.\n"
         }
         World::Effect => {
             "```rust\n\
@@ -780,7 +797,10 @@ fn interface_section(world: World) -> &'static str {
              `tools` is called on load and after a hot reload; the host compares what \
              it returns with `plugin.toml` and refuses any tool the manifest does not \
              declare. `name` reaches `call` without the plugin-id prefix, and \
-             `args_json` has already been validated against that tool's schema.\n"
+             `args_json` has already been validated against that tool's schema. \
+             Read it and write the answer with the `serde_json` the SDK re-exports \
+             — `subordinate_sdk::json!` and `subordinate_sdk::serde_json` — so this \
+             crate needs no JSON dependency of its own.\n"
         }
         _ => "",
     }
@@ -964,6 +984,62 @@ mod tests {
                 "{world}",
             );
 
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// The answer a `command` plugin returns is JSON, and the crate it is
+    /// scaffolded into depends only on the SDK. So the template builds that
+    /// answer out of what the SDK re-exports rather than out of `format!` over
+    /// hand-written braces, which is what sends an author to `Cargo.toml`
+    /// before they have edited a line of the plugin.
+    #[test]
+    fn the_command_scaffold_answers_json_with_the_sdks_own_and_adds_no_dependency() {
+        let parent = scratch("command-json");
+        new(&options(World::Command, "demo-plugin", &parent)).expect("a scaffold");
+        let root = parent.join("demo-plugin");
+
+        let lib = read(&root, "src/lib.rs");
+        assert!(lib.contains("json, serde_json"), "{lib}");
+        assert!(lib.contains("json!({"), "{lib}");
+        assert!(
+            lib.contains("serde_json::from_str(&args)"),
+            "the template reads its arguments as JSON: {lib}",
+        );
+        assert!(
+            !lib.contains(r#"format!(r#""#),
+            "the template hand-rolls JSON: {lib}",
+        );
+
+        // The guide says where JSON comes from, so the next reader does not go
+        // looking for a crate to add.
+        let guide = read(&root, "CLAUDE.md");
+        assert!(guide.contains("subordinate_sdk::json!"), "{guide}");
+        assert!(guide.contains("subordinate_sdk::serde_json"), "{guide}");
+    }
+
+    /// Whatever the world, `[dependencies]` is the SDK and nothing else: an
+    /// agent that has to add one before the scaffold builds has been handed an
+    /// unfinished crate.
+    #[test]
+    fn a_scaffolded_crate_depends_on_the_sdk_and_nothing_else() {
+        let parent = scratch("one-dependency");
+        for world in TEMPLATED_WORLDS {
+            new(&options(world, "demo-plugin", &parent)).expect("a scaffold");
+            let root = parent.join("demo-plugin");
+            let cargo = read(&root, "Cargo.toml");
+            let dependencies: Vec<&str> = cargo
+                .lines()
+                .skip_while(|line| line.trim() != "[dependencies]")
+                .skip(1)
+                .take_while(|line| !line.trim_start().starts_with('['))
+                .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+                .collect();
+            assert_eq!(dependencies.len(), 1, "{world}: {cargo}");
+            assert!(
+                dependencies[0].starts_with("subordinate-sdk ="),
+                "{world}: {cargo}",
+            );
             let _ = std::fs::remove_dir_all(&root);
         }
     }
