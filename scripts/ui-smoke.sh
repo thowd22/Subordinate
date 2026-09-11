@@ -7,24 +7,27 @@
 # or a seat -- Mesa's lavapipe draws and Xvfb holds the display -- so it runs
 # on the free hosted Linux runner (TASK-123).
 #
-# The two monitors are two RandR monitors carved out of one wide Xvfb screen,
-# which is what makes them one desktop the app can place a window across; a
-# second X screen joined with Xinerama looks the same but breaks window
-# coordinate translation under winit. The head geometry is read back from the
-# server rather than assumed, and each head is cropped out of one root capture
-# into its own PNG.
+# The two heads are carved out of one wide Xvfb screen, which is what makes
+# them one desktop the app can place a window across; a second X screen joined
+# with Xinerama looks the same but breaks window coordinate translation under
+# winit. Two RandR monitors are asked for first, since that is what makes the
+# heads visible to the app's own display enumeration, and the server's answer
+# is recorded either way (Ubuntu 26.04's Xvfb takes the request and creates
+# nothing). Each head is cropped out of one root capture into its own PNG, with
+# whichever window landed on it outlined and named.
 #
-# --gpu drops the software-rasteriser override so the same run photographs
-# what a real adapter draws; --require-popout-on-head N turns the pop-out's
-# placement from a picture someone has to look at into an assertion, by reading
-# the window's absolute geometry back off the server and checking it lies
-# inside that head's rectangle (TASK-118).
+# --gpu asks for the machine's real adapter; a display that cannot present it
+# (Xvfb has no DRI3, so Mesa refuses the surface) falls back to lavapipe with
+# the reason printed. --require-popout-on-head N turns the pop-out's placement
+# from a picture someone has to look at into an assertion, by reading the
+# window's absolute geometry back off the server and checking it lies inside
+# that head's rectangle (TASK-118).
 #
 # Requires: Xvfb, xdpyinfo and xwininfo (x11-utils), xwd (x11-apps), ImageMagick.
 # Output: <out>/screen-0.png, <out>/screen-1.png, <out>/app.log,
 #         <out>/summary.md, <out>/screens.txt (one "name WxH" per line),
 #         <out>/windows.txt (the top-level windows with their geometry) and
-#         <out>/monitors.txt (xrandr --listmonitors).
+#         <out>/monitors.txt (the server's RandR version, monitors and heads).
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)

@@ -30,13 +30,6 @@ name: Hardware verification
 # free but the NVIDIA job is not, and box is a machine in someone's home (see
 # docs/DEVELOPMENT.md, "Self-hosted AMD runner").
 on:
-  # TEMPORARY (TASK-118 verification): a workflow that is not on the default
-  # branch cannot be dispatched, so the two-output job is proved from a branch
-  # push. build-linux, nvidia-linux and amd-linux are skipped on a push so no
-  # GPU spot instance is launched. Remove this trigger and the three `if:`
-  # guards before merging.
-  push:
-    branches: [task/task-118]
   workflow_dispatch:
   schedule:
     # 04:30 UTC, once a day. One NVIDIA job a night is about 2.50 USD a month.
@@ -74,8 +67,6 @@ jobs:
   # artifact; the GPU job downloads them and spends its minutes measuring.
   build-linux:
     name: Build the Linux binaries (hosted, free)
-    # TEMPORARY (TASK-118): see the push trigger above.
-    if: github.event_name != 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -150,9 +141,6 @@ jobs:
   nvidia-linux:
     name: NVIDIA T4 (g4dn.xlarge, Ubuntu 24.04)
     needs: build-linux
-    # TEMPORARY (TASK-118): see the push trigger above. Never let a push start
-    # this job: it is the only one that costs money.
-    if: github.event_name != 'push'
     runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-linux
     # Hard stop on GPU spend; see the cost note in the header. With the build
     # moved off this instance the job is apt, fixtures, one render and two
@@ -339,8 +327,6 @@ jobs:
     # tools are already installed, so this job validates rather than installs,
     # and it costs nothing. See docs/DEVELOPMENT.md, "Self-hosted AMD runner".
     name: AMD APU (box, self-hosted, Ubuntu 26.04)
-    # TEMPORARY (TASK-118): see the push trigger above.
-    if: github.event_name != 'push'
     runs-on: [self-hosted, linux, box, amd-gpu]
     timeout-minutes: 30
     env:

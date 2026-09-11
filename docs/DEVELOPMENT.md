@@ -1000,16 +1000,17 @@ for: a second OS window, on a second output, drawn by a real GPU.
 
 `hardware.yml`'s `popout-two-output-linux` job does it on every dispatch:
 
-1. one 2560x800 Xvfb screen, split into two 1280x800 RandR monitors with
-   `xrandr --setmonitor` (two X screens joined by Xinerama break
-   `XTranslateCoordinates` under winit -- see the window smoke test above);
-2. `scripts/ui-smoke.sh --gpu`, so the editor draws on RADV rather than
-   llvmpipe and the `adapter chosen:` line proves which;
+1. one 2560x800 Xvfb screen carved into two 1280x800 heads (two X screens
+   joined by Xinerama break `XTranslateCoordinates` under winit -- see the
+   window smoke test above);
+2. `scripts/ui-smoke.sh --gpu`, which asks for the machine's real adapter and
+   says in the summary which one actually drew;
 3. `--require-popout-on-head 1`, which reads the pop-out window's absolute
    geometry back off the server with `xwininfo -root -tree` and fails the job
    unless it is inside head 1's rectangle with the editor on another head;
-4. one PNG per output, plus `windows.txt`, `monitors.txt` and `app.log`,
-   uploaded as `popout-two-output-<sha>` and listed in the job summary.
+4. one PNG per output -- each with the window that landed on it outlined and
+   named -- plus `windows.txt`, `monitors.txt` and `app.log`, uploaded as
+   `popout-two-output-<sha>` and listed in the job summary.
 
 ```bash
 gh workflow run hardware.yml
@@ -1018,9 +1019,34 @@ gh run download <run-id> -n popout-two-output-$(git rev-parse HEAD) -D /tmp/popo
 ```
 
 It runs on `box` rather than on the NVIDIA spot instance on purpose: nothing
-about it is NVDEC-specific -- it is RandR, window placement and a real Vulkan
+about it is NVDEC-specific -- it is RandR, window placement and a Vulkan
 adapter -- so the paid runner would buy nothing. That is also why the job is
 allowed to compile: box is free.
+
+Two limits of a virtual X display, both learned the hard way and both recorded
+in the artifact rather than papered over:
+
+- **Xvfb has no DRI3, so a real GPU cannot present into it.** Mesa's Vulkan WSI
+  needs DRI3 for a presentable image; RADV refuses the surface with "There was
+  no valid format for the surface at all" and the app exits before its first
+  frame (run 34614668762). `--gpu` therefore means "use the real adapter if
+  this display can present it": the script notices that failure, says so, and
+  redraws on Mesa's lavapipe, which the summary records. Note that
+  `LIBGL_ALWAYS_SOFTWARE` does nothing here -- it is a GL variable, and the
+  compositor is Vulkan -- so the fallback points `VK_DRIVER_FILES` at
+  `lvp_icd.json` instead. Real-GPU rendering of the compositor is proved
+  headlessly by the `amd-linux` and `nvidia-linux` jobs beside this one; this
+  job proves the windows.
+- **Ubuntu 26.04's Xvfb ignores `xrandr --setmonitor`.** The server reports
+  RandR 1.6 and accepts `RRSetMonitor` without an X error, and the monitor
+  never appears: three spellings, no complaint, one automatic whole-screen
+  monitor afterwards (runs 34615366090 and 34616222671). So the two heads are
+  two rectangles of one virtual screen rather than two RandR monitors. Window
+  placement is unaffected -- X windows are positioned in root coordinates, and
+  the pop-out lands and is photographed where it is put -- but the app's own
+  display enumeration sees one monitor on this runner, so TASK-68's picker
+  cannot be exercised here. That half needs a real second head, which is what
+  the RDP procedure below is for.
 
 ### Windows: interactive, by hand, over RDP with two monitors
 
