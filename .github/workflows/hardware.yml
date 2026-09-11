@@ -11,17 +11,18 @@ name: Hardware verification
 # ---------------------------------------------------------------- cost ------
 # nvidia-linux runs on RunsOn (.github/runs-on.yml, runner gpu-nvidia-linux):
 # one g4dn.xlarge in us-east-1, spot `price-capacity-optimized` at typically
-# 0.16-0.25 USD/h, 0.526 USD/h if it falls back to on-demand. `timeout-minutes`
-# caps the job at 20 minutes, so the worst case is
+# 0.16-0.25 USD/h, 0.526 USD/h if it falls back to on-demand. Nothing is
+# compiled on it (see build-linux below), so `timeout-minutes` caps it at 15
+# and the worst case is
 #
-#   spot      0.25 USD/h * 20/60 h = 0.083 USD
-#   on-demand 0.526 USD/h * 20/60 h = 0.175 USD
+#   spot      0.25 USD/h * 15/60 h = 0.063 USD
+#   on-demand 0.526 USD/h * 15/60 h = 0.132 USD
 #
-# and a warm run (rust-cache hit) finishes in well under half that. Storage is
-# the instance's own root volume, deleted with the instance. Budget: under
-# 0.10 USD per run on spot, under 0.25 USD in every case, which is the number
-# TASK-116 AC 4 states. amd-linux runs on the self-hosted box and costs
-# nothing, so only the NVIDIA job is money.
+# with a real run nearer 8 minutes, about 0.03 USD on spot. Storage is the
+# instance's own root volume, deleted with the instance. Budget: under 0.05 USD
+# per run on spot and under 0.25 USD in every case, which is the number
+# TASK-116 AC 4 states. build-linux is a free hosted runner and amd-linux is
+# the self-hosted box, so the GPU job is the only money in this workflow.
 #
 # Triggers are deliberately narrow for the same reason: on demand, plus one
 # nightly schedule. Never add `push` or `pull_request` here - the AMD job is
@@ -57,15 +58,107 @@ env:
   PRESET: youtube-1080p
 
 jobs:
-  nvidia-linux:
-    name: NVIDIA T4 (g4dn.xlarge, Ubuntu 24.04)
-    runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-linux
-    # Hard stop on GPU spend; see the cost note in the header. A cold cache
-    # (release subordinate-bench plus a debug subordinate-cli) is the slow
-    # case; a warm one is a few minutes.
-    timeout-minutes: 20
+  # Nothing is compiled on the GPU instance: it is the most expensive machine
+  # in this workflow and the slowest of the three (4 vCPU). On run 34603245414
+  # a cold `cargo build -p subordinate-cli` alone took 10m52s there - wasmtime
+  # with the workspace's opt-level 3 on dependencies - and the job hit its
+  # timeout before it had measured anything. A free hosted ubuntu-24.04 runner
+  # builds the same binaries in the same distro release (so the same
+  # libgstreamer 1.24 ABI the GPU image has) and hands them over as an
+  # artifact; the GPU job downloads them and spends its minutes measuring.
+  build-linux:
+    name: Build the Linux binaries (hosted, free)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install GStreamer (apt)
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*google*.list \
+                     /etc/apt/sources.list.d/*google*.sources \
+                     /etc/apt/sources.list.d/*microsoft*.list \
+                     /etc/apt/sources.list.d/*microsoft*.sources || true
+          sudo apt-get update || sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-tools \
+            pkg-config libasound2-dev
+          echo "gstreamer-1.0 = $(pkg-config --modversion gstreamer-1.0)"
+
+      # rust-toolchain.toml pins the version this repository builds with.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      # A shared-key of its own: Ubuntu 24.04 against GStreamer 1.24, which is
+      # not what ci.yml's archives hold. `save-if` is unconditional because
+      # this workflow only ever runs by hand or nightly, so there is no flood
+      # of branch entries to guard against - and without a saved archive every
+      # run is the cold 13-minute build above.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hardware-linux-ubuntu24
+          prefix-key: v1-rust
+          cache-workspace-crates: true
+
+      # Only what the measurements need: the whole workspace (the GUI, the
+      # plugin hosts) is not part of any criterion here. subordinate-bench is
+      # release because its fps numbers are compared against the release
+      # baselines in docs/PERFORMANCE.md; subordinate-cli is debug because its
+      # render is encoder-bound and a release build drags a thin-LTO wasmtime
+      # through the slowest link step in the repository. The readback
+      # throughput test is #[ignore]d, so it is compiled here and run there.
+      - name: Build the binaries
+        run: |
+          cargo build --release -p subordinate-bench
+          cargo build -p subordinate-cli
+          cargo test --release -p sub-render --test readback --no-run \
+            --message-format=json > /tmp/readback-build.json
+          mkdir -p dist
+          python3 - <<'PY'
+          import json, pathlib, shutil
+          binary = None
+          for line in pathlib.Path("/tmp/readback-build.json").read_text().splitlines():
+              message = json.loads(line)
+              executable = message.get("executable")
+              if executable and message.get("target", {}).get("name") == "readback":
+                  binary = executable
+          if binary is None:
+              raise SystemExit("cargo did not report a readback test binary")
+          shutil.copy2(binary, "dist/readback-test")
+          PY
+          cp target/release/subordinate-bench dist/subordinate-bench
+          cp target/debug/subordinate-cli dist/subordinate-cli
+          chmod +x dist/*
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hardware-linux-binaries
+          path: dist/
+          retention-days: 7
+
+  nvidia-linux:
+    name: NVIDIA T4 (g4dn.xlarge, Ubuntu 24.04)
+    needs: build-linux
+    runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-linux
+    # Hard stop on GPU spend; see the cost note in the header. With the build
+    # moved off this instance the job is apt, fixtures, one render and two
+    # measurements: well under ten minutes.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: hardware-linux-binaries
+          path: dist
+
+      - name: Make the binaries executable
+        run: |
+          chmod +x dist/*
+          ls -l dist
 
       - name: Instance and GPU facts
         run: |
@@ -94,12 +187,15 @@ jobs:
                      /etc/apt/sources.list.d/*microsoft*.list \
                      /etc/apt/sources.list.d/*microsoft*.sources || true
           sudo apt-get update || sudo apt-get update
+          # Runtime only - no -dev packages and no compiler: nothing is built
+          # on this instance. The plugin packages pull the shared libraries the
+          # prebuilt binaries link against.
           sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
-            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-            gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x pkg-config \
-            libasound2-dev libvulkan1 vulkan-tools xvfb
-          echo "gstreamer-1.0 = $(pkg-config --modversion gstreamer-1.0)"
+            libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libgstreamer-plugins-bad1.0-0 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x \
+            libasound2t64 libvulkan1 vulkan-tools xvfb
+          gst-inspect-1.0 --version
           vulkaninfo --summary 2>&1 | head -40 || echo "vulkaninfo failed; wgpu may fall back to software"
 
       - name: GStreamer diagnostics
@@ -107,7 +203,6 @@ jobs:
           mkdir -p target/hardware
           {
             gst-inspect-1.0 --version
-            echo "pkg-config gstreamer-1.0: $(pkg-config --modversion gstreamer-1.0)"
             echo "--- element presence ---"
             for e in nvh264enc nvh265enc nvh264dec nvh264sldec nvautogpuh264enc x264enc avdec_h264 avenc_aac; do
               if gst-inspect-1.0 --exists "$e"; then echo "present  $e"; else echo "absent   $e"; fi
@@ -120,30 +215,6 @@ jobs:
           sed -n '1,60p' target/hardware/gst-inspect.txt
           gst-inspect-1.0 --exists nvh264enc \
             || { echo "::error::nvh264enc missing: this runner cannot verify NVENC"; exit 1; }
-
-      # rust-toolchain.toml pins the version; this action honours it.
-      - uses: dtolnay/rust-toolchain@stable
-
-      # A distinct shared-key: these are GPU-runner artifacts built on Ubuntu
-      # 24.04 against GStreamer 1.24 and must never be mixed with ci.yml's.
-      # save-if keeps one archive rather than one per branch.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: hardware-nvidia-linux
-          prefix-key: v1-rust
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' }}
-          cache-workspace-crates: true
-
-      # Only the two binaries this job needs, never the whole workspace: the
-      # GUI and the plugin hosts are not part of any criterion here.
-      # subordinate-bench is release, because the fps numbers are compared
-      # against docs/PERFORMANCE.md's release baselines; subordinate-cli is
-      # debug, because its render is encoder-bound and a release build of it
-      # drags in a thin-LTO wasmtime that costs more GPU minutes than it saves.
-      - name: Build subordinate-bench (release) and subordinate-cli
-        run: |
-          cargo build --release -p subordinate-bench
-          cargo build -p subordinate-cli
 
       - name: Generate test fixtures
         run: ./scripts/gen-fixtures.sh
@@ -158,7 +229,7 @@ jobs:
       - name: Render the sample project with NVENC
         run: |
           mkdir -p target/hardware
-          xvfb-run -a ./target/debug/subordinate-cli render examples/sample-project/demo.sub \
+          xvfb-run -a ./dist/subordinate-cli render examples/sample-project/demo.sub \
             --preset "$PRESET" --encoder nvh264enc --verify \
             --out target/hardware/sample-nvh264enc.mp4 \
             | tee target/hardware/render.json
@@ -174,16 +245,18 @@ jobs:
       # nvdec and not avdec_h264.
       - name: Scrub and playback benchmark (hardware decode)
         run: |
-          xvfb-run -a ./target/release/subordinate-bench --out target/bench/perf.json \
+          mkdir -p target/bench
+          xvfb-run -a ./dist/subordinate-bench --out target/bench/perf.json \
             | tee target/hardware/bench-summary.txt
           cp target/bench/perf.json target/hardware/perf.json
 
       # Compositor readback throughput on a 1080p canvas: TASK-58 AC 2, which
       # could not be measured on a software adapter and moved here. The test is
-      # #[ignore]d so it only ever runs on a job like this one.
+      # #[ignore]d so it only ever runs on a job like this one, and it is the
+      # prebuilt test binary from build-linux, not a cargo invocation.
       - name: Compositor readback throughput (1080p)
         run: |
-          xvfb-run -a cargo test --release -p sub-render --test readback -- --ignored --nocapture \
+          xvfb-run -a ./dist/readback-test --ignored --nocapture \
             | tee target/hardware/readback.txt
 
       - name: Job summary and criteria
@@ -251,6 +324,24 @@ jobs:
           gst-inspect-1.0 --exists vah264enc \
             || { echo "::error::vah264enc missing: check the render/video groups"; exit 1; }
 
+      # The runner runs as a systemd service with a minimal environment, so
+      # rustup's shims in ~/.cargo/bin are not on PATH even though Rust is
+      # installed (run 34603245414: "cargo: command not found"). Find them
+      # rather than hard-coding one layout.
+      - name: Put the Rust toolchain on PATH
+        run: |
+          found=""
+          for d in "$HOME/.cargo/bin" /usr/local/cargo/bin /opt/rust/bin; do
+            if [ -x "$d/cargo" ]; then found=$d; break; fi
+          done
+          [ -n "$found" ] || { echo "::error::no cargo on this runner; install rustup for the runner user"; exit 1; }
+          echo "$found" >> "$GITHUB_PATH"
+
+      - name: Rust version
+        run: |
+          cargo --version
+          rustc --version
+
       # box keeps its target directory between runs on local disk, so there is
       # no rust-cache here: an Actions cache archive would be slower than the
       # disk it already has.
@@ -280,6 +371,7 @@ jobs:
 
       - name: Scrub and playback benchmark (hardware decode)
         run: |
+          mkdir -p target/bench
           xvfb-run -a ./target/release/subordinate-bench --out target/bench/perf.json \
             | tee target/hardware/bench-summary.txt
           cp target/bench/perf.json target/hardware/perf.json
