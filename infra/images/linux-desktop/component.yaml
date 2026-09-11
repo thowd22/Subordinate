@@ -115,9 +115,9 @@ phases:
       # ------------------------------------------------------------- Xorg boot
       # The GPU's PCI address is read at boot rather than baked in, so the
       # image still comes up if it is ever launched on something other than a
-      # g4dn. `UseDisplayDevice None` plus `Virtual` is the headless recipe:
-      # no monitor is attached to a T4, and without it Xorg exits with "no
-      # screens found".
+      # g4dn. Nothing is plugged into a T4, so the screen exists only because
+      # of AllowEmptyInitialConfiguration, and it has a size only because of
+      # Virtual; see the Screen section below for what must not be added.
       - name: XorgSetupScript
         action: CreateFile
         inputs:
@@ -231,7 +231,13 @@ phases:
             content: |
               [Unit]
               Description=Headless Xorg on the NVIDIA GPU (:0, 1920x1080)
-              After=multi-user.target
+              # Deliberately no `After=multi-user.target`: with
+              # `WantedBy=multi-user.target` below, and subordinate-wm ordered
+              # after this unit, that makes an ordering cycle and systemd
+              # breaks it by silently dropping one of the jobs - which is
+              # exactly how the window manager came up "inactive" on a fresh
+              # boot while Xorg itself was fine.
+              After=systemd-user-sessions.service
 
               [Service]
               Type=simple
@@ -261,8 +267,12 @@ phases:
               Environment=XAUTHORITY=/run/subordinate/Xauthority
               ExecStartPre=/usr/local/bin/subordinate-wait-for-display
               ExecStart=/usr/bin/openbox
-              Restart=on-failure
+              # A window manager that dies takes the test session with it, and
+              # there is no rate at which giving up is better than trying
+              # again on a machine whose whole job is to hold a window open.
+              Restart=always
               RestartSec=2
+              StartLimitIntervalSec=0
 
               [Install]
               WantedBy=multi-user.target
@@ -478,8 +488,14 @@ phases:
             - |
               set -euxo pipefail
               nvidia-smi
-              systemctl is-active subordinate-xorg.service
-              systemctl is-active subordinate-wm.service
+              for unit in subordinate-xorg subordinate-wm; do
+                  systemctl is-active "$unit.service" && continue
+                  echo "$unit is not running:"
+                  systemctl status "$unit.service" --no-pager || true
+                  journalctl -u "$unit.service" --no-pager | tail -60 || true
+                  tail -60 /var/log/Xorg.0.log || true
+                  exit 1
+              done
               export DISPLAY=:0 XAUTHORITY=/run/subordinate/Xauthority
               /usr/local/bin/subordinate-wait-for-display
               xdpyinfo | grep -E 'dimensions|depth of root'

@@ -121,7 +121,10 @@ jobs:
           out="$RUNNER_TEMP/desktop-smoke"
           mkdir -p "$out"
           echo "out=$out" >>"$GITHUB_OUTPUT"
-          subordinate --ui-smoke --hold-seconds 90 \
+          # setsid + nohup: the window has to outlive this step, because the
+          # screenshot, the window queries and the MCP round-trip are separate
+          # steps and each one gets its own shell.
+          setsid nohup subordinate --ui-smoke --hold-seconds 300 \
             crates/sub-model/tests/fixtures/sample-project.sub >"$out/app.log" 2>&1 &
           echo "app_pid=$!" >>"$GITHUB_OUTPUT"
           for _ in $(seq 1 120); do
@@ -190,7 +193,9 @@ jobs:
         run: |
           set -o pipefail
           out="${{ steps.editor.outputs.out }}"
-          python3 scripts/mcp-roundtrip.py --mcp /usr/local/bin/subordinate-mcp \
+          # timeout, because a stdio bridge that never answers would otherwise
+          # hold a GPU instance open until the job's own 30-minute limit.
+          timeout 180 python3 scripts/mcp-roundtrip.py --mcp /usr/local/bin/subordinate-mcp \
             'project.new={"name":"Desktop smoke"}' 'timeline.get_state={}' \
             | tee "$out/mcp.txt"
           grep -q 'timeline.get_state' "$out/mcp.txt"
