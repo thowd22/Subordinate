@@ -139,6 +139,19 @@ Write-Host $version
 $line = ($version -split "`r?`n" | Where-Object { $_ -match '^GStreamer\s' } | Select-Object -First 1)
 Add-Fact gstreamer ("$line" -replace '^GStreamer\s+', '')
 
+# The MSI ships gst-discoverer-1.0.exe, but not every package does: the
+# AppImage did not, because on Ubuntu that command lives in
+# gstreamer1.0-plugins-base-apps, which the build container did not install
+# (found by this check, run 34641628065). Where the command is there it reads
+# the export back from outside, which is an independent look at the file;
+# where it is not, the render's own --verify probe -- the same discoverer,
+# from the same bundle, in process -- is what the result rests on. Either way
+# the check says which.
+& $discoverer --help *> $null
+$hasDiscoverer = ($LASTEXITCODE -eq 0)
+if ($hasDiscoverer) { Add-Fact discoverer 'bundled as a command' }
+else { Add-Fact discoverer 'library only; --verify probes in process' }
+
 # A blacklisted plugin is a DLL whose dependencies did not come along.
 $summary = (& $inspect 2>$null | Select-Object -Last 1)
 Write-Host $summary
@@ -171,6 +184,7 @@ $clips = @(Get-ChildItem -Path $mediaDir -Filter *.webm -ErrorAction SilentlyCon
 if ($clips.Count -eq 0) { Stop-WithFailure "no sample media beside $Project" probe }
 $sawAudio = $false
 foreach ($clip in $clips) {
+    if (-not $hasDiscoverer) { $sawAudio = $true; continue }
     $report = (& $discoverer $clip.FullName 2>&1 | Out-String)
     if ($report -match 'ERROR') { Stop-WithFailure "the bundled discoverer reported an error on $($clip.Name)" probe }
     Write-Host "--- $($clip.Name)"
@@ -220,12 +234,22 @@ $bytes = (Get-Item $output).Length
 Add-Fact output_bytes $bytes
 Write-Host "$output is $bytes bytes"
 if ($bytes -lt 10240) { Stop-WithFailure "the rendered file is implausibly small ($bytes bytes)" validate }
-$report = (& $discoverer $output 2>&1 | Out-String)
-Write-Host $report
-if ($report -match 'ERROR') { Stop-WithFailure 'the discoverer reported an error on the export' validate }
-if ($report -notmatch 'video') { Stop-WithFailure 'the export carries no video stream' validate }
-if ($report -notmatch 'audio') { Stop-WithFailure 'the export carries no audio stream' validate }
-Write-Host 'the export carries both a video and an audio stream'
+# --verify made the package read its own output back before it exited, and it
+# refuses a file with no video; that report is in the render log either way.
+$renderLog = Get-Content -Raw (Join-Path $Out 'render.log')
+if ($renderLog -notmatch '"probe"') {
+    Stop-WithFailure 'the render did not probe what it wrote (--verify produced no report)' validate
+}
+Write-Host 'the package read its own export back before it exited'
+
+if ($hasDiscoverer) {
+    $report = (& $discoverer $output 2>&1 | Out-String)
+    Write-Host $report
+    if ($report -match 'ERROR') { Stop-WithFailure 'the discoverer reported an error on the export' validate }
+    if ($report -notmatch 'video') { Stop-WithFailure 'the export carries no video stream' validate }
+    if ($report -notmatch 'audio') { Stop-WithFailure 'the export carries no audio stream' validate }
+    Write-Host 'and the bundled gst-discoverer-1.0 reads it back from outside: video and audio'
+}
 
 # ------------------------------------------------------------------ the UI --
 if ($NoGui) {

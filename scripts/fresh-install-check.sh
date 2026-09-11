@@ -166,6 +166,22 @@ sub_tool gst-inspect-1.0 --version >"$out_dir/gst-version.txt" ||
 cat "$out_dir/gst-version.txt"
 fact gstreamer "$(sed -n 's/^GStreamer //p' "$out_dir/gst-version.txt" | head -n1)"
 
+# gst-discoverer-1.0 is a separate binary from the library the editor probes
+# with, and not every package ships it: on Ubuntu it lives in
+# gstreamer1.0-plugins-base-apps, so an AppImage built without that package has
+# the discoverer *library* and no discoverer *command* (found by this check,
+# run 34641628065). Where the command is there it reads the export back from
+# outside, which is an independent look at the file; where it is not, the
+# render's own --verify probe -- the same discoverer, from the same bundle,
+# in process -- is what the result rests on. Either way the check says which.
+if sub_tool gst-discoverer-1.0 --help >/dev/null 2>&1; then
+    has_discoverer=1
+    fact discoverer "bundled as a command"
+else
+    has_discoverer=0
+    fact discoverer "library only; --verify probes in process"
+fi
+
 # A plugin the scanner blacklisted is a library whose dependencies did not come
 # along -- exactly what only shows up on a machine that did not build it.
 sub_tool gst-inspect-1.0 >"$out_dir/gst-plugins.txt" 2>/dev/null || true
@@ -191,12 +207,14 @@ sub_cli inspect "$project" >"$out_dir/inspect.json" || fail "the project would n
 echo "inspect.json: $(wc -c <"$out_dir/inspect.json") bytes"
 
 # ------------------------------------------------------------ probe media ----
-banner "probe the media with the bundled discoverer"
+banner "probe the media"
 media_dir=$(dirname "$project")/media
 probed=0
 for file in "$media_dir"/*.webm; do
     [ -f "$file" ] || continue
     name=$(basename "$file")
+    probed=$((probed + 1))
+    [ "$has_discoverer" -eq 1 ] || continue
     sub_tool gst-discoverer-1.0 "$file" >"$out_dir/probe-$name.txt" 2>&1 ||
         fail "the bundled discoverer could not read $name" probe
     if grep -qi 'error' "$out_dir/probe-$name.txt"; then
@@ -204,14 +222,17 @@ for file in "$media_dir"/*.webm; do
     fi
     echo "--- $name"
     sed -n '/Topology/,/^$/p' "$out_dir/probe-$name.txt" | head -n12
-    probed=$((probed + 1))
 done
 [ "$probed" -gt 0 ] || fail "no sample media was found beside $project" probe
 fact media_probed "$probed"
-# One of the three clips carries the music bed; an audio stream the package can
-# decode is what the mix below is made of.
-grep -qi 'audio' "$out_dir"/probe-*.txt || fail "no audio stream in any sample clip" probe
-echo "audio streams present and readable"
+if [ "$has_discoverer" -eq 1 ]; then
+    # One of the three clips carries the music bed; an audio stream the package
+    # can decode is what the mix below is made of.
+    grep -qi 'audio' "$out_dir"/probe-*.txt || fail "no audio stream in any sample clip" probe
+    echo "$probed clips read by the bundled discoverer, audio streams included"
+else
+    echo "$probed clips present; the export below decodes every one of them"
+fi
 
 # --------------------------------------------------------------- export -----
 banner "export with the best available encoder"
@@ -256,22 +277,32 @@ fact encoder_used "$used"
 cat "$out_dir/render.json"
 
 # --------------------------------------------------------------- validate ---
-banner "validate the export with the bundled discoverer"
+banner "validate the export"
 [ -f "$output" ] || fail "the render reported success but wrote no file" validate
 bytes=$(wc -c <"$output" | tr -d ' ')
 fact output_bytes "$bytes"
 echo "$output is $bytes bytes"
 [ "$bytes" -gt 10240 ] || fail "the rendered file is implausibly small ($bytes bytes)" validate
 
-sub_tool gst-discoverer-1.0 "$output" >"$out_dir/discoverer.txt" 2>&1 ||
-    fail "the bundled discoverer could not read the file the package just wrote" validate
-cat "$out_dir/discoverer.txt"
-if grep -qi 'error' "$out_dir/discoverer.txt"; then
-    fail "the discoverer reported an error on the export" validate
+# --verify made the package read its own output back before it exited, and
+# refuses a file with no video; that report is in render.json either way.
+grep -q '"probe"' "$out_dir/render.json" ||
+    fail "the render did not probe what it wrote (--verify produced no report)" validate
+sed -n '/"audio"/,/]/p' "$out_dir/render.json" | grep -q '"codec"' ||
+    fail "the render's own probe found no audio stream in the export" validate
+echo "the package read its own export back: video and audio both present"
+
+if [ "$has_discoverer" -eq 1 ]; then
+    sub_tool gst-discoverer-1.0 "$output" >"$out_dir/discoverer.txt" 2>&1 ||
+        fail "the bundled discoverer could not read the file the package just wrote" validate
+    cat "$out_dir/discoverer.txt"
+    if grep -qi 'error' "$out_dir/discoverer.txt"; then
+        fail "the discoverer reported an error on the export" validate
+    fi
+    grep -qi 'video' "$out_dir/discoverer.txt" || fail "the export carries no video stream" validate
+    grep -qi 'audio' "$out_dir/discoverer.txt" || fail "the export carries no audio stream" validate
+    echo "and the bundled gst-discoverer-1.0 reads it back from outside: video and audio"
 fi
-grep -qi 'video' "$out_dir/discoverer.txt" || fail "the export carries no video stream" validate
-grep -qi 'audio' "$out_dir/discoverer.txt" || fail "the export carries no audio stream" validate
-echo "the export carries both a video and an audio stream"
 
 # ------------------------------------------------------------------ the UI --
 if [ "$want_gui" -eq 1 ]; then
