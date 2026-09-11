@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-task-133'
 created_date: '2026-09-11 14:48'
-updated_date: '2026-09-11 19:40'
+updated_date: '2026-09-11 19:57'
 labels:
   - media
   - performance
@@ -116,6 +116,8 @@ cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warn
 Validation (second pass): cargo fmt --all --check clean, cargo clippy --workspace --all-targets -- -D warnings clean, cargo test -p sub-media -p subordinate-bench green, and cargo test --workspace --exclude sub-ui green (sub-ui's snapshot suite was not run here; it does not exercise the seek path directly). cargo doc -p sub-media --no-deps raises nothing new. AC #1 and AC #3 stay checked: AC #1's split is still reported per scrub scenario (its halves now bill the reference chain to the seek, which the harness prints), and AC #3's evidence is seek_fixtures, which judges every seek by the burnt-in timecode and by the whole picture and still passes -- the VFR regression this pass found and fixed is exactly that gate doing its job. AC #2 remains unchecked.
 
 2026-09-11 supervisor measurement after the second merge (hardware run 34635562025, box APU, vah264dec): 4K scrub 9.898 fps (seek p50 11.3 ms, decode-forward p50 63.5 ms, still 14.2 pictures per seek); 1080p scrub 22.7 fps with 14 frames per seek. The delivered change removed unshown pictures from delivery but every step still decodes about half a GOP, so the decode count per step is unchanged. The NVIDIA job of that run failed at runner launch (RunsOn capacity while two T4 jobs were already running), so no T4 number this time. Next pass must change the seek strategy itself: for a forward step inside the current GOP continue decoding from the last decoded picture without a flushing seek, and keep the current GOP's decoded pictures in the frame cache so backward steps hit; measure frames-decoded-per-step, which should drop from 14 to about 1 for sequential scrubbing.
+
+2026-09-11 T4 measurement (hardware run 34640251740, nvh264dec): 4K scrub 9.782 fps; the split moved: decode-forward p50 is now 5.1 ms with 3.3 pictures per seek (the delivery change worked on NVDEC), but seek p50 rose to 86.3 ms, so each step is now dominated by the flushing seek and decoder preroll itself. On the box APU (vah264dec) the same run shows the old shape (14 pictures per seek). Conclusion for the next pass: eliminate the flushing seek for forward steps inside the current GOP (continue decoding from the last picture) and keep GOP pictures cached; on NVDEC that alone should take a sequential step from about 90 ms to a few ms.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
