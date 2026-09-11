@@ -213,6 +213,29 @@
             "items": [
               {
                 "clip": {
+                  "effects": [
+                    {
+                      "enabled": true,
+                      "id": "0193a1b0-0007-7000-8000-000000000001",
+                      "params": {
+                        "exposure": {
+                          "float": 1000000
+                        },
+                        "tint": {
+                          "color": [
+                            1000000,
+                            850000,
+                            700000,
+                            1000000
+                          ]
+                        },
+                        "tint_amount": {
+                          "float": 250000
+                        }
+                      },
+                      "plugin": "com.subordinate.color"
+                    }
+                  ],
                   "fade_in": {
                     "rate": {
                       "denominator": 1,

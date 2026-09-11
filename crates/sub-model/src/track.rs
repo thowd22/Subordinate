@@ -6,6 +6,7 @@ use sub_core::{SubError, SubResult};
 use sub_time::{Rational, RationalTime, TimeRange};
 
 use crate::codes;
+use crate::effect::ClipEffect;
 use crate::ids::{ClipId, MediaId, TrackId};
 use crate::marker::Marker;
 use crate::params::{GainDb, Opacity, Transform};
@@ -71,6 +72,15 @@ pub struct Clip {
     pub fade_out: RationalTime,
     /// Markers anchored to this clip (OTIO `Clip.markers`).
     pub markers: Vec<Marker>,
+    /// Plugin effects applied to this clip, first applied first.
+    ///
+    /// Each entry names the plugin that declares the shader and binds the
+    /// parameter values the user changed; the declaration itself comes from
+    /// the installed plugin at load time (see [`crate::effect`]). Empty by
+    /// default, and left out of the saved file when empty, so a project
+    /// written before effects existed still loads unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<ClipEffect>,
 }
 
 impl Clip {
@@ -90,6 +100,7 @@ impl Clip {
             fade_in: zero,
             fade_out: zero,
             markers: Vec::new(),
+            effects: Vec::new(),
         }
     }
 
@@ -122,11 +133,14 @@ impl Clip {
     ///
     /// - the source range lasts a non-negative time,
     /// - neither fade lasts a negative time,
-    /// - the two fades together do not exceed the clip length.
+    /// - the two fades together do not exceed the clip length,
+    /// - every applied effect names a plugin and binds parameter ids a shader
+    ///   could declare.
     ///
     /// # Errors
     ///
-    /// Returns `model.invalid_clip` describing the first broken invariant.
+    /// Returns `model.invalid_clip` describing the first broken invariant, or
+    /// `model.invalid_effect` when an applied effect is malformed.
     pub fn validate(&self) -> SubResult<()> {
         let duration = self.duration();
         if duration.is_negative() {
@@ -149,6 +163,14 @@ impl Clip {
                 .with_detail("fade_in", self.fade_in.to_string())
                 .with_detail("fade_out", self.fade_out.to_string())
         })?;
+        for effect in &self.effects {
+            effect.validate().map_err(|error| {
+                error
+                    .with_detail("clip_id", self.id)
+                    .with_detail("clip_name", self.name.clone())
+            })?;
+        }
+
         if fades > duration {
             return Err(self
                 .invalid("clip fades together may not exceed the clip length")

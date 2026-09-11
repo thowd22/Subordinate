@@ -17,19 +17,25 @@
 //! - the crossfade **blends**: at the middle of the dissolve V1 yields both of
 //!   its clips, the incoming one at half weight, and the canvas differs from
 //!   the same frame with the incoming clip suppressed;
-//! - the first-party colour plugin **runs on it**: the same frame graded a
-//!   stop up through `plugins/color`'s own shader comes back brighter, with no
-//!   effect failures.
+//! - the first-party colour plugin **runs on it**: the effect the project
+//!   itself applies to the wide shot — `com.subordinate.color`, a stop up with
+//!   a warm tint — is resolved against `plugins/color`'s own declaration,
+//!   bound with the values stored in `demo.sub` and run, and the canvas comes
+//!   back brighter with no effect failures.
 //!
-//! The effect is applied here rather than stored in `demo.sub` because the
-//! project model carries no effect stack yet — that is TASK-88's model half.
-//! When it lands, the grade below moves into the project file and this test
-//! reads it from there.
+//! The declaration — the parameter table and the WGSL — belongs to the plugin
+//! and is compiled out of its source tree here, exactly as the host lifts it
+//! out of the installed component; what the *project* stores is the reference
+//! and the bound values, which is what this test reads.
 //!
 //! The test skips itself, reporting why, when the sample media has not been
 //! fetched or the machine enumerates no wgpu adapter, so `cargo test` works on
 //! a fresh checkout; CI runs `scripts/get-sample-media.sh` first and has a
-//! software adapter, so there it really executes.
+//! software adapter, so there it really executes. CI also sets
+//! [`REQUIRE_MEDIA`], which turns the media skip into a failure: "the sample
+//! project opens without relinking on this OS" is only proven by a run that
+//! really resolved every media path, so a silent skip there would prove
+//! nothing.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,6 +45,8 @@ use std::time::Duration;
 use eframe::wgpu;
 use sub_media::{Decoder, DecoderOptions, FrameFormat, StreamSelection};
 use sub_model::content::ContentHash;
+use sub_model::effect::{ClipEffect, EffectValue};
+use sub_model::params::Fixed6;
 use sub_model::{ClipId, Project, Sequence, json};
 use sub_render::{
     Compositor, EffectDesc, EffectInstance, EffectParam, EffectSource, Nv12Converter, Nv12Geometry,
@@ -61,8 +69,11 @@ const ENTRY: &str = "fs_main";
 /// The sequence the render test drives.
 const SEQUENCE: &str = "Main cut";
 
-/// The clip the grade is dropped on.
+/// The clip the project drops the grade on.
 const GRADED_CLIP: &str = "Porters, wide";
+
+/// The plugin the project's effect names, which is the one compiled in above.
+const COLOR_PLUGIN: &str = "com.subordinate.color";
 
 /// The clip on the overlay track.
 const OVERLAY_CLIP: &str = "Soneros, corner";
@@ -97,6 +108,10 @@ fn context_or_skip() -> Option<(MutexGuard<'static, ()>, RenderContext)> {
     context.clone().map(|context| (guard, context))
 }
 
+/// Environment variable that forbids the media skip: set where a skip would
+/// hide the very thing the run is meant to prove.
+const REQUIRE_MEDIA: &str = "SUB_REQUIRE_SAMPLE_MEDIA";
+
 /// The directory `demo.sub` lives in, which is what every media path in it is
 /// relative to.
 fn project_dir() -> PathBuf {
@@ -116,6 +131,12 @@ fn project_or_skip() -> Option<Project> {
     for item in &project.media {
         let resolved = item.path.resolve(&project_dir());
         if !resolved.is_file() {
+            assert!(
+                std::env::var_os(REQUIRE_MEDIA).is_none(),
+                "{REQUIRE_MEDIA} is set, so the sample project must open with every media \
+                 path resolved, but {} is not a file; run scripts/get-sample-media.sh",
+                resolved.display()
+            );
             eprintln!(
                 "skipping: no sample media at {}; run scripts/get-sample-media.sh",
                 resolved.display()
@@ -300,13 +321,56 @@ fn color_effect() -> Arc<EffectDesc> {
     )
 }
 
-/// A one-stop lift with a warm tint: the grade the sample project shows off.
-fn sample_grade(desc: &Arc<EffectDesc>) -> EffectInstance {
-    EffectInstance::new(Arc::clone(desc))
-        .with_value(grade::TINT, ParamValue::Color([1.0, 0.85, 0.7, 1.0]))
-        .with_value(grade::TINT_AMOUNT, ParamValue::Float(0.25))
-        .with_value(grade::EXPOSURE, ParamValue::Float(1.0))
-        .with_value(grade::SATURATION, ParamValue::Float(1.0))
+/// Bind one stored [`ClipEffect`] against the declaration of the plugin it
+/// names.
+///
+/// This is the host's job in miniature: the project carries a plugin id and a
+/// handful of values, the installed plugin carries the parameters and the
+/// shader, and binding the two is what the compositor is handed. A value for a
+/// parameter the plugin no longer declares is never packed, and a parameter
+/// the project says nothing about keeps its declared default.
+fn bind(desc: &Arc<EffectDesc>, effect: &ClipEffect) -> EffectInstance {
+    let mut instance = EffectInstance::new(Arc::clone(desc));
+    for (id, value) in &effect.params {
+        instance.set(id.clone(), param_value(*value));
+    }
+    instance
+}
+
+/// One stored value as the compositor's own parameter value.
+fn param_value(value: EffectValue) -> ParamValue {
+    match value {
+        EffectValue::Float(value) => ParamValue::Float(value.as_f32()),
+        EffectValue::Int(value) => ParamValue::Int(value),
+        EffectValue::Bool(value) => ParamValue::Bool(value),
+        EffectValue::Color(channels) => ParamValue::Color(channels.map(Fixed6::as_f32)),
+        EffectValue::Choice(index) => ParamValue::Choice(index),
+    }
+}
+
+/// An [`EffectSource`] that runs exactly what the project applies: every
+/// enabled effect on the clip, in stored order, bound against the plugin that
+/// declares it.
+///
+/// `plugins/color` is the only plugin the sample project names, and it is
+/// compiled in above; an effect naming anything else is a project this test
+/// cannot honour, so it fails loudly rather than quietly rendering a clip
+/// ungraded.
+fn project_effects(desc: Arc<EffectDesc>) -> impl FnMut(&ResolvedClip<'_>) -> Vec<EffectInstance> {
+    move |clip: &ResolvedClip<'_>| {
+        clip.clip
+            .effects
+            .iter()
+            .filter(|effect| effect.enabled)
+            .map(|effect| {
+                assert_eq!(
+                    effect.plugin, COLOR_PLUGIN,
+                    "the sample project applies an effect from a plugin this test does not have"
+                );
+                bind(&desc, effect)
+            })
+            .collect()
+    }
 }
 
 #[test]
@@ -431,25 +495,35 @@ fn the_crossfade_blends_both_clips_at_its_midpoint() {
 }
 
 #[test]
-fn the_first_party_grade_runs_over_the_sample_project() {
+fn the_grade_the_project_applies_runs_over_the_sample_project() {
     let Some(project) = project_or_skip() else {
         return;
     };
     let Some((_guard, context)) = context_or_skip() else {
         return;
     };
+
+    // The effect is the project's, not this test's: the wide shot carries it
+    // in demo.sub, and this is where it is read back.
+    let graded_clip = project.sequences[0].tracks[0].items[0]
+        .as_clip()
+        .expect("V1 opens on the wide shot");
+    assert_eq!(graded_clip.name, GRADED_CLIP);
+    let stored = graded_clip
+        .effects
+        .first()
+        .expect("the sample project applies an effect to the wide shot");
+    assert_eq!(stored.plugin, COLOR_PLUGIN);
+    assert_eq!(
+        stored.param("exposure"),
+        Some(EffectValue::Float(Fixed6::ONE)),
+        "the stored grade lifts the clip a stop"
+    );
+
     let time = frame(&project, 25);
     let (plain, _) = render(&context, &project, time, &[], &mut sub_render::NoEffects);
 
-    let desc = color_effect();
-    let chain = vec![sample_grade(&desc)];
-    let mut effects = |clip: &ResolvedClip<'_>| {
-        if clip.clip.name == GRADED_CLIP {
-            chain.clone()
-        } else {
-            Vec::new()
-        }
-    };
+    let mut effects = project_effects(color_effect());
     let (graded, summary) = render(&context, &project, time, &[], &mut effects);
 
     assert!(

@@ -37,6 +37,7 @@
 
 pub mod analysis;
 pub mod content;
+pub mod effect;
 pub mod ids;
 pub mod json;
 pub mod marker;
@@ -49,7 +50,8 @@ pub mod track;
 
 pub use analysis::{Analysis, AnalysisRange};
 pub use content::{ContentHash, MediaPath};
-pub use ids::{BinId, ClipId, MarkerId, MediaId, ProjectId, SequenceId, TrackId};
+pub use effect::{ClipEffect, EffectValue};
+pub use ids::{BinId, ClipId, EffectId, MarkerId, MediaId, ProjectId, SequenceId, TrackId};
 pub use json::{ProjectFile, SCHEMA_VERSION};
 pub use marker::Marker;
 pub use media::{AudioStream, Bin, MediaItem, ProxyState, StreamInfo, VideoStream};
@@ -80,6 +82,9 @@ pub mod codes {
     pub const FILE_UNREADABLE: ErrorCode = ErrorCode::from_static("model.file_unreadable");
     /// A clip parameter value is out of range or not a finite number.
     pub const INVALID_PARAMETER: ErrorCode = ErrorCode::from_static("model.invalid_parameter");
+    /// A clip's effect names no valid plugin, or binds a parameter id no
+    /// shader could declare.
+    pub const INVALID_EFFECT: ErrorCode = ErrorCode::from_static("model.invalid_effect");
     /// A clip breaks one of its own invariants (negative durations, fades
     /// longer than the clip).
     pub const INVALID_CLIP: ErrorCode = ErrorCode::from_static("model.invalid_clip");
@@ -108,6 +113,7 @@ mod tests {
             codes::FILE_UNREADABLE,
             codes::INVALID_PARAMETER,
             codes::INVALID_CLIP,
+            codes::INVALID_EFFECT,
             codes::INVALID_PROJECT_FILE,
             codes::UNSUPPORTED_SCHEMA_VERSION,
             codes::MIGRATION_FAILED,
