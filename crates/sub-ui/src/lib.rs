@@ -11,6 +11,7 @@ pub mod audio_settings;
 pub mod diagnostics;
 pub mod dock;
 pub mod effects;
+pub mod export_panel;
 pub mod fade;
 pub mod fullscreen;
 pub mod history_panel;
@@ -45,6 +46,11 @@ pub use app::{AppOptions, ProjectState, SubordinateApp, UI_SMOKE_READY, edit_mod
 pub use audio_settings::{AudioSettingsAction, AudioSettingsPanel, device_label, status_line};
 pub use diagnostics::DiagnosticsPanel;
 pub use dock::{DockLayout, LAYOUT_FILE_NAME, LAYOUT_VERSION, LoadedLayout, Panel, layout_menu_ui};
+pub use export_panel::{
+    AUTOMATIC_ENCODER_LABEL, CANCEL_LABEL, ExportAction, ExportPanel, ExportRange, ExportRequest,
+    ExportStatus, NO_PRESETS_LABEL, NO_RECENT_LABEL, OPEN_FOLDER_LABEL, PresetEntry, PresetSource,
+    RECENT_LIMIT, RecentExport, START_LABEL, sequence_frames,
+};
 pub use fullscreen::{
     FULLSCREEN_FILE_NAME, FULLSCREEN_VERSION, FullscreenAction, FullscreenSettings,
     FullscreenState, LoadedFullscreen, Monitor, MonitorChoice, MonitorList, monitor_picker_ui,
@@ -239,4 +245,14 @@ pub mod codes {
     /// file manager.
     pub const PLUGIN_FOLDER_UNOPENABLE: ErrorCode =
         ErrorCode::from_static("ui.plugin_folder_unopenable");
+
+    /// The export panel cannot build a request yet: no preset, no sequence,
+    /// no output file, or a range with no frames in it. The `field` detail
+    /// names what is missing.
+    pub const EXPORT_NOT_READY: ErrorCode = ErrorCode::from_static("ui.export_not_ready");
+
+    /// A finished export's directory could not be handed to the platform's
+    /// file manager.
+    pub const EXPORT_FOLDER_UNOPENABLE: ErrorCode =
+        ErrorCode::from_static("ui.export_folder_unopenable");
 }

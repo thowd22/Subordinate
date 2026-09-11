@@ -39,11 +39,13 @@ use std::time::{Duration, Instant};
 use sub_audio::mixer::{MixGraphBuilder, MixerConfig, MixerControl, mixer};
 use sub_audio::scrub::{ScrubControl, ScrubSettings, scrub};
 use sub_audio::{AudioOutput, CpalBackend, MeterBank, OutputOptions};
+use sub_export::PresetLibrary;
 
 use crate::audio_settings::{AudioSettingsAction, AudioSettingsPanel};
 use crate::diagnostics::DiagnosticsPanel;
 use crate::dock::{DockLayout, Panel, layout_menu_ui};
 use crate::effects::EffectCatalog;
+use crate::export_panel::{ExportAction, ExportPanel};
 use crate::fullscreen::{FullscreenAction, FullscreenState, monitor_picker_ui};
 use crate::history_panel::{HistoryAction, HistoryList, edit_menu_ui};
 use crate::inspector::{EffectEdit, InspectorPanel, InspectorResponse};
@@ -88,6 +90,8 @@ struct FrameEdits {
     timeline: Option<TimelineResponse>,
     /// The inspector's gesture, when it asked for one.
     inspector: Option<InspectorResponse>,
+    /// What the export panel asked for, when it asked for anything.
+    export: Option<ExportAction>,
 }
 
 /// The line the window smoke run prints once every window has a picture.
@@ -96,6 +100,15 @@ struct FrameEdits {
 /// contract with `scripts/ui-smoke.sh` (TASK-123) rather than a stray log
 /// line. Anything after the colon is diagnostics.
 pub const UI_SMOKE_READY: &str = "ui-smoke ready";
+
+/// Why the export panel's Export button is held closed in this build.
+///
+/// Everything the panel needs is here — presets, range, file, encoder
+/// override, progress and cancel — and so is the export job it would drive
+/// (`sub_export::spawn_export_job`). What is missing is the piece between
+/// them: nothing yet turns the compositor's full-resolution readback and the
+/// offline audio mix into the frame sources that job takes.
+pub const NO_RENDERER_REASON: &str = "Rendering to a file is not connected in this build yet";
 
 /// Options for launching the application.
 #[derive(Debug, Clone, Default)]
@@ -251,6 +264,8 @@ pub struct SubordinateApp {
     /// The inspector panel: the parameters of whatever the timeline has
     /// selected.
     inspector: InspectorPanel,
+    /// The export panel: preset, range, output file and render progress.
+    export: ExportPanel,
 
     /// The effect plugins the inspector offers, and what each of them
     /// declared.
@@ -367,6 +382,7 @@ impl SubordinateApp {
             media_bin: MediaBinPanel::new(),
             timeline,
             inspector: InspectorPanel::new(),
+            export: export_panel(),
             effect_catalog: EffectCatalog::new(),
             layout: layout.layout,
             fullscreen: fullscreen.state,
@@ -1045,9 +1061,7 @@ impl SubordinateApp {
     ///
     /// The dock owns the arrangement; each panel's body is drawn here, so a
     /// panel dragged into another split or grouped into a tab keeps working
-    /// exactly as it did. The export panel has no widgets of its own yet
-    /// (TASK-62 brings it), so its tab says so rather than showing an empty
-    /// rectangle.
+    /// exactly as it did.
     fn dock_ui(&mut self, ui: &mut egui::Ui, preview: ViewerFrame) -> bool {
         // The project is read once for the whole frame as an immutable
         // snapshot, so every panel sees the same project and none of them
@@ -1063,6 +1077,7 @@ impl SubordinateApp {
             media_bin,
             timeline,
             inspector,
+            export,
             effect_catalog,
             sequence,
             ..
@@ -1095,7 +1110,12 @@ impl SubordinateApp {
                 }
             }
             Panel::Export => {
-                ui.label("The export panel arrives with TASK-62.");
+                // The panel opens on whatever sequence is on screen until the
+                // user picks another one for themselves.
+                if export.sequence().is_none() {
+                    export.select_sequence(&project, sequence.id);
+                }
+                frame.export = export.ui(ui, &project);
             }
         });
         // Everything the panels asked for is applied here, once the dock has
@@ -1103,6 +1123,31 @@ impl SubordinateApp {
         // stack, on the engine every other client edits through.
         self.apply_frame(frame);
         moved
+    }
+
+    /// Carries out what the export panel asked for.
+    ///
+    /// Nothing here edits the project, so none of it is a command: an export
+    /// reads the project and writes a file.
+    fn apply_export(&mut self, action: ExportAction) {
+        match action {
+            ExportAction::Start(_) | ExportAction::Cancel => {
+                // Neither reaches the panel while it is marked unavailable:
+                // the button that raises Start is disabled, and Cancel only
+                // appears while an export this build cannot start is running.
+            }
+            ExportAction::ChooseOutput => {
+                if let Some(path) = pick_export_destination(self.export.output()) {
+                    self.export.set_output(path);
+                }
+            }
+            ExportAction::Reveal(path) => {
+                if let Err(error) = crate::export_panel::reveal(&path) {
+                    log::warn!("[{}] {}", error.code, error.message);
+                    self.export.add_problem(error);
+                }
+            }
+        }
     }
 
     /// Applies everything one frame's panels asked for.
@@ -1115,6 +1160,9 @@ impl SubordinateApp {
         }
         if let Some(response) = frame.inspector {
             self.apply_inspector(response);
+        }
+        if let Some(action) = frame.export {
+            self.apply_export(action);
         }
         self.sync_project();
     }
@@ -1537,6 +1585,36 @@ pub fn pick_project_file() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("Subordinate project", &[PROJECT_EXTENSION])
         .pick_file()
+}
+
+/// The export panel, with the user's presets loaded.
+///
+/// A preset file that will not parse is shown in the panel rather than
+/// swallowed: the built-ins are still there, so the editor still exports.
+fn export_panel() -> ExportPanel {
+    let mut panel = ExportPanel::new();
+    match PresetLibrary::load() {
+        Ok(library) => panel.set_library(&library),
+        Err(error) => {
+            panel.set_library(&PresetLibrary::builtin());
+            panel.add_problem(error);
+        }
+    }
+    panel.set_unavailable(Some(NO_RENDERER_REASON));
+    panel
+}
+
+/// Where the user wants the exported file written, if they chose somewhere.
+#[must_use]
+pub fn pick_export_destination(current: &std::path::Path) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(name) = current.file_name().and_then(|name| name.to_str()) {
+        dialog = dialog.set_file_name(name);
+    }
+    if let Some(dir) = current.parent().filter(|dir| dir.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.save_file()
 }
 
 /// Where the user wants the project written, if they chose somewhere.
