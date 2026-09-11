@@ -1,11 +1,10 @@
 ---
 id: TASK-101
 title: 'First-party plugin: OpenTimelineIO JSON importer and exporter'
-status: In Progress
-assignee:
-  - '@opus-task-101'
+status: To Do
+assignee: []
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-10 19:19'
+updated_date: '2026-09-11 04:20'
 labels:
   - plugins
   - first-party
@@ -28,8 +27,8 @@ Interchange lives in plugins; OTIO is the sensible target (§3).
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Exports a sequence as OTIO JSON with tracks, clips, gaps, transitions and markers
-- [ ] #2 Imports OTIO JSON produced by the exporter (round-trip test) and by Kdenlive's native OTIO export
-- [x] #3 Effects are documented as not exported
+- [x] #2 Effects are documented as not exported
+- [ ] #3 Imports OTIO JSON produced by the exporter (round-trip test) and OTIO files written by the reference OpenTimelineIO Python library (pip opentimelineio, v0.18.x): at least one of its shipped sample timelines and one converted from CMX 3600 EDL via its adapter, committed as fixtures with their generating script
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -64,6 +63,8 @@ Verification:
 - CI gained a Linux-only 'First-party plugins (OpenTimelineIO)' step mirroring the plugins/gain one: wasm build, tests, clippy and fmt in plugins/otio.
 
 Acceptance criterion 2 is left unchecked, deliberately and only for its second half. The round-trip half is proven: tests/roundtrip.rs exports fixtures/project.json, compares it against a committed golden document and imports it back, asserting the media list, both track kinds, the clip source ranges, the gap, the crossfade offsets and both markers come back unchanged at 24000/1001. The Kdenlive half is exercised by tests/kdenlive.rs against fixtures/kdenlive.otio, which was written field by field against Kdenlive's own exporter (src/otio/otioexport.cpp in KDE/kdenlive) and carries its idioms: kdenlive metadata, a null global_start_time, per-track source ranges, Clip.2 media_references with an active key, absolute percent-escaped target_urls, a GeneratorReference colour clip, guides as one-frame stack markers with their text in comment, a mix as an asymmetric SMPTE_Dissolve, and a Subtitle track. It is a faithful reconstruction, not a file captured from a Kdenlive run: this machine has no sudo and no Qt or MLT, so Kdenlive cannot be installed to produce one. Running a real Kdenlive export through the importer is the one thing left to confirm the criterion.
+
+2026-09-10 supervisor: replaced the Kdenlive half of criterion 2. A Kdenlive-authored OTIO file requires a GUI export no agent can perform; the reference OpenTimelineIO Python library is the canonical producer and can be driven headlessly (pip install opentimelineio, otioconvert). Round-trip half already proven. Requeued.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
