@@ -210,6 +210,7 @@ pub mod dev;
 #[cfg(feature = "render")]
 pub mod effect;
 pub mod errors;
+pub mod expect;
 pub mod harness;
 mod interchange;
 pub mod manifest;
@@ -287,6 +288,7 @@ pub use dev::{
     ReloadStatus, ToolAnswer, ToolCaller, WatchHandle,
 };
 pub use errors::{HINT, PluginErrorExt, WIT};
+pub use expect::TimelineExpectation;
 pub use harness::{Check, CheckStatus, Harness, HarnessHost, TestReport};
 pub use interchange::{CommandCall, ExportPreset, ImportTarget, export_presets, import_plan};
 pub use menu::{
