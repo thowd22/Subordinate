@@ -605,9 +605,14 @@ impl ExportPipeline {
         };
 
         pipeline.set_state(gst::State::Playing).map_err(|e| {
+            let error = pipeline_error("the export pipeline would not start", &e)
+                .with_detail("path", path.display().to_string());
+            // The state change error itself says nothing about which element
+            // refused; the bus does, so it is drained before the pipeline is
+            // torn down.
+            let error = with_bus_error(&pipeline, error);
             let _ = pipeline.set_state(gst::State::Null);
-            pipeline_error("the export pipeline would not start", &e)
-                .with_detail("path", path.display().to_string())
+            error
         })?;
 
         tracing::debug!(
@@ -633,6 +638,24 @@ impl ExportPipeline {
     /// The settings the pipeline was built for.
     pub fn settings(&self) -> &ExportSettings {
         &self.settings
+    }
+
+    /// The file being written.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The encoder elements the pipeline is running.
+    pub fn elements(&self) -> &ExportElements {
+        &self.elements
+    }
+
+    /// How many bytes the muxer has written to the file so far.
+    ///
+    /// A muxer that buffers its header reports zero for a while, which is why
+    /// this is a progress statistic and never a completion test.
+    pub fn bytes_written(&self) -> u64 {
+        std::fs::metadata(&self.path).map_or(0, |meta| meta.len())
     }
 
     /// Video frames pushed so far.
@@ -747,12 +770,21 @@ impl ExportPipeline {
     /// [`codes::EXPORT_TIMEOUT`] when it never reached end of stream.
     pub fn finish(mut self) -> SubResult<ExportReport> {
         self.finished = true;
+        let report = self.finish_streams();
+        // Whether the muxer finished or failed, the pipeline stops here: a
+        // failed export must not leave elements running behind the error.
+        let _ = self.pipeline.set_state(gst::State::Null);
+        report
+    }
+
+    /// Ends both streams and waits for the muxer, leaving the pipeline state
+    /// for [`ExportPipeline::finish`] to tear down either way.
+    fn finish_streams(&self) -> SubResult<ExportReport> {
         end_stream(&self.video_src)?;
         if let Some(src) = self.audio_src.as_ref() {
             end_stream(src)?;
         }
         self.wait_for_eos()?;
-        let _ = self.pipeline.set_state(gst::State::Null);
         Ok(ExportReport {
             path: self.path.clone(),
             video_frames: self.video_frames,
@@ -764,12 +796,24 @@ impl ExportPipeline {
         })
     }
 
-    /// Stops the pipeline without finishing the file, which is what a
-    /// cancelled export does. The part-written file is left for the caller to
-    /// delete.
+    /// Stops the pipeline without finishing the file. The part-written file is
+    /// left for the caller to delete; [`ExportPipeline::abort`] is the usual
+    /// choice, because a part-written file is never playable.
     pub fn cancel(mut self) {
         self.finished = true;
         let _ = self.pipeline.set_state(gst::State::Null);
+    }
+
+    /// Stops the pipeline and deletes the part-written file, which is what a
+    /// cancelled or failed export does.
+    ///
+    /// A muxer that never saw end of stream has written no index and, for the
+    /// ISO containers, no `moov` atom at all: what is on disk is a broken file
+    /// wearing a real name, so it goes. Reports whether a file was removed.
+    pub fn abort(self) -> bool {
+        let path = self.path.clone();
+        self.cancel();
+        remove_partial_file(&path)
     }
 
     /// Waits for end of stream, failing on the first error the bus carries.
@@ -793,13 +837,12 @@ impl ExportPipeline {
         };
         match message.view() {
             gst::MessageView::Eos(_) => Ok(()),
-            gst::MessageView::Error(err) => Err(SubError::wrap(
-                codes::PIPELINE_FAILED,
-                "the export pipeline failed",
-                &err.error(),
-            )
-            .with_detail("path", self.path.display().to_string())
-            .with_detail("debug", err.debug().map(|debug| debug.to_string()))),
+            gst::MessageView::Error(err) => {
+                Err(
+                    element_error(codes::PIPELINE_FAILED, "the export pipeline failed", err)
+                        .with_detail("path", self.path.display().to_string()),
+                )
+            }
             _ => Err(SubError::new(
                 codes::PIPELINE_FAILED,
                 "the export pipeline posted something other than end of stream",
@@ -810,23 +853,75 @@ impl ExportPipeline {
     /// The error a refused push turns into, enriched with whatever the bus
     /// says went wrong underneath.
     fn push_failed(&self, stream: &'static str, flow: gst::FlowError) -> SubError {
-        let mut error = SubError::new(
+        let error = SubError::new(
             codes::PUSH_FAILED,
             format!("the export pipeline refused a {stream} buffer"),
         )
         .with_detail("stream", stream)
         .with_detail("flow", format!("{flow:?}"))
         .with_detail("path", self.path.display().to_string());
-        if let Some(bus) = self.pipeline.bus() {
-            while let Some(message) = bus.pop() {
-                if let gst::MessageView::Error(err) = message.view() {
-                    error = error.with_detail("reason", err.error().to_string());
-                    break;
-                }
-            }
-        }
-        error
+        with_bus_error(&self.pipeline, error)
     }
+}
+
+/// Deletes a part-written export, reporting whether anything was there.
+///
+/// A file that was never created is not a problem; anything else is worth a
+/// line in the log, because it means a broken file survived a cancellation.
+pub(crate) fn remove_partial_file(path: &Path) -> bool {
+    match std::fs::remove_file(path) {
+        Ok(()) => true,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "a part-written export could not be removed"
+                );
+            }
+            false
+        }
+    }
+}
+
+/// An error naming the element that posted `err`.
+///
+/// The element name is what makes a GStreamer failure actionable: `x264enc`
+/// refusing to negotiate and `mp4mux` refusing a stream carry much the same
+/// error text otherwise. It goes into the message as well as the details, so
+/// it survives being rendered as one line in a log or a panel.
+fn element_error(code: ErrorCode, message: &str, err: &gst::message::Error) -> SubError {
+    let element = err.src().map(|src| src.name().to_string());
+    let path = err.src().map(|src| src.path_string().to_string());
+    let message = match &element {
+        Some(name) => format!("{message} in {name}"),
+        None => message.to_owned(),
+    };
+    SubError::wrap(code, message, &err.error())
+        .with_detail("element", element)
+        .with_detail("element_path", path)
+        .with_detail("reason", err.error().to_string())
+        .with_detail("debug", err.debug().map(|debug| debug.to_string()))
+}
+
+/// Adds the first error on `pipeline`'s bus to `error`, when there is one.
+///
+/// A refused push and a refused state change both say only that something went
+/// wrong; the element that actually failed posted its reason to the bus.
+fn with_bus_error(pipeline: &gst::Pipeline, error: SubError) -> SubError {
+    let Some(bus) = pipeline.bus() else {
+        return error;
+    };
+    while let Some(message) = bus.pop() {
+        if let gst::MessageView::Error(err) = message.view() {
+            let mut merged = element_error(error.code.clone(), &error.message, err);
+            for (key, value) in error.details {
+                merged.details.entry(key).or_insert(value);
+            }
+            return merged;
+        }
+    }
+    error
 }
 
 impl Drop for ExportPipeline {
