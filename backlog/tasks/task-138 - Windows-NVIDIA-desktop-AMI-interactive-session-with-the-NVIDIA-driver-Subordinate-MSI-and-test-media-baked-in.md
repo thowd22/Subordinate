@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-11 22:18'
-updated_date: '2026-09-11 22:18'
+updated_date: '2026-09-11 22:25'
 labels:
   - infra
   - gpu
@@ -31,4 +31,5 @@ Windows human-style testing needs the runner in an interactive desktop session (
 - [ ] #1 infra/images/windows-desktop/ holds a committed Image Builder recipe and a workflow that builds the AMI and records its id in .github/runs-on.yml as runner gpu-nvidia-desktop-windows
 - [ ] #2 A smoke job on that runner launches the installed Subordinate from the Start Menu entry, captures a desktop screenshot showing the window, and nvidia-smi reports the T4
 - [ ] #3 A scripted click on the media bin's Import button opens the native file dialog and the job proves it by screenshot
+- [ ] #4 subordinate-mcp from the same release is installed on the image and a job proves an MCP call (project.new then timeline.get_state) round-trips against the running app while its window is visible
 <!-- AC:END -->

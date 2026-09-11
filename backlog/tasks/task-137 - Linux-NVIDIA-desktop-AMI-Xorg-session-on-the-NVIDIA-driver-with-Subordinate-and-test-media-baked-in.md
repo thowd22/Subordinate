@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-11 22:18'
-updated_date: '2026-09-11 22:18'
+updated_date: '2026-09-11 22:25'
 labels:
   - infra
   - gpu
@@ -32,4 +32,5 @@ Human-style desktop testing needs a real window session on a real GPU. Build an 
 - [ ] #1 infra/images/linux-desktop/ holds a committed Image Builder recipe (or Packer template) and a workflow that builds the AMI and records its id in .github/runs-on.yml as runner gpu-nvidia-desktop-linux
 - [ ] #2 A smoke job on that runner starts the app on the Xorg display, captures a screenshot showing the editor window rendered on the NVIDIA adapter (title bar reports a non-software Vulkan adapter), and uploads it
 - [ ] #3 The test MP4 is present on the image at a documented path and probes correctly with gst-discoverer
+- [ ] #4 subordinate-mcp from the same release is installed on the image and a job proves an MCP call (project.new then timeline.get_state) round-trips against the running app while its window is visible
 <!-- AC:END -->
