@@ -1282,3 +1282,164 @@ proves only that the bundled runtime exposes `nvcodec` and `va` and that the
 binary starts on Ubuntu LTS and on a bare Fedora container. Running an actual
 NVENC or VA-API export out of the AppImage belongs to `hardware.yml`
 (TASK-116), which has the runners.
+
+## Windows packaging (MSI)
+
+`packaging/windows/` builds a single Windows installer that carries the pinned
+GStreamer 1.28 runtime, so a user installs one thing and can export (TASK-104).
+`.github/workflows/windows-packaging.yml` builds it, installs it, renders with
+it and uninstalls it on a hosted `windows-latest` runner, on demand, on a `v*`
+tag and on any pull request touching `packaging/windows/`. It is a separate
+workflow from `packaging.yml` because that one is Linux end to end, down to the
+`validate` job that gates it.
+
+```
+packaging/windows/
+  build-msi.ps1        stages the tree, generates the payload, runs WiX
+  main.wxs             package shape: directories, shortcut, upgrade rules
+  gst-plugins.txt      which GStreamer plugins get bundled
+```
+
+### What is installed
+
+```
+%ProgramFiles%\Subordinate\
+  bin\subordinate.exe, subordinate-cli.exe
+  bin\*.dll                                    the GStreamer 1.28 MSVC runtime
+  bin\gst-inspect-1.0.exe, gst-discoverer-1.0.exe, gst-launch-1.0.exe
+  bin\vcruntime140.dll, msvcp140.dll, ...      the MSVC CRT, app-local
+  lib\gstreamer-1.0\gst*.dll                   the plugins in gst-plugins.txt
+  libexec\gstreamer-1.0\gst-plugin-scanner.exe
+  LICENSE.txt, README.md
+```
+
+That layout is a GStreamer prefix, and that is the whole trick. The Windows
+build of GStreamer is relocatable: at `gst_init` it finds its own
+`gstreamer-1.0-0.dll`, walks up out of `bin\` and treats what is left as its
+prefix, then looks for plugins in `<prefix>\lib\gstreamer-1.0` and for the
+helper in `<prefix>\libexec\gstreamer-1.0`. Installing into that shape means
+the bundled runtime is found with **no** environment variable, no `PATH` entry
+and no registry key -- the counterpart of `packaging/linux/AppRun`, which has
+to export `GST_PLUGIN_SYSTEM_PATH_1_0` and friends only because an AppImage
+mounts somewhere different every run. Putting the editor's own executables in
+`bin\` beside the DLLs is what makes the loader find those too.
+
+The packaging job proves this rather than assuming it: every step that touches
+the installed binaries first rewrites `PATH` to the installed `bin\` plus
+Windows itself, drops `GSTREAMER_1_0_ROOT_MSVC_X86_64`, and deletes the
+GStreamer registry cache under the user profile. A package that works only
+because the build machine's own GStreamer is on `PATH` fails there.
+
+### Why WiX directly and not cargo-wix
+
+`cargo-wix` drives the WiX **v3** toolset (`candle.exe`/`light.exe`), which is
+end-of-life and is not on the `windows-latest` hosted image any more, and what
+it automates is harvesting one crate's own binaries -- it has nothing to say
+about the few hundred files of third-party runtime that are the actual work
+here. So the toolset is **WiX v5, pinned, installed as a .NET global tool**
+(`dotnet tool install --global wix --version 5.0.2`), which takes seconds on
+any runner and needs no image support:
+
+* `main.wxs` is hand-written and describes only the package *shape*: the
+  install directories, the Start Menu shortcut, the `HKLM\Software\Subordinate`
+  install-location key, `MajorUpgrade` (0.1.1 replaces 0.1.0 in place, a
+  downgrade is refused with a message) and the `UpgradeCode` GUID, which is the
+  product's identity across versions and must never change.
+* `build-msi.ps1` generates `target\wix\payload.wxs` from the staged tree, one
+  `<Component>` per file with the file as its keypath. That is what Windows
+  Installer wants -- WiX can derive each component's GUID, and uninstall
+  reference-counting is per file.
+
+### Why the plugins are curated and the DLLs are not
+
+`gst-plugins.txt` is an allowlist in the same format as the Linux one: one
+module per line, `!` marks a module the package cannot ship without, and
+`build-msi.ps1` *fails* when a required one is absent from the GStreamer
+prefix. The required set includes `nvcodec`, `amfcodec` and `mediafoundation`,
+so an installer that could not hardware-encode on a whole GPU vendor is a build
+failure rather than something a user discovers when their export runs at
+software speed.
+
+The DLLs in `bin\` are copied wholesale instead of curated. Curating them means
+a transitive dependency walk over PE import tables, which is fragile -- plugins
+load some of their dependencies at runtime, where an import table does not see
+them -- and buys little, since the cabinet is compressed and the unused DLLs
+are a fraction of the installed size next to the plugins and the CRT. The
+installed-runtime check in the workflow fails if *any* bundled plugin ends up
+blacklisted, which is how a genuinely missing dependency shows up.
+
+The MSVC CRT is deployed app-local (`vcruntime140.dll`, `msvcp140*.dll`,
+`concrt140.dll` from the Visual Studio redistributable directory) rather than
+by chaining the VC++ redistributable installer. The UCRT is part of Windows and
+is never bundled.
+
+### Building it locally
+
+Needs Windows, the MSVC toolchain, the official GStreamer MSVC package
+(`/TYPE=devel`, see "GStreamer / Windows" above) and .NET 6+ for the toolset.
+
+```powershell
+packaging\windows\build-msi.ps1                    # release build, then the MSI
+packaging\windows\build-msi.ps1 -SkipBuild         # package target\release as-is
+packaging\windows\build-msi.ps1 -StageOnly         # stage and generate, no WiX
+packaging\windows\build-msi.ps1 -GstRoot C:\gstreamer\1.0\msvc_x86_64
+```
+
+The MSI lands in `target\wix\Subordinate-<version>-x86_64.msi` and the staged
+tree it was built from stays in `target\wix\stage` for inspection. The version
+comes from `[workspace.package]` in `Cargo.toml`, so it can never disagree with
+the AppImage or the Flatpak.
+
+Install, use and remove it the way CI does:
+
+```powershell
+msiexec /i target\wix\Subordinate-0.1.0-x86_64.msi /qn /norestart /l*v install.log
+& "$env:ProgramFiles\Subordinate\bin\subordinate.exe" --smoke-test
+msiexec /x target\wix\Subordinate-0.1.0-x86_64.msi /qn /norestart
+```
+
+`/qn` is fully silent; use `/qb` for a progress bar. Both need an elevated
+shell, because the package is per-machine.
+
+### Code signing
+
+The MVP ships **unsigned**. SmartScreen will warn on first run and Windows will
+show "Unknown publisher" in the UAC prompt; that is expected, and clearing it
+is the main thing a signed release buys. When a certificate exists, signing is
+two `signtool` calls and no change to any of the authoring above:
+
+1. Obtain an OV or EV code-signing certificate (EV, or an Azure Trusted
+   Signing subscription, is what clears SmartScreen reputation immediately; an
+   OV certificate builds reputation over time). Store it as a PFX in a repo
+   secret, or use Azure Trusted Signing and skip the key handling entirely.
+2. Sign the two executables **before** `build-msi.ps1` stages them, because a
+   file changed after it is packaged invalidates the MSI's own signature:
+
+   ```powershell
+   signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+     /f cert.pfx /p $env:CERT_PASSWORD `
+     target\release\subordinate.exe target\release\subordinate-cli.exe
+   ```
+
+   The bundled GStreamer DLLs are already signed upstream and are left alone.
+3. Sign the MSI afterwards, with the same options:
+
+   ```powershell
+   signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+     /f cert.pfx /p $env:CERT_PASSWORD target\wix\Subordinate-0.1.0-x86_64.msi
+   signtool verify /pa /v target\wix\Subordinate-0.1.0-x86_64.msi
+   ```
+
+   Always timestamp (`/tr`): without it every signature expires with the
+   certificate and old installers start warning.
+
+In CI this becomes two steps in `windows-packaging.yml` guarded on the secret
+being present, so forks and pull requests keep building unsigned MSIs.
+
+### What is not verified here
+
+The runner has no GPU, so the packaging job pins `x264enc` for its render and
+proves only that the installed runtime *registers* `nvcodec`, `amfcodec` and
+`mediafoundation`. An actual NVENC export out of the installed package is
+TASK-115's job, on the hardware workflow's runners. Installing on a clean
+Windows image that has never had a build toolchain on it is TASK-110.

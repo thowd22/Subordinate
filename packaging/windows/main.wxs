@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Subordinate Windows installer (TASK-104).
+
+  This file describes the *shape* of the package: where it installs, the Start
+  Menu entry, the upgrade rules and the uninstall behaviour. The payload is a
+  second .wxs that packaging\windows\build-msi.ps1 generates from the staged
+  tree, because the bundled GStreamer runtime is a few hundred files that
+  nobody should hand-author or hand-maintain.
+
+  Directory layout, which is not arbitrary. GStreamer's Windows build is
+  relocatable: at gst_init it locates its own gstreamer-1.0-0.dll, walks up out
+  of bin\ and takes what is left as its prefix, then looks for plugins under
+  <prefix>\lib\gstreamer-1.0 and for the helper under
+  <prefix>\libexec\gstreamer-1.0\gst-plugin-scanner.exe. Laying the install
+  folder out as a GStreamer prefix is therefore what makes the bundled runtime
+  work with no environment variables, no PATH entry and no registry key; the
+  Windows counterpart of packaging/linux/AppRun, which has to export
+  GST_PLUGIN_SYSTEM_PATH_1_0 and friends because an AppImage mounts somewhere
+  different every run. Put the editor's own executables in bin\ beside the DLLs
+  and the loader finds them without any of that either.
+
+  Version and payload come from the command line:
+    wix build -arch x64 -d Version=0.1.0 main.wxs <generated payload>.wxs
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="Subordinate"
+      Manufacturer="The Subordinate project"
+      Version="$(var.Version)"
+      Language="1033"
+      Codepage="1252"
+      Scope="perMachine"
+      Compressed="yes"
+      InstallerVersion="500"
+      UpgradeCode="6f3e5f26-6a54-4c7a-9a1f-2b6c8f3d1a44">
+
+    <!-- The UpgradeCode above is the identity of the product across all of its
+         versions and must never change. MajorUpgrade makes 0.1.1 replace 0.1.0
+         in place rather than installing beside it, and refuses a downgrade
+         with a message instead of half-removing the newer install. -->
+    <MajorUpgrade
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="A newer version of Subordinate is already installed. Uninstall it first." />
+
+    <!-- One embedded cabinet. The payload is mostly already-compressed DLLs,
+         but `high` still takes the runtime down by roughly half. -->
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <SummaryInformation Description="Subordinate video editor with the GStreamer 1.28 runtime" />
+
+    <!-- Shown in Apps &amp; features next to the uninstall entry. -->
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/thowd22/Subordinate" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Subordinate">
+        <Directory Id="BINFOLDER" Name="bin" />
+        <Directory Id="LIBFOLDER" Name="lib">
+          <Directory Id="GSTPLUGINFOLDER" Name="gstreamer-1.0" />
+        </Directory>
+        <Directory Id="LIBEXECFOLDER" Name="libexec">
+          <Directory Id="GSTLIBEXECFOLDER" Name="gstreamer-1.0" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="APPMENUFOLDER" Name="Subordinate" />
+    </StandardDirectory>
+
+    <!-- A shortcut is not a file, so it needs a component of its own with a
+         registry keypath: an advertised-shortcut component has nothing else
+         Windows Installer can use to decide whether it is installed. HKMU
+         resolves to HKLM here because the package is perMachine. The
+         RemoveFolder is what stops an empty "Subordinate" folder being left
+         behind in the Start Menu after an uninstall. -->
+    <Component Id="StartMenuShortcut" Directory="APPMENUFOLDER" Guid="1c6d9a0e-8f57-4a2b-bd63-0c9e7a4f5e11">
+      <Shortcut Id="SubordinateShortcut"
+                Name="Subordinate"
+                Description="Video editor"
+                Target="[BINFOLDER]subordinate.exe"
+                WorkingDirectory="BINFOLDER" />
+      <RemoveFolder Id="RemoveAppMenuFolder" Directory="APPMENUFOLDER" On="uninstall" />
+      <RegistryValue Root="HKMU" Key="Software\Subordinate" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <!-- Where the installed copy lives, so a later installer, a plugin or a
+         support script can find it without guessing at ProgramFiles. -->
+    <Component Id="InstallRegistry" Directory="INSTALLFOLDER" Guid="a3f18b72-5d44-4c19-9b0e-77ad1e2c6f38">
+      <RegistryValue Root="HKMU" Key="Software\Subordinate" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+      <RegistryValue Root="HKMU" Key="Software\Subordinate" Name="Version" Type="string" Value="$(var.Version)" />
+    </Component>
+
+    <Feature Id="Main" Title="Subordinate" Level="1" AllowAbsent="no">
+      <!-- Generated by build-msi.ps1, one component per staged file. -->
+      <ComponentGroupRef Id="FilesRoot" />
+      <ComponentGroupRef Id="FilesBin" />
+      <ComponentGroupRef Id="FilesGstPlugins" />
+      <ComponentGroupRef Id="FilesGstLibexec" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="InstallRegistry" />
+    </Feature>
+  </Package>
+</Wix>
