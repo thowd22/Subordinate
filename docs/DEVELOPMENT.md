@@ -608,6 +608,19 @@ Snapshot PNGs are committed, so keep them small: render at 800x600 or less, no
 LFS. A test in `crates/sub-ui/tests/ui_harness.rs` enforces the budget — 150 KB
 per snapshot and 5 MB for the directory.
 
+### The user guide's generated blocks
+
+`docs/user-guide.md` shows the committed snapshot PNGs as its screenshots and
+carries a keyboard reference generated from the action registry in
+`crates/sub-ui/src/shortcuts.rs`. `crates/sub-ui/tests/user_guide.rs` fails
+when either goes stale — a screenshot that no longer exists, an action the
+table is missing, an encoder the troubleshooting section does not name — so
+re-record the block after adding or rebinding an action:
+
+```bash
+UPDATE_DOCS=1 cargo test -p sub-ui --test user_guide   # rewrite, then commit
+```
+
 ### Looking at a failure (including from an agent)
 
 A failing comparison writes two PNGs next to the reference:
