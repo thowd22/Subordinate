@@ -1,13 +1,26 @@
 # Flatpak manifest for Subordinate.
 #
 # Unlike the AppImage, this package does not carry its own GStreamer: the
-# freedesktop runtime already ships GStreamer 1.24+ and declares the
+# freedesktop runtime already ships GStreamer and declares the
 # `org.freedesktop.Platform.GStreamer` extension point
 # (directory lib/extensions/gstreamer-1.0, already on the runtime's
 # GST_PLUGIN_SYSTEM_PATH), so extra plugin sets drop in without rebuilding the
-# app. `org.freedesktop.Platform.ffmpeg-full` adds the encoders and decoders
-# the base runtime leaves out for patent reasons, and is what the libav
-# elements behind several export presets need.
+# app.
+#
+# Runtime branch 25.08, not 24.08, for two reasons:
+#
+#   * org.freedesktop.Sdk.Extension.rust-stable on 24.08 is frozen at rustc
+#     1.89, and this workspace declares rust-version = 1.95; cargo refuses the
+#     build outright ("rustc 1.89.0 is not supported by the following
+#     packages", run 34626701087). The 25.08 branch of the extension tracks
+#     current stable.
+#   * 25.08 retired org.freedesktop.Platform.ffmpeg-full. The full codec set is
+#     now org.freedesktop.Platform.codecs-extra, an extension the *runtime*
+#     declares (version 25.08-extra, add-ld-path, auto-downloaded) whose
+#     GStreamer directory the runtime already has on GST_PLUGIN_SYSTEM_PATH.
+#     So the app declares nothing: no add-extensions block and no
+#     LD_LIBRARY_PATH finish-arg, and the libav elements several export presets
+#     use are simply there.
 #
 # Hardware paths:
 #   * VA-API  -- the runtime's `va` plugin over the host driver through
@@ -22,9 +35,12 @@
 # sources are fetched at build time; a Flathub submission would replace that
 # with a generated cargo-sources.json, which is deliberately not committed here
 # (it is a six-figure-line file that churns with every Cargo.lock change).
+# Nothing else about the manifest would change for Flathub -- in particular the
+# toolchain still comes from the SDK extension, never from rustup over the
+# network.
 id: io.github.thowd22.Subordinate
 runtime: org.freedesktop.Platform
-runtime-version: '24.08'
+runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
@@ -42,18 +58,13 @@ finish-args:
   - --socket=pulseaudio
   # Media files and projects live wherever the user keeps them.
   - --filesystem=home
-  # The ffmpeg-full extension mounts here.
-  - --env=LD_LIBRARY_PATH=/app/lib:/usr/lib/x86_64-linux-gnu/ffmpeg
 
-# Extensions the app expects to find, all part of the freedesktop runtime.
-# ffmpeg-full is not auto-downloaded, so build-flatpak.sh installs it.
-add-extensions:
-  org.freedesktop.Platform.ffmpeg-full:
-    directory: lib/ffmpeg
-    add-ld-path: .
-    version: '24.08'
-    autodelete: false
-    no-autodownload: false
+# No add-extensions block: the extensions this app needs
+# (org.freedesktop.Platform.GStreamer for extra plugin sets,
+# org.freedesktop.Platform.codecs-extra for the full ffmpeg codec set,
+# org.freedesktop.Platform.GL.* for the driver) are all declared by the runtime
+# itself, mounted under /usr and already on GST_PLUGIN_SYSTEM_PATH and the
+# loader path. Re-declaring them here would shadow the runtime's own paths.
 
 cleanup:
   - /include
@@ -83,7 +94,6 @@ modules:
         /app/share/metainfo/io.github.thowd22.Subordinate.metainfo.xml
       - install -Dm644 packaging/linux/subordinate.svg
         /app/share/icons/hicolor/scalable/apps/io.github.thowd22.Subordinate.svg
-      - mkdir -p /app/lib/ffmpeg
     sources:
       - type: dir
         path: ../..

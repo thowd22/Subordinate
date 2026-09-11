@@ -1208,6 +1208,30 @@ refuse to start on a newer distro or fall back to software rendering, so
 `build-appimage.sh` excludes them by name and `validate.sh --appdir` fails if
 one appears anyway.
 
+**Which machine builds it decides which machines can run it.** glibc is only
+forward compatible: a binary linked against 2.43 asks for `GLIBC_2.43` symbols
+that a 2.40 system does not have, and the AppImage dies before `main` with
+`/lib64/libc.so.6: version GLIBC_2.43 not found`. That is exactly what the
+first CI run did (run 34626701087): built on the `ubuntu-26.04` runner, dead on
+Fedora 41. So the `appimage` job in `packaging.yml` runs inside an
+**ubuntu:24.04 container** -- glibc 2.39, the oldest supported Ubuntu LTS and
+older than every distro this package targets -- and the runner is only the
+machine the container runs on. The job prints the highest `GLIBC_2.x` symbol
+version the bundle asks for into the run summary; that number is the package's
+real minimum.
+
+The cost of that choice is the GStreamer version: **Ubuntu 24.04 carries
+GStreamer 1.24, not the repository's 1.28 pin**, and there is no trustworthy
+1.28 for that base (no backport, no upstream Linux binary release, and a
+from-source build of the monorepo in CI is a bigger liability than a minor
+version). So the AppImage bundles 1.24 while `ci.yml`, `hardware.yml` and the
+Flatpak stay on 1.28+. Nothing in `sub-media` or `sub-export` needs a 1.26+
+API -- the gstreamer-rs feature gate is `v1_18` -- and both `nvcodec` and `va`
+(with `vah264enc`) exist in 1.24, which the packaging jobs assert. The job
+fails if the base image's GStreamer is not 1.24.x, so the two facts cannot
+drift apart silently. Revisit when the next Ubuntu LTS (28.04) is the oldest
+LTS in support, or if a plugin the presets need lands after 1.24.
+
 ```bash
 packaging/linux/build-appimage.sh                  # CI-style, needs pkg-config
 packaging/linux/build-appimage.sh --stage-only     # AppDir only, no FUSE needed
@@ -1217,6 +1241,15 @@ packaging/linux/build-appimage.sh --gst-prefix "$GSTROOT/usr" --skip-build
 On the sudo-less dev boxes there is no system GStreamer, so pass
 `--gst-prefix "$GSTROOT/usr"` (the prefix `env-gst.sh` sets up) and
 `--stage-only`; that exercises everything except `appimagetool` itself.
+
+One allowlist entry is there for a reason worth stating: **`voaacenc`**. Every
+`youtube-*` preset is AAC in MP4, and the obvious AAC encoder -- gst-libav's
+`avenc_aac` -- is registered at rank `NONE`. Rank `NONE` is how a machine says
+"never plug this unasked", and `sub-export` will not plug a deranked element,
+so a bundle whose only AAC encoder is `avenc_aac` refuses every MP4 export with
+`export.no_encoder` even though `gst-inspect` lists the element (run
+34630086856, from inside the AppImage on box). `voaacenc` is ranked and is
+marked required for that reason.
 
 `linux/gst-plugins.txt` is an allowlist, not the whole plugin directory -- the
 full Ubuntu set is about 100 MB of things Subordinate never loads. A leading
@@ -1247,23 +1280,69 @@ GStreamer tool instead of the editor, which is how CI checks the package's own
 registry rather than the host's.
 
 What the host must still provide is the flip side of the excludelist: libc and
-libstdc++, the GL/EGL/gbm/libdrm stack, libva (and libvdpau, vulkan-loader),
-X11 and Wayland client libraries, `libasound` and `libpulse`. Every desktop
-install has all of it; a *bare* Fedora container does not, which is why the
-Fedora job in `packaging.yml` installs exactly that list and nothing
-GStreamer-shaped before running the package. If the smoke test there ever needs
+libstdc++, the GL/EGL/gbm/libdrm stack, libva *and* libva-drm (the `va`,
+`libav`, `qsv` and `msdk` plugins all link the DRM backend, not just libva
+itself), libvdpau and the Vulkan loader, the X11 and Wayland client libraries
+including `libxcb-xkb` and `libxcb-render`, `libasound` and `libpulse`. That list is not maintained by hand: the
+`appimage` job prints every library the bundle resolves outside its own AppDir
+into the run summary and ships it with the artifact as `host-libraries.txt`,
+and the smoke baselines are the distro spelling of it. A new name appearing
+there is the warning that the package has started depending on something a
+stock desktop may not have. Every desktop install has all of it; a *bare*
+Fedora container does not, which is why the smoke jobs in `packaging.yml`
+install exactly that list and nothing GStreamer-shaped before running the
+package. If the smoke test there ever needs
 a package outside that list, the bundle is missing something.
+
+The `appimage-smoke` job runs the *artifact* -- never the build tree -- on
+three systems that did not build it: the `ubuntu-26.04` runner (newer glibc,
+the direction that has to work), an `ubuntu:24.04` container (the build base,
+i.e. the oldest system claimed) and a `fedora:41` container. All three run the
+same script: start the editor with `--help`, resolve `nvcodec`, `va`, `libav`
+and `x264` through the bundled registry, and fail if any plugin was
+blacklisted.
 
 ### Flatpak
 
 The Flatpak does the opposite: it bundles no GStreamer at all. The freedesktop
 runtime ships one and declares the `org.freedesktop.Platform.GStreamer`
 extension point (`lib/extensions/gstreamer-1.0`, already on the runtime's
-`GST_PLUGIN_SYSTEM_PATH`), so plugin sets drop in without rebuilding the app,
-and `org.freedesktop.Platform.ffmpeg-full` adds the codecs the base runtime
-leaves out. VA-API works through `--device=dri` plus the host driver; NVENC
-works through the `org.freedesktop.Platform.GL.nvidia-*` extension flatpak
-mounts to match the host's kernel module.
+`GST_PLUGIN_SYSTEM_PATH`), so plugin sets drop in without rebuilding the app.
+VA-API works through `--device=dri` plus the host driver; NVENC works through
+the `org.freedesktop.Platform.GL.nvidia-*` extension flatpak mounts to match
+the host's kernel module.
+
+The manifest is on **runtime branch 25.08**, and both reasons are worth
+knowing:
+
+- `org.freedesktop.Sdk.Extension.rust-stable` on 24.08 is frozen at **rustc
+  1.89**, below this workspace's `rust-version = 1.95`. flatpak-builder gets
+  several minutes in and then cargo stops with `error: rustc 1.89.0 is not
+  supported by the following packages` (run 34626701087). The 25.08 branch of
+  the extension tracks current stable, which keeps the toolchain coming from
+  the SDK -- the alternative, installing a pinned toolchain over the network
+  inside the build, would work in CI but is exactly what a Flathub submission
+  may not do.
+- 25.08 **retired `org.freedesktop.Platform.ffmpeg-full`**. The full codec set
+  is now `org.freedesktop.Platform.codecs-extra`, an extension the *runtime*
+  declares (`add-ld-path`, auto-downloaded) whose GStreamer directory the
+  runtime already has on `GST_PLUGIN_SYSTEM_PATH`. So the app declares nothing:
+  no `add-extensions` block and no `LD_LIBRARY_PATH` finish-arg, and the
+  `libav` elements several export presets use are simply there. Re-declaring a
+  runtime extension in `add-extensions` would shadow the runtime's own mount
+  point and lose the codecs, so `validate.sh` fails the manifest if it does.
+
+Unlike the AppImage, the Flatpak's GStreamer is whatever the runtime ships
+(1.26+ on 25.08), not the 1.28 pin -- that is the trade the package makes for
+not carrying a runtime of its own. It also inherits the runtime's *encoders*,
+and the 25.08 runtime has **no ranked AAC encoder**: `voaacenc`, `fdkaacenc`
+and `faac` are absent and `avenc_aac` is rank NONE (measured inside the sandbox
+on box, run 34633406106). Every `youtube-*` preset is AAC in MP4, so a Flatpak
+user exporting one gets `export.no_encoder` today. The packaging job works
+around it for verification with `GST_PLUGIN_FEATURE_RANK=avenc_aac:256` and
+says so in its summary; the real fix is either an AAC encoder module in the
+manifest or letting the app promote `avenc_aac` itself, which is a product
+decision, not a packaging one.
 
 ```bash
 packaging/flatpak/build-flatpak.sh --install-deps   # first time
@@ -1275,10 +1354,18 @@ at build time. A Flathub submission would have to replace that with a generated
 `cargo-sources.json`; that file is deliberately not committed, as it is a
 six-figure-line artefact that churns with every `Cargo.lock` change.
 
-### What is not verified here
+### Hardware encode from the packages
 
-Hardware encode *from inside the packages* needs a GPU, so `packaging.yml`
-proves only that the bundled runtime exposes `nvcodec` and `va` and that the
-binary starts on Ubuntu LTS and on a bare Fedora container. Running an actual
-NVENC or VA-API export out of the AppImage belongs to `hardware.yml`
-(TASK-116), which has the runners.
+`packages-amd` in `packaging.yml` is the job that proves the point of the
+packages: it runs on the self-hosted AMD box, downloads both artifacts and
+renders `examples/sample-project/demo.sub` with `--encoder vah264enc` twice --
+once through `SUB_APPIMAGE_TOOL=subordinate-cli` inside the AppImage (bundled
+GStreamer, host driver) and once through `flatpak run --command=subordinate-cli`
+(runtime GStreamer, host driver). Both outputs are checked with the *host's*
+`gst-discoverer-1.0`, which is an independent look at the file rather than at
+the pipeline that wrote it. Nothing is compiled on box; the packages arrive as
+artifacts and are run the way a user would run them.
+
+NVENC out of the packages is not covered here: the NVIDIA runner is the paid
+one and `hardware.yml` (TASK-116) already owns that budget. `packaging.yml`
+proves the bundled registry exposes `nvcodec` on every smoke target.

@@ -10,21 +10,29 @@
 #   --out DIR        build tree and bundle location (default target/flatpak)
 #   -h, --help       this text
 #
-# Needs flatpak and flatpak-builder on PATH. Everything else -- runtime, SDK,
-# the rust-stable SDK extension and ffmpeg-full -- comes from Flathub with
-# --install-deps.
+# Needs flatpak and flatpak-builder on PATH. Everything else -- the runtime,
+# the SDK and the rust-stable SDK extension -- comes from Flathub with
+# --install-deps. There is no ffmpeg-full to install: since branch 25.08 the
+# full codec set is org.freedesktop.Platform.codecs-extra, which the runtime
+# declares and pulls in itself.
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 manifest=$repo_root/packaging/flatpak/io.github.thowd22.Subordinate.yml
 app_id=io.github.thowd22.Subordinate
-runtime_version=24.08
+runtime_version=25.08
+# The manifest declares no branch, so flatpak-builder would default to
+# "master"; `flatpak build-bundle` then has to be told the same name or it
+# fails with "no such ref". "stable" is what Flathub publishes under, so both
+# sides say stable and a user installing the bundle gets the branch they would
+# get from a remote.
+app_branch=stable
 
 install_deps=0
 bundle=1
 out_dir=$repo_root/target/flatpak
 
-usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -39,6 +47,11 @@ done
 
 command -v flatpak >/dev/null 2>&1 || { echo "build-flatpak.sh: flatpak is not installed" >&2; exit 1; }
 command -v flatpak-builder >/dev/null 2>&1 || { echo "build-flatpak.sh: flatpak-builder is not installed" >&2; exit 1; }
+# flatpak-builder strips debuginfo out of everything it installs and shells out
+# to eu-strip for it. Missing, it fails at the end of the build rather than the
+# start, which on this workspace is a ten-minute release compile wasted.
+command -v eu-strip >/dev/null 2>&1 ||
+    { echo "build-flatpak.sh: eu-strip is missing; install elfutils" >&2; exit 1; }
 
 if [ "$install_deps" -eq 1 ]; then
     flatpak remote-add --if-not-exists --user flathub \
@@ -46,8 +59,13 @@ if [ "$install_deps" -eq 1 ]; then
     flatpak install --user --noninteractive flathub \
         "org.freedesktop.Platform//$runtime_version" \
         "org.freedesktop.Sdk//$runtime_version" \
-        "org.freedesktop.Sdk.Extension.rust-stable//$runtime_version" \
-        "org.freedesktop.Platform.ffmpeg-full//$runtime_version"
+        "org.freedesktop.Sdk.Extension.rust-stable//$runtime_version"
+    # The toolchain the SDK extension carries has to satisfy the workspace's
+    # rust-version, or cargo stops with "rustc X is not supported by the
+    # following packages" after several minutes of flatpak-builder setup.
+    flatpak run --user --command=/usr/lib/sdk/rust-stable/bin/rustc \
+        --devel "org.freedesktop.Sdk//$runtime_version" --version ||
+        echo "build-flatpak.sh: could not query the SDK extension's rustc" >&2
 fi
 
 mkdir -p "$out_dir"
@@ -55,11 +73,11 @@ version=$(sed -n '/^\[workspace.package\]/,/^\[/p' "$repo_root/Cargo.toml" |
     sed -n 's/^version = "\(.*\)"/\1/p' | head -n1)
 
 flatpak-builder --user --force-clean --disable-rofiles-fuse \
-    --repo="$out_dir/repo" \
+    --default-branch="$app_branch" --repo="$out_dir/repo" \
     "$out_dir/build" "$manifest"
 
 if [ "$bundle" -eq 1 ]; then
     out_file=$out_dir/Subordinate-$version.flatpak
-    flatpak build-bundle "$out_dir/repo" "$out_file" "$app_id" "$runtime_version"
+    flatpak build-bundle "$out_dir/repo" "$out_file" "$app_id" "$app_branch"
     echo "==> built $out_file"
 fi
