@@ -1,0 +1,480 @@
+name: Hardware verification
+
+# Runs the hardware encode and decode criteria (TASK-116) on real GPUs: it
+# renders the sample project with each vendor's encoder through
+# subordinate-cli, validates the file with the discoverer, measures the 4K
+# H.264 scrub rate with a hardware decoder and the compositor readback
+# throughput, and uploads the output, perf.json and the gst-inspect
+# diagnostics. The verify tasks (TASK-64, TASK-65) are checked from this
+# workflow's logs and artifacts rather than by hand.
+#
+# ---------------------------------------------------------------- cost ------
+# nvidia-linux runs on RunsOn (.github/runs-on.yml, runner gpu-nvidia-linux):
+# one g4dn.xlarge in us-east-1, spot `price-capacity-optimized` at typically
+# 0.16-0.25 USD/h, 0.526 USD/h if it falls back to on-demand. Nothing is
+# compiled on it (see build-linux below), so `timeout-minutes` caps it at 15
+# and the worst case is
+#
+#   spot      0.25 USD/h * 15/60 h = 0.063 USD
+#   on-demand 0.526 USD/h * 15/60 h = 0.132 USD
+#
+# and the measurement itself took 2m29s on run 34610600133 (about 0.04 USD
+# on-demand, including the instance's own boot time). Storage is the
+# instance's own root volume, deleted with the instance. Budget: under 0.05 USD
+# per run on spot and under 0.25 USD in every case, which is the number
+# TASK-116 AC 4 states. build-linux is a free hosted runner and amd-linux is
+# the self-hosted box, so the GPU job is the only money in this workflow.
+#
+# Triggers are deliberately narrow for the same reason: on demand, plus one
+# nightly schedule. Never add `push` or `pull_request` here - the AMD job is
+# free but the NVIDIA job is not, and box is a machine in someone's home (see
+# docs/DEVELOPMENT.md, "Self-hosted AMD runner").
+on:
+  workflow_dispatch:
+  schedule:
+    # 04:30 UTC, once a day. One NVIDIA job a night is about 2.50 USD a month.
+    - cron: "30 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hardware-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # The preset the sample project is rendered with: H.264 in MP4 with AAC, so
+  # both vendor encoders can be pinned against the same output.
+  PRESET: youtube-1080p
+  # demo.sub carries two sequences ("Main cut" and "Titles"), so the render
+  # command has to name one - without it the CLI refuses with
+  # core.invalid_argument (run 34605526227).
+  SEQUENCE: Main cut
+
+jobs:
+  # Nothing is compiled on the GPU instance: it is the most expensive machine
+  # in this workflow and the slowest of the three (4 vCPU). On run 34603245414
+  # a cold `cargo build -p subordinate-cli` alone took 10m52s there - wasmtime
+  # with the workspace's opt-level 3 on dependencies - and the job hit its
+  # timeout before it had measured anything. A free hosted ubuntu-24.04 runner
+  # builds the same binaries in the same distro release (so the same
+  # libgstreamer 1.24 ABI the GPU image has) and hands them over as an
+  # artifact; the GPU job downloads them and spends its minutes measuring.
+  build-linux:
+    name: Build the Linux binaries (hosted, free)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GStreamer (apt)
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*google*.list \
+                     /etc/apt/sources.list.d/*google*.sources \
+                     /etc/apt/sources.list.d/*microsoft*.list \
+                     /etc/apt/sources.list.d/*microsoft*.sources || true
+          sudo apt-get update || sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-tools \
+            pkg-config libasound2-dev
+          echo "gstreamer-1.0 = $(pkg-config --modversion gstreamer-1.0)"
+
+      # rust-toolchain.toml pins the version this repository builds with.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      # A shared-key of its own: Ubuntu 24.04 against GStreamer 1.24, which is
+      # not what ci.yml's archives hold. `save-if` is unconditional because
+      # this workflow only ever runs by hand or nightly, so there is no flood
+      # of branch entries to guard against - and without a saved archive every
+      # run is the cold 13-minute build above.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hardware-linux-ubuntu24
+          prefix-key: v1-rust
+          cache-workspace-crates: true
+
+      # Only what the measurements need: the whole workspace (the GUI, the
+      # plugin hosts) is not part of any criterion here. subordinate-bench is
+      # release because its fps numbers are compared against the release
+      # baselines in docs/PERFORMANCE.md; subordinate-cli is debug because its
+      # render is encoder-bound and a release build drags a thin-LTO wasmtime
+      # through the slowest link step in the repository. The readback
+      # throughput test is #[ignore]d, so it is compiled here and run there.
+      - name: Build the binaries
+        run: |
+          cargo build --release -p subordinate-bench
+          cargo build -p subordinate-cli
+          cargo test --release -p sub-render --test readback --no-run \
+            --message-format=json > /tmp/readback-build.json
+          mkdir -p dist
+          python3 - <<'PY'
+          import json, pathlib, shutil
+          binary = None
+          for line in pathlib.Path("/tmp/readback-build.json").read_text().splitlines():
+              message = json.loads(line)
+              executable = message.get("executable")
+              if executable and message.get("target", {}).get("name") == "readback":
+                  binary = executable
+          if binary is None:
+              raise SystemExit("cargo did not report a readback test binary")
+          shutil.copy2(binary, "dist/readback-test")
+          PY
+          cp target/release/subordinate-bench dist/subordinate-bench
+          cp target/debug/subordinate-cli dist/subordinate-cli
+          chmod +x dist/*
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hardware-linux-binaries
+          path: dist/
+          retention-days: 7
+
+  nvidia-linux:
+    name: NVIDIA T4 (g4dn.xlarge, Ubuntu 24.04)
+    needs: build-linux
+    runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-linux
+    # Hard stop on GPU spend; see the cost note in the header. With the build
+    # moved off this instance the job is apt, fixtures, one render and two
+    # measurements: well under ten minutes.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: hardware-linux-binaries
+          path: dist
+
+      - name: Make the binaries executable
+        run: |
+          chmod +x dist/*
+          ls -l dist
+
+      - name: Instance and GPU facts
+        run: |
+          echo "runner=$RUNNER_NAME"
+          curl -fsS -m 3 http://169.254.169.254/latest/meta-data/instance-type || true; echo
+          curl -fsS -m 3 http://169.254.169.254/latest/meta-data/instance-life-cycle || true; echo
+          . /etc/os-release && echo "os=$PRETTY_NAME"
+          nvidia-smi
+
+      # ubuntu24-gpu-x64 is Ubuntu 24.04, whose apt GStreamer is 1.24 rather
+      # than the 1.28 pinned in ci.yml. That is accepted here: the elements
+      # this workflow exercises (nvcodec's nvh264enc/nvh264dec) have shipped
+      # since well before 1.24, and building 1.28 from source would cost more
+      # GPU minutes than the whole job. The version is recorded in the
+      # diagnostics artifact so a difference in the numbers can be traced to
+      # it. Replace this with a 26.04 GPU image when one exists.
+      #
+      # libvulkan1 and the Mesa/NVIDIA ICDs are what wgpu needs: without a
+      # Vulkan loader the compositor silently falls back to a software adapter
+      # and the readback number stops meaning anything (the summary marks that
+      # case). xvfb is belt and braces for anything that wants a display.
+      # 73 MB of packages at 93 kB/s from archive.ubuntu.com cost this job 13
+      # of its 15 minutes on run 34608554627. Two fixes: point apt at the
+      # in-region EC2 mirror, which is free and fast from us-east-1, and keep
+      # the .deb archives in the Actions cache (RunsOn serves that from its own
+      # S3 bucket) exactly as ci.yml does.
+      - name: Restore the apt archive cache
+        id: apt-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: hardware-apt-${{ hashFiles('.github/workflows/hardware.yml') }}
+
+      - name: Install GStreamer and the Vulkan loader (apt)
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*google*.list \
+                     /etc/apt/sources.list.d/*google*.sources \
+                     /etc/apt/sources.list.d/*microsoft*.list \
+                     /etc/apt/sources.list.d/*microsoft*.sources || true
+          sudo sed -i \
+            -e 's|https\?://archive.ubuntu.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g' \
+            -e 's|https\?://security.ubuntu.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          if [ -d ~/apt-archives ]; then sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/ 2>/dev/null || true; fi
+          sudo apt-get update || sudo apt-get update
+          # Runtime only - no -dev packages and no compiler: nothing is built
+          # on this instance. The plugin packages pull the shared libraries the
+          # prebuilt binaries link against. No vulkan-tools: vulkaninfo drags
+          # in BLAS and LAPACK for a diagnostic the wgpu adapter line in the
+          # benchmark report already gives.
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            -o APT::Keep-Downloaded-Packages=true \
+            libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libgstreamer-plugins-bad1.0-0 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x \
+            gstreamer1.0-plugins-base-apps \
+            libasound2t64 libvulkan1 xvfb
+          gst-inspect-1.0 --version
+          mkdir -p ~/apt-archives && sudo cp /var/cache/apt/archives/*.deb ~/apt-archives/ \
+            && sudo chown -R "$USER" ~/apt-archives
+
+      - name: Save the apt archive cache
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
+
+      - name: GStreamer diagnostics
+        run: |
+          mkdir -p target/hardware
+          {
+            gst-inspect-1.0 --version
+            echo "--- element presence ---"
+            for e in nvh264enc nvh265enc nvh264dec nvh264sldec nvautogpuh264enc x264enc avdec_h264 avenc_aac; do
+              if gst-inspect-1.0 --exists "$e"; then echo "present  $e"; else echo "absent   $e"; fi
+            done
+            echo "--- nvcodec plugin ---"
+            gst-inspect-1.0 nvcodec || true
+            echo "--- nvh264enc ---"
+            gst-inspect-1.0 nvh264enc || true
+          } > target/hardware/gst-inspect.txt 2>&1
+          sed -n '1,60p' target/hardware/gst-inspect.txt
+          gst-inspect-1.0 --exists nvh264enc \
+            || { echo "::error::nvh264enc missing: this runner cannot verify NVENC"; exit 1; }
+
+      - name: Generate test fixtures
+        run: ./scripts/gen-fixtures.sh
+
+      - name: Fetch the sample project media
+        run: ./scripts/get-sample-media.sh
+
+      # The encode criterion: the real sample project, rendered through the
+      # production export pipeline with NVENC pinned, then read back by the
+      # discoverer. --verify makes the CLI probe the file itself; the separate
+      # gst-discoverer-1.0 run is the independent check and the artifact.
+      - name: Render the sample project with NVENC
+        env:
+          # GStreamer registers hardware *encoders* at rank NONE - autoplug is
+          # never meant to pick an encoder - and sub-export refuses to plug an
+          # element a machine has deranked (export.encoder_unavailable, run
+          # 34606570134 on the AMD job). Lifting the rank for the element this
+          # job pins is what a user selecting a hardware encoder in the export
+          # panel effectively asks for; nothing else about the pipeline changes.
+          GST_PLUGIN_FEATURE_RANK: "nvh264enc:primary,nvh265enc:primary"
+        run: |
+          mkdir -p target/hardware
+          xvfb-run -a ./dist/subordinate-cli render examples/sample-project/demo.sub \
+            --preset "$PRESET" --sequence "$SEQUENCE" --encoder nvh264enc --verify \
+            --out target/hardware/sample-nvh264enc.mp4 \
+            | tee target/hardware/render.json
+          ls -l target/hardware/sample-nvh264enc.mp4
+          gst-discoverer-1.0 target/hardware/sample-nvh264enc.mp4 \
+            | tee target/hardware/discoverer.txt
+          grep -q 'H.264' target/hardware/discoverer.txt \
+            || { echo "::error::the rendered file carries no H.264 stream"; exit 1; }
+
+      # The decode criterion: 4K H.264 scrub through the production decoder,
+      # which prefers a hardware decoder when the machine has one. The summary
+      # step below asserts both the rate and that the element chosen really was
+      # nvdec and not avdec_h264.
+      - name: Scrub and playback benchmark (hardware decode)
+        run: |
+          mkdir -p target/bench
+          xvfb-run -a ./dist/subordinate-bench --out target/bench/perf.json \
+            --fixtures "$GITHUB_WORKSPACE/fixtures" \
+            | tee target/hardware/bench-summary.txt
+          cp target/bench/perf.json target/hardware/perf.json
+
+      # Compositor readback throughput on a 1080p canvas: TASK-58 AC 2, which
+      # could not be measured on a software adapter and moved here. The test is
+      # #[ignore]d so it only ever runs on a job like this one, and it is the
+      # prebuilt test binary from build-linux, not a cargo invocation.
+      - name: Compositor readback throughput (1080p)
+        run: |
+          xvfb-run -a ./dist/readback-test --ignored --nocapture \
+            | tee target/hardware/readback.txt
+
+      - name: Job summary and criteria
+        if: always()
+        run: |
+          python3 scripts/hardware-summary.py \
+            --label "NVIDIA T4 (g4dn.xlarge)" \
+            --perf target/bench/perf.json \
+            --readback target/hardware/readback.txt \
+            --min-scrub-fps 30 \
+            --scrub-severity warning \
+            --min-readback-fps 60 \
+            --require-hardware-decode nvh,nvdec,nvv4l2 \
+            --out target/hardware/summary.md
+          cat target/hardware/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardware-nvidia-linux
+          path: |
+            target/hardware/
+          if-no-files-found: warn
+          retention-days: 30
+
+  amd-linux:
+    # AWS no longer offers an AMD GPU instance (g4ad is retired), so this job
+    # runs on "box", a user-owned mini PC with an AMD Cezanne APU registered as
+    # a self-hosted runner: GStreamer 1.28, mesa VA-API, Rust and the fixture
+    # tools are already installed, so this job validates rather than installs,
+    # and it costs nothing. See docs/DEVELOPMENT.md, "Self-hosted AMD runner".
+    name: AMD APU (box, self-hosted, Ubuntu 26.04)
+    runs-on: [self-hosted, linux, box, amd-gpu]
+    timeout-minutes: 30
+    env:
+      GST_MINOR: "1.28"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host, DRM and GStreamer facts
+        run: |
+          echo "runner=$RUNNER_NAME"
+          . /etc/os-release && echo "os=$PRETTY_NAME"
+          ls -l /dev/dri
+          id -nG
+          v=$(pkg-config --modversion gstreamer-1.0); echo "gstreamer-1.0 = $v"
+          case "$v" in "$GST_MINOR".*) ;; *) echo "::error::expected GStreamer $GST_MINOR.x, got $v"; exit 1;; esac
+
+      - name: GStreamer and VA-API diagnostics
+        run: |
+          mkdir -p target/hardware
+          {
+            gst-inspect-1.0 --version
+            echo "pkg-config gstreamer-1.0: $(pkg-config --modversion gstreamer-1.0)"
+            echo "--- vainfo ---"
+            vainfo --display drm --device /dev/dri/renderD128 || true
+            echo "--- element presence ---"
+            for e in vah264enc vah265enc vah264dec vapostproc x264enc avdec_h264 avenc_aac; do
+              if gst-inspect-1.0 --exists "$e"; then echo "present  $e"; else echo "absent   $e"; fi
+            done
+            echo "--- vah264enc ---"
+            gst-inspect-1.0 vah264enc || true
+          } > target/hardware/gst-inspect.txt 2>&1
+          sed -n '1,60p' target/hardware/gst-inspect.txt
+          gst-inspect-1.0 --exists vah264enc \
+            || { echo "::error::vah264enc missing: check the render/video groups"; exit 1; }
+
+      # The runner runs as a systemd service with a minimal environment, so
+      # rustup's shims in ~/.cargo/bin are not on PATH even though Rust is
+      # installed (run 34603245414: "cargo: command not found"). Find them
+      # rather than hard-coding one layout.
+      - name: Put the Rust toolchain on PATH
+        run: |
+          found=""
+          for d in "$HOME/.cargo/bin" /usr/local/cargo/bin /opt/rust/bin; do
+            if [ -x "$d/cargo" ]; then found=$d; break; fi
+          done
+          [ -n "$found" ] || { echo "::error::no cargo on this runner; install rustup for the runner user"; exit 1; }
+          echo "$found" >> "$GITHUB_PATH"
+
+      - name: Rust version
+        run: |
+          cargo --version
+          rustc --version
+
+      # The compositor (and therefore both the render and the readback
+      # measurement) needs a Vulkan driver, not just VA-API. box had the loader
+      # but no ICD on run 34608554627 - wgpu reported "vkCreateInstance: Found
+      # no drivers!" and the render failed with render.no_adapter - so this
+      # says what is missing instead of failing four steps later.
+      - name: Vulkan driver present
+        run: |
+          ls -l /usr/share/vulkan/icd.d/ 2>/dev/null || true
+          if ! ls /usr/share/vulkan/icd.d/*.json >/dev/null 2>&1; then
+            echo "::error::no Vulkan ICD on this runner: install mesa-vulkan-drivers (RADV) and libvulkan1, then re-run"
+            exit 1
+          fi
+
+      # box keeps its target directory between runs on local disk, so there is
+      # no rust-cache here: an Actions cache archive would be slower than the
+      # disk it already has.
+      - name: Build subordinate-bench (release) and subordinate-cli
+        run: |
+          cargo build --release -p subordinate-bench
+          cargo build -p subordinate-cli
+
+      - name: Generate test fixtures
+        run: ./scripts/gen-fixtures.sh
+
+      - name: Fetch the sample project media
+        run: ./scripts/get-sample-media.sh
+
+      - name: Render the sample project with VA-API
+        env:
+          # See the NVENC render step: the va plugin registers vah264enc at
+          # rank NONE, and sub-export treats a deranked element as unusable.
+          GST_PLUGIN_FEATURE_RANK: "vah264enc:primary,vah265enc:primary"
+        run: |
+          mkdir -p target/hardware
+          xvfb-run -a ./target/debug/subordinate-cli render examples/sample-project/demo.sub \
+            --preset "$PRESET" --sequence "$SEQUENCE" --encoder vah264enc --verify \
+            --out target/hardware/sample-vah264enc.mp4 \
+            | tee target/hardware/render.json
+          ls -l target/hardware/sample-vah264enc.mp4
+          gst-discoverer-1.0 target/hardware/sample-vah264enc.mp4 \
+            | tee target/hardware/discoverer.txt
+          grep -q 'H.264' target/hardware/discoverer.txt \
+            || { echo "::error::the rendered file carries no H.264 stream"; exit 1; }
+
+      - name: Scrub and playback benchmark (hardware decode)
+        run: |
+          mkdir -p target/bench
+          xvfb-run -a ./target/release/subordinate-bench --out target/bench/perf.json \
+            --fixtures "$GITHUB_WORKSPACE/fixtures" \
+            | tee target/hardware/bench-summary.txt
+          cp target/bench/perf.json target/hardware/perf.json
+
+      # Reported, not gated: the 60 fps readback criterion (TASK-58) is stated
+      # against the NVIDIA job. This APU's number is recorded for comparison.
+      - name: Compositor readback throughput (1080p)
+        run: |
+          xvfb-run -a cargo test --release -p sub-render --test readback -- --ignored --nocapture \
+            | tee target/hardware/readback.txt
+
+      - name: Job summary and criteria
+        if: always()
+        run: |
+          python3 scripts/hardware-summary.py \
+            --label "AMD Cezanne APU (box)" \
+            --perf target/bench/perf.json \
+            --readback target/hardware/readback.txt \
+            --min-scrub-fps 30 \
+            --scrub-severity warning \
+            --require-hardware-decode va \
+            --out target/hardware/summary.md
+          cat target/hardware/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardware-amd-linux
+          path: |
+            target/hardware/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ----------------------------------------------------------------------
+  # Windows jobs: deliberately absent, not forgotten (TASK-116 AC 1).
+  #
+  #   nvidia-windows - needs the GPU AMI TASK-115 builds (NVIDIA driver,
+  #     GStreamer 1.28 and the RunsOn agent). Until that AMI id replaces the
+  #     placeholder in .github/runs-on.yml, a job asking for
+  #     `runner=gpu-nvidia-windows` fails to launch. When it exists, copy the
+  #     nvidia-linux job, swap the shell to pwsh, install GStreamer with the
+  #     official MSVC installer as ci.yml does, and pin `--encoder mfh264enc`
+  #     or `nvh264enc`.
+  #
+  #   amd-windows - no hardware exists at all: AWS retired g4ad, there is no
+  #     AMD Windows host, and AMF cannot be exercised anywhere this project can
+  #     reach. TASK-65's AMF half stays manual until someone has such a
+  #     machine. Do not add a job that would silently pass on software.
+  # ----------------------------------------------------------------------

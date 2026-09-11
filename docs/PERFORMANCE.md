@@ -88,6 +88,41 @@ Confirming it there is TASK-74 and the `verify` tasks, on hardware neither this
 machine nor hosted CI has; when those run, add their rows here rather than
 replacing these.
 
+## Baseline: NVIDIA T4, hardware decode (nvdec)
+
+Recorded 2026-09-11 (TASK-116), the first numbers from real GPU hardware. AWS
+`g4dn.xlarge` in us-east-1 through RunsOn (4 vCPU, Tesla T4, driver 580.173.02,
+Vulkan), Ubuntu 24.04 with apt GStreamer 1.24, `nvh264dec` plugged by the
+production ranking, release build, harness defaults. Run 34610600133 of the
+`Hardware verification` workflow; `perf.json` is on that run as the
+`hardware-nvidia-linux` artifact.
+
+| Fixture | Scenario | Sustained fps | Latency p50 | Latency p95 |
+| --- | --- | --- | --- | --- |
+| `bars_1080p_h264.mp4` (1920x1080) | playback | 535.8 | 1.652 ms | 3.678 ms |
+| `bars_1080p_h264.mp4` (1920x1080) | scrub | 26.9 | 34.055 ms | 69.862 ms |
+| `bars_2160p_h264.mp4` (3840x2160) | playback | 171.9 | 5.348 ms | 12.072 ms |
+| `bars_2160p_h264.mp4` (3840x2160) | scrub | 8.3 | 111.690 ms | 219.388 ms |
+
+Playback is what the hardware decoder buys: 4K playback is 171.9 fps against
+47.3 on the software baseline above, and a 1080p frame reaches a texture in
+1.65 ms instead of 6.1.
+
+**Scrub is not there yet.** 8.3 fps on a 4K clip is a long way below phase 1's
+">30 fps" criterion, and it is only marginally better than the 6.9 fps of the
+software baseline - the decoder is plainly not what limits it. Each scrub step
+is a keyframe seek plus a decode-forward, so what dominates is the flush,
+re-prime and forward decode of a fraction of a GOP, not the decode of the one
+frame asked for; the p95 of 219 ms against a p50 of 112 ms is the shape of a
+seek that lands further from a keyframe. Closing that gap is work for TASK-64
+and the phase 1 exit criterion, not something the harness can report away: the
+hardware verification workflow prints this number and warns, and deliberately
+does not fail on it.
+
+Compositor readback on the same machine is comfortably past its own criterion:
+588.7 fps on a 1080p canvas (611.7 fps on the run before it), against the
+60 fps TASK-58 asked for.
+
 ## CI
 
 The `Scrub and playback benchmark (Linux)` step of `.github/workflows/ci.yml`
