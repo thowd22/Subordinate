@@ -461,12 +461,23 @@ CC0 clips. It is what a new user (or an agent) opens to see the editor doing
 something, and what the CI render test renders.
 
 The media is never committed. Fetch it first — three files, about 4.7 MB, each
-pinned by URL, byte size and SHA-256:
+pinned by byte size and SHA-256:
 
 ```bash
 ./scripts/get-sample-media.sh          # scripts\get-sample-media.ps1 on Windows
 cargo run -p subordinate -- examples/sample-project/demo.sub
 ```
+
+The files are served as assets of this project's own
+[`sample-media-v1`](https://github.com/thowd22/Subordinate/releases/tag/sample-media-v1)
+release and are verified against the `SHA256SUMS` published beside them as well
+as the pins in the script, so a release that does not match what the project was
+built against fails the fetch. They were first published on Wikimedia Commons as
+CC0 1.0; those URLs stay in the script's catalogue and in `media/manifest.json`
+(`origin` and `source`) for provenance, and `--upstream` (`-Upstream` in
+PowerShell) fetches from them, but neither the default path nor CI contacts
+Wikimedia — concurrent CI runs off shared runner egress were being answered with
+HTTP 429, and no run should hang on a third-party site.
 
 Every media path in the project is relative and forward-slashed, so it opens
 without a relink on any of the three OSes, and every media item records the
@@ -481,8 +492,9 @@ decodes the real media with `sub-media`, composites it through `sub-render`,
 and checks that the overlay stacks, that the dissolve blends and that the
 first-party `plugins/color` grade runs over a clip. It skips itself when the
 media has not been fetched or the machine has no wgpu adapter. CI fetches the
-media (cached per OS, as the fixtures are) before the test job, so there it
-really runs. `examples/sample-project/README.md` carries the media credits.
+media (cached per OS and keyed on both fetch scripts, as the fixtures are)
+before the test job, so there it really runs; a warm cache downloads nothing at
+all. `examples/sample-project/README.md` carries the media credits.
 
 ## UI tests (egui_kittest)
 
