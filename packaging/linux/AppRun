@@ -1,0 +1,55 @@
+#!/bin/sh
+# AppImage entry point.
+#
+# Everything Subordinate needs that is not part of a base distro install lives
+# under $APPDIR: the binary, the GStreamer libraries, the plugin modules chosen
+# by packaging/linux/gst-plugins.txt and the plugin scanner. The host keeps
+# three things only: the graphics driver stack (Mesa/NVIDIA, used by wgpu and
+# by the va/nvcodec plugins), the display server and PulseAudio/PipeWire.
+#
+# POSIX sh on purpose: the AppImage has to start on a system with no bash.
+set -eu
+
+here=$(dirname "$(readlink -f "$0")")
+libdir=$here/usr/lib
+
+# GStreamer's registry is a cache of absolute paths. The AppImage mounts at a
+# different /tmp/.mount_XXXX every run, so a registry from the previous run
+# points at a directory that no longer exists; without a private, per-run
+# registry file GStreamer either rescans noisily or loads nothing at all.
+GST_REGISTRY=${TMPDIR:-/tmp}/subordinate-gst-registry-$$.bin
+GST_PLUGIN_SYSTEM_PATH_1_0=$libdir/gstreamer-1.0
+GST_PLUGIN_PATH_1_0=$libdir/gstreamer-1.0
+GST_PLUGIN_SCANNER=$libdir/gstreamer-1.0/gst-plugin-scanner
+export GST_REGISTRY GST_PLUGIN_SYSTEM_PATH_1_0 GST_PLUGIN_PATH_1_0 GST_PLUGIN_SCANNER
+
+# Keep the bundled libraries ahead of the host's, but never in front of the
+# driver stack: LD_LIBRARY_PATH is appended to, not prefixed with, whatever the
+# caller already set, so a host that points at its own GL/VA drivers wins.
+LD_LIBRARY_PATH=$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH
+
+# GIO modules and typelibs would otherwise be looked up in /usr on the host,
+# where they may be a different major version than the bundled GLib.
+if [ -d "$libdir/gio/modules" ]; then
+    GIO_MODULE_DIR=$libdir/gio/modules
+    export GIO_MODULE_DIR
+fi
+XDG_DATA_DIRS=$here/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}:/usr/local/share:/usr/share
+export XDG_DATA_DIRS
+
+cleanup() {
+    rm -f "$GST_REGISTRY"
+}
+trap cleanup EXIT INT TERM
+
+# SUB_APPIMAGE_TOOL runs a bundled GStreamer command instead of the editor, so
+# `./Subordinate-x86_64.AppImage` and
+# `SUB_APPIMAGE_TOOL=gst-inspect-1.0 ./Subordinate-x86_64.AppImage va` report on
+# the same runtime. That is how the hardware workflow proves the package's own
+# encoders exist rather than the host's.
+if [ -n "${SUB_APPIMAGE_TOOL:-}" ]; then
+    exec "$here/usr/bin/$SUB_APPIMAGE_TOOL" "$@"
+fi
+
+exec "$here/usr/bin/subordinate" "$@"

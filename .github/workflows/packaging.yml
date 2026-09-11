@@ -1,0 +1,180 @@
+name: Packaging
+
+# Linux packages (TASK-103). Two independent ways to ship the editor:
+#
+#   * AppImage -- carries the pinned GStreamer 1.28 runtime, including the
+#     nvcodec and va hardware plugins, so it runs on a stock Ubuntu LTS or
+#     Fedora with nothing but a graphics driver on the host.
+#   * Flatpak  -- uses the freedesktop runtime's GStreamer and its
+#     `org.freedesktop.Platform.GStreamer` extension point instead of bundling
+#     one, with ffmpeg-full for the codecs the base runtime omits.
+#
+# Runs on demand, on a tag, and on pushes that touch packaging, so a change to
+# the manifest or the plugin allowlist is checked before a release needs it.
+# TASK-106 calls these jobs from the release workflow; hardware encode from
+# inside the packages is verified separately by hardware.yml (TASK-116), which
+# has the GPUs.
+
+on:
+  workflow_dispatch:
+  # No `paths` filter on the tag trigger: GitHub ANDs the two, so a release tag
+  # whose commit happens not to touch packaging/ would be skipped.
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'packaging/**'
+      - '.github/workflows/packaging.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  GST_MINOR: "1.28"
+
+jobs:
+  # Cheap and fast: catches a mistyped app id, a metainfo version that drifted
+  # from Cargo.toml, or a manifest that lost --device=dri, without waiting for
+  # a release build.
+  validate:
+    name: Validate packaging metadata
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install validators
+        run: |
+          sudo apt-get update || sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            desktop-file-utils appstream shellcheck python3-yaml
+      - run: packaging/validate.sh
+
+  appimage:
+    name: AppImage
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: packaging-appimage
+
+      # The same package set ci.yml installs, plus the runtime plugin packages
+      # the AppImage bundles from. libgstreamer-plugins-bad carries nvcodec and
+      # va; without it the build fails on the required-plugin check rather than
+      # shipping a package that silently cannot hardware-encode.
+      - name: Install GStreamer and packaging tools
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*google* /etc/apt/sources.list.d/*microsoft* || true
+          sudo apt-get update || sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x \
+            gstreamer1.0-pulseaudio gstreamer1.0-alsa \
+            pkg-config libasound2-dev patchelf desktop-file-utils appstream python3-yaml
+          v=$(pkg-config --modversion gstreamer-1.0)
+          echo "gstreamer-1.0 = $v"
+          case "$v" in "$GST_MINOR".*) ;; *) echo "::error::expected GStreamer $GST_MINOR.x, got $v"; exit 1;; esac
+
+      - name: Build the AppImage
+        run: packaging/linux/build-appimage.sh
+
+      - name: Check the staged AppDir
+        run: packaging/validate.sh --appdir target/appimage/Subordinate.AppDir
+
+      # An AppImage that only starts on the machine that built it is the whole
+      # failure mode here, so it is run twice: on the Ubuntu LTS runner, and in
+      # a bare Fedora container that has no GStreamer of its own. --help exits
+      # without a window, which is all that is needed to prove the binary, its
+      # bundled libraries and the loader agree. The gst-inspect run through
+      # SUB_APPIMAGE_TOOL proves the *bundled* registry sees the hardware
+      # plugins; the elements themselves need a GPU, hence hardware.yml.
+      - name: Smoke test on Ubuntu LTS
+        run: |
+          appimage=$(ls target/appimage/Subordinate-*-x86_64.AppImage)
+          chmod +x "$appimage"
+          "$appimage" --appimage-extract-and-run --help
+          SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run --version
+          for plugin in nvcodec va libav x264; do
+            SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run "$plugin" > /dev/null \
+              || { echo "::error::the bundled runtime does not expose $plugin"; exit 1; }
+            echo "bundled plugin ok: $plugin"
+          done
+
+      # Fedora is the second distro the package promises to run on, and a bare
+      # container is the honest test: no GStreamer at all, only the client
+      # libraries a desktop has and an AppImage is entitled to assume. That
+      # list is exactly the excludelist in build-appimage.sh -- the graphics
+      # and audio stack that must come from the host -- so installing it here
+      # proves the split is right. Anything else missing would be a bundling
+      # bug, not a Fedora problem.
+      - name: Smoke test on Fedora
+        run: |
+          appimage=$(ls target/appimage/Subordinate-*-x86_64.AppImage)
+          docker run --rm -v "$PWD:/work" -w /work fedora:41 bash -c '
+            set -e
+            dnf install -y -q --setopt=install_weak_deps=False \
+              alsa-lib pulseaudio-libs mesa-libGL mesa-libEGL mesa-libgbm \
+              libdrm libva libX11 libX11-xcb libxcb libXext libXrender \
+              libvdpau vulkan-loader libwayland-client libwayland-cursor \
+              libwayland-egl > /dev/null
+            appimage=$(ls target/appimage/Subordinate-*-x86_64.AppImage)
+            chmod +x "$appimage"
+            "$appimage" --appimage-extract-and-run --help > /dev/null
+            for plugin in nvcodec va libav x264; do
+              SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run "$plugin" > /dev/null \
+                || { echo "::error::Fedora: the bundled runtime does not expose $plugin"; exit 1; }
+              echo "Fedora bundled plugin ok: $plugin"
+            done
+            # A blacklisted plugin means a dependency did not come along.
+            summary=$(SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run 2>/dev/null | tail -1)
+            echo "$summary"
+            case "$summary" in
+              *blacklist*) echo "::error::Fedora: some bundled plugins were blacklisted"; exit 1 ;;
+            esac
+            echo "Fedora: AppImage starts and its bundled registry is clean"
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: subordinate-appimage
+          path: target/appimage/Subordinate-*-x86_64.AppImage
+          if-no-files-found: error
+
+  flatpak:
+    name: Flatpak
+    runs-on: ubuntu-26.04
+    timeout-minutes: 75
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update || sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+
+      # The runtime, SDK, the rust-stable SDK extension and ffmpeg-full are
+      # several GB; caching them keeps a rebuild to the app itself.
+      - name: Cache flatpak runtimes
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/flatpak
+          key: flatpak-24.08-${{ hashFiles('packaging/flatpak/*.yml') }}
+          restore-keys: flatpak-24.08-
+
+      - name: Build the Flatpak
+        run: packaging/flatpak/build-flatpak.sh --install-deps
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: subordinate-flatpak
+          path: target/flatpak/Subordinate-*.flatpak
+          if-no-files-found: error

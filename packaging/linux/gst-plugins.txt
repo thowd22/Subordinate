@@ -1,0 +1,77 @@
+# GStreamer plugins bundled into the Linux AppImage.
+#
+# One plugin module per line, named the way the shared object is: `nvcodec`
+# means `libgstnvcodec.so`. Blank lines and `#` comments are ignored. A leading
+# `!` marks a plugin the package cannot ship without: build-appimage.sh fails
+# when one of those is absent from the GStreamer prefix, while a plain entry is
+# copied when present and reported when not. That is how a runtime that quietly
+# dropped nvcodec or va gets caught at build time instead of by a user whose
+# export falls back to software.
+#
+# The list is an allowlist rather than "copy the whole plugin directory"
+# because the full Ubuntu set is ~100 MB of things Subordinate never loads
+# (DVB, teletext, fluidsynth, ladspa...). Elements referenced from sub-media,
+# sub-audio and sub-export decide what belongs here; if a preset or decode
+# path starts using a new element, add its module.
+
+# --- core pipeline ---------------------------------------------------------
+!coreelements
+!app
+!playback
+!typefindfunctions
+!audioconvert
+!audioresample
+!videoconvertscale
+audiorate
+videorate
+videofilter
+audiotestsrc
+videotestsrc
+compositor
+audiomixer
+
+# --- containers and parsers ------------------------------------------------
+!isomp4
+!matroska
+audioparsers
+videoparsersbad
+id3demux
+id3tag
+apetag
+wavparse
+wavenc
+ogg
+
+# --- software decode and encode -------------------------------------------
+!libav
+!x264
+x265
+vpx
+opus
+opusparse
+flac
+vorbis
+theora
+jpeg
+png
+openh264
+dsd
+mpg123
+lame
+
+# --- hardware decode and encode -------------------------------------------
+# nvcodec is NVENC/NVDEC (it needs the NVIDIA driver at runtime, which stays on
+# the host and is never bundled); va is the Mesa/Intel VA-API plugin that
+# replaced gstreamer-vaapi in 1.28. Both are required: the whole point of the
+# AppImage is that hardware encode works without the user installing plugins.
+!nvcodec
+!va
+vulkan
+msdk
+qsv
+
+# --- capture and output ----------------------------------------------------
+pulseaudio
+alsa
+autodetect
+video4linux2

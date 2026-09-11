@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Subordinate
+GenericName=Video Editor
+Comment=Agent-first non-linear video editor
+Exec=subordinate %f
+TryExec=subordinate
+Icon=io.github.thowd22.Subordinate
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+Keywords=video;editor;nle;timeline;
+StartupWMClass=subordinate
