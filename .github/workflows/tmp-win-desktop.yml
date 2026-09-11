@@ -1,0 +1,180 @@
+name: TEMP windows desktop recon
+
+# TEMPORARY (TASK-138). Deleted before the task is finished. Exists only so the
+# Windows desktop AMI work can be iterated on a branch: RunsOn reads
+# .github/runs-on.yml from the default branch only, and a brand new workflow
+# file cannot be workflow_dispatch-ed from a branch, so this one is triggered
+# by pushes to task/task-138 and spells its runner out with inline labels.
+on:
+  push:
+    branches: [task/task-138]
+  workflow_dispatch:
+
+jobs:
+  recon:
+    name: Recon the stock RunsOn Windows image
+    # No GPU needed to learn how the agent is started; m7i.large Windows is
+    # about a quarter of the price of g4dn.xlarge.
+    runs-on: runs-on=${{ github.run_id }}/image=windows22-full-x64/family=m7i.large/spot=false
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Who and where
+        run: |
+          "ami=$env:RUNS_ON_AMI_ID"
+          Get-ChildItem Env: | Where-Object Name -like 'RUNS_ON*' | Format-Table -AutoSize | Out-String -Width 200
+          "whoami=$(whoami)"
+          "elevated=" + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          $p = Get-Process -Id $PID
+          "pid=$($p.Id) sessionId=$($p.SessionId)"
+          "--- process ancestry ---"
+          $id = $PID
+          for ($i = 0; $i -lt 8 -and $id; $i++) {
+            $ci = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
+            if (-not $ci) { break }
+            "{0,-6} {1,-28} session={2} parent={3}" -f $ci.ProcessId, $ci.Name, (Get-Process -Id $ci.ProcessId -ErrorAction SilentlyContinue).SessionId, $ci.ParentProcessId
+            $id = $ci.ParentProcessId
+          }
+
+      - name: Sessions and logon state
+        run: |
+          "--- query session ---"
+          cmd /c "query session" 2>&1
+          "--- query user ---"
+          cmd /c "query user" 2>&1
+          "--- local users ---"
+          Get-LocalUser | Format-Table Name, Enabled, LastLogon -AutoSize | Out-String -Width 200
+          "--- winlogon autologon keys ---"
+          Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' |
+            Select-Object AutoAdminLogon, DefaultUserName, DefaultDomainName, ForceAutoLogon |
+            Format-List | Out-String
+          "--- RDP ---"
+          (Get-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server').fDenyTSConnections
+          Get-Service TermService | Format-List Name, Status, StartType | Out-String
+
+      - name: How the RunsOn agent is started
+        run: |
+          "--- C:\runs-on ---"
+          if (Test-Path C:\runs-on) { Get-ChildItem C:\runs-on -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize | Out-String -Width 200 } else { "absent" }
+          "--- C:\actions-runner (top level) ---"
+          if (Test-Path C:\actions-runner) { Get-ChildItem C:\actions-runner | Select-Object Name, Length | Format-Table -AutoSize | Out-String -Width 200 } else { "absent" }
+          "--- .runner / .credentials presence ---"
+          foreach ($f in '.runner', '.credentials', '.credentials_rsaparams', '.env', '.path') {
+            $p = "C:\actions-runner\$f"
+            "{0,-26} {1}" -f $f, (Test-Path $p)
+          }
+          "--- runner-ish services ---"
+          Get-Service | Where-Object { $_.Name -match 'action|runner|runs' } | Format-Table Name, Status, StartType -AutoSize | Out-String -Width 200
+          "--- runner processes ---"
+          Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'Runner|run\.cmd|bootstrap|cmd|powershell|pwsh' } |
+            Select-Object ProcessId, ParentProcessId, Name, @{n='cmd';e={$_.CommandLine}} | Format-List | Out-String -Width 300
+          "--- non-Microsoft scheduled tasks ---"
+          Get-ScheduledTask | Where-Object { $_.TaskPath -notlike '\Microsoft\*' } |
+            Select-Object TaskPath, TaskName, State | Format-Table -AutoSize | Out-String -Width 200
+
+      - name: User data and EC2Launch
+        run: |
+          try {
+            $t = Invoke-RestMethod -Method Put -Uri http://169.254.169.254/latest/api/token -Headers @{'X-aws-ec2-metadata-token-ttl-seconds'='120'} -TimeoutSec 3
+            $h = @{'X-aws-ec2-metadata-token'=$t}
+            $ud = Invoke-RestMethod -Uri http://169.254.169.254/latest/user-data -Headers $h -TimeoutSec 5
+            "--- user-data (secrets redacted) ---"
+            ($ud -replace '(?i)([A-Za-z0-9+/]{40,})', '<REDACTED>') | Out-String
+          } catch { "user-data unavailable: $_" }
+          "--- EC2Launch agent config ---"
+          if (Test-Path 'C:\ProgramData\Amazon\EC2Launch\config\agent-config.yml') { Get-Content 'C:\ProgramData\Amazon\EC2Launch\config\agent-config.yml' } else { 'no agent-config.yml' }
+          "--- EC2Launch state ---"
+          Get-ChildItem 'C:\ProgramData\Amazon\EC2Launch\state' -ErrorAction SilentlyContinue | Format-Table Name -AutoSize | Out-String
+
+      - name: Toolchain already on the image
+        run: |
+          foreach ($exe in 'python', 'py', 'pip', 'choco', 'winget', 'git', 'msiexec', 'aws') {
+            $c = Get-Command $exe -ErrorAction SilentlyContinue
+            "{0,-10} {1}" -f $exe, ($(if ($c) { $c.Source } else { 'ABSENT' }))
+          }
+          try { python --version } catch { 'no python' }
+          "--- disk ---"
+          Get-PSDrive C | Format-Table Name, @{n='UsedGB';e={[int]($_.Used/1GB)}}, @{n='FreeGB';e={[int]($_.Free/1GB)}} -AutoSize | Out-String
+
+      - name: Prototype - install the release MSI silently
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rels = Invoke-RestMethod -UseBasicParsing -Uri 'https://api.github.com/repos/thowd22/Subordinate/releases?per_page=30'
+          $rel = $rels | Where-Object { $_.tag_name -like 'v*' -and ($_.assets | Where-Object { $_.name -like '*.msi' }) } | Select-Object -First 1
+          if (-not $rel) { throw 'no v* release with an .msi asset' }
+          $asset = $rel.assets | Where-Object { $_.name -like '*.msi' } | Select-Object -First 1
+          "release=$($rel.tag_name) asset=$($asset.name) size=$($asset.size)"
+          $msi = Join-Path $env:RUNNER_TEMP $asset.name
+          curl.exe -sS -L -o "$msi" $asset.browser_download_url
+          $log = Join-Path $env:RUNNER_TEMP 'msi.log'
+          $p = Start-Process -Wait -PassThru msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$log`""
+          "msiexec exit=$($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { Get-Content $log -Tail 60; throw "msi install failed" }
+          "--- install dir ---"
+          Get-ChildItem 'C:\Program Files\Subordinate\bin' | Select-Object Name, Length | Format-Table -AutoSize | Out-String -Width 200
+          "--- registry ---"
+          Get-ItemProperty 'HKLM:\SOFTWARE\Subordinate' | Format-List | Out-String
+          "--- start menu shortcut ---"
+          Get-ChildItem 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Subordinate' -ErrorAction SilentlyContinue | Format-Table Name, FullName -AutoSize | Out-String -Width 200
+
+      - name: Prototype - can the app run headless-ish in session 0
+        continue-on-error: true
+        run: |
+          $exe = 'C:\Program Files\Subordinate\bin\subordinate.exe'
+          $out = Join-Path $env:RUNNER_TEMP 'smoke.out'
+          $err = Join-Path $env:RUNNER_TEMP 'smoke.err'
+          $p = Start-Process -PassThru -FilePath $exe -ArgumentList '--smoke-test' -RedirectStandardOutput $out -RedirectStandardError $err
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); 'TIMED OUT' } else { "exit=$($p.ExitCode)" }
+          '--- stdout ---'; Get-Content $out -ErrorAction SilentlyContinue
+          '--- stderr ---'; Get-Content $err -ErrorAction SilentlyContinue
+
+      - name: Prototype - desktop screenshot from session 0
+        continue-on-error: true
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          "virtual screen = $($b.Width)x$($b.Height)"
+          $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
+          $path = Join-Path $env:RUNNER_TEMP 'session0.png'
+          $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+          "saved $path ($((Get-Item $path).Length) bytes)"
+
+      - name: Prototype - Python and pywinauto
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $py = (Get-Command python -ErrorAction SilentlyContinue)
+          if (-not $py) { 'python absent; would need an install step'; exit 0 }
+          python -m pip install --disable-pip-version-check --no-input pywinauto
+          python -c "import pywinauto, sys; print('pywinauto', pywinauto.__version__, 'on', sys.version)"
+
+      - name: Prototype - local test user and autologon keys
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pw = ConvertTo-SecureString 'Recon-Only-Never-Kept-1!' -AsPlainText -Force
+          New-LocalUser -Name subtest -Password $pw -PasswordNeverExpires -AccountNeverExpires -ErrorAction SilentlyContinue | Out-Null
+          Add-LocalGroupMember -Group Administrators -Member subtest -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member subtest -ErrorAction SilentlyContinue
+          Get-LocalUser subtest | Format-List | Out-String
+          $wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+          Set-ItemProperty $wl AutoAdminLogon '1'
+          Set-ItemProperty $wl DefaultUserName 'subtest'
+          Set-ItemProperty $wl DefaultDomainName $env:COMPUTERNAME
+          'autologon keys written (takes effect only on the next boot, which this instance will not do)'
+          "--- schtasks /IT smoke (no interactive session here, so it should fail) ---"
+          schtasks /Create /TN ReconIT /TR "cmd /c echo hi" /SC ONCE /ST 23:59 /RU subtest /IT /F 2>&1
+          schtasks /Run /TN ReconIT 2>&1
+          schtasks /Query /TN ReconIT /V /FO LIST 2>&1 | Select-String -Pattern 'Last Result|Status|Run As User'
+
+      - name: Upload recon screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recon-session0
+          path: ${{ runner.temp }}/session0.png
+          if-no-files-found: warn
