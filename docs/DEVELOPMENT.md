@@ -1271,8 +1271,10 @@ GStreamer tool instead of the editor, which is how CI checks the package's own
 registry rather than the host's.
 
 What the host must still provide is the flip side of the excludelist: libc and
-libstdc++, the GL/EGL/gbm/libdrm stack, libva (and libvdpau, vulkan-loader),
-X11 and Wayland client libraries, `libasound` and `libpulse`. Every desktop
+libstdc++, the GL/EGL/gbm/libdrm stack, libva *and* libva-drm (the `va`,
+`libav`, `qsv` and `msdk` plugins all link the DRM backend, not just libva
+itself), libvdpau and the Vulkan loader, the X11 and Wayland client libraries
+including `libxcb-xkb` and `libxcb-render`, `libasound` and `libpulse`. Every desktop
 install has all of it; a *bare* Fedora container does not, which is why the
 Fedora job in `packaging.yml` installs exactly that list and nothing
 GStreamer-shaped before running the package. If the smoke test there ever needs

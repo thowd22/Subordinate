@@ -171,18 +171,27 @@ jobs:
       matrix:
         include:
           # The host runner: proves a package built on old glibc still runs on
-          # a much newer one, which is the direction that has to work.
+          # a much newer one, which is the direction that has to work. It gets
+          # the same baseline as the containers -- a hosted runner image is not
+          # a desktop and has neither libva nor libpulse, so without this the
+          # bundled va, nvcodec and libav plugins are blacklisted at scan time
+          # for want of the host half of the split.
           - target: ubuntu-26.04 host
             image: ""
-            install: "true"
+            install: |
+              apt-get update >/dev/null
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+                libgl1 libegl1 libgbm1 libdrm2 libva2 libva-drm2 libx11-6 libx11-xcb1 libxcb1 \
+                libxcb-xkb1 libxcb-render0 libxext6 libxrender1 libvdpau1 libvulkan1 libwayland-client0 \
+                libwayland-cursor0 libwayland-egl1 libasound2t64 libpulse0 >/dev/null
           # The build base, i.e. the oldest system this package claims.
           - target: ubuntu-24.04
             image: ubuntu:24.04
             install: |
               apt-get update >/dev/null
               DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-                libgl1 libegl1 libgbm1 libdrm2 libva2 libx11-6 libx11-xcb1 libxcb1 \
-                libxext6 libxrender1 libvdpau1 libvulkan1 libwayland-client0 \
+                libgl1 libegl1 libgbm1 libdrm2 libva2 libva-drm2 libx11-6 libx11-xcb1 libxcb1 \
+                libxcb-xkb1 libxcb-render0 libxext6 libxrender1 libvdpau1 libvulkan1 libwayland-client0 \
                 libwayland-cursor0 libwayland-egl1 libasound2t64 libpulse0 >/dev/null
           # Fedora is the second distro the package promises to run on, and a
           # bare container is the honest test: only the client libraries a
@@ -237,7 +246,8 @@ jobs:
         run: |
           printf '%s\n' "$INSTALL" > install.sh
           if [ -z "$IMAGE" ]; then
-            sh install.sh && sh smoke.sh
+            # The containers run as root; the runner does not.
+            sudo -E sh install.sh && sh smoke.sh
           else
             docker run --rm -v "$PWD:/work" -w /work "$IMAGE" \
               sh -c 'sh install.sh && sh smoke.sh'
