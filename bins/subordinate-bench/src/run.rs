@@ -8,11 +8,12 @@
 //! skipped or decode-only scenario instead.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use sub_core::{ErrorCode, SubError, SubResult};
 use sub_media::probe::NANOSECONDS;
-use sub_media::{Decoder, DecoderOptions, FrameFormat, HardwarePreference, VideoFrame};
+use sub_media::{Decoder, DecoderOptions, FrameFormat, HardwarePreference, PtsIndex, VideoFrame};
 use sub_render::{Nv12Converter, Nv12Geometry, RenderContext, RenderError};
 use sub_time::RationalTime;
 
@@ -210,6 +211,21 @@ pub fn measure_scrub(
     context: Option<&RenderContext>,
 ) -> SubResult<Scenario> {
     let mut decoder = Decoder::open_with(path, decoder_options(options))?;
+    // The viewer scrubs against a PTS index -- it is built in the background as
+    // soon as a clip is imported -- so the harness measures the seek path the
+    // way the product uses it: the index says which keyframe a target needs, so
+    // a step never flushes the pipeline when the target is in the GOP the
+    // decoder is already in, and a step that must seek aims at the keyframe
+    // itself rather than at wherever the demuxer's snap falls (TASK-133).
+    // Building it is a parse pass, not a decode, and it happens before anything
+    // is timed. A file this machine cannot index is still measured, without
+    // one.
+    match PtsIndex::build(path) {
+        Ok(index) => decoder.set_index(Arc::new(index)),
+        Err(error) => {
+            tracing::warn!(fixture = name, %error, "scrubbing without a PTS index");
+        }
+    }
     let mut uploader = Uploader::new(context);
     let mut scenario = new_scenario(name, ScenarioKind::Scrub);
 
@@ -223,6 +239,13 @@ pub fn measure_scrub(
     let mut decode = Samples::new();
     let mut upload = Samples::new();
     let mut total = Samples::new();
+    // The two halves of a scrub step, kept apart because they answer to
+    // different fixes: the flushing keyframe seek, and the decode-forward from
+    // that keyframe to the frame that was asked for (TASK-133).
+    let mut seek = Samples::new();
+    let mut forward = Samples::new();
+    let mut frames_decoded = 0_u64;
+    let mut seeks_issued = 0_u64;
     let started = Instant::now();
     for target in targets {
         let step_started = Instant::now();
@@ -232,6 +255,12 @@ pub fn measure_scrub(
         let seeked = Instant::now();
         let upload_nanos = uploader.upload(&frame)?;
         decode.push(nanos_between(step_started, seeked));
+        if let Some(timing) = decoder.last_seek_timing() {
+            seek.push(timing.seek_nanos);
+            forward.push(timing.decode_forward_nanos);
+            frames_decoded = frames_decoded.saturating_add(timing.frames_decoded);
+            seeks_issued = seeks_issued.saturating_add(timing.seeks_issued);
+        }
         upload.push(upload_nanos);
         total.push(nanos_between(step_started, Instant::now()));
         describe(&mut scenario, &frame);
@@ -250,6 +279,10 @@ pub fn measure_scrub(
     scenario.decode = decode.summary();
     scenario.upload = context.and(upload.summary());
     scenario.decode_to_texture = context.and(total.summary());
+    scenario.seek = seek.summary();
+    scenario.decode_forward = forward.summary();
+    scenario.frames_decoded = Some(frames_decoded);
+    scenario.seeks_issued = Some(seeks_issued);
     finish(&mut scenario, frames, wall);
     Ok(scenario)
 }

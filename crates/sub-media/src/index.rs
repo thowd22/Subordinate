@@ -115,6 +115,16 @@ pub struct PtsIndex {
 }
 
 impl PtsIndex {
+    /// An index over entries that are already known, for a test that needs a
+    /// GOP structure without a file to parse.
+    #[cfg(test)]
+    pub(crate) fn from_entries(entries: Vec<IndexEntry>) -> Self {
+        Self {
+            source_hash: ContentHash::from_bytes([0; 32]),
+            entries,
+        }
+    }
+
     /// Builds an index by parsing `path`, with no cache and no cancellation.
     ///
     /// # Errors
@@ -695,8 +705,13 @@ impl IndexedDecoder {
         options: DecoderOptions,
         index: Arc<PtsIndex>,
     ) -> SubResult<Self> {
+        let mut decoder = Decoder::open_with(path, options)?;
+        // The decoder plans its own seeks from the same index, so a step inside
+        // the current GOP never flushes the pipeline and a seek that must
+        // happen aims at the exact keyframe (TASK-133).
+        decoder.set_index(Arc::clone(&index));
         Ok(Self {
-            decoder: Decoder::open_with(path, options)?,
+            decoder,
             index,
             current: None,
         })

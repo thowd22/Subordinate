@@ -99,6 +99,23 @@ pub struct Scenario {
     /// the viewer pays before a scrubbed frame can be shown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_to_texture: Option<Stats>,
+    /// Scrub only: the flushing keyframe seek half of each step -- the seek
+    /// itself, the demuxer's re-prime and the keyframe frame it produces.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seek: Option<Stats>,
+    /// Scrub only: the decode-forward half of each step -- every picture
+    /// between that keyframe and the frame that was asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_forward: Option<Stats>,
+    /// Scrub only: pictures the decoder produced across the timed steps,
+    /// discarded reference frames included. Divided by `frames` it is how far
+    /// into a GOP an average step landed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frames_decoded: Option<u64>,
+    /// Scrub only: flushing seeks issued across the timed steps. Fewer than
+    /// `frames` means some steps were reached by decoding forward.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seeks_issued: Option<u64>,
     /// Frames per second sustained across the whole run, in milli-fps.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sustained_milli_fps: Option<u64>,
@@ -129,6 +146,10 @@ impl Scenario {
             decode: None,
             upload: None,
             decode_to_texture: None,
+            seek: None,
+            decode_forward: None,
+            frames_decoded: None,
+            seeks_issued: None,
             sustained_milli_fps: None,
             stall_threshold_nanos: None,
             stalls: None,
@@ -156,7 +177,7 @@ impl Scenario {
             },
         );
         format!(
-            "{:<10} {:<24} {}x{:<5} {:>4} frames  {:>8} fps  p50 {:>10}  p95 {:>10}{}{}",
+            "{:<10} {:<24} {}x{:<5} {:>4} frames  {:>8} fps  p50 {:>10}  p95 {:>10}{}{}{}",
             self.kind.as_str(),
             self.fixture,
             self.width,
@@ -165,6 +186,7 @@ impl Scenario {
             format_milli_fps(self.sustained_milli_fps),
             p50,
             p95,
+            self.seek_split_line(),
             match self.stalls {
                 Some(stalls) => format!("  {stalls} stalls"),
                 None => String::new(),
@@ -173,6 +195,25 @@ impl Scenario {
                 "  [decode only: no GPU]"
             } else {
                 ""
+            }
+        )
+    }
+
+    /// Where a scrub step's time went, as the summary prints it: the flushing
+    /// seek against the decode-forward, and how far into a GOP the steps
+    /// landed. Empty for a scenario that measured no seeks, so a playback line
+    /// is unchanged.
+    fn seek_split_line(&self) -> String {
+        let (Some(seek), Some(forward)) = (self.seek, self.decode_forward) else {
+            return String::new();
+        };
+        format!(
+            "  seek p50 {}  fwd p50 {}  {} frames/seek",
+            format_millis(seek.p50_nanos),
+            format_millis(forward.p50_nanos),
+            match (self.frames_decoded, self.seeks_issued) {
+                (Some(frames), Some(seeks)) if seeks > 0 => (frames / seeks).to_string(),
+                _ => "n/a".to_owned(),
             }
         )
     }

@@ -18,7 +18,12 @@ YUV-to-RGB pass the viewer uses):
 
 Scrub targets alternate between the head and the tail of the clip and work
 inward, so a run covers the whole file and every step is a real seek rather
-than the decode-forward playback gets for free.
+than the decode-forward playback gets for free. The scrub decoder is driven by
+a `PtsIndex` of the fixture, built before anything is timed, because that is how
+the viewer scrubs: the index says which keyframe a target needs, so a step never
+flushes the pipeline for a target inside the GOP the decoder is already in, and
+a step that must seek aims at the keyframe itself instead of at wherever the
+demuxer's snap falls.
 
 Two numbers come out of each scenario:
 
@@ -26,6 +31,28 @@ Two numbers come out of each scenario:
   mean, min and max. This is what the viewer pays before a scrubbed frame can
   be shown.
 * **sustained fps** — timed frames divided by the wall time of the whole run.
+
+A scrub scenario also reports where that latency went, because the two halves of
+a scrub step answer to different fixes (TASK-133):
+
+* **`seek`** — the flushing keyframe seek: the flush itself, the demuxer's
+  re-prime, and the keyframe frame it produces. Zero for a step that was reached
+  by decoding forward.
+* **`decode_forward`** — every picture between that keyframe and the frame that
+  was actually asked for.
+* **`frames_decoded`** and **`seeks_issued`** — pictures produced and flushes
+  issued across the timed steps. `frames_decoded / frames` is how deep into a
+  GOP an average step landed, and it is the number to watch: every picture over
+  one is a picture decoded only to build the reference chain of the frame the
+  scrub wanted.
+
+The summary line prints the split, so a workflow log shows it without opening
+the JSON:
+
+```
+scrub  bars_2160p_h264.mp4  3840x2160  20 frames  11.712 fps  p50 84.872 ms \
+  p95 139.836 ms  seek p50 39.610 ms  fwd p50 46.581 ms  13 frames/seek
+```
 
 Every duration in the JSON report is an exact nanosecond count and every rate
 is in milli-frames per second (`30_500` is 30.5 fps): no timing value is ever
@@ -87,6 +114,46 @@ criterion is stated against a GPU with a hardware decoder (PLAN.md §8).
 Confirming it there is TASK-74 and the `verify` tasks, on hardware neither this
 machine nor hosted CI has; when those run, add their rows here rather than
 replacing these.
+
+## Where a scrub step's time goes
+
+Recorded 2026-09-11 (TASK-133) on the same WSL2 machine as the software
+baseline above, release build, software decode, `--no-gpu --seeks 20`, so these
+are decode-only numbers: no upload, no YUV-to-RGB pass.
+
+| Fixture | seek p50 | decode-forward p50 | pictures decoded per timed step |
+| --- | --- | --- | --- |
+| `bars_1080p_h264.mp4` | 19.6 ms | 10.1 ms | 12.7 |
+| `bars_2160p_h264.mp4` | 39.6 ms | 46.6 ms | 12.0 |
+
+Both halves are large, and neither is the decode of the frame that was asked
+for. The fixtures have a one-second GOP at 25 fps, so a random target sits about
+twelve pictures past its keyframe; those twelve are decoded and thrown away, and
+on the 4K clip they are more than half the step. The rest is the flush: about
+20 ms at 1080p and 40 ms at 4K, spent before a single picture of the new
+position exists.
+
+That is the shape of the gap to phase 1's ">30 fps" criterion, and it is why
+the T4 run is only marginally better than software: a hardware decoder makes
+the pictures cheaper, not the flush, and not the number of pictures.
+
+What the index removed (TASK-133): aiming a seek at the keyframe the index names
+rather than at the target itself. A target expressed in stream time does not
+carry the offset a reordered stream's timestamps start with — 80 ms on these
+fixtures — so the demuxer could snap to the keyframe *after* the one the target
+needed, and the decoder then had to seek a second time, aiming blindly further
+back, to recover the frame: a whole extra flush plus another pass over a GOP.
+Over the 20-step 4K scrub it took the pictures decoded from 302 to 240, a fifth
+of the decode-forward work, and it removed the retry seeks. The sustained rate
+moved from 11.3 to 11.7 fps, which is inside this machine's run-to-run spread:
+the win is in the counts, and the flush is untouched.
+
+What is left for the 30 fps criterion is therefore not a tuning change. At 4K a
+step has to stop decoding a dozen pictures it does not show — a per-GOP cache of
+what a step already decoded, a keyframe-only decode while the playhead is moving
+with the accurate frame drawn when it stops, or proxies — and the flush has to
+stop costing tens of milliseconds. Those are the follow-ups; this task made the
+two costs visible and cut the wasted seeks.
 
 ## Baseline: NVIDIA T4, hardware decode (nvdec)
 

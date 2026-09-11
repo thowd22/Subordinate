@@ -68,6 +68,7 @@ use crate::audio::{
     layout_from_roles, roles_from_positions,
 };
 use crate::codes;
+use crate::index::PtsIndex;
 use crate::probe::NANOSECONDS;
 
 /// Pixel format every [`VideoFrame`] is delivered in.
@@ -276,6 +277,56 @@ impl std::fmt::Debug for VideoFrame {
     }
 }
 
+/// Where one [`Decoder::seek_to`] spent its time.
+///
+/// A scrub step is two very different costs stuck together: the flushing
+/// keyframe seek, which tears down what is in flight and makes the demuxer and
+/// the decoder start again at a keyframe, and the decode-forward from that
+/// keyframe to the frame that was actually asked for. They respond to
+/// different fixes, so the benchmark harness has to be able to tell them apart
+/// (docs/PERFORMANCE.md); this is that split, measured around the production
+/// path itself rather than guessed at from the outside.
+///
+/// Every field is an exact count, nanoseconds included: no timing value here
+/// is a float.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SeekTiming {
+    /// Nanoseconds spent issuing flushing seeks and waiting for the first
+    /// frame each one produced. Zero when the target was reached by decoding
+    /// forward inside the GOP the decoder was already in.
+    pub seek_nanos: u64,
+    /// Nanoseconds spent decoding the frames between there and the target,
+    /// the target frame included.
+    pub decode_forward_nanos: u64,
+    /// Frames pulled out of the pipeline for this step, the target included.
+    pub frames_decoded: u64,
+    /// Flushing seeks issued, usually one and zero for a forward step inside
+    /// the GOP. More than one means the first seek overshot its target and the
+    /// backoff retry ran.
+    pub seeks_issued: u64,
+}
+
+impl SeekTiming {
+    /// The whole step: both halves added together.
+    pub fn total_nanos(&self) -> u64 {
+        self.seek_nanos.saturating_add(self.decode_forward_nanos)
+    }
+
+    /// Bills the span since `mark` to one half of the step and returns the new
+    /// mark. `to_seek` charges the flushing seek, otherwise the decode-forward.
+    fn charge(&mut self, mark: Instant, to_seek: bool) -> Instant {
+        let now = Instant::now();
+        let nanos =
+            u64::try_from(now.saturating_duration_since(mark).as_nanos()).unwrap_or(u64::MAX);
+        if to_seek {
+            self.seek_nanos = self.seek_nanos.saturating_add(nanos);
+        } else {
+            self.decode_forward_nanos = self.decode_forward_nanos.saturating_add(nanos);
+        }
+        now
+    }
+}
+
 /// A decoding pipeline for one media file.
 ///
 /// See the [module documentation](self) for the pipeline shape and the
@@ -294,6 +345,8 @@ pub struct Decoder {
     seeks: u64,
     frames_since_seek: u64,
     prerolled: bool,
+    last_seek: Option<SeekTiming>,
+    index: Option<Arc<PtsIndex>>,
 }
 
 /// The audio half of a decode: the second `appsink`, the shape it negotiated,
@@ -465,6 +518,8 @@ impl Decoder {
             seeks: 0,
             frames_since_seek: 0,
             prerolled: false,
+            last_seek: None,
+            index: None,
         })
     }
 
@@ -558,15 +613,34 @@ impl Decoder {
         } else {
             target
         };
-        if plan_seek(self.position, target, self.forward_window) == SeekPlan::Reseek {
-            self.keyframe_seek(target)?;
+        let mut timing = SeekTiming::default();
+        let seeks_before = self.seeks;
+        let mut mark = Instant::now();
+        if let SeekPlan::Reseek(aim) = plan_seek(
+            self.position,
+            target,
+            self.forward_window,
+            self.index.as_deref(),
+        ) {
+            self.keyframe_seek(aim)?;
         }
         let mut backoff = duration_time(SEEK_BACKOFF);
         let mut aim = target;
         loop {
-            let Some(frame) = self.next_frame()? else {
+            let frame = self.next_frame();
+            // The wait for a frame is charged to the seek when it is the first
+            // frame after a flush -- that span carries the flush, the demuxer's
+            // re-prime and the keyframe decode -- and to the decode-forward
+            // otherwise. A frame that never arrived is still time spent, so the
+            // error and end-of-stream paths bill it too.
+            let first_after_seek = self.frames_since_seek <= 1;
+            mark = timing.charge(mark, first_after_seek);
+            let Some(frame) = frame? else {
+                timing.seeks_issued = self.seeks - seeks_before;
+                self.last_seek = Some(timing);
                 return Ok(None);
             };
+            timing.frames_decoded += 1;
             if frame.pts() < target {
                 // Between the keyframe and the target: decoded only to build
                 // the reference chain the target frame needs.
@@ -587,8 +661,34 @@ impl Decoder {
                 backoff = backoff + backoff;
                 continue;
             }
+            timing.seeks_issued = self.seeks - seeks_before;
+            self.last_seek = Some(timing);
             return Ok(Some(frame));
         }
+    }
+
+    /// Drives seek planning from a PTS index of this file.
+    ///
+    /// The index turns the GOP guess [`DecoderOptions::forward_decode_window`]
+    /// makes into knowledge: a seek then aims at the exact keyframe the target
+    /// needs, and a forward step inside the GOP the decoder is already in
+    /// decodes forward however far ahead it is instead of flushing the
+    /// pipeline. An index of some other file would only cost accuracy in
+    /// speed, not in correctness -- the decode-forward still stops at the first
+    /// frame at or after the target -- but there is no reason to hand one over.
+    ///
+    /// [`IndexedDecoder`](crate::IndexedDecoder) does this for its own index.
+    pub fn set_index(&mut self, index: Arc<PtsIndex>) {
+        self.index = Some(index);
+    }
+
+    /// How the last [`Decoder::seek_to`] split between the flushing seek and
+    /// the decode-forward, or `None` before the first one.
+    ///
+    /// This is what the benchmark harness reports per scrub step; a caller
+    /// tuning [`DecoderOptions::forward_decode_window`] can read it too.
+    pub fn last_seek_timing(&self) -> Option<SeekTiming> {
+        self.last_seek
     }
 
     /// Presentation timestamp of the last frame this decoder delivered, or
@@ -1209,31 +1309,67 @@ fn clock_time(duration: Duration) -> gst::ClockTime {
 enum SeekPlan {
     /// Keep decoding from where the pipeline already is.
     DecodeForward,
-    /// Issue a flushing keyframe-backward seek first.
-    Reseek,
+    /// Issue a flushing keyframe-backward seek aiming at this instant first.
+    /// It is the target itself when nothing better is known, and the exact
+    /// timestamp of the keyframe the target needs when an index says where
+    /// that keyframe is.
+    Reseek(RationalTime),
 }
 
-/// Decides whether a target can be reached by decoding forward.
+/// Decides whether a target can be reached by decoding forward, and where a
+/// seek that cannot should aim.
 ///
-/// Only a target strictly ahead of the current position and no further than
-/// `window` from it is decoded forward: anything behind the position needs the
-/// pipeline rewound, and anything far ahead is cheaper to reach through a
-/// keyframe seek than by decoding every picture in between.
+/// Without an index the rule is the time window: only a target strictly ahead
+/// of the current position and no further than `window` from it is decoded
+/// forward, because anything behind the position needs the pipeline rewound
+/// and anything far ahead is usually cheaper to reach through a keyframe seek
+/// than by decoding every picture in between. The window is a guess at a GOP
+/// length, and it is wrong in both directions: on a source with GOPs longer
+/// than the window it re-seeks inside the GOP the decoder is already in, and on
+/// one with shorter GOPs it decodes through whole GOPs a seek would have
+/// skipped.
+///
+/// With an index the guess is not needed (docs/PLAN.md §5.2, TASK-133). The
+/// index says which keyframe the target needs, so the answer is exact: decode
+/// forward exactly when that keyframe is at or before the current position --
+/// the decoder is already inside the GOP the target lives in, and re-seeking
+/// would decode those same pictures again -- and otherwise seek straight to
+/// that keyframe. No step then decodes more than the one GOP the target sits
+/// in, and the seek lands on the keyframe rather than wherever the demuxer's
+/// snap happens to fall.
 fn plan_seek(
     position: Option<RationalTime>,
     target: RationalTime,
     window: RationalTime,
+    index: Option<&PtsIndex>,
 ) -> SeekPlan {
+    let keyframe = index.and_then(|index| keyframe_before(index, target));
+    let aim = keyframe.unwrap_or(target);
     let Some(position) = position else {
-        return SeekPlan::Reseek;
+        return SeekPlan::Reseek(aim);
     };
     if target <= position {
-        return SeekPlan::Reseek;
+        return SeekPlan::Reseek(aim);
+    }
+    if let Some(keyframe) = keyframe {
+        return if keyframe <= position {
+            SeekPlan::DecodeForward
+        } else {
+            SeekPlan::Reseek(aim)
+        };
     }
     match target.checked_sub(position) {
         Some(ahead) if ahead <= window => SeekPlan::DecodeForward,
-        _ => SeekPlan::Reseek,
+        _ => SeekPlan::Reseek(aim),
     }
+}
+
+/// Timestamp of the keyframe a decode that must produce the frame at or after
+/// `target` has to start from, or `None` when the index cannot answer: the
+/// target is past the last picture, or no keyframe precedes it.
+fn keyframe_before(index: &PtsIndex, target: RationalTime) -> Option<RationalTime> {
+    let frame = index.frame_at_or_after(target)?;
+    index.pts(index.keyframe_at_or_before(frame)?)
 }
 
 /// How far before its target a seek that overshot aims on its next attempt.
@@ -1543,7 +1679,7 @@ mod tests {
         for ahead in [1_i64, 40_000_000, 2_000_000_000] {
             let target = nanoseconds(u64::try_from(1_000_000_000 + ahead).expect("positive"));
             assert_eq!(
-                super::plan_seek(Some(position), target, window),
+                super::plan_seek(Some(position), target, window, None),
                 super::SeekPlan::DecodeForward,
                 "{ahead} ns ahead is inside the GOP window"
             );
@@ -1564,8 +1700,8 @@ mod tests {
             nanoseconds(600_000_000_000),
         ] {
             assert_eq!(
-                super::plan_seek(Some(position), target, window),
-                super::SeekPlan::Reseek,
+                super::plan_seek(Some(position), target, window, None),
+                super::SeekPlan::Reseek(target),
                 "{} ns must re-seek",
                 target.value()
             );
@@ -1576,8 +1712,8 @@ mod tests {
     fn the_first_seek_of_a_fresh_decoder_always_seeks() {
         let window = super::duration_time(Duration::from_secs(2));
         assert_eq!(
-            super::plan_seek(None, nanoseconds(0), window),
-            super::SeekPlan::Reseek,
+            super::plan_seek(None, nanoseconds(0), window, None),
+            super::SeekPlan::Reseek(nanoseconds(0)),
             "nothing has been decoded, so there is nothing to decode forward from"
         );
     }
@@ -1592,14 +1728,133 @@ mod tests {
         let window = super::duration_time(Duration::from_secs(2));
         let just_before = nanoseconds(10_009_999_999);
         assert_eq!(
-            super::plan_seek(Some(just_before), target, window),
+            super::plan_seek(Some(just_before), target, window, None),
             super::SeekPlan::DecodeForward,
             "the target is 10.01 s, which is still ahead of 10.009999999 s"
         );
         let just_after = nanoseconds(10_010_000_001);
         assert_eq!(
-            super::plan_seek(Some(just_after), target, window),
-            super::SeekPlan::Reseek
+            super::plan_seek(Some(just_after), target, window, None),
+            super::SeekPlan::Reseek(target),
+            "without an index a re-seek aims at the target itself"
+        );
+    }
+
+    /// Twenty-five pictures at 25 fps with a keyframe every five: one second
+    /// of a five-frame-GOP source, which is what the planner reasons about.
+    fn gop_index() -> crate::index::PtsIndex {
+        let entries = (0..25)
+            .map(|frame| crate::index::IndexEntry {
+                pts_ns: frame * 40_000_000,
+                keyframe: frame % 5 == 0,
+            })
+            .collect();
+        crate::index::PtsIndex::from_entries(entries)
+    }
+
+    #[test]
+    fn an_indexed_seek_aims_at_the_keyframe_the_target_needs() {
+        let index = gop_index();
+        let window = super::duration_time(Duration::from_secs(2));
+        // Frame 13 sits in the GOP that starts at frame 10, which is 400 ms in.
+        let target = nanoseconds(520_000_000);
+        assert_eq!(
+            super::plan_seek(None, target, window, Some(&index)),
+            super::SeekPlan::Reseek(nanoseconds(400_000_000)),
+            "the seek aims at the keyframe rather than at the target"
+        );
+        // A target between two pictures needs the keyframe of the later one,
+        // which is the frame that will actually be delivered.
+        assert_eq!(
+            super::plan_seek(None, nanoseconds(399_999_999), window, Some(&index)),
+            super::SeekPlan::Reseek(nanoseconds(400_000_000))
+        );
+    }
+
+    #[test]
+    fn an_indexed_forward_step_inside_the_gop_never_seeks() {
+        let index = gop_index();
+        // A window so narrow that the time rule would re-seek for anything.
+        let window = super::duration_time(Duration::from_millis(1));
+        let position = nanoseconds(440_000_000);
+        for target in [480_000_000_u64, 520_000_000, 560_000_000] {
+            assert_eq!(
+                super::plan_seek(Some(position), nanoseconds(target), window, Some(&index)),
+                super::SeekPlan::DecodeForward,
+                "{target} ns is in the GOP the decoder is already inside"
+            );
+        }
+    }
+
+    #[test]
+    fn an_indexed_forward_step_into_the_next_gop_seeks_to_its_keyframe() {
+        let index = gop_index();
+        // A window wide enough that the time rule would decode forward through
+        // the rest of this GOP and all of the next: the index knows better.
+        let window = super::duration_time(Duration::from_secs(2));
+        let position = nanoseconds(440_000_000);
+        assert_eq!(
+            super::plan_seek(
+                Some(position),
+                nanoseconds(640_000_000),
+                window,
+                Some(&index)
+            ),
+            super::SeekPlan::Reseek(nanoseconds(600_000_000)),
+            "no step decodes through more than the GOP its target sits in"
+        );
+    }
+
+    #[test]
+    fn an_index_that_cannot_answer_falls_back_to_the_time_window() {
+        let index = gop_index();
+        let window = super::duration_time(Duration::from_secs(2));
+        // Past the last indexed picture: nothing to learn, so the window rule
+        // decides and the seek aims at the target itself.
+        let past_the_end = nanoseconds(2_000_000_000);
+        assert_eq!(
+            super::plan_seek(None, past_the_end, window, Some(&index)),
+            super::SeekPlan::Reseek(past_the_end)
+        );
+        assert_eq!(
+            super::plan_seek(
+                Some(nanoseconds(1_999_000_000)),
+                past_the_end,
+                window,
+                Some(&index)
+            ),
+            super::SeekPlan::DecodeForward
+        );
+    }
+
+    #[test]
+    fn a_backward_target_re_seeks_even_inside_the_current_gop() {
+        let index = gop_index();
+        let window = super::duration_time(Duration::from_secs(2));
+        // The pipeline cannot run backwards, so a target behind the position is
+        // a seek however close it is -- but it aims at the keyframe.
+        assert_eq!(
+            super::plan_seek(
+                Some(nanoseconds(440_000_000)),
+                nanoseconds(400_000_000),
+                window,
+                Some(&index)
+            ),
+            super::SeekPlan::Reseek(nanoseconds(400_000_000))
+        );
+    }
+
+    #[test]
+    fn seek_timing_charges_each_half_of_a_step_separately() {
+        let mut timing = super::SeekTiming::default();
+        let mark = std::time::Instant::now();
+        let mark = timing.charge(mark, true);
+        let _ = timing.charge(mark, false);
+        assert!(timing.seek_nanos > 0, "the seek half was billed");
+        assert!(timing.decode_forward_nanos > 0, "so was the other half");
+        assert_eq!(
+            timing.total_nanos(),
+            timing.seek_nanos + timing.decode_forward_nanos
         );
     }
 
