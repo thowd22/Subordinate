@@ -1334,7 +1334,15 @@ knowing:
 
 Unlike the AppImage, the Flatpak's GStreamer is whatever the runtime ships
 (1.26+ on 25.08), not the 1.28 pin -- that is the trade the package makes for
-not carrying a runtime of its own.
+not carrying a runtime of its own. It also inherits the runtime's *encoders*,
+and the 25.08 runtime has **no ranked AAC encoder**: `voaacenc`, `fdkaacenc`
+and `faac` are absent and `avenc_aac` is rank NONE (measured inside the sandbox
+on box, run 34633406106). Every `youtube-*` preset is AAC in MP4, so a Flatpak
+user exporting one gets `export.no_encoder` today. The packaging job works
+around it for verification with `GST_PLUGIN_FEATURE_RANK=avenc_aac:256` and
+says so in its summary; the real fix is either an AAC encoder module in the
+manifest or letting the app promote `avenc_aac` itself, which is a product
+decision, not a packaging one.
 
 ```bash
 packaging/flatpak/build-flatpak.sh --install-deps   # first time

@@ -28,13 +28,9 @@ name: Packaging
 
 on:
   workflow_dispatch:
-  # TEMPORARY (TASK-103): GitHub refuses workflow_dispatch for a workflow file
-  # that is changed off the default branch, and these jobs can only be proved
-  # by running them. Remove before merging.
   # No `paths` filter on the tag trigger: GitHub ANDs the two, so a release tag
   # whose commit happens not to touch packaging/ would be skipped.
   push:
-    branches: [task/task-103-fix]
     tags: ['v*']
   pull_request:
     paths:
