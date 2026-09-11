@@ -1846,10 +1846,23 @@ mod tests {
 
     #[test]
     fn seek_timing_charges_each_half_of_a_step_separately() {
+        // A coarse platform clock (Windows in particular) can report a zero
+        // elapsed time across two adjacent reads, so wait for it to tick
+        // rather than assume any work takes a measurable moment.
+        fn after_a_tick(mark: std::time::Instant) -> std::time::Instant {
+            loop {
+                let now = std::time::Instant::now();
+                if now.saturating_duration_since(mark).as_nanos() > 0 {
+                    return mark;
+                }
+                std::hint::spin_loop();
+            }
+        }
+
         let mut timing = super::SeekTiming::default();
         let mark = std::time::Instant::now();
-        let mark = timing.charge(mark, true);
-        let _ = timing.charge(mark, false);
+        let mark = timing.charge(after_a_tick(mark), true);
+        let _ = timing.charge(after_a_tick(mark), false);
         assert!(timing.seek_nanos > 0, "the seek half was billed");
         assert!(timing.decode_forward_nanos > 0, "so was the other half");
         assert_eq!(
