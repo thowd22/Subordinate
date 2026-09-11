@@ -6,8 +6,16 @@
 //! the panel asks for is performed against a real [`History`] holding real
 //! track commands, because what matters is that the project ends up where the
 //! clicked row says it should.
+//!
+//! The last two tests go through the shared `egui_kittest` harness instead
+//! (TASK-122): one commits the panel's picture after three edits as a
+//! snapshot, and one clicks a row by the label a user reads rather than by a
+//! rectangle, so the accessible tree is part of the contract.
+
+mod support;
 
 use eframe::egui;
+use egui_kittest::kittest::Queryable;
 use sub_edit::History;
 use sub_edit::commands::{AddTrack, RenameTrack, SetTrackMuted};
 use sub_model::sequence::SequenceSettings;
@@ -292,4 +300,113 @@ fn a_jump_past_the_end_of_a_stale_list_stops_at_the_end() {
 #[test]
 fn the_open_state_row_is_named() {
     assert_eq!(ORIGINAL_STATE_LABEL, "Open state");
+}
+
+/// A real project, the history over it and the panel showing that history.
+struct Scene {
+    /// The project the jumps are performed against.
+    project: Project,
+    /// The history the panel lists.
+    history: History,
+    /// The panel under test.
+    panel: HistoryPanel,
+    /// Every jump the panel asked for, in order.
+    asked: Vec<HistoryAction>,
+}
+
+impl Scene {
+    /// A scene whose history holds the three edits the tests jump around in.
+    fn new() -> Self {
+        let (mut project, sequence) = project();
+        let mut history = History::new();
+        three_edits(&mut project, &mut history, sequence);
+        Self {
+            project,
+            history,
+            panel: HistoryPanel::new(),
+            asked: Vec::new(),
+        }
+    }
+
+    /// The label of the row for the command at `index`, as a user reads it.
+    fn label(&self, index: usize) -> String {
+        HistoryList::from_history(&self.history).labels()[index].clone()
+    }
+
+    /// The first track of the sequence the edits were made on.
+    fn track(&self) -> &sub_model::Track {
+        &self.project.sequences[0].tracks[0]
+    }
+}
+
+#[test]
+fn the_history_panel_matches_its_snapshot_after_three_edits() {
+    if !support::can_render() {
+        return;
+    }
+    let scene = Scene::new();
+    let list = HistoryList::from_history(&scene.history);
+    assert_eq!(list.len(), 3, "three commands are listed");
+    let mut panel = HistoryPanel::new();
+    let mut harness = support::panel_harness(|ui| {
+        panel.ui(ui, &list);
+    });
+    harness.run();
+    support::snapshot(&mut harness, "history_panel_three_edits");
+}
+
+#[test]
+fn clicking_a_history_row_through_the_harness_jumps_the_project() {
+    let scene = Scene::new();
+    let first = scene.label(0);
+    let mut harness = support::panel_harness_state(scene, |ui, scene| {
+        // The list is rebuilt every frame, exactly as the app rebuilds it
+        // from the engine's history, so a performed jump shows up in the next
+        // paint rather than in a cached list.
+        let list = HistoryList::from_history(&scene.history);
+        if let Some(action) = scene.panel.ui(ui, &list) {
+            scene.asked.push(action);
+            action
+                .perform(&mut scene.history, &mut scene.project)
+                .expect("the clicked jump performs");
+        }
+    });
+    harness.run();
+    assert_eq!(
+        harness.state().track().name,
+        "Picture",
+        "the project starts at the end of the history"
+    );
+    assert!(harness.state().track().muted);
+
+    harness.get_by_label(&first).click();
+    harness.run();
+    assert_eq!(
+        harness.state().asked,
+        vec![HistoryAction::Undo { steps: 2 }],
+        "clicking the first command's row undoes everything after it"
+    );
+    assert_eq!(
+        harness.state().track().name,
+        "V1",
+        "and the project is back at the state that row names"
+    );
+    assert!(!harness.state().track().muted);
+    assert_eq!(
+        HistoryList::from_history(&harness.state().history).position(),
+        1,
+        "with the panel's marker on the clicked row"
+    );
+
+    // And forward again: the last row redoes what the click undid.
+    let last = harness.state().label(2);
+    harness.get_by_label(&last).click();
+    harness.run();
+    assert_eq!(
+        harness.state().asked.last(),
+        Some(&HistoryAction::Redo { steps: 2 }),
+        "clicking a row above the marker redoes up to it"
+    );
+    assert_eq!(harness.state().track().name, "Picture");
+    assert!(harness.state().track().muted);
 }
