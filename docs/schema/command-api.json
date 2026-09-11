@@ -1297,6 +1297,29 @@
       ],
       "type": "object"
     },
+    "MediaListResult": {
+      "description": "The result of [`MEDIA_LIST`].",
+      "properties": {
+        "media": {
+          "description": "Every media item, in project order.",
+          "items": {
+            "$ref": "#/$defs/MediaItem"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "description": "The revision the project was read at.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "media"
+      ],
+      "type": "object"
+    },
     "MediaPath": {
       "description": "A slash-separated project-relative media path.",
       "type": "string"
@@ -1475,6 +1498,20 @@
       ],
       "type": "object"
     },
+    "NewProjectParams": {
+      "additionalProperties": false,
+      "description": "The parameters of [`PROJECT_NEW`].",
+      "properties": {
+        "name": {
+          "description": "The name the new project takes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
     "NoParams": {
       "additionalProperties": false,
       "description": "The parameters of every method that takes none.",
@@ -1484,6 +1521,44 @@
       "description": "Opacity in micro-units, from 0 to 1000000.",
       "format": "int64",
       "type": "integer"
+    },
+    "OpenProjectParams": {
+      "additionalProperties": false,
+      "description": "The parameters of [`PROJECT_OPEN`].",
+      "properties": {
+        "path": {
+          "description": "The project file to read.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "PlayParams": {
+      "additionalProperties": false,
+      "description": "The parameters of [`PLAYBACK_PLAY`].",
+      "properties": {
+        "sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The sequence to play; absent keeps the transport on the one it is on."
+        },
+        "speed": {
+          "$ref": "#/$defs/ShuttleSpeed",
+          "default": "forward1x",
+          "description": "How fast, and in which direction; the default is forward at 1x."
+        }
+      },
+      "type": "object"
     },
     "Point2": {
       "additionalProperties": false,
@@ -2054,6 +2129,20 @@
       ],
       "type": "object"
     },
+    "ReplaceProject": {
+      "additionalProperties": false,
+      "description": "Replaces the whole open project.\n\n```\nuse sub_edit::History;\nuse sub_edit::commands::ReplaceProject;\nuse sub_model::Project;\n\nlet mut project = Project::new(\"Doc cut\");\nlet mut history = History::new();\nhistory\n    .apply(&mut project, ReplaceProject::new(Project::new(\"Trailer\")))\n    .unwrap();\nassert_eq!(project.name, \"Trailer\");\n\nhistory.undo(&mut project).unwrap();\nassert_eq!(project.name, \"Doc cut\");\n```",
+      "properties": {
+        "project": {
+          "$ref": "#/$defs/Project",
+          "description": "The document that takes the open one's place."
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "type": "object"
+    },
     "Resolution": {
       "additionalProperties": false,
       "description": "A pixel canvas size. Both dimensions are non-zero.\n\nOTIO has no counterpart: it stores no rendering resolution.",
@@ -2138,6 +2227,47 @@
       ],
       "type": "object"
     },
+    "SaveProjectParams": {
+      "additionalProperties": false,
+      "description": "The parameters of [`PROJECT_SAVE`].",
+      "properties": {
+        "path": {
+          "description": "Where the project file is written.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "SaveResult": {
+      "description": "The result of [`PROJECT_SAVE`].",
+      "properties": {
+        "bytes": {
+          "description": "How many bytes it holds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Where the file was written.",
+          "type": "string"
+        },
+        "revision": {
+          "description": "The revision that was written.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "bytes",
+        "revision"
+      ],
+      "type": "object"
+    },
     "Scale2": {
       "additionalProperties": false,
       "description": "A per-axis scale factor. Neither axis may be zero; a negative axis mirrors.",
@@ -2154,6 +2284,32 @@
       "required": [
         "x",
         "y"
+      ],
+      "type": "object"
+    },
+    "SeekParams": {
+      "additionalProperties": false,
+      "description": "The parameters of [`PLAYBACK_SEEK`].",
+      "properties": {
+        "position": {
+          "$ref": "#/$defs/RationalTime",
+          "description": "Where the playhead goes, as an exact rational time."
+        },
+        "sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The sequence to seek in; absent keeps the transport on the one it is on."
+        }
+      },
+      "required": [
+        "position"
       ],
       "type": "object"
     },
@@ -2202,6 +2358,48 @@
       "format": "uuid",
       "type": "string"
     },
+    "SequenceListResult": {
+      "description": "The result of [`PROJECT_LIST_SEQUENCES`].",
+      "properties": {
+        "revision": {
+          "description": "The revision the project was read at.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sequences": {
+          "description": "The sequences, in tab order.",
+          "items": {
+            "$ref": "#/$defs/SequenceSummary"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "sequences"
+      ],
+      "type": "object"
+    },
+    "SequenceParams": {
+      "additionalProperties": false,
+      "description": "The parameters of every method that takes an optional sequence.",
+      "properties": {
+        "sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Which sequence; absent takes the project's only one."
+        }
+      },
+      "type": "object"
+    },
     "SequenceSettings": {
       "additionalProperties": false,
       "description": "The canvas, timebase, audio rate and colour tags of a [`Sequence`].\n\nOTIO stores only the rate, implicitly, on each item's `RationalTime`.",
@@ -2230,6 +2428,41 @@
         "frame_rate",
         "sample_rate",
         "color"
+      ],
+      "type": "object"
+    },
+    "SequenceSummary": {
+      "description": "One sequence, as the listing describes it.",
+      "properties": {
+        "duration": {
+          "$ref": "#/$defs/RationalTime",
+          "description": "How far its last item reaches."
+        },
+        "id": {
+          "$ref": "#/$defs/SequenceId",
+          "description": "The sequence's stable identifier."
+        },
+        "name": {
+          "description": "Its display name.",
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/$defs/SequenceSettings",
+          "description": "Its canvas, timebase, audio rate and colour tags."
+        },
+        "tracks": {
+          "description": "How many tracks it holds.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "settings",
+        "tracks",
+        "duration"
       ],
       "type": "object"
     },
@@ -2510,6 +2743,86 @@
       ],
       "type": "object"
     },
+    "SettingsResult": {
+      "description": "The result of [`PROJECT_SETTINGS`].",
+      "properties": {
+        "id": {
+          "description": "The project's stable identifier.",
+          "type": "string"
+        },
+        "media_count": {
+          "description": "How many media items it references.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "description": "Its display name.",
+          "type": "string"
+        },
+        "revision": {
+          "description": "The revision the project was read at.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sequences": {
+          "description": "The settings of each sequence, which is where canvas and timebase live.",
+          "items": {
+            "$ref": "#/$defs/SequenceSummary"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "id",
+        "name",
+        "media_count",
+        "sequences"
+      ],
+      "type": "object"
+    },
+    "ShuttleSpeed": {
+      "description": "How fast, and in which direction, playback is running.\n\nJKL shuttling is the NLE convention: L plays forward and each further press\ndoubles the speed to 2x then 4x, J does the same backwards, and K pauses.\nThe set is closed at 4x, which is as fast as the MVP shuttles.",
+      "oneOf": [
+        {
+          "const": "paused",
+          "description": "Stopped: the playhead stays where it is.",
+          "type": "string"
+        },
+        {
+          "const": "forward1x",
+          "description": "Forward at normal speed.",
+          "type": "string"
+        },
+        {
+          "const": "forward2x",
+          "description": "Forward at twice normal speed.",
+          "type": "string"
+        },
+        {
+          "const": "forward4x",
+          "description": "Forward at four times normal speed.",
+          "type": "string"
+        },
+        {
+          "const": "reverse1x",
+          "description": "Backwards at normal speed.",
+          "type": "string"
+        },
+        {
+          "const": "reverse2x",
+          "description": "Backwards at twice normal speed.",
+          "type": "string"
+        },
+        {
+          "const": "reverse4x",
+          "description": "Backwards at four times normal speed.",
+          "type": "string"
+        }
+      ]
+    },
     "SplitClip": {
       "additionalProperties": false,
       "description": "Cuts a clip in two at a timeline instant.\n\nThe head keeps the clip's identity and the tail becomes a new clip butt\njoined to it, so nothing on the track moves. `at` must fall strictly inside\nthe clip: splitting at either boundary, or outside the clip, returns\n`edit.invalid_split` rather than silently doing nothing, because it almost\nalways means the caller aimed at the wrong clip or the wrong instant.",
@@ -2619,6 +2932,31 @@
       "required": [
         "start",
         "duration"
+      ],
+      "type": "object"
+    },
+    "TimelineStateResult": {
+      "description": "The result of [`TIMELINE_GET_STATE`].",
+      "properties": {
+        "duration": {
+          "$ref": "#/$defs/RationalTime",
+          "description": "How far the sequence's last item reaches."
+        },
+        "revision": {
+          "description": "The revision the sequence was read at.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sequence": {
+          "$ref": "#/$defs/Sequence",
+          "description": "The sequence itself: tracks, clips, transitions and markers."
+        }
+      },
+      "required": [
+        "revision",
+        "duration",
+        "sequence"
       ],
       "type": "object"
     },
@@ -2845,6 +3183,52 @@
           "type": "object"
         }
       ]
+    },
+    "TransportResult": {
+      "description": "The result of every `playback.*` method the engine serves.",
+      "properties": {
+        "dropped_frames": {
+          "description": "Frames dropped in this run of playback.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "duration": {
+          "$ref": "#/$defs/RationalTime",
+          "description": "How long the sequence being played is."
+        },
+        "loop_range": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimeRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The loop range in force, if any."
+        },
+        "playing": {
+          "description": "Whether playback is running.",
+          "type": "boolean"
+        },
+        "position": {
+          "$ref": "#/$defs/RationalTime",
+          "description": "Where the playhead is."
+        },
+        "speed": {
+          "$ref": "#/$defs/ShuttleSpeed",
+          "description": "The shuttle speed."
+        }
+      },
+      "required": [
+        "position",
+        "duration",
+        "speed",
+        "playing",
+        "dropped_frames"
+      ],
+      "type": "object"
     },
     "TrimClipIn": {
       "additionalProperties": false,
@@ -3398,6 +3782,17 @@
       }
     },
     {
+      "description": "List every media item the project references, in project order.",
+      "kind": "query",
+      "name": "media.list",
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/MediaListResult"
+      }
+    },
+    {
       "description": "Point a media item at a different file on disk.",
       "kind": "command",
       "name": "media.relink",
@@ -3464,6 +3859,50 @@
       }
     },
     {
+      "description": "Stop playback, leaving the playhead where it stands.",
+      "kind": "query",
+      "name": "playback.pause",
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TransportResult"
+      }
+    },
+    {
+      "description": "Start playback, forwards or backwards, at a shuttle speed.",
+      "kind": "query",
+      "name": "playback.play",
+      "params": {
+        "$ref": "#/$defs/PlayParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TransportResult"
+      }
+    },
+    {
+      "description": "Move the playhead to an exact time, without stopping playback.",
+      "kind": "query",
+      "name": "playback.seek",
+      "params": {
+        "$ref": "#/$defs/SeekParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TransportResult"
+      }
+    },
+    {
+      "description": "Read where the playhead is and whether playback is running.",
+      "kind": "query",
+      "name": "playback.status",
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TransportResult"
+      }
+    },
+    {
       "description": "Read the whole project as JSON, with the revision it was read at.",
       "kind": "query",
       "name": "project.get",
@@ -3475,6 +3914,50 @@
       }
     },
     {
+      "description": "List the project's sequences, with their settings and their length.",
+      "kind": "query",
+      "name": "project.list_sequences",
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SequenceListResult"
+      }
+    },
+    {
+      "description": "Replace the open project with a new, empty one, undoably.",
+      "kind": "query",
+      "name": "project.new",
+      "params": {
+        "$ref": "#/$defs/NewProjectParams"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Open a project file, replacing the open project undoably.",
+      "kind": "query",
+      "name": "project.open",
+      "params": {
+        "$ref": "#/$defs/OpenProjectParams"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Replace the whole open project with another one.",
+      "kind": "command",
+      "name": "project.replace",
+      "params": {
+        "$ref": "#/$defs/ReplaceProject"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
       "description": "Read the project's current revision number without reading the project.",
       "kind": "query",
       "name": "project.revision",
@@ -3483,6 +3966,28 @@
       },
       "result": {
         "$ref": "#/$defs/RevisionResult"
+      }
+    },
+    {
+      "description": "Write the open project to a file as JSON.",
+      "kind": "query",
+      "name": "project.save",
+      "params": {
+        "$ref": "#/$defs/SaveProjectParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SaveResult"
+      }
+    },
+    {
+      "description": "Read the open project's name, identity and per-sequence settings.",
+      "kind": "query",
+      "name": "project.settings",
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SettingsResult"
       }
     },
     {
@@ -3549,6 +4054,138 @@
       },
       "result": {
         "$ref": "#/$defs/ListMethodsResult"
+      }
+    },
+    {
+      "description": "Add a clip to a track of a sequence at a given start time.",
+      "kind": "command",
+      "name": "timeline.add_clip",
+      "params": {
+        "$ref": "#/$defs/AddClip"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Add a marker to a sequence or to a clip.",
+      "kind": "command",
+      "name": "timeline.add_marker",
+      "params": {
+        "$ref": "#/$defs/AddMarker"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Add a track to a sequence.",
+      "kind": "command",
+      "name": "timeline.add_track",
+      "params": {
+        "$ref": "#/$defs/AddTrack"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Remove a clip, leaving a gap where it was.",
+      "kind": "command",
+      "name": "timeline.delete_clip",
+      "params": {
+        "$ref": "#/$defs/RemoveClip"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Read one sequence whole, as the OTIO-shaped JSON the project file stores.",
+      "kind": "query",
+      "name": "timeline.get_state",
+      "params": {
+        "$ref": "#/$defs/SequenceParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TimelineStateResult"
+      }
+    },
+    {
+      "description": "Move a clip along its track, or to another track of the same sequence.",
+      "kind": "command",
+      "name": "timeline.move_clip",
+      "params": {
+        "$ref": "#/$defs/MoveClip"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Remove a marker from a sequence or from a clip.",
+      "kind": "command",
+      "name": "timeline.remove_marker",
+      "params": {
+        "$ref": "#/$defs/RemoveMarker"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Remove a track from a sequence, with everything on it.",
+      "kind": "command",
+      "name": "timeline.remove_track",
+      "params": {
+        "$ref": "#/$defs/RemoveTrack"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Remove a clip and close the gap by pulling everything after it back.",
+      "kind": "command",
+      "name": "timeline.ripple_delete_clip",
+      "params": {
+        "$ref": "#/$defs/RippleDelete"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Split a clip in two at a time inside it.",
+      "kind": "command",
+      "name": "timeline.split_clip",
+      "params": {
+        "$ref": "#/$defs/SplitClip"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Move a clip's in point, keeping its out point where it is.",
+      "kind": "command",
+      "name": "timeline.trim_clip_in",
+      "params": {
+        "$ref": "#/$defs/TrimClipIn"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Move a clip's out point, keeping its in point where it is.",
+      "kind": "command",
+      "name": "timeline.trim_clip_out",
+      "params": {
+        "$ref": "#/$defs/TrimClipOut"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
       }
     },
     {

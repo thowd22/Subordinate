@@ -1,0 +1,500 @@
+{
+  "$defs": {
+    "AppliedResult": {
+      "description": "What one applied, undone or redone command did.\n\nThe project itself is deliberately not included: a caller that wants it\nasks for [`PROJECT_GET`], so a chatty edit session does not serialise the\nwhole timeline on every call.",
+      "properties": {
+        "events": {
+          "description": "What changed, in the order it changed.",
+          "items": {
+            "$ref": "#/$defs/ChangeEvent"
+          },
+          "type": "array"
+        },
+        "label": {
+          "description": "The label of the history step, as the undo menu shows it.",
+          "type": "string"
+        },
+        "revision": {
+          "description": "The revision the project reached.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "label",
+        "events"
+      ],
+      "type": "object"
+    },
+    "ChangeEvent": {
+      "description": "One change to one entity, broadcast after the engine applied it.\n\nThe JSON shape is stable: it is what the Command API's event subscriptions\nsend.",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeType",
+          "description": "What happened to it."
+        },
+        "command": {
+          "description": "The stable kind of the command responsible, such as `clip.trim_in`.",
+          "type": "string"
+        },
+        "entity": {
+          "$ref": "#/$defs/EntityKind",
+          "description": "The kind of entity that changed."
+        },
+        "id": {
+          "description": "The identifier of the entity, when the command names one. Commands that\nmint an identifier — `track.add`, `sequence.create` — do not.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "$ref": "#/$defs/ChangeOrigin",
+          "description": "Whether the command was applied, undone or redone."
+        },
+        "revision": {
+          "description": "The revision the project reached; every event of one engine operation\ncarries the same revision, and revisions only ever increase.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "entity",
+        "change",
+        "command",
+        "origin"
+      ],
+      "type": "object"
+    },
+    "ChangeOrigin": {
+      "description": "Why the engine applied the command that produced the event.",
+      "oneOf": [
+        {
+          "const": "apply",
+          "description": "A command submitted by a client.",
+          "type": "string"
+        },
+        {
+          "const": "undo",
+          "description": "A history step being undone.",
+          "type": "string"
+        },
+        {
+          "const": "redo",
+          "description": "A history step being redone.",
+          "type": "string"
+        }
+      ]
+    },
+    "ChangeType": {
+      "description": "What happened to the entity.",
+      "oneOf": [
+        {
+          "const": "added",
+          "description": "The entity now exists and did not before.",
+          "type": "string"
+        },
+        {
+          "const": "removed",
+          "description": "The entity no longer exists.",
+          "type": "string"
+        },
+        {
+          "const": "modified",
+          "description": "The entity still exists with different contents.",
+          "type": "string"
+        }
+      ]
+    },
+    "EntityKind": {
+      "description": "The kind of entity a change touched, such as `clip` or `track`.\n\nIt is a string newtype rather than a closed enum because plugin command\nkinds carry entity names this build does not know; the constants cover the\nbuilt-in model. Like an error code, an existing name is never given a new\nmeaning.",
+      "type": "string"
+    },
+    "ExportParams": {
+      "additionalProperties": false,
+      "description": "The parameters of [`EXPORT_RENDER`].",
+      "properties": {
+        "output": {
+          "description": "Where the finished file goes.",
+          "type": "string"
+        },
+        "preset": {
+          "description": "The export preset, by id, as [`EXPORT_LIST_PRESETS`] names it.",
+          "type": "string"
+        },
+        "range": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FrameRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The frames to write; absent writes the whole sequence."
+        },
+        "sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Which sequence; absent takes the project's only one."
+        }
+      },
+      "required": [
+        "preset",
+        "output"
+      ],
+      "type": "object"
+    },
+    "ExportStatus": {
+      "description": "Where an export has got to.",
+      "properties": {
+        "error": {
+          "description": "The failure, as the standard JSON error, when the state is `failed`."
+        },
+        "frames_done": {
+          "description": "Frames written so far.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "frames_total": {
+          "description": "Frames the export will write in total.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "job": {
+          "description": "The job id, which [`EXPORT_PROGRESS`] takes.",
+          "type": "string"
+        },
+        "output": {
+          "description": "Where the file is being written.",
+          "type": "string"
+        },
+        "permille": {
+          "description": "How far along it is, in thousandths of a percent, so nothing is\nreported as a float.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "description": "`running`, `completed`, `failed` or `cancelled`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job",
+        "state",
+        "frames_done",
+        "frames_total",
+        "permille",
+        "output"
+      ],
+      "type": "object"
+    },
+    "FrameImage": {
+      "description": "One frame, encoded.",
+      "properties": {
+        "data": {
+          "description": "The PNG itself, base64-encoded, as an MCP image content block carries\nit.",
+          "type": "string"
+        },
+        "height": {
+          "description": "The picture's height in pixels.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mime_type": {
+          "description": "Always `image/png`.",
+          "type": "string"
+        },
+        "time": {
+          "$ref": "#/$defs/RationalTime",
+          "description": "The time that was drawn."
+        },
+        "width": {
+          "description": "The picture's width in pixels.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "data",
+        "mime_type",
+        "width",
+        "height",
+        "time"
+      ],
+      "type": "object"
+    },
+    "FrameParams": {
+      "additionalProperties": false,
+      "description": "The parameters of [`PLAYBACK_RENDER_FRAME_PNG`].",
+      "properties": {
+        "sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Which sequence; absent takes the project's only one."
+        },
+        "time": {
+          "$ref": "#/$defs/RationalTime",
+          "description": "The exact time on the sequence's timeline to draw."
+        },
+        "width": {
+          "default": null,
+          "description": "The width to scale the picture to; absent draws at the canvas width.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "time"
+      ],
+      "type": "object"
+    },
+    "FrameRange": {
+      "additionalProperties": false,
+      "description": "The frames an export covers, at the sequence's own timebase.",
+      "properties": {
+        "end_frame": {
+          "default": null,
+          "description": "One past the last frame written; absent runs to the end.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "start_frame": {
+          "description": "The first frame written.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_frame"
+      ],
+      "type": "object"
+    },
+    "MediaId": {
+      "description": "The canonical lowercase hyphenated UUIDv7 of a media.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "NoParams": {
+      "additionalProperties": false,
+      "description": "The parameters of every method that takes none.",
+      "type": "object"
+    },
+    "PresetListResult": {
+      "description": "The result of [`EXPORT_LIST_PRESETS`].",
+      "properties": {
+        "presets": {
+          "description": "The presets, in the library's order.",
+          "items": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "presets"
+      ],
+      "type": "object"
+    },
+    "ProbeParams": {
+      "additionalProperties": false,
+      "description": "The parameters of [`MEDIA_PROBE`]: exactly one of the two.",
+      "properties": {
+        "media": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MediaId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A media item of the open project to read."
+        },
+        "path": {
+          "default": null,
+          "description": "A file to read, named directly.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ProgressParams": {
+      "additionalProperties": false,
+      "description": "The parameters of [`EXPORT_PROGRESS`].",
+      "properties": {
+        "job": {
+          "description": "The job id [`EXPORT_RENDER`] answered with.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job"
+      ],
+      "type": "object"
+    },
+    "ProxyParams": {
+      "additionalProperties": false,
+      "description": "The parameters of [`MEDIA_MAKE_PROXY`].",
+      "properties": {
+        "media": {
+          "$ref": "#/$defs/MediaId",
+          "description": "The media item to make a proxy for."
+        }
+      },
+      "required": [
+        "media"
+      ],
+      "type": "object"
+    },
+    "Rational": {
+      "description": "A strictly positive rational rate in units per second, held in lowest terms.\n\nA rate of `numerator / denominator` means that one unit of a\n[`RationalTime`](crate::RationalTime) at this rate lasts\n`denominator / numerator` seconds. NTSC rates are represented exactly:\n23.976 fps is `24000/1001`, never a float.",
+      "properties": {
+        "denominator": {
+          "description": "Seconds per `numerator` units; strictly positive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numerator": {
+          "description": "Units per `denominator` seconds; strictly positive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "numerator",
+        "denominator"
+      ],
+      "type": "object"
+    },
+    "RationalTime": {
+      "additionalProperties": false,
+      "description": "An exact instant or duration: an integer `value` of units at a rational\n`rate`.\n\nThe wall-clock length is `value * rate.denominator() / rate.numerator()`\nseconds. All arithmetic here is integer arithmetic; no operation on this\ntype uses a float, so edits never drift (see docs/PLAN.md §5.1).\n\nEquality and ordering compare the *duration in seconds*, not the raw\nrepresentation: `1` frame at 24 fps equals `2` frames at 48 fps. [`Hash`]\nagrees with that equality.\n\nThe serde form is `{ \"rate\": { \"numerator\": …, \"denominator\": … },\n\"value\": … }`: exactly the two integers, so a saved time reloads as the\nsame instant at the same rate rather than as a rounded one.",
+      "properties": {
+        "rate": {
+          "$ref": "#/$defs/Rational",
+          "description": "The rate the units are counted at."
+        },
+        "value": {
+          "description": "The count of units.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value",
+        "rate"
+      ],
+      "type": "object"
+    },
+    "SequenceId": {
+      "description": "The canonical lowercase hyphenated UUIDv7 of a sequence.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The methods of the Subordinate Command API that a serving process supplies rather than the engine: probing and proxying media, drawing a frame, and exporting (docs/PLAN.md §7). Generated from the Rust types; do not edit by hand.",
+  "methods": [
+    {
+      "description": "List the export presets this build offers, with their container and codecs.",
+      "kind": "query",
+      "name": "export.list_presets",
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/PresetListResult"
+      }
+    },
+    {
+      "description": "Read how far an export has got, and whether it finished or failed.",
+      "kind": "query",
+      "name": "export.progress",
+      "params": {
+        "$ref": "#/$defs/ProgressParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ExportStatus"
+      }
+    },
+    {
+      "description": "Render a sequence to a file with an export preset, reporting the job that does it.",
+      "kind": "query",
+      "name": "export.render",
+      "params": {
+        "$ref": "#/$defs/ExportParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ExportStatus"
+      }
+    },
+    {
+      "description": "Transcode a low-resolution proxy for a media item and record it on the item.",
+      "kind": "query",
+      "name": "media.make_proxy",
+      "params": {
+        "$ref": "#/$defs/ProxyParams"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Read a media file's video and audio streams without importing it.",
+      "kind": "query",
+      "name": "media.probe",
+      "params": {
+        "$ref": "#/$defs/ProbeParams"
+      },
+      "result": true
+    },
+    {
+      "description": "Composite one frame of a sequence and return it as a PNG, so an agent can look at it.",
+      "kind": "query",
+      "name": "playback.render_frame_png",
+      "params": {
+        "$ref": "#/$defs/FrameParams"
+      },
+      "result": {
+        "$ref": "#/$defs/FrameImage"
+      }
+    }
+  ],
+  "title": "Subordinate host-served API"
+}

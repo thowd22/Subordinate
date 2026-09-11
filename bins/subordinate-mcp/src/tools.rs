@@ -39,6 +39,14 @@ pub const COMMAND_API_SCHEMA: &str = include_str!("../../../docs/schema/command-
 /// round trip to the running editor.
 pub const PLUGIN_API_SCHEMA: &str = include_str!("../../../docs/schema/plugin-api.json");
 
+/// The committed host-served schema, compiled in.
+///
+/// `media.probe`, `media.make_proxy`, `playback.render_frame_png` and the
+/// `export.*` family are supplied by whichever process is serving rather than
+/// by the engine (`sub_command::host`), so they are exported as their own
+/// document and become tools exactly like the engine's methods.
+pub const HOST_API_SCHEMA: &str = include_str!("../../../docs/schema/host-api.json");
+
 /// The tools this bridge offers, and the method each one calls.
 #[derive(Debug, Clone)]
 pub struct ToolSet {
@@ -49,16 +57,17 @@ pub struct ToolSet {
 }
 
 impl ToolSet {
-    /// The tools of the schemas compiled into this build: the engine's methods
-    /// and the plugin host's.
+    /// The tools of the schemas compiled into this build: the engine's
+    /// methods, the plugin host's, and the ones the serving process supplies.
     ///
     /// # Errors
     ///
-    /// Returns `mcp.schema_invalid` if either compiled document is not a
+    /// Returns `mcp.schema_invalid` if any compiled document is not a
     /// Command API schema, which would mean the build is broken.
     pub fn committed() -> SubResult<Self> {
         let mut tools = Self::from_schema(&compiled_in(COMMAND_API_SCHEMA)?)?;
         tools.extend_from_schema(&compiled_in(PLUGIN_API_SCHEMA)?)?;
+        tools.extend_from_schema(&compiled_in(HOST_API_SCHEMA)?)?;
         Ok(tools)
     }
 
@@ -394,7 +403,9 @@ fn resolve(reference: &str, defs: Option<&Map<String, Value>>) -> SubResult<Json
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMAND_API_SCHEMA, PLUGIN_API_SCHEMA, PluginTools, ToolSet, tool_name};
+    use super::{
+        COMMAND_API_SCHEMA, HOST_API_SCHEMA, PLUGIN_API_SCHEMA, PluginTools, ToolSet, tool_name,
+    };
     use serde_json::{Value, json};
 
     /// A `plugin.tools` answer with two plugins' tools in it.
@@ -507,6 +518,11 @@ mod tests {
         serde_json::from_str(PLUGIN_API_SCHEMA).expect("the committed plugin schema is JSON")
     }
 
+    /// The committed host-served schema, parsed.
+    fn host_document() -> Value {
+        serde_json::from_str(HOST_API_SCHEMA).expect("the committed host schema is JSON")
+    }
+
     #[test]
     fn every_method_of_the_command_api_becomes_a_tool() {
         let document = document();
@@ -516,7 +532,11 @@ mod tests {
             .as_array()
             .expect("plugin methods")
             .len();
-        assert_eq!(tools.len(), methods.len() + plugin_methods);
+        let host_methods = host_document()["methods"]
+            .as_array()
+            .expect("host methods")
+            .len();
+        assert_eq!(tools.len(), methods.len() + plugin_methods + host_methods);
         assert!(!tools.is_empty());
 
         for method in methods {
@@ -533,6 +553,65 @@ mod tests {
                 "{name}",
             );
             assert_eq!(tools.method(&tool.name), Some(name));
+        }
+    }
+
+    /// docs/PLAN.md §7 names the families an agent works through; this is the
+    /// list, and every member has to be a tool with a description and an
+    /// object parameter schema.
+    #[test]
+    fn every_tool_family_of_the_plan_is_published() {
+        let tools = ToolSet::committed().expect("tools");
+        for method in [
+            "project.new",
+            "project.open",
+            "project.save",
+            "project.list_sequences",
+            "project.settings",
+            "media.import",
+            "media.list",
+            "media.probe",
+            "media.relink",
+            "media.make_proxy",
+            "timeline.add_clip",
+            "timeline.move_clip",
+            "timeline.trim_clip_in",
+            "timeline.trim_clip_out",
+            "timeline.split_clip",
+            "timeline.delete_clip",
+            "timeline.add_track",
+            "timeline.remove_track",
+            "timeline.add_marker",
+            "timeline.remove_marker",
+            "timeline.get_state",
+            "playback.seek",
+            "playback.play",
+            "playback.pause",
+            "playback.render_frame_png",
+            "export.list_presets",
+            "export.render",
+            "export.progress",
+            "plugin.new",
+            "plugin.install",
+            "plugin.reload",
+            "plugin.test",
+            "plugin.list",
+        ] {
+            let name = tool_name(method);
+            let tool = tools
+                .tools()
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{method} is not published as a tool"));
+            assert_eq!(tool.title.as_deref(), Some(method));
+            assert!(
+                tool.description
+                    .as_deref()
+                    .is_some_and(|text| text.ends_with('.')),
+                "{method} has no one-sentence description",
+            );
+            assert_eq!(tool.input_schema["type"], "object", "{method}");
+            assert_eq!(tools.method(&name), Some(method));
         }
     }
 

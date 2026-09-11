@@ -17,10 +17,12 @@ performs, on the project the editor has open. That is deliberate — there is a
 single command set behind the GUI, the CLI, plugins and this bridge — and it
 means an agent can do exactly what a user can do, and no more.
 
-Nothing in the tool list is written by hand. It is generated from the two
-committed schema documents, `docs/schema/command-api.json` (the engine's
-methods, exported from the Rust command set) and `docs/schema/plugin-api.json`
-(the plugin host's), with the same names, descriptions and parameter schemas.
+Nothing in the tool list is written by hand. It is generated from the three
+committed schema documents — `docs/schema/command-api.json` (the engine's
+methods, exported from the Rust command set), `docs/schema/plugin-api.json` (the
+plugin host's) and `docs/schema/host-api.json` (the ones the serving process
+supplies, such as probing a file or rendering a frame) — with the same names,
+descriptions and parameter schemas.
 A method added to the Command API is a tool as soon as the schema is re-exported
 with `cargo run -p subordinate-cli -- schema`.
 
@@ -97,8 +99,15 @@ scratch directory, and let it launch its own headless server.
 ## The tool families
 
 Names below are the MCP tool names. Their full parameter and result schemas are
-in `docs/schema/command-api.json` and `docs/schema/plugin-api.json`, and each
-tool's own description in `tools/list` is the doc comment on the command itself.
+in `docs/schema/command-api.json`, `docs/schema/plugin-api.json` and
+`docs/schema/host-api.json`, and each tool's own description in `tools/list` is
+the doc comment on the command itself.
+
+The command set is organised by the entity an edit touches — a clip, a track, a
+marker — and the families below are organised by the task an agent is doing.
+Both are published, and they are the same commands: every timeline mutation is
+the matching clip, track or marker command under a second name, with the same
+parameters and the same undo step. Use whichever reads better.
 
 ### Reading the project
 
@@ -106,8 +115,24 @@ tool's own description in `tools/list` is the doc comment on the command itself.
 | --- | --- |
 | `project_get` | The whole open project as JSON, with the revision it was read at |
 | `project_revision` | Just the revision, to tell two reads apart cheaply |
+| `project_list_sequences` | Each sequence with its settings, track count and length |
+| `project_settings` | The project's name, identity and per-sequence settings |
+| `media_list` | Every media item the project references, in project order |
+| `timeline_get_state` | One sequence whole, as the OTIO-shaped JSON the project file stores |
 | `history_get` | The undo stack: what would be undone and what redone |
 | `system_list_methods` | Every method this build serves, which is the tool list from the engine's side |
+
+### Opening and saving
+
+| Tool | What it does |
+| --- | --- |
+| `project_new` | Replace the open project with a new, empty one |
+| `project_open` | Open a project file, replacing the open project |
+| `project_save` | Write the open project to a file as JSON |
+| `project_replace` | The command the three above apply; takes a whole project |
+
+All four are ordinary undoable commands, so opening the wrong file is
+`edit_undo` away.
 
 ### Editing the timeline
 
@@ -119,6 +144,7 @@ tool's own description in `tools/list` is the doc comment on the command itself.
 | Transitions | `transition_add`, `transition_remove` |
 | Effects | `clip_add_effect`, `clip_insert_effect`, `clip_move_effect`, `clip_remove_effect`, `clip_set_effect_param` |
 | Markers | `marker_add`, `marker_move`, `marker_remove`, `marker_rename`, `marker_replace_on_clip`, `marker_from_analysis` |
+| Timeline | `timeline_add_clip`, `timeline_move_clip`, `timeline_trim_clip_in`, `timeline_trim_clip_out`, `timeline_split_clip`, `timeline_delete_clip`, `timeline_ripple_delete_clip`, `timeline_add_track`, `timeline_remove_track`, `timeline_add_marker`, `timeline_remove_marker` |
 
 `clip_set_params` is where per-clip opacity, transform, gain and fades live.
 The effect tools edit a clip's effect stack: `clip_add_effect` names the plugin
@@ -134,6 +160,45 @@ as an ordinary undoable command.
 | --- | --- |
 | Media | `media_import`, `media_insert`, `media_relink`, `media_remove`, `media_set_analysis`, `media_remove_analysis`, `media_replace_analyses`, `media_set_proxy` |
 | Bins | `bin_create`, `bin_insert`, `bin_move`, `bin_move_media`, `bin_remove`, `bin_rename` |
+
+`media_probe` reads a file's video and audio streams without importing it —
+give it either a `path` or the `media` id of something already in the project.
+`media_make_proxy` transcodes a low-resolution stand-in for one media item and
+records it on the item as an undoable edit.
+
+### Playback, and looking at a frame
+
+| Tool | What it does |
+| --- | --- |
+| `playback_play` | Start playback at a shuttle speed, optionally on a named sequence |
+| `playback_pause` | Stop, leaving the playhead where it stands |
+| `playback_seek` | Move the playhead to an exact rational time |
+| `playback_status` | Where the playhead is, and whether playback is running |
+| `playback_render_frame_png` | Composite one frame and hand it back as a picture |
+
+`playback_render_frame_png` is how an agent **looks** at the timeline rather
+than reading it. The answer carries the PNG as an MCP image content block as
+well as in the structured result, so a client renders it; `width` scales the
+canvas down, which is usually what you want before handing a 4K frame to a
+model. It needs a GPU on the serving machine, and answers `render.no_adapter`
+when there is none.
+
+### Export
+
+| Tool | What it does |
+| --- | --- |
+| `export_list_presets` | The presets this build offers, with their container and codecs |
+| `export_render` | Start a render of a sequence to a file, returning a job id |
+| `export_progress` | How far that job has got, and whether it finished or failed |
+
+`export_render` returns as soon as the job starts; poll `export_progress` with
+the `job` it answered with. It renders the project as the editor holds it, so an
+edit made a moment ago is in the file without saving first.
+
+`media_probe`, `media_make_proxy`, `playback_render_frame_png` and the three
+export tools are supplied by the process serving the Command API rather than by
+the engine (`docs/schema/host-api.json`). A build serving without decoders or a GPU
+simply does not offer them.
 
 ### Undo, redo and grouping
 

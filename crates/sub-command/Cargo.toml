@@ -11,6 +11,7 @@ repository.workspace = true
 sub-core = { path = "../sub-core" }
 sub-edit = { path = "../sub-edit" }
 sub-model = { path = "../sub-model" }
+sub-time = { path = "../sub-time" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
@@ -22,7 +23,6 @@ interprocess = { version = "2", default-features = false }
 # compositor and the wgpu types a frame source is built from.
 [dev-dependencies]
 sub-render = { path = "../sub-render" }
-sub-time = { path = "../sub-time" }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan", "metal", "dx12", "webgpu"] }
 
 [lints]

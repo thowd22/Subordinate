@@ -4,6 +4,10 @@
 //! the agent surface is exactly as capable as the UI. Also hosts the engine
 //! thread that owns project state. See docs/PLAN.md §4 and §7.
 //!
+//! - [`agent`] — the agent-facing tool families of docs/PLAN.md §7
+//!   (`project.*`, `media.*`, `timeline.*`, `playback.*`) that the engine
+//!   alone can serve, and [`host`] — the rest of them, which need decoders, a
+//!   GPU and an encoder, so whoever is serving supplies a [`host::Services`].
 //! - [`rpc`] — the JSON-RPC 2.0 message types: requests, notifications,
 //!   responses, errors and batches.
 //! - [`dispatch`] — the [`Dispatcher`], which maps method names to engine
@@ -35,9 +39,11 @@
 //! engine.shutdown().unwrap();
 //! ```
 
+pub mod agent;
 pub mod dispatch;
 pub mod endpoint;
 pub mod events;
+pub mod host;
 pub mod rpc;
 pub mod schema;
 pub mod transport;

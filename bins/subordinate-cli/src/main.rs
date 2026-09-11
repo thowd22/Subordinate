@@ -9,6 +9,7 @@ use std::process::ExitCode;
 
 use sub_plugin::registry::InstallLocation;
 
+mod host;
 mod plugin;
 mod plugin_test;
 mod project;
