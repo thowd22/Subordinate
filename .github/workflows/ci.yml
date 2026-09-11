@@ -476,6 +476,37 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then bin=target/debug/subordinate.exe; fi
           "$bin" --smoke-test
 
+      # ---------------- Headless render smoke test (TASK-63) ----------------
+      # The sample project rendered by the headless CLI on every OS: decode,
+      # composite, mix and encode, end to end, with the software x264 encoder
+      # pinned so all three runners write the same codec whatever hardware they
+      # happen to expose. `--verify` probes the written file with the GStreamer
+      # discoverer and fails the step when it carries no video, so a render that
+      # exits zero having written a broken file cannot pass.
+      #
+      # A second of the sequence rather than the whole thing: the point is that
+      # the path works on this OS, and the frame-accurate proofs live in the
+      # workspace tests. The step is skipped when the sample media fetch above
+      # did not land, exactly as the render test in sub-ui skips.
+      - name: Headless render smoke test
+        shell: bash
+        env:
+          RUST_LOG: info
+        run: |
+          if [ ! -d examples/sample-project/media ]; then
+            echo "no sample media; skipping the headless render"
+            exit 0
+          fi
+          bin=target/debug/subordinate-cli
+          if [ "$RUNNER_OS" = "Windows" ]; then bin=target/debug/subordinate-cli.exe; fi
+          "$bin" render examples/sample-project/demo.sub \
+            --sequence "Main cut" \
+            --preset mezzanine \
+            --encoder x264enc \
+            --range 0:25 \
+            --out target/sample-render.mkv \
+            --verify
+
       # ---------------- Window smoke test (TASK-123) ----------------
       # The assembled app rather than a panel in isolation: Xvfb gives it one
       # wide screen split into two RandR monitors, the app opens the sample
