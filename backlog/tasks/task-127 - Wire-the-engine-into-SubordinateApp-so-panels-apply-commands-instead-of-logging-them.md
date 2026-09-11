@@ -3,11 +3,11 @@ id: TASK-127
 title: >-
   Wire the engine into SubordinateApp so panels apply commands instead of
   logging them
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-127'
 created_date: '2026-09-10 19:43'
-updated_date: '2026-09-10 22:23'
+updated_date: '2026-09-11 00:06'
 labels:
   - ui
   - core
@@ -34,7 +34,7 @@ Several merged UI tasks report the same gap: the assembled app shell (Subordinat
 - [x] #2 Timeline, bin, inspector, markers, track headers and sequence tabs dispatch their commands through the handle; the log-only placeholders in app.rs are removed
 - [x] #3 Engine change events refresh the panels (subscription wired) so an edit made via the MCP bridge appears in the running UI
 - [x] #4 An interaction test opens the sample project in the assembled app, splits a clip via the timeline, undoes it via the menu, and asserts project state through the Command API
-- [ ] #5 The Xvfb window smoke shows the sample project loaded through the real engine path
+- [x] #5 The Xvfb window smoke shows the sample project loaded through the real engine path
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -78,10 +78,12 @@ Validation
 Not verified here
 
 - AC 5 (the Xvfb window smoke) cannot run in this environment: Xvfb, xdpyinfo, xwd and ImageMagick are all absent. The ready line now also reports sequences=, tracks= and revision= read out of the engine, and scripts/ui-smoke.sh fails the run when either count is zero, so a window that came up on an empty project is no longer photographed as a pass. That path needs a CI run to prove.
+
+2026-09-10 supervisor verification: CI run 34539791304 ui-smoke artifact app.log shows 'opened .../sample-project.sub' followed by 'ui-smoke ready: frames=3 popout=true popout_frames=1 project=loaded sequences=2 tracks=3 revision=0', i.e. the sample project is loaded through the engine (revision reported by the engine handle) in the assembled app under Xvfb.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-SubordinateApp now edits through the engine instead of logging. A new EditorSession (crates/sub-ui/src/session.rs) owns the sub-edit Engine thread, the immutable project snapshot the panels read, an in-process sub_command::Dispatcher over the same handle, the autosave worker and the open file; the window holds one and applies every panel gesture — timeline moves, trims, splits, fades, crossfades, bin drops, marker and track-header actions, inspector drags, media-bin folder commands, sequence tabs, insert/overwrite, undo and redo — as one entry in that engine's undo stack, and drains its change-event subscription once a frame so an edit from the Command API appears in the panels on the next one. Every 'not wired up yet' placeholder in app.rs is gone, and File (Open/Save/Save As), Edit (Undo/Redo) and a sequence tab strip were added. Verified with cargo fmt --all --check and cargo clippy --workspace --all-targets -- -D warnings clean, cargo test -p sub-ui green (491 tests, snapshots included), six new session unit tests covering open/save/save-as/autosave and group abort, and a new crates/sub-ui/tests/app_engine.rs that builds the real app through egui_kittest's eframe harness, cuts a clip of the sample project with Ctrl+K, undoes it from the Edit menu, and reads the result back through the window's own Dispatcher. AC 5 is unchecked: the Xvfb window smoke cannot run here (no Xvfb or ImageMagick), though the ready line and scripts/ui-smoke.sh now fail a run whose sequence and track counts come back zero.
+SubordinateApp now owns the engine handle and Command API client; panels dispatch commands through it, engine events refresh panels, and the assembled app opens the sample project through the real engine path (verified by tests and the CI Xvfb smoke log).
 <!-- SECTION:FINAL_SUMMARY:END -->
