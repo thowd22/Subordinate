@@ -23,7 +23,7 @@ use sub_core::{SubError, SubResult};
 use sub_edit::commands::DeleteSequence;
 use sub_edit::playback::{PlaybackScheduler, ShuttleSpeed};
 use sub_model::sequence::{Resolution, Sequence, SequenceSettings};
-use sub_model::{Project, SequenceId};
+use sub_model::{BinId, Project, SequenceId};
 use sub_render::{
     Compositor, RenderContext, RenderError, ResolvedClip, SourceFrame, describe_adapter,
     select_adapter,
@@ -52,9 +52,11 @@ use crate::fullscreen::{FullscreenAction, FullscreenState, monitor_picker_ui};
 use crate::history_panel::{HistoryAction, HistoryList, edit_menu_ui};
 use crate::inspector::{EffectEdit, InspectorPanel, InspectorResponse};
 use crate::keymap::LoadedKeymap;
-use crate::media_bin::{BinSelection, MediaBinAction, MediaBinPanel};
+use crate::media_bin::{BinSelection, BinStatus, MediaBinAction, MediaBinPanel};
+use crate::media_import::{FinishedImport, ImportOutcome, ImportQueue};
 use crate::popout::{PopoutViewer, popout_menu_ui};
 use crate::recovery::{RecoveryOutcome, RecoveryPrompt, SnapshotMenu};
+use crate::relink_dialog::RelinkDialog;
 use crate::sequence_tabs::{SequenceTabAction, SequenceTabs, SequenceViewState};
 use crate::session::EditorSession;
 use crate::shortcuts::{Action, ShortcutMap, ShortcutsWindow};
@@ -71,6 +73,12 @@ const METERED_TRACKS: usize = 64;
 /// interactive work out.
 const JOB_WORKERS: usize = 2;
 
+/// How many failures the media bin keeps on screen at once.
+///
+/// Enough that dropping a folder of mixed files shows what was refused,
+/// few enough that the panel is still a bin rather than a log.
+const MAX_BIN_PROBLEMS: usize = 8;
+
 /// How often the window repaints itself while an export runs, so the progress
 /// bar and the ETA keep moving without an input event to wake egui.
 const EXPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -86,6 +94,20 @@ pub const SAVE_AS_LABEL: &str = "Save project as...";
 
 /// The extension a Subordinate project file has.
 pub const PROJECT_EXTENSION: &str = "sub";
+
+/// The undo entry one Import gesture leaves behind.
+///
+/// One gesture is one entry however many files it carried, so importing a
+/// card of twenty rushes is undone with one press (TASK-136).
+pub const IMPORT_GROUP_LABEL: &str = "Import media";
+
+/// Why an import into a project that has never been saved is refused.
+///
+/// Media paths are stored relative to the project file, so a project with no
+/// file has nothing for an imported path to be relative to. This is the same
+/// rule that holds the Export button closed, said for import.
+pub const NO_IMPORT_REASON: &str =
+    "Save the project to a file before importing: its media is named relative to it";
 
 /// What one frame's panels asked the engine to do.
 ///
@@ -201,6 +223,73 @@ impl ProjectState {
     }
 }
 
+/// The import and relink side of the window.
+///
+/// Both are jobs rather than commands: importing has to hash and probe the
+/// files before there is a [`MediaItem`](sub_model::MediaItem) to add, and
+/// relinking has to find the replacement before there is a path to point at.
+/// Neither may touch the UI thread, so both run on the window's
+/// [`JobService`] and are pumped once a frame from
+/// [`SubordinateApp::poll_media`]; what they produce is applied through the
+/// session like every other edit, one history group per gesture (TASK-136).
+struct MediaHost {
+    /// The imports and their follow-up thumbnail and waveform jobs.
+    ///
+    /// `None` until the project has a file, because an imported path is
+    /// stored relative to that file and a sidecar folder is named after it.
+    /// Rebuilt whenever the project folder changes, so a Save As moves later
+    /// imports with it.
+    queue: Option<ImportQueue>,
+    /// The project folder `queue` was built for, so the rebuild happens
+    /// exactly when the folder moves.
+    dir: Option<PathBuf>,
+    /// The relink dialog, open for one item or for every offline one.
+    relink: RelinkDialog,
+    /// What the last import or relink got wrong, newest last. Shown in the
+    /// bin, not logged and forgotten.
+    problems: Vec<SubError>,
+}
+
+impl MediaHost {
+    /// The media side of a fresh window: no queue, no dialog, nothing wrong.
+    fn new() -> Self {
+        Self {
+            queue: None,
+            dir: None,
+            relink: RelinkDialog::new(),
+            problems: Vec::new(),
+        }
+    }
+
+    /// Records `error` for the bin to show, keeping the list short enough to
+    /// draw.
+    fn problem(&mut self, error: SubError) {
+        log::warn!("[{}] {}", error.code, error.message);
+        if self.problems.len() >= MAX_BIN_PROBLEMS {
+            self.problems.remove(0);
+        }
+        self.problems.push(error);
+    }
+
+    /// What the bin should draw this frame.
+    fn status(&self) -> BinStatus {
+        BinStatus {
+            importing: self
+                .queue
+                .as_ref()
+                .map(|queue| {
+                    queue
+                        .pending_paths()
+                        .into_iter()
+                        .map(Path::to_path_buf)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            problems: self.problems.clone(),
+        }
+    }
+}
+
 /// The Subordinate editor window.
 pub struct SubordinateApp {
     render: RenderContext,
@@ -279,6 +368,12 @@ pub struct SubordinateApp {
     /// The export side of the window: the panel, the presets it offers and
     /// the job it is running.
     export: ExportHost,
+    /// The import and relink side of the window.
+    media: MediaHost,
+    /// The worker pool every file read in this window runs on. Imports,
+    /// hashes, thumbnails, waveforms, relink searches and exports share it,
+    /// which is what keeps a long export from shutting importing out.
+    jobs: JobService,
 
     /// The effect plugins the inspector offers, and what each of them
     /// declared.
@@ -396,6 +491,8 @@ impl SubordinateApp {
             timeline,
             inspector: InspectorPanel::new(),
             export: ExportHost::new(),
+            media: MediaHost::new(),
+            jobs: JobService::new(JOB_WORKERS),
             effect_catalog: EffectCatalog::new(),
             layout: layout.layout,
             fullscreen: fullscreen.state,
@@ -407,23 +504,32 @@ impl SubordinateApp {
             snapshots: SnapshotMenu::new(),
         };
         if let Some(path) = startup_project {
-            app.project_state = match app.open_project(&path) {
-                Ok(()) => {
-                    log::info!("opened {}", path.display());
-                    ProjectState::Loaded
-                }
-                Err(error) => {
-                    log::error!(
-                        "could not open {}: [{}] {}",
-                        path.display(),
-                        error.code,
-                        error.message
-                    );
-                    ProjectState::Failed
-                }
-            };
+            app.open_startup_project(&path);
         }
         Ok(app)
+    }
+
+    /// Opens the project named on the command line, recording how it went.
+    ///
+    /// A file that will not open is not a reason to refuse to start: the
+    /// window comes up empty and the ready line says `failed`, which is what
+    /// the unattended smoke run reports.
+    fn open_startup_project(&mut self, path: &Path) {
+        self.project_state = match self.open_project(path) {
+            Ok(()) => {
+                log::info!("opened {}", path.display());
+                ProjectState::Loaded
+            }
+            Err(error) => {
+                log::error!(
+                    "could not open {}: [{}] {}",
+                    path.display(),
+                    error.code,
+                    error.message
+                );
+                ProjectState::Failed
+            }
+        };
     }
 
     /// Opens a project file, offering to recover a newer autosave first.
@@ -747,6 +853,35 @@ impl SubordinateApp {
     /// The viewer panel, which owns the playhead.
     pub fn viewer(&mut self) -> &mut ViewerPanel {
         &mut self.viewer
+    }
+
+    /// The media bin panel, which owns what looking at the bin means and what
+    /// the host's import and relink jobs are doing.
+    ///
+    /// Public for the same reason the viewer is: a host — or a test driving
+    /// the window without a pointer — reads the pending rows and the failures
+    /// the panel is showing rather than a log.
+    pub fn media_bin(&mut self) -> &mut MediaBinPanel {
+        &mut self.media_bin
+    }
+
+    /// The relink dialog, open for one item or for every offline one.
+    ///
+    /// Public so a caller can tell the dialog which file replaces an offline
+    /// item without a native file dialog, which is what a test does and what
+    /// an agent surface would do.
+    pub fn relink_dialog(&mut self) -> &mut RelinkDialog {
+        &mut self.media.relink
+    }
+
+    /// Starts the relink search of `folder` on the window's job pool.
+    ///
+    /// The same thing the dialog's "Search folder..." button does once the
+    /// native folder picker has answered, without the picker: hashing a card
+    /// of footage is a job, and this is how a caller with no pointer asks for
+    /// it.
+    pub fn search_for_relink(&mut self, folder: impl Into<PathBuf>) {
+        self.media.relink.search_folder(&self.jobs, folder);
     }
 
     /// The timeline panel, which owns the clip selection.
@@ -1091,6 +1226,7 @@ impl SubordinateApp {
             timeline,
             inspector,
             export,
+            media,
             effect_catalog,
             sequence,
             ..
@@ -1098,6 +1234,10 @@ impl SubordinateApp {
         // The engine's revision counter is what tells the timeline its cached
         // layout is stale, so an edit made anywhere — a panel, the Command
         // API, a plugin — invalidates it.
+        // The bin draws what the host's jobs are doing — the files still
+        // being probed, and what the last import or relink got wrong — so it
+        // is told before it paints.
+        media_bin.set_status(media.status());
         timeline.sync(sequence, revision);
         // The viewer owns the playhead; the timeline draws it and can ask for
         // a new one, so it is handed the current value before it paints.
@@ -1194,9 +1334,10 @@ impl SubordinateApp {
         };
         let project = self.session.project_arc();
         let render = self.render.clone();
+        let jobs = &self.jobs;
         let export = &mut self.export;
         let started = export.runner.start(
-            &export.jobs,
+            jobs,
             &export.presets,
             &project,
             request,
@@ -1256,16 +1397,202 @@ impl SubordinateApp {
 
     /// Applies one media-bin action.
     ///
-    /// Four of the six are one command each. Importing has to hash and probe
-    /// the files first and relinking has to find the replacement, so those two
-    /// are jobs rather than commands; each ends in a command of its own once
-    /// it finishes, and neither job is hosted by this window yet.
-    fn apply_bin_action(&mut self, action: MediaBinAction) {
-        let described = format!("{action:?}");
-        if let Some(command) = action.into_command() {
-            let _ = self.session.apply_boxed(command);
-        } else {
-            log::info!("the bin asked for work this window does not host yet: {described}");
+    /// Four of the six are one command each and are applied here and now.
+    /// The other two are jobs: importing has to hash and probe the files
+    /// before there is an item to add, and relinking has to find the
+    /// replacement before there is a path to point at. Both are started here
+    /// and finish in [`SubordinateApp::poll_media`], where what they produced
+    /// becomes one history group.
+    ///
+    /// Public because this is what a click in the bin reaches: a caller
+    /// driving the window without a pointer — an OS drop, or a test — takes
+    /// exactly the path a user does.
+    pub fn apply_bin_action(&mut self, action: MediaBinAction) {
+        match action {
+            MediaBinAction::Import { paths, bin } => self.start_import(&paths, bin),
+            MediaBinAction::Relink(media) => {
+                let project = self.session.project_arc();
+                self.media.relink.open_for(&project, media);
+            }
+            MediaBinAction::RelinkAll => {
+                let project = self.session.project_arc();
+                self.media.relink.open_for_offline(&project);
+            }
+            // Named rather than caught by a wildcard, so a variant added to
+            // the bin later fails to compile here instead of being silently
+            // dropped — which is the bug this whole task is about.
+            edit @ (MediaBinAction::CreateBin { .. }
+            | MediaBinAction::RenameBin { .. }
+            | MediaBinAction::MoveBin { .. }
+            | MediaBinAction::MoveMedia { .. }) => {
+                if let Some(command) = edit.into_command()
+                    && let Err(error) = self.session.apply_boxed(command)
+                {
+                    self.media.problem(error);
+                }
+            }
+        }
+    }
+
+    /// Queues `paths` as one import gesture, filed in `bin`.
+    ///
+    /// Nothing is read on this thread: each file becomes a job that hashes it,
+    /// probes it and builds the item, and the bin shows it as pending until
+    /// that lands. The whole gesture is one batch, so it becomes one entry in
+    /// the undo stack however many files it carried.
+    fn start_import(&mut self, paths: &[PathBuf], bin: BinId) {
+        if paths.is_empty() {
+            return;
+        }
+        if !self.ready_to_import() {
+            self.media.problem(
+                SubError::new(crate::codes::IMPORT_NOT_READY, NO_IMPORT_REASON)
+                    .with_detail("field", "project"),
+            );
+            return;
+        }
+        // Two disjoint fields: the pool the jobs run on, and the queue that
+        // holds them.
+        let jobs = &self.jobs;
+        if let Some(queue) = self.media.queue.as_mut() {
+            queue.submit(jobs, paths, Some(bin));
+        }
+    }
+
+    /// Makes sure the import queue matches the project as it stands, and
+    /// says whether this project can be imported into at all.
+    ///
+    /// False for a project that has never been saved: an imported path is
+    /// stored relative to the project file, so there is nothing to be relative
+    /// to and nowhere to put the thumbnail and waveform sidecars.
+    fn ready_to_import(&mut self) -> bool {
+        let Some(file) = self.session.project_file().map(Path::to_path_buf) else {
+            return false;
+        };
+        let (Some(dir), Ok(cache)) = (self.project_dir(), sub_edit::autosave::sidecar_dir(&file))
+        else {
+            return false;
+        };
+        if self.media.dir.as_ref() != Some(&dir) {
+            // A queue built for the old folder would express new imports
+            // relative to it, so it is replaced rather than reused. Anything
+            // it still had in flight is asked to stop.
+            if let Some(stale) = self.media.queue.take() {
+                stale.cancel_all();
+            }
+            self.media.queue = Some(ImportQueue::new(&dir, cache));
+            self.media.dir = Some(dir);
+        }
+        self.media.queue.is_some()
+    }
+
+    /// Drains the finished imports and the relink search into the project.
+    /// Once a frame.
+    ///
+    /// Returns whether anything happened, so the window knows to repaint while
+    /// a job is still running.
+    fn poll_media(&mut self) -> bool {
+        let mut busy = false;
+        // The borrow on the queue ends with this block, because applying what
+        // it produced goes through the session and the bin.
+        let finished = {
+            let jobs = &self.jobs;
+            match self.media.queue.as_mut() {
+                Some(queue) => {
+                    let finished = queue.poll(jobs);
+                    busy |= !queue.is_idle();
+                    finished
+                }
+                None => Vec::new(),
+            }
+        };
+        for batch in finished {
+            self.apply_import(batch);
+        }
+        busy |= self.media.relink.poll() || self.media.relink.is_searching();
+        busy
+    }
+
+    /// Applies one finished import gesture as a single undo step.
+    ///
+    /// Every file that was hashed and probed becomes an
+    /// [`ImportMedia`](sub_edit::commands::ImportMedia) command, and the whole
+    /// gesture goes in as one group. Files that could not be read add nothing
+    /// and are shown in the bin with the code and message the probe reported,
+    /// so an unreadable file is a visible refusal rather than a log line.
+    fn apply_import(&mut self, batch: FinishedImport) {
+        let mut commands: Vec<sub_edit::BoxedCommand> = Vec::new();
+        let mut first = None;
+        for outcome in batch.outcomes {
+            match outcome {
+                ImportOutcome::Ready { item, bin } => {
+                    first.get_or_insert(item.id);
+                    let command = sub_edit::commands::ImportMedia::new(*item);
+                    let command = match bin.or(batch.bin) {
+                        Some(bin) => command.into_bin(bin),
+                        None => command,
+                    };
+                    commands.push(Box::new(command));
+                }
+                ImportOutcome::Failed { path, error } => {
+                    self.media
+                        .problem(error.with_detail("path", path.display().to_string().as_str()));
+                }
+            }
+        }
+        if commands.is_empty() {
+            return;
+        }
+        if let Err(error) = self.session.apply_group(IMPORT_GROUP_LABEL, commands) {
+            self.media.problem(error);
+            return;
+        }
+        // The bin opens on what was just imported, which is what a user
+        // expects to be looking at after choosing files.
+        if let Some(media) = first {
+            self.media_bin.select_media(media);
+        }
+    }
+
+    /// Draws the relink dialog and applies what it decided.
+    ///
+    /// The search itself is a job; this only puts the window up and turns the
+    /// plan it hands back into one history group, so relinking twenty items is
+    /// one press of undo.
+    fn relink_ui(&mut self, ctx: &egui::Context) {
+        if !self.media.relink.is_open() {
+            return;
+        }
+        let project = self.session.project_arc();
+        let Some(dir) = self.project_dir() else {
+            self.media.relink.close();
+            self.media.problem(SubError::new(
+                crate::codes::IMPORT_NOT_READY,
+                NO_IMPORT_REASON,
+            ));
+            return;
+        };
+        // The dialog puts its own window up; this only hands it the pool its
+        // search runs on and applies what it decided.
+        let Some(plan) = self.media.relink.ui(ctx, &self.jobs, &project, &dir) else {
+            return;
+        };
+        for (_, error) in plan.rejected {
+            self.media.problem(error);
+        }
+        let commands: Vec<sub_edit::BoxedCommand> = plan
+            .relinks
+            .into_iter()
+            .map(|command| Box::new(command) as sub_edit::BoxedCommand)
+            .collect();
+        if commands.is_empty() {
+            return;
+        }
+        if let Err(error) = self
+            .session
+            .apply_group(sub_edit::relink::RELINK_GROUP_LABEL, commands)
+        {
+            self.media.problem(error);
         }
     }
 
@@ -1634,6 +1961,15 @@ impl eframe::App for SubordinateApp {
             ui.ctx().request_repaint_after(EXPORT_POLL_INTERVAL);
         }
 
+        // The imports and the relink search report themselves the same way:
+        // their workers finish between frames, so a window with either still
+        // running asks for the next frame itself rather than waiting for the
+        // user to move the pointer.
+        if self.poll_media() {
+            ui.ctx().request_repaint_after(EXPORT_POLL_INTERVAL);
+        }
+        self.relink_ui(ui.ctx());
+
         let preview = self.composite();
         // The pop-out runs before the dock, so the panel knows on this frame
         // whether the picture is its to paint.
@@ -1697,8 +2033,6 @@ struct ExportHost {
     presets: PresetLibrary,
     /// The export running now, if one is.
     runner: ExportRunner,
-    /// The worker pool an export runs on.
-    jobs: JobService,
 }
 
 impl ExportHost {
@@ -1721,7 +2055,6 @@ impl ExportHost {
             panel,
             presets,
             runner: ExportRunner::new(),
-            jobs: JobService::new(JOB_WORKERS),
         }
     }
 }

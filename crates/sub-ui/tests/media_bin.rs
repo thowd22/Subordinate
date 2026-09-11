@@ -18,12 +18,15 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Pos2, Rect};
 use egui_kittest::kittest::Queryable;
+use sub_core::SubError;
 use sub_edit::History;
 use sub_edit::commands::{CreateBin, MoveBin, MoveToBin, RelinkMedia, RenameBin};
 use sub_model::media::{StreamInfo, VideoStream};
 use sub_model::{Bin, BinId, ColorTags, MediaId, MediaItem, MediaPath, Project};
 use sub_time::{Rational, RationalTime};
-use sub_ui::media_bin::{BinSelection, BinViewMode, MediaBinAction, MediaBinPanel, SortColumn};
+use sub_ui::media_bin::{
+    BinSelection, BinStatus, BinViewMode, MediaBinAction, MediaBinPanel, PENDING_LABEL, SortColumn,
+};
 
 /// A file the integration reports as dropped on the window.
 #[derive(Debug)]
@@ -603,4 +606,80 @@ fn renaming_a_folder_through_the_harness_applies_and_undoes_a_command() {
     );
     history.undo(project).expect("the rename undoes");
     assert_eq!(project.root_bin.children[0].name, original);
+}
+
+/// What the host tells the bin while two files are being probed and one has
+/// already been refused.
+fn busy_status() -> BinStatus {
+    BinStatus {
+        importing: vec![
+            PathBuf::from("/rushes/a-roll/interview_take3.mkv"),
+            PathBuf::from("/rushes/b-roll/harbour.mp4"),
+        ],
+        problems: vec![
+            SubError::new(
+                sub_model::codes::INVALID_PATH,
+                "the file is outside the project folder",
+            )
+            .with_detail("path", "/elsewhere/take.mov"),
+        ],
+    }
+}
+
+#[test]
+fn the_bin_shows_the_files_being_probed_and_the_ones_that_were_refused() {
+    // The bug this replaces was a log line: the bin said nothing at all while
+    // an import ran, and nothing at all when one failed. Both are drawn now,
+    // and the failure is drawn with its stable code.
+    let project = support::fixture_project();
+    let mut panel = MediaBinPanel::new();
+    let ctx = egui::Context::default();
+
+    // Nothing running, nothing wrong: the strip costs no height.
+    let (_, shapes) = frame(&ctx, &mut panel, &project, Vec::new(), Vec::new());
+    let quiet = texts(&shapes);
+    assert!(
+        !quiet.iter().any(|text| text.contains(PENDING_LABEL)),
+        "a quiet bin draws no pending rows"
+    );
+
+    panel.set_status(busy_status());
+    let (_, shapes) = frame(&ctx, &mut panel, &project, Vec::new(), Vec::new());
+    let busy = texts(&shapes);
+
+    assert!(
+        busy.iter()
+            .any(|text| text == &format!("{PENDING_LABEL} interview_take3.mkv")),
+        "the MKV being probed has a pending row: {busy:?}"
+    );
+    assert!(
+        busy.iter()
+            .any(|text| text == &format!("{PENDING_LABEL} harbour.mp4")),
+        "so does the second file in the same gesture: {busy:?}"
+    );
+    assert!(
+        busy.iter().any(|text| {
+            text.starts_with(&format!("[{}]", sub_model::codes::INVALID_PATH))
+                && text.contains("outside the project folder")
+        }),
+        "the refusal is drawn with its stable code: {busy:?}"
+    );
+}
+
+#[test]
+fn the_import_status_matches_its_snapshot() {
+    // The list view with two imports running and one refused, which is the
+    // one shape of the panel no other snapshot covers.
+    if !support::can_render() {
+        return;
+    }
+    let project = support::fixture_project();
+    let mut panel = MediaBinPanel::new();
+    panel.mode = BinViewMode::List;
+    panel.set_status(busy_status());
+    let mut harness = support::panel_harness(|ui| {
+        panel.ui(ui, &project);
+    });
+    harness.run();
+    support::snapshot(&mut harness, "media_bin_importing");
 }

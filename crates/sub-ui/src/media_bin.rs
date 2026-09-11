@@ -29,9 +29,10 @@
 //! `23.976` without a float ever existing.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Color32, RichText, Ui, Vec2};
+use sub_core::SubError;
 use sub_edit::BoxedCommand;
 use sub_edit::commands::{CreateBin, MoveBin, MoveToBin, RenameBin};
 use sub_model::media::StreamInfo;
@@ -49,6 +50,16 @@ const INDENT: f32 = 14.0;
 
 /// The size of one grid tile, in points.
 const TILE: Vec2 = Vec2::new(132.0, 96.0);
+
+/// The colour every "this is not right" badge in the bin is drawn in: an
+/// offline item's name, the offline count, and an import that failed.
+const ALERT: Color32 = Color32::from_rgb(220, 120, 90);
+
+/// The colour a file that is still being hashed and probed is drawn in.
+const PENDING_COLOR: Color32 = Color32::from_rgb(150, 170, 200);
+
+/// What a row says while its file is still being probed.
+pub const PENDING_LABEL: &str = "Importing...";
 
 /// How the contents of a bin are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -305,6 +316,32 @@ pub enum BinSelection {
     Media(MediaId),
 }
 
+/// What the host's jobs are doing, as the bin shows it.
+///
+/// The bin owns no jobs and starts none: importing and relinking happen on the
+/// host's [`JobService`](sub_core::JobService), and this is what the host hands
+/// back so the panel can draw it. Two things are in it, and both are things a
+/// user must be able to see without reading a log: the files that have been
+/// asked for and are still being hashed and probed, and the errors the last
+/// import or relink reported.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BinStatus {
+    /// The files still being hashed and probed, in the order they were asked
+    /// for. Each becomes one pending row.
+    pub importing: Vec<PathBuf>,
+    /// What went wrong with the last import or relink, newest last. A file
+    /// that cannot be read belongs here rather than in a log line.
+    pub problems: Vec<SubError>,
+}
+
+impl BinStatus {
+    /// True when no job is running and nothing has gone wrong.
+    #[must_use]
+    pub fn is_quiet(&self) -> bool {
+        self.importing.is_empty() && self.problems.is_empty()
+    }
+}
+
 /// The media bin panel.
 #[derive(Debug, Clone, Default)]
 pub struct MediaBinPanel {
@@ -322,6 +359,8 @@ pub struct MediaBinPanel {
     new_bin_name: String,
     /// The name being typed for the open folder.
     rename_buffer: String,
+    /// What the host's import and relink jobs are doing, as it last said.
+    status: BinStatus,
 }
 
 impl MediaBinPanel {
@@ -338,6 +377,20 @@ impl MediaBinPanel {
         self.open_bin
             .filter(|id| project.root_bin.find(*id).is_some())
             .unwrap_or(project.root_bin.id)
+    }
+
+    /// Tells the panel what the host's jobs are doing, for the next frame.
+    ///
+    /// Called once a frame by the host before the panel is drawn. Nothing here
+    /// starts or stops a job: the bin only reports.
+    pub fn set_status(&mut self, status: BinStatus) {
+        self.status = status;
+    }
+
+    /// What the panel is currently reporting about the host's jobs.
+    #[must_use]
+    pub const fn status(&self) -> &BinStatus {
+        &self.status
     }
 
     /// Opens `bin` and clears the item selection.
@@ -409,6 +462,7 @@ impl MediaBinPanel {
         }
 
         self.toolbar(ui, project, open, &mut actions);
+        self.status_ui(ui);
         ui.separator();
         ui.horizontal_top(|ui| {
             ui.allocate_ui(Vec2::new(TREE_WIDTH, ui.available_height()), |ui| {
@@ -479,13 +533,44 @@ impl MediaBinPanel {
                 ui.label(
                     RichText::new(format!("{offline} offline"))
                         .small()
-                        .color(Color32::from_rgb(220, 120, 90)),
+                        .color(ALERT),
                 );
                 if ui.small_button("Relink all").clicked() {
                     actions.push(MediaBinAction::RelinkAll);
                 }
             }
         });
+    }
+
+    /// What the host's jobs are doing: the files still being probed, and what
+    /// the last import or relink got wrong.
+    ///
+    /// Drawn above the folders and the contents so it is visible in both view
+    /// modes, and absent entirely while nothing is running and nothing has
+    /// failed, so the quiet case costs no height.
+    fn status_ui(&self, ui: &mut Ui) {
+        if self.status.is_quiet() {
+            return;
+        }
+        // A label rather than a spinner: an animated widget asks egui to
+        // repaint for ever, and the window already asks for the next frame
+        // itself while a job is running.
+        for path in &self.status.importing {
+            ui.label(
+                RichText::new(format!("{PENDING_LABEL} {}", file_label(path)))
+                    .small()
+                    .color(PENDING_COLOR),
+            );
+        }
+        // The code is shown beside the message on purpose: it is the stable
+        // half of a SubError, and it is what a user quotes in a bug report.
+        for problem in &self.status.problems {
+            ui.label(
+                RichText::new(format!("[{}] {}", problem.code, problem.message))
+                    .small()
+                    .color(ALERT),
+            );
+        }
     }
 
     /// The folder tree: one row per visible bin, each a target for whatever is
@@ -560,7 +645,7 @@ impl MediaBinPanel {
                 for column in SortColumn::ALL {
                     let text = RichText::new(column.text(item));
                     let text = if item.offline && column == SortColumn::Name {
-                        text.color(Color32::from_rgb(220, 120, 90))
+                        text.color(ALERT)
                     } else {
                         text
                     };
@@ -662,11 +747,7 @@ impl MediaBinPanel {
         if !item.offline {
             return;
         }
-        ui.label(
-            RichText::new("OFFLINE")
-                .small()
-                .color(Color32::from_rgb(220, 120, 90)),
-        );
+        ui.label(RichText::new("OFFLINE").small().color(ALERT));
         if ui.small_button("Relink").clicked() {
             self.select_media(item.id);
             actions.push(MediaBinAction::Relink(item.id));
@@ -957,6 +1038,16 @@ pub fn dropped_paths(ctx: &egui::Context) -> Vec<PathBuf> {
             .map(|file| file.path().to_path_buf())
             .collect()
     })
+}
+
+/// How a path is named in a pending row: its file name, or the whole path when
+/// it has none.
+#[must_use]
+pub fn file_label(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 /// Asks the operating system for media files to import.
