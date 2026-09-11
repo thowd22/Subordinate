@@ -56,6 +56,10 @@ env:
   # The preset the sample project is rendered with: H.264 in MP4 with AAC, so
   # both vendor encoders can be pinned against the same output.
   PRESET: youtube-1080p
+  # demo.sub carries two sequences ("Main cut" and "Titles"), so the render
+  # command has to name one - without it the CLI refuses with
+  # core.invalid_argument (run 34605526227).
+  SEQUENCE: Main cut
 
 jobs:
   # Nothing is compiled on the GPU instance: it is the most expensive machine
@@ -230,7 +234,7 @@ jobs:
         run: |
           mkdir -p target/hardware
           xvfb-run -a ./dist/subordinate-cli render examples/sample-project/demo.sub \
-            --preset "$PRESET" --encoder nvh264enc --verify \
+            --preset "$PRESET" --sequence "$SEQUENCE" --encoder nvh264enc --verify \
             --out target/hardware/sample-nvh264enc.mp4 \
             | tee target/hardware/render.json
           ls -l target/hardware/sample-nvh264enc.mp4
@@ -360,7 +364,7 @@ jobs:
         run: |
           mkdir -p target/hardware
           xvfb-run -a ./target/debug/subordinate-cli render examples/sample-project/demo.sub \
-            --preset "$PRESET" --encoder vah264enc --verify \
+            --preset "$PRESET" --sequence "$SEQUENCE" --encoder vah264enc --verify \
             --out target/hardware/sample-vah264enc.mp4 \
             | tee target/hardware/render.json
           ls -l target/hardware/sample-vah264enc.mp4
