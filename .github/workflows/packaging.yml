@@ -135,6 +135,50 @@ jobs:
       # version the package asks for. If it ever climbs above the build base's
       # own glibc, something from outside the AppDir leaked into the bundle and
       # the package stops being portable.
+      # The host half of the split, derived rather than asserted: every library
+      # the bundle resolves outside its own AppDir. It is what the smoke job's
+      # baseline package lists have to cover, and a new name appearing here is
+      # the warning that the package has started depending on something a
+      # stock desktop may not have.
+      - name: Report the host libraries this package needs
+        run: |
+          python3 - target/appimage/Subordinate.AppDir > target/appimage/host-libraries.txt <<'PY'
+          import glob, os, re, subprocess, sys
+
+          appdir = sys.argv[1]
+          libdir = os.path.abspath(os.path.join(appdir, "usr/lib"))
+          targets = (
+              glob.glob(f"{appdir}/usr/lib/*.so*")
+              + glob.glob(f"{appdir}/usr/lib/gstreamer-1.0/*.so")
+              + glob.glob(f"{appdir}/usr/bin/*")
+          )
+          env = dict(os.environ, LD_LIBRARY_PATH=libdir)
+          needed = set()
+          for target in targets:
+              out = subprocess.run(["ldd", target], capture_output=True, text=True, env=env).stdout
+              for line in out.splitlines():
+                  line = line.strip()
+                  missing = re.match(r"(\S+) => not found", line)
+                  if missing:
+                      needed.add(missing.group(1))
+                      continue
+                  resolved = re.match(r"(\S+) => (/\S+)", line)
+                  if resolved and not resolved.group(2).startswith(libdir):
+                      needed.add(resolved.group(1))
+          for name in sorted(needed):
+              print(name)
+          PY
+          echo "host libraries the package expects to find:"
+          cat target/appimage/host-libraries.txt
+          {
+            echo "<details><summary>Host libraries the AppImage expects</summary>"
+            echo
+            echo '```'
+            cat target/appimage/host-libraries.txt
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Report the glibc floor
         run: |
           appimage=$(ls target/appimage/Subordinate-*-x86_64.AppImage)
@@ -150,7 +194,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: subordinate-appimage
-          path: target/appimage/Subordinate-*-x86_64.AppImage
+          path: |
+            target/appimage/Subordinate-*-x86_64.AppImage
+            target/appimage/host-libraries.txt
           if-no-files-found: error
 
   # An AppImage that only starts on the machine that built it is the whole
@@ -175,24 +221,33 @@ jobs:
           # the same baseline as the containers -- a hosted runner image is not
           # a desktop and has neither libva nor libpulse, so without this the
           # bundled va, nvcodec and libav plugins are blacklisted at scan time
-          # for want of the host half of the split.
+          # for want of the host half of the split. The package list is not
+          # guessed: it is the Debian spelling of the "host libraries" list the
+          # appimage job prints, i.e. every library the bundle resolves outside
+          # its own AppDir.
           - target: ubuntu-26.04 host
             image: ""
             install: |
               apt-get update >/dev/null
               DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-                libgl1 libegl1 libgbm1 libdrm2 libva2 libva-drm2 libx11-6 libx11-xcb1 libxcb1 \
-                libxcb-xkb1 libxcb-render0 libxext6 libxrender1 libvdpau1 libvulkan1 libwayland-client0 \
-                libwayland-cursor0 libwayland-egl1 libasound2t64 libpulse0 >/dev/null
+                libgl1 libegl1 libglx0 libglvnd0 libgbm1 libdrm2 \
+                libva2 libva-drm2 libva-x11-2 libvdpau1 libvulkan1 \
+                libx11-6 libx11-xcb1 libxau6 libxdmcp6 libxext6 libxfixes3 libxrender1 \
+                libxcb1 libxcb-dri3-0 libxcb-render0 libxcb-shm0 libxcb-xkb1 \
+                libwayland-client0 libwayland-cursor0 libwayland-egl1 \
+                libasound2t64 libpulse0 libdbus-1-3 libsystemd0 libudev1 libselinux1 >/dev/null
           # The build base, i.e. the oldest system this package claims.
           - target: ubuntu-24.04
             image: ubuntu:24.04
             install: |
               apt-get update >/dev/null
               DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-                libgl1 libegl1 libgbm1 libdrm2 libva2 libva-drm2 libx11-6 libx11-xcb1 libxcb1 \
-                libxcb-xkb1 libxcb-render0 libxext6 libxrender1 libvdpau1 libvulkan1 libwayland-client0 \
-                libwayland-cursor0 libwayland-egl1 libasound2t64 libpulse0 >/dev/null
+                libgl1 libegl1 libglx0 libglvnd0 libgbm1 libdrm2 \
+                libva2 libva-drm2 libva-x11-2 libvdpau1 libvulkan1 \
+                libx11-6 libx11-xcb1 libxau6 libxdmcp6 libxext6 libxfixes3 libxrender1 \
+                libxcb1 libxcb-dri3-0 libxcb-render0 libxcb-shm0 libxcb-xkb1 \
+                libwayland-client0 libwayland-cursor0 libwayland-egl1 \
+                libasound2t64 libpulse0 libdbus-1-3 libsystemd0 libudev1 libselinux1 >/dev/null
           # Fedora is the second distro the package promises to run on, and a
           # bare container is the honest test: only the client libraries a
           # desktop has and an AppImage is entitled to assume. That list is
