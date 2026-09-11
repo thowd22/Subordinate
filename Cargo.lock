@@ -4938,6 +4938,7 @@ dependencies = [
  "sub-core",
  "sub-media",
  "sub-time",
+ "toml",
  "tracing",
 ]
 
