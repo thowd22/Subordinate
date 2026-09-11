@@ -214,7 +214,7 @@ jobs:
     timeout-minutes: 20
     defaults:
       run:
-        shell: pwsh
+        shell: powershell
     env:
       GST_VERSION: "1.28.6"
     steps:
@@ -230,7 +230,7 @@ jobs:
           $dir = "$env:LOCALAPPDATA\gstreamer\1.0\msvc_x86_64"
           if (-not (Test-Path "$dir\bin\gst-inspect-1.0.exe")) {
             $exe = "$env:RUNNER_TEMP\gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.exe"
-            Invoke-WebRequest -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc/$exe.Split('\')[-1]" -OutFile $exe
+            Invoke-WebRequest -UseBasicParsing -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc/$exe.Split('\')[-1]" -OutFile $exe
             $p = Start-Process -Wait -PassThru -FilePath $exe -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/CURRENTUSER","/TYPE=devel","/DIR=$dir"
             "installer exit $($p.ExitCode)"
             Remove-Item $exe -ErrorAction SilentlyContinue
