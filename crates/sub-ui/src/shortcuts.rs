@@ -581,6 +581,69 @@ pub fn help_rows(map: &ShortcutMap) -> Vec<HelpRow> {
     rows
 }
 
+/// The line `docs/user-guide.md` opens its generated reference block with.
+///
+/// Everything between this line and [`REFERENCE_END`] is written by
+/// [`reference_markdown`] and is checked against this table by
+/// `tests/user_guide.rs`, so a new action cannot ship with a stale guide.
+pub const REFERENCE_BEGIN: &str = "<!-- shortcuts:begin -->";
+
+/// The line that closes the generated reference block; see [`REFERENCE_BEGIN`].
+pub const REFERENCE_END: &str = "<!-- shortcuts:end -->";
+
+/// The text an action with no chord is written as in the reference.
+const UNBOUND_LABEL: &str = "unbound";
+
+/// The chord as text with the same modifier names on every platform.
+///
+/// [`chord_label`] follows the machine it is compiled for, which is right for
+/// a window and wrong for a document: a guide written on Linux and read on
+/// macOS would claim Ctrl. This writes `Ctrl` everywhere and the guide says
+/// once that Ctrl is Cmd on macOS.
+#[must_use]
+pub fn portable_chord_label(chord: KeyboardShortcut) -> String {
+    chord.format(&egui::ModifierNames::NAMES, false)
+}
+
+/// The keyboard reference in the guide's Markdown, generated from the action
+/// registry.
+///
+/// Every [`Action`] appears exactly once, in [`Action::ALL`] order under its
+/// [`Category`], with the chord `map` gives it and the stable
+/// [`Action::id`] a `keymap.toml` entry names. An action `map` leaves unbound
+/// is still listed — it exists, it just has no chord — so the table is a
+/// complete list of what the editor can be asked to do from the keyboard.
+#[must_use]
+pub fn reference_markdown(map: &ShortcutMap) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    for category in Category::ALL {
+        let actions: Vec<Action> = Action::ALL
+            .into_iter()
+            .filter(|action| action.category() == category)
+            .collect();
+        if actions.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        // Writing into a String cannot fail, so the results are dropped.
+        let _ = writeln!(out, "### {}\n", category.label());
+        out.push_str("| Shortcut | Action | Action id |\n");
+        out.push_str("| --- | --- | --- |\n");
+        for action in actions {
+            let chord = map.chord_for(action).map_or_else(
+                || UNBOUND_LABEL.to_owned(),
+                |chord| format!("`{}`", portable_chord_label(chord)),
+            );
+            let _ = writeln!(out, "| {chord} | {} | `{}` |", action.label(), action.id());
+        }
+    }
+    out
+}
+
 /// The window that lists every shortcut.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ShortcutsWindow {
@@ -675,6 +738,7 @@ impl ShortcutsWindow {
 mod tests {
     use super::{
         Action, Binding, Category, DEFAULT_BINDINGS, ShortcutMap, ShortcutsWindow, help_rows,
+        reference_markdown,
     };
     use eframe::egui::{self, Key, Modifiers};
     use std::sync::Mutex;
@@ -1029,5 +1093,40 @@ mod tests {
         assert!(label.contains('Z'), "label: {label}");
         assert!(label.contains("Shift"), "label: {label}");
         assert_eq!(map.chord_label_for(Action::PlayForward), "L");
+    }
+
+    #[test]
+    fn the_reference_lists_every_action_once_with_its_id() {
+        let markdown = reference_markdown(&ShortcutMap::default_map());
+        for action in Action::ALL {
+            assert_eq!(
+                markdown.matches(&format!("`{}`", action.id())).count(),
+                1,
+                "{} is listed {} times",
+                action.id(),
+                markdown.matches(action.id()).count()
+            );
+        }
+        for category in Category::ALL {
+            assert!(
+                markdown.contains(&format!("### {}", category.label())),
+                "no {} section",
+                category.label()
+            );
+        }
+        // Platform-independent: the document says Ctrl even on macOS.
+        assert!(markdown.contains("`Ctrl+Z`"), "markdown: {markdown}");
+    }
+
+    #[test]
+    fn an_unbound_action_is_still_listed() {
+        let mut map = ShortcutMap::default_map();
+        map.unbind(Action::ToggleSnapping);
+        let markdown = reference_markdown(&map);
+        let row = markdown
+            .lines()
+            .find(|line| line.contains("`view.toggle_snapping`"))
+            .expect("the action is still listed");
+        assert!(row.starts_with("| unbound |"), "row: {row}");
     }
 }

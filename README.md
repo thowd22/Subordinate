@@ -3,6 +3,9 @@
 A cross-platform video editor with a small Rust core and an agent-friendly plugin system.
 
 - Plan: [docs/PLAN.md](docs/PLAN.md)
+- Using the editor: [docs/user-guide.md](docs/user-guide.md) — import, editing,
+  audio, export, proxies, the pop-out viewer, the keyboard reference and what
+  to do when a hardware encoder is missing
 - Writing a plugin: [docs/plugin-guide.md](docs/plugin-guide.md) — every world,
   the manifest, capabilities, the developer loop and the headless test harness
 - Driving it from an agent: [docs/mcp-guide.md](docs/mcp-guide.md) —
