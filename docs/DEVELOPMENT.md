@@ -1439,7 +1439,12 @@ being present, so forks and pull requests keep building unsigned MSIs.
 ### What is not verified here
 
 The runner has no GPU, so the packaging job pins `x264enc` for its render and
-proves only that the installed runtime *registers* `nvcodec`, `amfcodec` and
-`mediafoundation`. An actual NVENC export out of the installed package is
+proves only that the installed runtime loads the `nvcodec`, `amfcodec` and
+`mediafoundation` plugin modules. Note that loading a plugin and getting its
+elements are different things: `nvcodec` and `amfcodec` register their encoders
+only after talking to a driver, so on the hosted runner both plugins load and
+neither `nvh264enc` nor `amfh264enc` appears (`mfh264enc` does, because the
+Media Foundation transform is part of Windows). The job reports that rather
+than asserting it. An actual NVENC export out of the installed package is
 TASK-115's job, on the hardware workflow's runners. Installing on a clean
 Windows image that has never had a build toolchain on it is TASK-110.

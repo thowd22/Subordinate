@@ -17,10 +17,6 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
-    # TEMPORARY (TASK-104): GitHub refuses workflow_dispatch for a workflow
-    # file that is not on the default branch, so the branch triggers itself
-    # while this is being verified. Removed before the task is finished.
-    branches: [task/task-104]
   pull_request:
     paths:
       - 'packaging/windows/**'
@@ -155,10 +151,15 @@ jobs:
             }
             Write-Host "bundled plugin ok: $plugin"
           }
-          # The elements the encoder selection order actually asks for. The
-          # hardware ones register without a GPU present, so their absence
-          # here means the plugin did not load, not that the runner has no
-          # card; whether they can encode is hardware.yml's question.
+          # The elements the encoder selection order actually asks for,
+          # reported rather than required. nvcodec and amfcodec register their
+          # encoders only after talking to a driver, so on a GPU-less runner
+          # the plugin loads and contributes no elements -- measured in run
+          # 34635008969: both plugins present, nvh264enc and amfh264enc
+          # absent, mfh264enc present because the Media Foundation transform
+          # is part of Windows. Which of them can actually encode is
+          # hardware.yml's question; the plugin checks above are what this job
+          # can honestly assert.
           foreach ($element in "x264enc", "avdec_h264", "nvh264enc", "amfh264enc", "mfh264enc") {
             & "$bin\gst-inspect-1.0.exe" --exists $element
             if ($LASTEXITCODE -eq 0) { Write-Host "present  $element" }
