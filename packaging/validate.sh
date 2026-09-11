@@ -136,7 +136,9 @@ bad_entries=$(sed 's/#.*//' "$plugins" | tr -d ' \t' | grep -v '^$' |
 entries=$(sed 's/#.*//' "$plugins" | tr -d ' \t!' | grep -v '^$')
 duplicates=$(echo "$entries" | sort | uniq -d)
 [ -z "$duplicates" ] || fail "duplicate plugin entries: $(echo "$duplicates" | tr '\n' ' ')"
-for must in nvcodec va coreelements app playback libav x264 isomp4 matroska; do
+# voaacenc rather than libav for AAC: gst-libav registers avenc_aac at rank
+# NONE and sub-export will not plug a deranked element.
+for must in nvcodec va coreelements app playback libav x264 voaacenc isomp4 matroska; do
     grep -qx "!$must" <(sed 's/#.*//' "$plugins" | tr -d ' \t') ||
         fail "plugin allowlist does not mark $must as required"
 done

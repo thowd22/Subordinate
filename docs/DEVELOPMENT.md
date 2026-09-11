@@ -1242,6 +1242,15 @@ On the sudo-less dev boxes there is no system GStreamer, so pass
 `--gst-prefix "$GSTROOT/usr"` (the prefix `env-gst.sh` sets up) and
 `--stage-only`; that exercises everything except `appimagetool` itself.
 
+One allowlist entry is there for a reason worth stating: **`voaacenc`**. Every
+`youtube-*` preset is AAC in MP4, and the obvious AAC encoder -- gst-libav's
+`avenc_aac` -- is registered at rank `NONE`. Rank `NONE` is how a machine says
+"never plug this unasked", and `sub-export` will not plug a deranked element,
+so a bundle whose only AAC encoder is `avenc_aac` refuses every MP4 export with
+`export.no_encoder` even though `gst-inspect` lists the element (run
+34630086856, from inside the AppImage on box). `voaacenc` is ranked and is
+marked required for that reason.
+
 `linux/gst-plugins.txt` is an allowlist, not the whole plugin directory -- the
 full Ubuntu set is about 100 MB of things Subordinate never loads. A leading
 `!` marks a plugin the package cannot ship without, and `nvcodec` (NVENC) and
