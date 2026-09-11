@@ -54,7 +54,9 @@ pub use effect::{ClipEffect, EffectValue};
 pub use ids::{BinId, ClipId, EffectId, MarkerId, MediaId, ProjectId, SequenceId, TrackId};
 pub use json::{ProjectFile, SCHEMA_VERSION};
 pub use marker::Marker;
-pub use media::{AudioStream, Bin, MediaItem, ProxyState, StreamInfo, VideoStream};
+pub use media::{
+    AudioStream, Bin, MediaItem, MediaSource, MediaUse, ProxyState, StreamInfo, VideoStream,
+};
 pub use migrate::{AppliedMigration, LoadReport, Migration, MigrationRegistry};
 pub use params::{Fixed6, GainDb, Opacity, Point2, Scale2, Transform};
 pub use project::Project;

@@ -17,6 +17,12 @@
 //! open, which item is selected, which folders are collapsed, whether the
 //! contents are listed or tiled, and which column they are sorted by.
 //!
+//! Two things about an item are shown that are not metadata: whether its file
+//! is missing, and whether a proxy stands in for it while editing. Both are
+//! badges on the row and the tile, and the proxy badge names every state —
+//! none, generating, ready, stale, failed — so "is this cut running on
+//! proxies?" is answered by looking (TASK-70).
+//!
 //! Durations are [`RationalTime`] end to end. The duration column is a
 //! timecode at the item's own rate and the frame-rate column is derived from
 //! the exact [`Rational`] by integer arithmetic, so 24000/1001 reads as
@@ -29,7 +35,7 @@ use eframe::egui::{self, Color32, RichText, Ui, Vec2};
 use sub_edit::BoxedCommand;
 use sub_edit::commands::{CreateBin, MoveBin, MoveToBin, RenameBin};
 use sub_model::media::StreamInfo;
-use sub_model::{Bin, BinId, MediaId, MediaItem, Project};
+use sub_model::{Bin, BinId, MediaId, MediaItem, Project, ProxyState};
 use sub_time::{Rational, RationalTime, Timecode, TimecodeRate};
 
 /// Shown in a metadata column the item has no answer for.
@@ -578,6 +584,7 @@ impl MediaBinPanel {
                         self.select_media(item.id);
                     }
                 }
+                Self::proxy_badge(ui, item);
                 self.offline_controls(ui, item, actions);
             });
         }
@@ -619,11 +626,29 @@ impl MediaBinPanel {
                         }
                         ui.label(RichText::new(duration_text(item)).weak());
                         ui.label(RichText::new(resolution_text(item)).weak());
+                        Self::proxy_badge(ui, item);
                         self.offline_controls(ui, item, actions);
                     });
                 });
             }
         });
+    }
+
+    /// The proxy badge: what stands in for this item while editing.
+    ///
+    /// Every state says its name, an item with no proxy included, so the bin
+    /// answers "is this cut running on proxies?" at a glance rather than only
+    /// when something is wrong. The badge is a label, not a control: asking
+    /// for a proxy is a job the host starts, and what it reports comes back as
+    /// a [`SetProxyState`](sub_edit::commands::SetProxyState) command.
+    fn proxy_badge(ui: &mut Ui, item: &MediaItem) {
+        let badge = RichText::new(proxy_text(item))
+            .small()
+            .color(proxy_color(item));
+        let response = ui.label(badge);
+        if let Some(hover) = proxy_hover(item) {
+            response.on_hover_text(hover);
+        }
     }
 
     /// The offline badge and the relink button, for an item whose file is
@@ -844,6 +869,42 @@ pub fn resolution_text(item: &MediaItem) -> String {
             },
             |stream| format!("{}x{}", stream.width, stream.height),
         )
+}
+
+/// The proxy badge's text: which of the five proxy states the item is in.
+///
+/// The wording is the state, not the file: an editor asks whether this clip is
+/// running on a proxy, not where the proxy lives.
+#[must_use]
+pub fn proxy_text(item: &MediaItem) -> String {
+    match item.proxy {
+        ProxyState::None => "NO PROXY",
+        ProxyState::Pending => "PROXY...",
+        ProxyState::Ready(_) => "PROXY",
+        ProxyState::Stale(_) => "PROXY STALE",
+        ProxyState::Failed(_) => "PROXY FAILED",
+    }
+    .to_owned()
+}
+
+/// The badge colour: quiet for the two states nothing is wrong with, and the
+/// same warning colour the offline badge uses for the two that need the user.
+fn proxy_color(item: &MediaItem) -> Color32 {
+    match item.proxy {
+        ProxyState::Ready(_) => Color32::from_rgb(120, 190, 130),
+        ProxyState::Stale(_) | ProxyState::Failed(_) => Color32::from_rgb(220, 120, 90),
+        ProxyState::None | ProxyState::Pending => Color32::GRAY,
+    }
+}
+
+/// What the badge says on hover, when there is more to say than the state.
+fn proxy_hover(item: &MediaItem) -> Option<String> {
+    match &item.proxy {
+        ProxyState::Ready(path) => Some(format!("Preview uses {}", path.as_str())),
+        ProxyState::Stale(_) => Some("The source changed since this proxy was made".to_owned()),
+        ProxyState::Failed(message) => Some(message.clone()),
+        ProxyState::None | ProxyState::Pending => None,
+    }
 }
 
 /// The path of `bin` from the root, for the breadcrumb line.

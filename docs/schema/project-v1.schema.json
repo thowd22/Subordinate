@@ -597,7 +597,7 @@
       "type": "string"
     },
     "ProxyState": {
-      "description": "Whether a reduced-resolution proxy exists for a media item (TASK-69,\nTASK-70).\n\nThe proxy path is project-relative like every other media path; proxies live\nin the `project.sub.d/` sidecar folder.",
+      "description": "Whether a reduced-resolution proxy exists for a media item (TASK-69,\nTASK-70).\n\nThe proxy path is project-relative like every other media path; proxies live\nin the `project.sub.d/` sidecar folder.\n\nA proxy stands in for exactly the bytes it was made from, so the state also\nrecords the two ways a proxy stops standing for anything: generation failed,\nor the source changed under it and the file on disk is\n[`Stale`](ProxyState::Stale). A stale proxy is kept rather than deleted —\nthe path is what a regeneration overwrites, and undoing the edit that\ninvalidated it puts the item back on the proxy it had.",
       "oneOf": [
         {
           "const": "none",
@@ -606,7 +606,7 @@
         },
         {
           "const": "pending",
-          "description": "A proxy job has been queued or is running.",
+          "description": "A proxy job has been queued or is running. This is the \"generating\"\nstate the bin shows; the tag is `pending` on disk, where it has been\nsince the first project schema.",
           "type": "string"
         },
         {
@@ -619,6 +619,19 @@
           },
           "required": [
             "ready"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A proxy exists at this project-relative path but was made from other\nbytes than the item now refers to, so preview must not use it until it\nhas been generated again.",
+          "properties": {
+            "stale": {
+              "$ref": "#/$defs/MediaPath"
+            }
+          },
+          "required": [
+            "stale"
           ],
           "type": "object"
         },

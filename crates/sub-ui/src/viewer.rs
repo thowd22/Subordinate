@@ -36,6 +36,7 @@ use eframe::egui;
 use sub_audio::MeterLevels;
 use sub_edit::playback::PlaybackScheduler;
 use sub_model::sequence::Sequence;
+use sub_model::{MediaItem, MediaSource, MediaUse};
 use sub_time::{Rational, RationalTime, Rounding, Timecode, TimecodeRate};
 
 use crate::meter::MeterState;
@@ -49,6 +50,10 @@ const MASTER_METER_WIDTH: f32 = 120.0;
 
 /// How tall the master meter in the transport row is, in points.
 const MASTER_METER_HEIGHT: f32 = 8.0;
+
+/// The label of the button that switches preview between proxies and
+/// originals.
+pub const PROXY_TOGGLE_LABEL: &str = "Proxy";
 
 /// What the docked panel says while the picture is in the pop-out window.
 pub const POPPED_OUT_LABEL: &str = "Showing in the pop-out window";
@@ -585,6 +590,13 @@ pub struct ViewerPanel {
     pub keyboard: bool,
     /// Whether the picture is showing in the pop-out window instead.
     pub popped_out: bool,
+    /// Whether preview reads proxies where an item has a ready one.
+    ///
+    /// On by default, which is what makes a proxied cut scrub. It is view
+    /// state, not project state: which file the *preview* opens is not an edit,
+    /// so it is not a Command and is not undoable. Export never reads it —
+    /// [`MediaUse::Export`] has no proxy branch at all.
+    pub use_proxies: bool,
     /// The master bus meter, fed from the mixer's meter bank.
     pub master_meter: MeterState,
 }
@@ -597,6 +609,7 @@ impl ViewerPanel {
             state: ViewerState::new(rate),
             keyboard: true,
             popped_out: false,
+            use_proxies: true,
             master_meter: MeterState::new(),
         }
     }
@@ -608,8 +621,27 @@ impl ViewerPanel {
             state: ViewerState::for_sequence(sequence),
             keyboard: true,
             popped_out: false,
+            use_proxies: true,
             master_meter: MeterState::new(),
         }
+    }
+
+    /// What the preview switch means to the model.
+    #[must_use]
+    pub fn media_use(&self) -> MediaUse {
+        MediaUse::Preview {
+            proxies: self.use_proxies,
+        }
+    }
+
+    /// Which file preview reads `item` from with the switch as it stands.
+    ///
+    /// A ready proxy with the switch on, the original in every other case: the
+    /// switch off, a proxy still generating, one that failed, and one gone
+    /// stale under a changed source (docs/PLAN.md §5.2).
+    #[must_use]
+    pub fn preview_source<'a>(&self, item: &'a MediaItem) -> MediaSource<'a> {
+        item.source(self.media_use())
     }
 
     /// Feeds the master meter with the levels the audio callback published,
@@ -684,6 +716,14 @@ impl ViewerPanel {
             }
             if ui.button(">|").on_hover_text("Last frame (End)").clicked() {
                 moved |= self.state.go_to_end();
+            }
+            // Which file preview opens, never what an export writes.
+            if ui
+                .selectable_label(self.use_proxies, PROXY_TOGGLE_LABEL)
+                .on_hover_text("Preview from proxies where one is ready")
+                .clicked()
+            {
+                self.use_proxies = !self.use_proxies;
             }
             // The master meter takes the right-hand end of the transport row,
             // where it is next to the picture it belongs to.

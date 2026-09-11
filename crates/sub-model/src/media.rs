@@ -75,29 +75,142 @@ impl StreamInfo {
 ///
 /// The proxy path is project-relative like every other media path; proxies live
 /// in the `project.sub.d/` sidecar folder.
+///
+/// A proxy stands in for exactly the bytes it was made from, so the state also
+/// records the two ways a proxy stops standing for anything: generation failed,
+/// or the source changed under it and the file on disk is
+/// [`Stale`](ProxyState::Stale). A stale proxy is kept rather than deleted —
+/// the path is what a regeneration overwrites, and undoing the edit that
+/// invalidated it puts the item back on the proxy it had.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyState {
     /// No proxy has been asked for.
     #[default]
     None,
-    /// A proxy job has been queued or is running.
+    /// A proxy job has been queued or is running. This is the "generating"
+    /// state the bin shows; the tag is `pending` on disk, where it has been
+    /// since the first project schema.
     Pending,
     /// A proxy exists at this project-relative path.
     Ready(MediaPath),
+    /// A proxy exists at this project-relative path but was made from other
+    /// bytes than the item now refers to, so preview must not use it until it
+    /// has been generated again.
+    Stale(MediaPath),
     /// Proxy generation failed; the message is for the user, the code was
     /// reported when it happened.
     Failed(String),
 }
 
 impl ProxyState {
-    /// The proxy file, when one is ready.
+    /// The proxy file, when one is ready to be previewed from.
     #[must_use]
     pub fn path(&self) -> Option<&MediaPath> {
         match self {
             Self::Ready(path) => Some(path),
             _ => None,
         }
+    }
+
+    /// The proxy file on disk, ready or stale.
+    ///
+    /// This is what a regeneration writes over and what a clean-up deletes;
+    /// preview asks [`ProxyState::path`] instead, which never hands back a
+    /// stale file.
+    #[must_use]
+    pub fn file(&self) -> Option<&MediaPath> {
+        match self {
+            Self::Ready(path) | Self::Stale(path) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// Whether a proxy can be previewed from right now.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready(_))
+    }
+
+    /// Whether a proxy exists but no longer matches the source.
+    #[must_use]
+    pub fn is_stale(&self) -> bool {
+        matches!(self, Self::Stale(_))
+    }
+
+    /// Whether a proxy job is queued or running.
+    #[must_use]
+    pub fn is_generating(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+
+    /// The state's name, as the bin labels it.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Pending => "generating",
+            Self::Ready(_) => "ready",
+            Self::Stale(_) => "stale",
+            Self::Failed(_) => "failed",
+        }
+    }
+
+    /// The same state with a ready proxy marked stale.
+    ///
+    /// Every other state is returned unchanged: there is nothing to invalidate
+    /// in a proxy that does not exist, and a job still running writes its own
+    /// result when it finishes.
+    #[must_use]
+    pub fn invalidated(self) -> Self {
+        match self {
+            Self::Ready(path) => Self::Stale(path),
+            other => other,
+        }
+    }
+}
+
+/// What a media item is being read for, and therefore which file is read.
+///
+/// Proxies exist to make editing feel immediate, never to change what is
+/// delivered: [`MediaUse::Preview`] may read the proxy, and
+/// [`MediaUse::Export`] reads the original always (docs/PLAN.md §5.2). This
+/// enum is the only place that choice is made, so "export never uses a proxy"
+/// is one branch that a test can pin rather than a rule every call site has to
+/// remember.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MediaUse {
+    /// The viewer, the timeline and anything else the editor draws.
+    Preview {
+        /// Whether the user has the proxy switch on. A ready proxy is used
+        /// only when this is true.
+        proxies: bool,
+    },
+    /// Rendering the sequence to a file.
+    Export,
+}
+
+impl MediaUse {
+    /// Preview with the proxy switch on.
+    pub const PREVIEW_PROXIES: Self = Self::Preview { proxies: true };
+    /// Preview with the proxy switch off.
+    pub const PREVIEW_ORIGINALS: Self = Self::Preview { proxies: false };
+}
+
+/// The file a media item is read from for one [`MediaUse`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaSource<'a> {
+    /// The project-relative path to open.
+    pub path: &'a MediaPath,
+    /// True when that path is the proxy rather than the original.
+    pub is_proxy: bool,
+}
+
+impl MediaSource<'_> {
+    /// The absolute path to open, given the folder holding the project file.
+    #[must_use]
+    pub fn resolve(&self, project_dir: &Path) -> std::path::PathBuf {
+        self.path.resolve(project_dir)
     }
 }
 
@@ -178,6 +291,58 @@ impl MediaItem {
     #[must_use]
     pub fn absolute_proxy_path(&self, project_dir: &Path) -> Option<std::path::PathBuf> {
         self.proxy.path().map(|path| path.resolve(project_dir))
+    }
+
+    /// Which file this item is read from for `media_use`.
+    ///
+    /// Preview reads a ready proxy when the switch is on; everything else —
+    /// the switch off, a proxy still generating, a failed one, one gone stale
+    /// under a changed source, and every export — reads the original.
+    ///
+    /// ```
+    /// use sub_model::{MediaItem, MediaPath, MediaUse, ProxyState};
+    ///
+    /// let mut item = MediaItem::new(MediaPath::new("footage/a.mp4").unwrap());
+    /// item.proxy = ProxyState::Ready(MediaPath::new("cut.sub.d/a.mov").unwrap());
+    ///
+    /// assert!(item.source(MediaUse::PREVIEW_PROXIES).is_proxy);
+    /// assert!(!item.source(MediaUse::PREVIEW_ORIGINALS).is_proxy);
+    /// assert!(!item.source(MediaUse::Export).is_proxy);
+    /// ```
+    #[must_use]
+    pub fn source(&self, media_use: MediaUse) -> MediaSource<'_> {
+        if let MediaUse::Preview { proxies: true } = media_use
+            && let Some(path) = self.proxy.path()
+        {
+            return MediaSource {
+                path,
+                is_proxy: true,
+            };
+        }
+        MediaSource {
+            path: &self.path,
+            is_proxy: false,
+        }
+    }
+
+    /// The absolute path this item is read from for `media_use`.
+    #[must_use]
+    pub fn absolute_source(&self, project_dir: &Path, media_use: MediaUse) -> std::path::PathBuf {
+        self.source(media_use).resolve(project_dir)
+    }
+
+    /// Marks a ready proxy stale, and reports whether that changed anything.
+    ///
+    /// Called when the bytes behind the item change: a relink to another file,
+    /// or a re-hash that finds different content at the same path. The proxy
+    /// file is left where it is so a regeneration overwrites it and an undo
+    /// can put the item back on it.
+    pub fn invalidate_proxy(&mut self) -> bool {
+        let was_ready = self.proxy.is_ready();
+        if was_ready {
+            self.proxy = std::mem::take(&mut self.proxy).invalidated();
+        }
+        was_ready
     }
 
     /// Looks for the source file and updates [`MediaItem::offline`].
@@ -338,6 +503,95 @@ mod tests {
         );
         assert_eq!(ProxyState::Pending.path(), None);
         assert_eq!(ProxyState::Failed("no encoder".into()).path(), None);
+    }
+
+    #[test]
+    fn preview_reads_a_ready_proxy_and_export_never_does() {
+        let dir = Path::new("/p/doc");
+        let proxy = path("doc.sub.d/a.proxy.mov");
+        let mut item = MediaItem::new(path("footage/a.mp4"));
+        item.proxy = ProxyState::Ready(proxy.clone());
+
+        let preview = item.source(MediaUse::PREVIEW_PROXIES);
+        assert!(preview.is_proxy);
+        assert_eq!(preview.path, &proxy);
+        assert_eq!(
+            item.absolute_source(dir, MediaUse::PREVIEW_PROXIES),
+            Path::new("/p/doc/doc.sub.d/a.proxy.mov")
+        );
+
+        for media_use in [MediaUse::PREVIEW_ORIGINALS, MediaUse::Export] {
+            let source = item.source(media_use);
+            assert!(!source.is_proxy, "{media_use:?} must read the original");
+            assert_eq!(source.path, &item.path);
+            assert_eq!(
+                item.absolute_source(dir, media_use),
+                Path::new("/p/doc/footage/a.mp4")
+            );
+        }
+    }
+
+    #[test]
+    fn preview_falls_back_to_the_original_unless_a_proxy_is_ready() {
+        let mut item = MediaItem::new(path("footage/a.mp4"));
+        for state in [
+            ProxyState::None,
+            ProxyState::Pending,
+            ProxyState::Stale(path("doc.sub.d/a.proxy.mov")),
+            ProxyState::Failed("no encoder".to_owned()),
+        ] {
+            item.proxy = state.clone();
+            assert!(
+                !item.source(MediaUse::PREVIEW_PROXIES).is_proxy,
+                "{} must not be previewed from",
+                state.label()
+            );
+        }
+    }
+
+    #[test]
+    fn a_ready_proxy_goes_stale_when_the_source_changes() {
+        let proxy = path("doc.sub.d/a.proxy.mov");
+        let mut item = MediaItem::new(path("footage/a.mp4"));
+        item.proxy = ProxyState::Ready(proxy.clone());
+
+        assert!(item.invalidate_proxy());
+        assert_eq!(item.proxy, ProxyState::Stale(proxy.clone()));
+        // The file itself is kept, so a regeneration overwrites it.
+        assert_eq!(item.proxy.file(), Some(&proxy));
+        assert!(item.proxy.path().is_none());
+
+        // Invalidating again changes nothing, and neither does invalidating a
+        // state with no proxy behind it.
+        assert!(!item.invalidate_proxy());
+        assert_eq!(item.proxy, ProxyState::Stale(proxy));
+        item.proxy = ProxyState::Pending;
+        assert!(!item.invalidate_proxy());
+        assert_eq!(item.proxy, ProxyState::Pending);
+    }
+
+    #[test]
+    fn proxy_states_name_themselves() {
+        let proxy = path("doc.sub.d/a.proxy.mov");
+        assert_eq!(ProxyState::None.label(), "none");
+        assert_eq!(ProxyState::Pending.label(), "generating");
+        assert_eq!(ProxyState::Ready(proxy.clone()).label(), "ready");
+        assert_eq!(ProxyState::Stale(proxy.clone()).label(), "stale");
+        assert_eq!(ProxyState::Failed("no encoder".into()).label(), "failed");
+
+        assert!(ProxyState::Pending.is_generating());
+        assert!(ProxyState::Ready(proxy.clone()).is_ready());
+        assert!(ProxyState::Stale(proxy).is_stale());
+    }
+
+    #[test]
+    fn a_stale_proxy_round_trips_through_the_project_file() {
+        let mut item = MediaItem::new(path("footage/a.mp4"));
+        item.proxy = ProxyState::Stale(path("doc.sub.d/a.proxy.mov"));
+        let text = serde_json::to_string(&item).unwrap();
+        assert!(text.contains("\"stale\""), "{text}");
+        let loaded: MediaItem = serde_json::from_str(&text).unwrap();
+        assert_eq!(loaded.proxy, item.proxy);
     }
 
     #[test]

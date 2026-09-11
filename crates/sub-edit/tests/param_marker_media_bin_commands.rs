@@ -11,13 +11,13 @@
 use sub_edit::commands::{
     AddMarker, CreateBin, Filing, ImportMedia, InsertBin, InsertMedia, MarkerTarget, MoveBin,
     MoveMarker, MoveToBin, RelinkMedia, RemoveBin, RemoveMarker, RemoveMedia, RenameBin,
-    RenameMarker, SetClipParams, SetTrackLocked, builtin_registry,
+    RenameMarker, SetClipParams, SetProxyState, SetTrackLocked, builtin_registry,
 };
 use sub_edit::{AnyCommand, Command, CommandEnvelope, History, codes};
 use sub_model::{
     Bin, BinId, Clip, ClipId, ContentHash, Fixed6, GainDb, MarkerId, MediaId, MediaItem, MediaPath,
-    Opacity, Point2, Project, Scale2, Sequence, SequenceId, SequenceSettings, Track, TrackId,
-    TrackKind, Transform, codes as model_codes, json,
+    MediaUse, Opacity, Point2, Project, ProxyState, Scale2, Sequence, SequenceId, SequenceSettings,
+    Track, TrackId, TrackKind, Transform, codes as model_codes, json,
 };
 use sub_time::{Rational, RationalTime, TimeRange};
 
@@ -485,6 +485,110 @@ fn relinking_keeps_the_identity_and_undoes_exactly() {
         RelinkMedia::new(MediaId::new(), MediaPath::new("a.mp4").unwrap()),
     );
     assert_eq!(err.code, codes::MEDIA_NOT_FOUND);
+}
+
+#[test]
+fn a_proxy_state_is_set_and_undone_exactly() {
+    let (mut project, at) = fixture();
+    let proxy = MediaPath::new("doc.sub.d/interview.proxy.mov").unwrap();
+
+    round_trip(&mut project, SetProxyState::generating(at.used));
+    assert_eq!(
+        project.media_item(at.used).unwrap().proxy,
+        ProxyState::Pending
+    );
+
+    round_trip(&mut project, SetProxyState::ready(at.used, proxy.clone()));
+    let item = project.media_item(at.used).unwrap();
+    assert!(item.proxy.is_ready());
+    assert_eq!(item.source(MediaUse::PREVIEW_PROXIES).path, &proxy);
+    // Export reads the original however the proxy state reads.
+    assert_eq!(item.source(MediaUse::Export).path, &item.path);
+
+    round_trip(
+        &mut project,
+        SetProxyState::new(at.used, ProxyState::Failed("no encoder".to_owned())),
+    );
+    assert_eq!(
+        project.media_item(at.used).unwrap().proxy,
+        ProxyState::Failed("no encoder".to_owned())
+    );
+
+    let err = refused(&mut project, SetProxyState::generating(MediaId::new()));
+    assert_eq!(err.code, codes::MEDIA_NOT_FOUND);
+}
+
+#[test]
+fn a_ready_proxy_goes_stale_when_the_source_hash_changes() {
+    let (mut project, at) = fixture();
+    let proxy = MediaPath::new("doc.sub.d/interview.proxy.mov").unwrap();
+    let made_from = ContentHash::from_bytes([3; 32]);
+    let mut history = History::new();
+    history
+        .apply(
+            &mut project,
+            RelinkMedia::new(at.used, MediaPath::new("footage/interview.mp4").unwrap())
+                .with_hash(made_from),
+        )
+        .unwrap();
+    history
+        .apply(&mut project, SetProxyState::ready(at.used, proxy.clone()))
+        .unwrap();
+
+    // Relinking to a file with other bytes invalidates the proxy: the file is
+    // kept, but preview falls back to the original.
+    round_trip(
+        &mut project,
+        RelinkMedia::new(at.used, MediaPath::new("moved/interview.mp4").unwrap())
+            .with_hash(ContentHash::from_bytes([9; 32])),
+    );
+    let item = project.media_item(at.used).unwrap();
+    assert_eq!(item.proxy, ProxyState::Stale(proxy.clone()));
+    assert_eq!(item.proxy.file(), Some(&proxy));
+    assert!(!item.source(MediaUse::PREVIEW_PROXIES).is_proxy);
+
+    // Undoing the relink puts the ready proxy back, exactly.
+    let mut history = History::new();
+    history
+        .apply(
+            &mut project,
+            RelinkMedia::new(at.used, MediaPath::new("elsewhere/interview.mp4").unwrap())
+                .with_hash(ContentHash::from_bytes([11; 32])),
+        )
+        .unwrap();
+    history.undo(&mut project).unwrap();
+    assert_eq!(
+        project.media_item(at.used).unwrap().proxy,
+        ProxyState::Stale(proxy)
+    );
+}
+
+#[test]
+fn a_relink_to_the_same_bytes_keeps_the_proxy() {
+    let (mut project, at) = fixture();
+    let proxy = MediaPath::new("doc.sub.d/interview.proxy.mov").unwrap();
+    let hash = ContentHash::from_bytes([5; 32]);
+    let mut history = History::new();
+    history
+        .apply(
+            &mut project,
+            RelinkMedia::new(at.used, MediaPath::new("footage/interview.mp4").unwrap())
+                .with_hash(hash),
+        )
+        .unwrap();
+    history
+        .apply(&mut project, SetProxyState::ready(at.used, proxy.clone()))
+        .unwrap();
+
+    // The same bytes at another path: the proxy still stands for them.
+    round_trip(
+        &mut project,
+        RelinkMedia::new(at.used, MediaPath::new("moved/interview.mp4").unwrap()).with_hash(hash),
+    );
+    assert_eq!(
+        project.media_item(at.used).unwrap().proxy,
+        ProxyState::Ready(proxy)
+    );
 }
 
 // -- bins -----------------------------------------------------------------

@@ -13,7 +13,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
-use sub_model::{BinId, ContentHash, MediaId, MediaItem, MediaPath, Project};
+use sub_model::{BinId, ContentHash, MediaId, MediaItem, MediaPath, Project, ProxyState};
 
 use super::bin::filed_at;
 use super::{bin_mut, check_insert_index, media_item_mut};
@@ -229,12 +229,92 @@ impl Command for RemoveMedia {
     }
 }
 
+/// Sets a media item's proxy state.
+///
+/// Proxy generation is a background job, and what it reports — queued,
+/// finished at a path, failed — is project state that is saved, undone and
+/// redone like any other, so it arrives as a command rather than as a direct
+/// mutation. The inverse carries the state the item had, which is what puts a
+/// ready proxy back after an undo.
+///
+/// ```
+/// use sub_edit::History;
+/// use sub_edit::commands::{ImportMedia, SetProxyState};
+/// use sub_model::{MediaItem, MediaPath, ProxyState, Project};
+///
+/// let mut project = Project::new("Doc cut");
+/// let item = MediaItem::new(MediaPath::new("footage/interview.mp4").unwrap());
+/// let media = item.id;
+/// let mut history = History::new();
+/// history.apply(&mut project, ImportMedia::new(item)).unwrap();
+///
+/// let proxy = MediaPath::new("cut.sub.d/interview.proxy.mov").unwrap();
+/// let command = SetProxyState::new(media, ProxyState::Ready(proxy));
+/// history.apply(&mut project, command).unwrap();
+/// assert!(project.media_item(media).unwrap().proxy.is_ready());
+///
+/// history.undo(&mut project).unwrap();
+/// assert_eq!(project.media_item(media).unwrap().proxy, ProxyState::None);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetProxyState {
+    /// The item whose proxy state changes.
+    pub media: MediaId,
+    /// The state it takes.
+    pub proxy: ProxyState,
+}
+
+impl SetProxyState {
+    /// Sets `media`'s proxy state to `proxy`.
+    #[must_use]
+    pub fn new(media: MediaId, proxy: ProxyState) -> Self {
+        Self { media, proxy }
+    }
+
+    /// Marks `media`'s proxy as generating.
+    #[must_use]
+    pub fn generating(media: MediaId) -> Self {
+        Self::new(media, ProxyState::Pending)
+    }
+
+    /// Records a finished proxy at `path`.
+    #[must_use]
+    pub fn ready(media: MediaId, path: MediaPath) -> Self {
+        Self::new(media, ProxyState::Ready(path))
+    }
+}
+
+impl Command for SetProxyState {
+    const KIND: &'static str = "media.set_proxy";
+    const DESCRIPTION: &'static str =
+        "Set a media item's proxy state: none, generating, ready at a path, stale or failed.";
+
+    fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
+        let item = media_item_mut(project, self.media)?;
+        let previous = std::mem::replace(&mut item.proxy, self.proxy.clone());
+        Ok(Inverse::new(Self::new(self.media, previous)))
+    }
+
+    fn label(&self) -> String {
+        format!("Proxy {}", self.proxy.label())
+    }
+}
+
 /// Points a media item at another file.
 ///
 /// The item keeps its identifier, so every clip cut from it survives the
 /// relink. The command carries the new hash and offline flag as well as the
 /// path, because relinking is what a successful search for a moved file
-/// concludes with, and the inverse carries the three values the item had.
+/// concludes with, and the inverse carries the values the item had.
+///
+/// A proxy stands in for particular bytes, so pointing the item at a file that
+/// hashes differently invalidates a ready proxy: it goes
+/// [`Stale`](ProxyState::Stale) and preview falls back to the original until
+/// the proxy is generated again (TASK-70). Re-hashing a file that changed in
+/// place is the same command with the item's own path, and invalidates the
+/// same way. The inverse carries the proxy state the item had, so undo puts a
+/// ready proxy back.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelinkMedia {
@@ -248,6 +328,11 @@ pub struct RelinkMedia {
     /// Whether the file is still missing. False for a successful relink.
     #[serde(default)]
     pub offline: bool,
+    /// The proxy state to force, which only an inverse sets. Left out, the
+    /// command invalidates a ready proxy when the hash it records differs from
+    /// the one the item had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyState>,
 }
 
 impl RelinkMedia {
@@ -259,6 +344,7 @@ impl RelinkMedia {
             path,
             hash: None,
             offline: false,
+            proxy: None,
         }
     }
 
@@ -283,12 +369,22 @@ impl Command for RelinkMedia {
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
         let item = media_item_mut(project, self.media)?;
+        let previous_hash = std::mem::replace(&mut item.hash, self.hash);
         let previous = Self {
             media: self.media,
             path: std::mem::replace(&mut item.path, self.path.clone()),
-            hash: std::mem::replace(&mut item.hash, self.hash),
+            hash: previous_hash,
             offline: std::mem::replace(&mut item.offline, self.offline),
+            proxy: Some(item.proxy.clone()),
         };
+        if let Some(proxy) = self.proxy.clone() {
+            item.proxy = proxy;
+        } else if self.hash != previous_hash {
+            // The item now refers to other bytes than the proxy was made
+            // from, so nothing may be previewed from it until it is made
+            // again. The file stays where it is; only the state changes.
+            item.invalidate_proxy();
+        }
         Ok(Inverse::new(previous))
     }
 
