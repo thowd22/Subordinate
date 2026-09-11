@@ -5088,6 +5088,7 @@ dependencies = [
 name = "subordinate-cli"
 version = "0.1.0"
 dependencies = [
+ "png",
  "serde",
  "serde_json",
  "sub-audio",
@@ -5116,6 +5117,7 @@ dependencies = [
  "sub-edit",
  "sub-model",
  "sub-plugin",
+ "sub-time",
  "tokio",
  "tracing",
 ]

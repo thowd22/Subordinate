@@ -74,6 +74,7 @@ pub fn serve(options: &Options, ready: impl FnOnce(&Value)) -> SubResult<Value> 
 
     let engine = Engine::spawn(project)?;
     let mut dispatcher = Dispatcher::new(engine.handle().clone());
+    install_host_methods(&mut dispatcher, options);
     // The watcher lives as long as the server does: dropping the handle stops
     // the thread, so it is held here and not inside the setup.
     let watching = install_plugin_methods(&mut dispatcher, engine.handle(), options)?;
@@ -84,6 +85,28 @@ pub fn serve(options: &Options, ready: impl FnOnce(&Value)) -> SubResult<Value> 
     let report = served?;
     stopped?;
     Ok(report)
+}
+
+/// Puts the host-backed tool families on the dispatcher: `media.probe`,
+/// `media.make_proxy`, `playback.render_frame_png` and the `export.*` family
+/// (docs/PLAN.md §7).
+///
+/// The engine-served families are already there — every [`Dispatcher`] carries
+/// them — and these are what a serving process adds out of its own decoders,
+/// GPU and encoder ([`crate::host::CliServices`]).
+///
+/// A registration that fails is logged and skipped rather than fatal: it can
+/// only be a duplicate method name, which would be a bug here, and a server
+/// that cannot export is still a server that can edit.
+fn install_host_methods(dispatcher: &mut Dispatcher, options: &Options) {
+    let services = Arc::new(crate::host::CliServices::new(options.project.as_deref()));
+    if let Err(error) = sub_command::host::register_methods(dispatcher, services) {
+        tracing::warn!(
+            code = error.code.as_str(),
+            "the host-served tool families are not served: {}",
+            error.message,
+        );
+    }
 }
 
 /// Puts the plugin management methods on the dispatcher, so an agent manages

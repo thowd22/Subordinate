@@ -38,6 +38,7 @@ fn method_count() -> usize {
     [
         subordinate_mcp::tools::COMMAND_API_SCHEMA,
         subordinate_mcp::tools::PLUGIN_API_SCHEMA,
+        subordinate_mcp::tools::HOST_API_SCHEMA,
     ]
     .into_iter()
     .map(|text| {

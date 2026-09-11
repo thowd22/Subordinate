@@ -106,6 +106,18 @@ fn schema_of<T: JsonSchema>(generator: &mut SchemaGenerator) -> Schema {
 enum Method {
     /// A registered command kind, applied through the engine's registry.
     Command,
+    /// A second name for a registered command kind.
+    ///
+    /// The agent-facing `timeline.*` family is made of these: `timeline.add_clip`
+    /// is `clip.add` under the name the tool families use, applied through the
+    /// same envelope and the same history, with the command's own parameter
+    /// schema (docs/PLAN.md §7).
+    Alias {
+        /// The command kind the call is applied as.
+        kind: String,
+        /// One sentence written for the alias rather than for the command.
+        description: &'static str,
+    },
     /// A query or history operation.
     Query(Handler),
     /// A method acting on the connection that called it.
@@ -116,7 +128,7 @@ impl Method {
     /// The word `system.list_methods` reports.
     fn kind(&self) -> &'static str {
         match self {
-            Self::Command => "command",
+            Self::Command | Self::Alias { .. } => "command",
             Self::Query(_) => "query",
             Self::Session(_) => "session",
         }
@@ -351,6 +363,7 @@ impl Dispatcher {
         };
         dispatcher.install_events();
         dispatcher.install_queries();
+        crate::agent::install(&mut dispatcher);
         dispatcher
     }
 
@@ -439,9 +452,10 @@ impl Dispatcher {
     #[must_use]
     pub fn description(&self, method: &str) -> Option<&str> {
         let entry = self.methods.get(method)?;
-        match &entry.described {
-            Some(described) => Some(described.description),
-            None => self.registry.description(method),
+        match (&entry.described, &entry.method) {
+            (Some(described), _) => Some(described.description),
+            (None, Method::Alias { description, .. }) => Some(description),
+            (None, _) => self.registry.description(method),
         }
     }
 
@@ -454,13 +468,20 @@ impl Dispatcher {
         self.methods
             .iter()
             .map(|(name, entry)| {
-                let (description, params, result) = match &entry.described {
-                    Some(described) => (
+                let (description, params, result) = match (&entry.described, &entry.method) {
+                    (Some(described), _) => (
                         described.description.to_owned(),
                         (described.params)(generator),
                         (described.result)(generator),
                     ),
-                    None => (
+                    (None, Method::Alias { kind, description }) => (
+                        (*description).to_owned(),
+                        self.registry
+                            .params_schema(kind, generator)
+                            .unwrap_or_default(),
+                        generator.subschema_for::<AppliedResult>(),
+                    ),
+                    (None, _) => (
                         self.registry
                             .description(name)
                             .unwrap_or_default()
@@ -652,6 +673,13 @@ impl Dispatcher {
                     .apply_envelope(CommandEnvelope::new(method, params))?;
                 to_value(&AppliedResult::from(&applied))
             }
+            Method::Alias { kind, .. } => {
+                let params = command_params(method, params)?;
+                let applied = self
+                    .engine
+                    .apply_envelope(CommandEnvelope::new(kind, params))?;
+                to_value(&AppliedResult::from(&applied))
+            }
             Method::Query(handler) => handler(&self.engine, params),
             Method::Session(handler) => {
                 let session = session.ok_or_else(|| {
@@ -790,9 +818,31 @@ impl Dispatcher {
         );
     }
 
+    /// Adds a second name for a registered command kind.
+    ///
+    /// Nothing is added when the kind is not in this dispatcher's registry: a
+    /// build whose command set was trimmed offers fewer aliases rather than
+    /// methods that answer `edit.unknown_kind`.
+    pub(crate) fn alias(&mut self, name: &str, description: &'static str, kind: &str) {
+        if !self.registry.contains(kind) {
+            return;
+        }
+        let previous = self.methods.insert(
+            name.to_owned(),
+            Entry {
+                method: Method::Alias {
+                    kind: kind.to_owned(),
+                    description,
+                },
+                described: None,
+            },
+        );
+        debug_assert!(previous.is_none(), "aliased method {name} collides");
+    }
+
     /// Adds a built-in query, which cannot collide because the names are
     /// distinct literals and command kinds are namespaced by their own crate.
-    fn add<P, R, F>(&mut self, name: &str, description: &'static str, handler: F)
+    pub(crate) fn add<P, R, F>(&mut self, name: &str, description: &'static str, handler: F)
     where
         P: JsonSchema,
         R: JsonSchema,
@@ -835,7 +885,7 @@ impl Dispatcher {
 }
 
 /// Serialises a result value.
-fn to_value<T: Serialize>(value: &T) -> SubResult<Value> {
+pub(crate) fn to_value<T: Serialize>(value: &T) -> SubResult<Value> {
     serde_json::to_value(value).map_err(|err| {
         SubError::wrap(
             sub_core::codes::INTERNAL,
@@ -852,7 +902,7 @@ fn applied_option(applied: Option<&Applied>) -> Value {
 }
 
 /// Decodes typed parameters, reporting a mismatch as `command.invalid_params`.
-fn typed<T: DeserializeOwned>(params: Value) -> SubResult<T> {
+pub(crate) fn typed<T: DeserializeOwned>(params: Value) -> SubResult<T> {
     serde_json::from_value(params).map_err(|err| {
         SubError::wrap(
             codes::INVALID_PARAMS,

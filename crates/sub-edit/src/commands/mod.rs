@@ -6,8 +6,9 @@
 //! [`params`] for a clip's inspector parameters, [`effect`] for the plugin
 //! effects applied to a clip, [`marker`] for annotations on
 //! sequences and clips, [`analysis`] for what analyzer plugins found in a media
-//! item, [`media`] for the sources a project references and [`bin`] for the
-//! folders they are filed in. The clip edits themselves live
+//! item, [`media`] for the sources a project references, [`bin`] for the
+//! folders they are filed in and [`project`] for swapping the open document
+//! itself. The clip edits themselves live
 //! in [`crate::clip`]; [`register_builtin`] registers those too, so the whole
 //! mutation surface is one registry.
 //!
@@ -29,6 +30,7 @@ pub mod effect;
 pub mod marker;
 pub mod media;
 pub mod params;
+pub mod project;
 pub mod sequence;
 pub mod track;
 pub mod transition;
@@ -50,6 +52,7 @@ pub use effect::{
 pub use marker::{AddMarker, MarkerTarget, MoveMarker, RemoveMarker, RenameMarker};
 pub use media::{Filing, ImportMedia, InsertMedia, RelinkMedia, RemoveMedia, SetProxyState};
 pub use params::SetClipParams;
+pub use project::ReplaceProject;
 pub use sequence::{
     CreateSequence, DeleteSequence, InsertSequence, RenameSequence, SetSequenceSettings,
 };
@@ -97,6 +100,7 @@ pub fn register_builtin(registry: &mut CommandRegistry) -> SubResult<()> {
     registry.register::<RenameSequence>()?;
     registry.register::<SetSequenceSettings>()?;
     registry.register::<SetClipParams>()?;
+    registry.register::<ReplaceProject>()?;
     registry.register::<AddMarker>()?;
     registry.register::<MarkersFromAnalysis>()?;
     registry.register::<ReplaceClipMarkers>()?;
@@ -405,6 +409,7 @@ mod tests {
                 "media.replace_analyses",
                 "media.set_analysis",
                 "media.set_proxy",
+                "project.replace",
                 "sequence.create",
                 "sequence.delete",
                 "sequence.insert",

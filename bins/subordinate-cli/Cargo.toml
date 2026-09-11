@@ -22,6 +22,9 @@ sub-plugin = { version = "0.1.0", path = "../../crates/sub-plugin", features = [
 sub-render = { version = "0.1.0", path = "../../crates/sub-render" }
 sub-time = { version = "0.1.0", path = "../../crates/sub-time" }
 serde = "1"
+# playback.render_frame_png hands an agent a picture, so a composited frame is
+# encoded here rather than written as raw pixels.
+png = "0.18"
 wgpu = { version = "30", default-features = false }
 serde_json = "1"
 tracing = "0.1"

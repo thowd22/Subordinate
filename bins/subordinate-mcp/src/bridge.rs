@@ -186,7 +186,7 @@ impl Bridge {
         let params = request.arguments.map(Value::Object);
         debug!(tool = %request.name, %method, "forwarding a tool call");
         Ok(match self.backend.invoke(method, params) {
-            Ok(value) => success(&value),
+            Ok(value) => with_image(success(&value), &value),
             Err(error) => {
                 warn!(tool = %request.name, code = error.code.as_str(), "the tool call failed");
                 failure(&error)
@@ -387,6 +387,30 @@ fn success(value: &Value) -> CallToolResult {
     let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
     let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
     result.structured_content = Some(value.clone());
+    result
+}
+
+/// Adds an image content block when the answer carries a picture.
+///
+/// `playback.render_frame_png` exists so an agent can *look* at the timeline
+/// (docs/PLAN.md §7), and a base64 string buried in a JSON result is not
+/// something a model can look at. A result that carries `data`, an
+/// `image/…` `mime_type` and a pixel size is therefore published as an MCP
+/// image block as well as the JSON, so a client renders the frame and the
+/// structured content still says exactly which time was drawn.
+fn with_image(mut result: CallToolResult, value: &Value) -> CallToolResult {
+    let (Some(data), Some(mime)) = (
+        value.get("data").and_then(Value::as_str),
+        value.get("mime_type").and_then(Value::as_str),
+    ) else {
+        return result;
+    };
+    if !mime.starts_with("image/") || data.is_empty() || value.get("width").is_none() {
+        return result;
+    }
+    result
+        .content
+        .insert(0, ContentBlock::image(data.to_owned(), mime.to_owned()));
     result
 }
 
