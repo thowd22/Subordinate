@@ -403,6 +403,15 @@ echo "ui-smoke: editor on head ${editor_head:-?}, pop-out on head ${popout_head:
 # an unannotated capture of the pop-out is a black rectangle on a black field:
 # the window is there, and the picture says nothing to the eye. The outline is
 # the evidence (TASK-118).
+#
+# box has no configured ImageMagick font and `-annotate` is fatal without one
+# (run 34618215215), so the text is drawn only when a TrueType file can be
+# found, and the whole annotation is best-effort: a screenshot is worth more
+# than a label.
+label_font=$(find /usr/share/fonts -name 'DejaVuSans.ttf' -print -quit 2>/dev/null || true)
+[ -n "$label_font" ] ||
+    label_font=$(find /usr/share/fonts -name '*.ttf' -print -quit 2>/dev/null || true)
+
 outline_window() {
     png=$1
     head_x=$2
@@ -415,12 +424,13 @@ $geom
 EOF2
     rx=$((x - head_x))
     ry=$((y - head_y))
-    im "$png" \
-        -stroke '#ff4d3d' -strokewidth 3 -fill none \
-        -draw "rectangle $rx,$ry $((rx + w - 1)),$((ry + h - 1))" \
-        -stroke none -fill '#ff4d3d' -pointsize 20 \
-        -annotate "+$((rx + 10))+$((ry + 34))" "$label ${w}x$h" \
-        "$png"
+    set -- "$png" -stroke '#ff4d3d' -strokewidth 3 -fill none \
+        -draw "rectangle $rx,$ry $((rx + w - 1)),$((ry + h - 1))"
+    if [ -n "$label_font" ]; then
+        set -- "$@" -stroke none -fill '#ff4d3d' -font "$label_font" -pointsize 20 \
+            -annotate "+$((rx + 10))+$((ry + 34))" "$label ${w}x$h"
+    fi
+    im "$@" "$png" || echo "ui-smoke: could not outline $label on $png"
 }
 
 # One capture of the whole Xinerama desktop, then a crop per head: two xwd
