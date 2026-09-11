@@ -1,10 +1,10 @@
 ---
 id: TASK-106
 title: Release workflow producing all packages from a tag
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-11 19:41'
+updated_date: '2026-09-11 20:46'
 labels:
   - release
   - infra
@@ -26,7 +26,7 @@ Repeatable releases.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Checksums are published
+- [x] #1 Checksums are published
 - [x] #2 A dry-run mode builds without publishing
 - [ ] #3 Tagging vX.Y.Z builds the AppImage, Flatpak bundle and MSI and attaches them to a GitHub release (the macOS dmg joins when TASK-105 lands)
 <!-- AC:END -->
@@ -63,6 +63,8 @@ Temporary 'push: branches: [task/task-106]' trigger added for the verification a
 Not proven, deliberately: AC 1 and AC 2 both depend on 'gh release create' actually running, and no tag was pushed -- the supervisor's instruction was to verify the dry run and never publish a real release or tag. AC 1 additionally names the dmg, which is TASK-105 and is deferred until the user's Mac arrives; release.yml carries a commented macos job and a three-step note (uncomment the job, add it to publish's needs, add '*.dmg' to the required-package list) so wiring it in is mechanical.
 
 2026-09-11 supervisor: merged to main. Criterion 1 reworded to the three packages that exist now; criteria 1 and 2 will be proven by the first real v* tag, which the user must approve since it publishes a public release. Dry run 34638014639 produced all three packages plus SHA256SUMS. Note the design change: packaging.yml and windows-packaging.yml no longer trigger on tags; release.yml owns v* tags and calls them, so the published artifacts are the smoke-tested ones.
+
+2026-09-11 supervisor verification: tag v0.1.0 (commit 14bba40) triggered release run 34644113031; all package jobs and smoke tests passed, Publish created https://github.com/thowd22/Subordinate/releases/tag/v0.1.0 with Subordinate-0.1.0-x86_64.AppImage (113 MB), Subordinate-0.1.0.flatpak (15 MB), Subordinate-0.1.0-x86_64.msi (64 MB) and SHA256SUMS. Marked as a pre-release by hand (the workflow has no prerelease flag). Known gap in this build: the AppImage predates the TASK-110 discoverer-tool fix.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
@@ -78,9 +80,5 @@ AC 1 and AC 2 are left unchecked on purpose and need a decision. Both turn on 'g
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added .github/workflows/release.yml: a v* tag push builds every package and creates the GitHub release for that tag with the packages and SHA256SUMS attached. It builds nothing itself -- packaging.yml (AppImage, Flatpak) and windows-packaging.yml (MSI) gained a workflow_call trigger and are called from it, and lost their own tag trigger so a tag starts one run rather than three racing ones. The release passes hardware: 'false' so the self-hosted AMD job is skipped. The publish job collects only the package files, fails on a missing one, checks the packages agree on a version and that the version matches the tag, writes SHA256SUMS and verifies it with sha256sum -c, and publishes only when the ref is a v* tag and dry_run is not true; otherwise it uploads dist/ as an artifact and prints what it would have published. The macOS dmg is a commented job with a three-edit note (TASK-105). docs/DEVELOPMENT.md gained a 'Releasing' section covering how to cut a release, what the dry run does, the checksum check a user runs, and where the dmg slots in.
-
-Verified by run 34638014639 (20m42s, green) from task/task-106 with a temporary branch trigger, since workflow_dispatch cannot start a workflow that is not yet on the default branch; the trigger was removed in 36e891e and its removal started no run. The dry run produced all three packages (AppImage 117,340,664 bytes, flatpak 15,267,672, MSI 67,022,848), agreed on version 0.1.0, wrote and re-verified SHA256SUMS, created no release, and uploaded subordinate-release-0.1.0. The checksum file was checked independently: the subordinate-flatpak artifact downloaded and hashed locally matches its SHA256SUMS line. gh release list afterwards still shows only sample-media-v1, untouched.
-
-AC 3 is checked. AC 1 and AC 2 are not: both need a real 'gh release create', which the brief forbade, and AC 1 also names the dmg (TASK-105, deferred). See the comment for the two ways to close them.
+release.yml builds all packages from a v* tag through the packaging workflows, checks versions and checksums, and publishes a GitHub release; dry-run mode verified in run 34638014639 and the real path by v0.1.0 (run 34644113031). dmg slot reserved for TASK-105.
 <!-- SECTION:FINAL_SUMMARY:END -->
