@@ -518,9 +518,9 @@ jobs:
           done
           ls -l /dev/dri || true
           ls -l /usr/share/vulkan/icd.d/ || true
-          for tool in Xvfb xdpyinfo xwd xwininfo xrandr; do
+          for tool in Xvfb xdpyinfo xwd xwininfo; do
             command -v "$tool" >/dev/null 2>&1 \
-              || { echo "::error::$tool is missing on box: install xvfb, x11-utils, x11-apps and x11-xserver-utils"; exit 1; }
+              || { echo "::error::$tool is missing on box: install xvfb, x11-utils and x11-apps"; exit 1; }
           done
           command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1 \
             || { echo "::error::ImageMagick is missing on box"; exit 1; }
@@ -529,6 +529,26 @@ jobs:
           # which is what the free hosted job already covers.
           ls /usr/share/vulkan/icd.d/*.json >/dev/null 2>&1 \
             || { echo "::error::no Vulkan ICD on this runner: install mesa-vulkan-drivers (RADV)"; exit 1; }
+
+      # The second output is made with `xrandr --setmonitor`, and box had
+      # everything else but not xrandr (run 34614583394). x11-xserver-utils is
+      # a 200 kB package with no daemon, so the job installs it rather than
+      # waiting on its owner - but only if it is missing, and it says exactly
+      # what to run by hand if the runner service has no passwordless sudo.
+      - name: Ensure xrandr is present
+        run: |
+          if command -v xrandr >/dev/null 2>&1; then
+            echo "xrandr already installed: $(xrandr --version | head -1)"
+            exit 0
+          fi
+          sudo -n true 2>/dev/null || {
+            echo "::error::xrandr is missing and this runner has no passwordless sudo: run 'sudo apt-get install -y x11-xserver-utils' on box"
+            exit 1
+          }
+          sudo -n apt-get update || true
+          sudo -n apt-get install -y --no-install-recommends x11-xserver-utils \
+            || { echo "::error::could not install x11-xserver-utils on box"; exit 1; }
+          xrandr --version | head -1
 
       # The GUI binary, which the other jobs on this workflow never build. box
       # keeps its target directory on local disk between runs, so this is
