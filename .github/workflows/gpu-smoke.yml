@@ -229,8 +229,10 @@ jobs:
         run: |
           $dir = "$env:LOCALAPPDATA\gstreamer\1.0\msvc_x86_64"
           if (-not (Test-Path "$dir\bin\gst-inspect-1.0.exe")) {
-            $exe = "$env:RUNNER_TEMP\gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.exe"
-            Invoke-WebRequest -UseBasicParsing -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc/$exe.Split('\')[-1]" -OutFile $exe
+            $ProgressPreference = 'SilentlyContinue'
+            $name = "gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.exe"
+            $exe = "$env:RUNNER_TEMP\$name"
+            Invoke-WebRequest -UseBasicParsing -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc/$name" -OutFile $exe
             $p = Start-Process -Wait -PassThru -FilePath $exe -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/CURRENTUSER","/TYPE=devel","/DIR=$dir"
             "installer exit $($p.ExitCode)"
             Remove-Item $exe -ErrorAction SilentlyContinue
