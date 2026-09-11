@@ -39,13 +39,15 @@ use std::time::{Duration, Instant};
 use sub_audio::mixer::{MixGraphBuilder, MixerConfig, MixerControl, mixer};
 use sub_audio::scrub::{ScrubControl, ScrubSettings, scrub};
 use sub_audio::{AudioOutput, CpalBackend, MeterBank, OutputOptions};
+use sub_core::JobService;
 use sub_export::PresetLibrary;
 
 use crate::audio_settings::{AudioSettingsAction, AudioSettingsPanel};
 use crate::diagnostics::DiagnosticsPanel;
 use crate::dock::{DockLayout, Panel, layout_menu_ui};
 use crate::effects::EffectCatalog;
-use crate::export_panel::{ExportAction, ExportPanel};
+use crate::export_panel::{ExportAction, ExportPanel, ExportRequest};
+use crate::export_runner::{ExportRunner, ExportStreams};
 use crate::fullscreen::{FullscreenAction, FullscreenState, monitor_picker_ui};
 use crate::history_panel::{HistoryAction, HistoryList, edit_menu_ui};
 use crate::inspector::{EffectEdit, InspectorPanel, InspectorResponse};
@@ -63,6 +65,15 @@ use crate::viewer::{TransportAction, ViewerAction, ViewerFrame, ViewerPanel, seq
 /// How many tracks the shared meter bank has room for. A sequence with more
 /// audio tracks than this still plays; the tracks past it are unmetered.
 const METERED_TRACKS: usize = 64;
+
+/// Worker threads the window's job pool runs. Imports, hashes, waveforms and
+/// exports share them; two is enough that a long export does not shut the
+/// interactive work out.
+const JOB_WORKERS: usize = 2;
+
+/// How often the window repaints itself while an export runs, so the progress
+/// bar and the ETA keep moving without an input event to wake egui.
+const EXPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The File menu's open entry.
 pub const OPEN_LABEL: &str = "Open project...";
@@ -264,8 +275,9 @@ pub struct SubordinateApp {
     /// The inspector panel: the parameters of whatever the timeline has
     /// selected.
     inspector: InspectorPanel,
-    /// The export panel: preset, range, output file and render progress.
-    export: ExportPanel,
+    /// The export side of the window: the panel, the presets it offers and
+    /// the job it is running.
+    export: ExportHost,
 
     /// The effect plugins the inspector offers, and what each of them
     /// declared.
@@ -382,7 +394,7 @@ impl SubordinateApp {
             media_bin: MediaBinPanel::new(),
             timeline,
             inspector: InspectorPanel::new(),
-            export: export_panel(),
+            export: ExportHost::new(),
             effect_catalog: EffectCatalog::new(),
             layout: layout.layout,
             fullscreen: fullscreen.state,
@@ -1112,10 +1124,10 @@ impl SubordinateApp {
             Panel::Export => {
                 // The panel opens on whatever sequence is on screen until the
                 // user picks another one for themselves.
-                if export.sequence().is_none() {
-                    export.select_sequence(&project, sequence.id);
+                if export.panel.sequence().is_none() {
+                    export.panel.select_sequence(&project, sequence.id);
                 }
-                frame.export = export.ui(ui, &project);
+                frame.export = export.panel.ui(ui, &project);
             }
         });
         // Everything the panels asked for is applied here, once the dock has
@@ -1131,23 +1143,46 @@ impl SubordinateApp {
     /// reads the project and writes a file.
     fn apply_export(&mut self, action: ExportAction) {
         match action {
-            ExportAction::Start(_) | ExportAction::Cancel => {
-                // Neither reaches the panel while it is marked unavailable:
-                // the button that raises Start is disabled, and Cancel only
-                // appears while an export this build cannot start is running.
-            }
+            ExportAction::Start(request) => self.start_export(&request),
+            ExportAction::Cancel => self.export.runner.cancel(),
             ExportAction::ChooseOutput => {
-                if let Some(path) = pick_export_destination(self.export.output()) {
-                    self.export.set_output(path);
+                if let Some(path) = pick_export_destination(self.export.panel.output()) {
+                    self.export.panel.set_output(path);
                 }
             }
             ExportAction::Reveal(path) => {
                 if let Err(error) = crate::export_panel::reveal(&path) {
                     log::warn!("[{}] {}", error.code, error.message);
-                    self.export.add_problem(error);
+                    self.export.panel.add_problem(error);
                 }
             }
         }
+    }
+
+    /// Hands `request` to the export job, and its refusal to the panel.
+    ///
+    /// The job reports itself from here on: every progress snapshot, the ETA
+    /// and the terminal event reach the panel through
+    /// [`SubordinateApp::poll_export`], and the panel's Cancel button reaches
+    /// the job's cancel token.
+    fn start_export(&mut self, request: &ExportRequest) {
+        let export = &mut self.export;
+        let started = export.runner.start(
+            &export.jobs,
+            &export.presets,
+            request,
+            &mut export_sources(),
+        );
+        if let Err(error) = started {
+            log::warn!("[{}] {}", error.code, error.message);
+            export.panel.add_problem(error);
+        }
+    }
+
+    /// Drains the running export's events into the panel. Once a frame.
+    fn poll_export(&mut self) -> bool {
+        let export = &mut self.export;
+        export.runner.poll(&mut export.panel) > 0
     }
 
     /// Applies everything one frame's panels asked for.
@@ -1538,6 +1573,15 @@ impl eframe::App for SubordinateApp {
             self.needs_composite = true;
         }
 
+        // The running export reports itself once a frame: the bar, the
+        // percentage and the ETA the panel shows are the job's own numbers.
+        // Its events come from a worker thread, which egui has no reason to
+        // wake for, so a running export asks for the next frame itself.
+        self.poll_export();
+        if self.export.runner.is_running() {
+            ui.ctx().request_repaint_after(EXPORT_POLL_INTERVAL);
+        }
+
         let preview = self.composite();
         // The pop-out runs before the dock, so the panel knows on this frame
         // whether the picture is its to paint.
@@ -1587,21 +1631,64 @@ pub fn pick_project_file() -> Option<PathBuf> {
         .pick_file()
 }
 
-/// The export panel, with the user's presets loaded.
+/// The export side of the window, in one place.
 ///
-/// A preset file that will not parse is shown in the panel rather than
-/// swallowed: the built-ins are still there, so the editor still exports.
-fn export_panel() -> ExportPanel {
-    let mut panel = ExportPanel::new();
-    match PresetLibrary::load() {
-        Ok(library) => panel.set_library(&library),
-        Err(error) => {
-            panel.set_library(&PresetLibrary::builtin());
-            panel.add_problem(error);
+/// The panel holds the choices, the library resolves the chosen preset back
+/// to settings when an export starts, and the runner owns whatever job is
+/// running — which is what the panel's progress bar, ETA and Cancel button
+/// reach.
+struct ExportHost {
+    /// The export panel: preset, range, output file and render progress.
+    panel: ExportPanel,
+    /// The presets the panel offers, kept so a started export can be resolved
+    /// back to the settings its preset asks for.
+    presets: PresetLibrary,
+    /// The export running now, if one is.
+    runner: ExportRunner,
+    /// The worker pool an export runs on.
+    jobs: JobService,
+}
+
+impl ExportHost {
+    /// The export side of a fresh window, with the user's presets loaded.
+    ///
+    /// A preset file that will not parse is shown in the panel rather than
+    /// swallowed: the built-ins are still there, so the editor still exports.
+    fn new() -> Self {
+        let mut panel = ExportPanel::new();
+        let presets = match PresetLibrary::load() {
+            Ok(library) => library,
+            Err(error) => {
+                panel.add_problem(error);
+                PresetLibrary::builtin()
+            }
+        };
+        panel.set_library(&presets);
+        panel.set_unavailable(Some(NO_RENDERER_REASON));
+        Self {
+            panel,
+            presets,
+            runner: ExportRunner::new(),
+            jobs: JobService::new(JOB_WORKERS),
         }
     }
-    panel.set_unavailable(Some(NO_RENDERER_REASON));
-    panel
+}
+
+/// Where an export reads its pixels and samples from.
+///
+/// There is nowhere yet: the compositor's full-resolution readback and the
+/// offline audio mix are not adapted into frame sources in this build, which
+/// is what [`NO_RENDERER_REASON`] tells the user and why the panel's Export
+/// button is held closed. The hook is here so that the day those sources
+/// exist, the only change is what this returns — the panel, the runner, the
+/// job and the cancel path are already wired to each other.
+fn export_sources() -> impl crate::export_runner::ExportSources {
+    |_: &ExportRequest, _: &sub_export::ExportSettings| -> SubResult<ExportStreams> {
+        Err(SubError::new(
+            sub_core::codes::UNIMPLEMENTED,
+            NO_RENDERER_REASON,
+        ))
+    }
 }
 
 /// Where the user wants the exported file written, if they chose somewhere.

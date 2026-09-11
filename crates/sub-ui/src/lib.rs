@@ -12,6 +12,7 @@ pub mod diagnostics;
 pub mod dock;
 pub mod effects;
 pub mod export_panel;
+pub mod export_runner;
 pub mod fade;
 pub mod fullscreen;
 pub mod history_panel;
@@ -50,6 +51,10 @@ pub use export_panel::{
     AUTOMATIC_ENCODER_LABEL, CANCEL_LABEL, ExportAction, ExportPanel, ExportRange, ExportRequest,
     ExportStatus, NO_PRESETS_LABEL, NO_RECENT_LABEL, OPEN_FOLDER_LABEL, PresetEntry, PresetSource,
     RECENT_LIMIT, RecentExport, START_LABEL, sequence_frames,
+};
+pub use export_runner::{
+    EXPORT_PRIORITY, ExportRunner, ExportSources, ExportStreams, elements_for, frames_total,
+    settings_for,
 };
 pub use fullscreen::{
     FULLSCREEN_FILE_NAME, FULLSCREEN_VERSION, FullscreenAction, FullscreenSettings,
@@ -255,4 +260,15 @@ pub mod codes {
     /// file manager.
     pub const EXPORT_FOLDER_UNOPENABLE: ErrorCode =
         ErrorCode::from_static("ui.export_folder_unopenable");
+
+    /// A second export was asked for while one was already running. Only one
+    /// runs at a time: they saturate the encoder, and a second one started by
+    /// accident would fight the first for it.
+    pub const EXPORT_BUSY: ErrorCode = ErrorCode::from_static("ui.export_busy");
+
+    /// The chosen preset came from an exporter plugin, which the host cannot
+    /// resolve to export settings yet. The `preset` and `plugin` details name
+    /// it.
+    pub const EXPORT_PRESET_UNSUPPORTED: ErrorCode =
+        ErrorCode::from_static("ui.export_preset_unsupported");
 }
