@@ -184,24 +184,52 @@ jobs:
       # Vulkan loader the compositor silently falls back to a software adapter
       # and the readback number stops meaning anything (the summary marks that
       # case). xvfb is belt and braces for anything that wants a display.
+      # 73 MB of packages at 93 kB/s from archive.ubuntu.com cost this job 13
+      # of its 15 minutes on run 34608554627. Two fixes: point apt at the
+      # in-region EC2 mirror, which is free and fast from us-east-1, and keep
+      # the .deb archives in the Actions cache (RunsOn serves that from its own
+      # S3 bucket) exactly as ci.yml does.
+      - name: Restore the apt archive cache
+        id: apt-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: hardware-apt-${{ hashFiles('.github/workflows/hardware.yml') }}
+
       - name: Install GStreamer and the Vulkan loader (apt)
         run: |
           sudo rm -f /etc/apt/sources.list.d/*google*.list \
                      /etc/apt/sources.list.d/*google*.sources \
                      /etc/apt/sources.list.d/*microsoft*.list \
                      /etc/apt/sources.list.d/*microsoft*.sources || true
+          sudo sed -i \
+            -e 's|https\?://archive.ubuntu.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g' \
+            -e 's|https\?://security.ubuntu.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          if [ -d ~/apt-archives ]; then sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/ 2>/dev/null || true; fi
           sudo apt-get update || sudo apt-get update
           # Runtime only - no -dev packages and no compiler: nothing is built
           # on this instance. The plugin packages pull the shared libraries the
-          # prebuilt binaries link against.
+          # prebuilt binaries link against. No vulkan-tools: vulkaninfo drags
+          # in BLAS and LAPACK for a diagnostic the wgpu adapter line in the
+          # benchmark report already gives.
           sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            -o APT::Keep-Downloaded-Packages=true \
             libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libgstreamer-plugins-bad1.0-0 \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x \
             gstreamer1.0-plugins-base-apps \
-            libasound2t64 libvulkan1 vulkan-tools xvfb
+            libasound2t64 libvulkan1 xvfb
           gst-inspect-1.0 --version
-          vulkaninfo --summary 2>&1 | head -40 || echo "vulkaninfo failed; wgpu may fall back to software"
+          mkdir -p ~/apt-archives && sudo cp /var/cache/apt/archives/*.deb ~/apt-archives/ \
+            && sudo chown -R "$USER" ~/apt-archives
+
+      - name: Save the apt archive cache
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
       - name: GStreamer diagnostics
         run: |
@@ -260,6 +288,7 @@ jobs:
         run: |
           mkdir -p target/bench
           xvfb-run -a ./dist/subordinate-bench --out target/bench/perf.json \
+            --fixtures "$GITHUB_WORKSPACE/fixtures" \
             | tee target/hardware/bench-summary.txt
           cp target/bench/perf.json target/hardware/perf.json
 
@@ -355,6 +384,19 @@ jobs:
           cargo --version
           rustc --version
 
+      # The compositor (and therefore both the render and the readback
+      # measurement) needs a Vulkan driver, not just VA-API. box had the loader
+      # but no ICD on run 34608554627 - wgpu reported "vkCreateInstance: Found
+      # no drivers!" and the render failed with render.no_adapter - so this
+      # says what is missing instead of failing four steps later.
+      - name: Vulkan driver present
+        run: |
+          ls -l /usr/share/vulkan/icd.d/ 2>/dev/null || true
+          if ! ls /usr/share/vulkan/icd.d/*.json >/dev/null 2>&1; then
+            echo "::error::no Vulkan ICD on this runner: install mesa-vulkan-drivers (RADV) and libvulkan1, then re-run"
+            exit 1
+          fi
+
       # box keeps its target directory between runs on local disk, so there is
       # no rust-cache here: an Actions cache archive would be slower than the
       # disk it already has.
@@ -390,6 +432,7 @@ jobs:
         run: |
           mkdir -p target/bench
           xvfb-run -a ./target/release/subordinate-bench --out target/bench/perf.json \
+            --fixtures "$GITHUB_WORKSPACE/fixtures" \
             | tee target/hardware/bench-summary.txt
           cp target/bench/perf.json target/hardware/perf.json
 
