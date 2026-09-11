@@ -81,10 +81,11 @@ echo "==> plugin dir   $gst_plugin_dir"
 # ---------------------------------------------------------------------------
 if [ "$skip_build" -eq 0 ]; then
     echo "==> cargo build --release"
-    (cd "$repo_root" && cargo build --release -p subordinate -p subordinate-cli)
+    (cd "$repo_root" && cargo build --release -p subordinate -p subordinate-cli -p subordinate-mcp)
 fi
 bin_gui=$repo_root/target/release/subordinate
 bin_cli=$repo_root/target/release/subordinate-cli
+bin_mcp=$repo_root/target/release/subordinate-mcp
 [ -x "$bin_gui" ] || die "missing $bin_gui (drop --skip-build?)"
 
 # ---------------------------------------------------------------------------
@@ -105,6 +106,14 @@ if [ -x "$bin_cli" ]; then
     install -m 0755 "$bin_cli" "$appdir/usr/bin/subordinate-cli"
 else
     echo "==> subordinate-cli not built; the package will be GUI only"
+fi
+# The MCP bridge rides along for the same reason, and because a runner image
+# built from this package has to be able to prove an agent round-trip without
+# a Rust toolchain (TASK-137).
+if [ -x "$bin_mcp" ]; then
+    install -m 0755 "$bin_mcp" "$appdir/usr/bin/subordinate-mcp"
+else
+    echo "==> subordinate-mcp not built; the package will have no MCP bridge"
 fi
 install -m 0755 "$packaging_dir/AppRun" "$appdir/AppRun"
 
@@ -227,6 +236,9 @@ fi
 # LD_LIBRARY_PATH. AppRun sets the variable too, so patchelf is a nicety.
 if command -v patchelf >/dev/null 2>&1; then
     patchelf --set-rpath '$ORIGIN/../lib' "$appdir/usr/bin/subordinate"
+    if [ -x "$appdir/usr/bin/subordinate-mcp" ]; then
+        patchelf --set-rpath '$ORIGIN/../lib' "$appdir/usr/bin/subordinate-mcp"
+    fi
     if [ -x "$appdir/usr/bin/subordinate-cli" ]; then
         patchelf --set-rpath '$ORIGIN/../lib' "$appdir/usr/bin/subordinate-cli"
     fi

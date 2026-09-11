@@ -894,6 +894,7 @@ on EC2 instances in the project's AWS account through
   | Runner | Instance | Image | On-demand $/h | Status |
   | --- | --- | --- | --- | --- |
   | `gpu-nvidia-linux` | `g4dn.xlarge` (T4) | `ubuntu24-gpu-x64` | 0.526 | ready |
+  | `gpu-nvidia-desktop-linux` | `g4dn.xlarge` (T4) | custom (Xorg desktop) | 0.526 | ready |
   | `gpu-amd-linux` | `g4ad.xlarge` (Radeon Pro V520) | `ubuntu26-full-x64` | 0.379 | ready |
   | `gpu-nvidia-windows` | `g4dn.xlarge` (T4) | `windows22-full-x64` | 0.752 | ready |
 
@@ -967,6 +968,133 @@ aws logs tail /aws/ecs/runs-on/runs-on-worker --region us-east-1 --since 10m
 aws ec2 describe-instances --region us-east-1 \
   --query "Reservations[].Instances[].[InstanceId,InstanceType,State.Name]" --output text
 ```
+
+## Desktop GPU runner (Linux)
+
+`gpu-nvidia-linux` boots into a console: there is no X server, no window
+manager and no seat, so nothing there can open a window, click in one or
+photograph it. `gpu-nvidia-desktop-linux` is the same `g4dn.xlarge` T4
+instance booted into a real Xorg session on the NVIDIA driver, from a custom
+AMI built by **`infra/images/linux-desktop/`** (TASK-137). It is the runner for
+anything that has to drive the real application the way a person does;
+`gpu-nvidia-linux` stays the cheaper choice for offscreen work.
+
+What is on the image, on top of RunsOn's `ubuntu24-gpu-x64` base:
+
+| | |
+| --- | --- |
+| Display | Xorg on the NVIDIA driver, `:0`, one virtual 1920x1080 screen, started at boot by `subordinate-xorg.service`; openbox as the window manager (`subordinate-wm.service`) as the `runner` user |
+| X cookie | `/run/subordinate/Xauthority`, minted per boot, world-readable (single-tenant ephemeral instance) |
+| Automation | `xdotool`, `xdpyinfo`, `xwininfo`, `xrandr`, `scrot`, ImageMagick, `vulkaninfo` |
+| Editor | the newest `v*` release's AppImage, extracted to `/opt/subordinate/app`, exposed as `subordinate` on `PATH` |
+| CLI and bridge | `subordinate-cli` and `subordinate-mcp` on `PATH` (the CLI through `AppRun`'s `SUB_APPIMAGE_TOOL`) |
+| GStreamer | the 1.28 runtime **bundled inside the AppImage**, reachable as `subordinate-gst-discoverer` / `subordinate-gst-inspect`. Ubuntu 24.04's apt GStreamer is 1.24, so no system GStreamer is installed at all - probing through the bundle is also the more honest test, since that is the runtime the editor decodes with |
+| Test media | `/opt/subordinate/test-media/meld-4k60-excerpt-2min.mkv`, copied from the private bucket (TASK-140) and sha256-verified at build time |
+| Release marker | `/opt/subordinate/RELEASE_TAG` names the release the image was built from |
+
+RunsOn's agent, the `runner` user (uid 1001) and `/usr/local/bin/runs-on-bootstrap-*`
+are left exactly as the base image has them - the `validate` phase fails the
+build if any of them has gone, because RunsOn will not schedule on an image
+that lost them.
+
+**Jobs must set `DISPLAY` and `XAUTHORITY` themselves.** The Actions runner is
+started by the RunsOn bootstrap, which reads no login profile, so the image's
+`/etc/profile.d/subordinate-display.sh` never reaches a step. Copy the job
+header from `nvidia-desktop-linux` in `.github/workflows/gpu-smoke.yml`:
+
+```yaml
+    runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-desktop-linux
+    env:
+      DISPLAY: ':0'
+      XAUTHORITY: /run/subordinate/Xauthority
+      SUBORDINATE_CLI: /usr/local/bin/subordinate-cli
+```
+
+That job is also the image's acceptance test. It waits for `:0`, starts
+`subordinate --ui-smoke` on the committed sample project, waits for the
+`ui-smoke ready` line, finds the window with `xdotool search --name`,
+screenshots the display with `scrot`, asserts the `render device ready on
+Vulkan` line names something that is not a software adapter, probes the baked
+test clip with the bundled `gst-discoverer`, and runs an MCP round-trip
+(`project.new` then `timeline.get_state`) through `scripts/mcp-roundtrip.py`
+while the window is still up. The screenshot, the app log, the window
+geometry and the MCP transcript come back as `desktop-smoke-<sha>`.
+
+One caveat about that round-trip: the editor process does **not** bind the
+Command API endpoint today (`sub-ui` builds a `Dispatcher` but nothing calls
+`Server::bind`), so the bridge starts `subordinate-cli serve` and talks to
+that - the same engine and the same dispatcher with nothing drawn. The call
+really does go over the socket and really does come back; it just is not the
+GUI process's own project. When the editor learns to serve its endpoint, this
+job's assertion gets stronger for free.
+
+### Rebuilding the image
+
+Rebuild after every release, and at least monthly: the image bakes in a
+release's AppImage, and GitHub stops routing jobs to a runner agent more than
+30 days old.
+
+```bash
+# From a machine with admin credentials in the account:
+infra/images/linux-desktop/deploy.sh --run --wait
+```
+
+`deploy.sh` resolves the newest RunsOn `runs-on-v2.2-ubuntu24-gpu-x64-*` base
+AMI (owner `135269210855` - the same image `ubuntu24-gpu-x64` resolves to,
+confirmed against `RUNS_ON_AMI_ID` in a GPU smoke run), uploads
+`component.yaml` to `s3://subordinate-imagebuilder-<account>/` (an inline
+component body is not possible: CloudFormation caps
+`AWS::ImageBuilder::Component`'s `Data` at 16000 characters), deploys
+`stack.yaml`, then starts the pipeline and waits for the AMI id. The component
+version is `VERSION` plus a hash of `component.yaml`, so editing the component
+always produces a new immutable version and redeploying an unchanged one is a
+no-op.
+
+Then, before adopting the new AMI:
+
+1. Smoke it from a branch. RunsOn reads `.github/runs-on.yml` from the default
+   branch only, so a new AMI has to be named inline - dispatch **GPU smoke**
+   with `only=nvidia-desktop-linux` and
+   `desktop_runner=image=<ami-id>/family=g4dn.xlarge/spot=false`.
+2. Only once that passes, set `images.subordinate-desktop-linux.ami` in
+   `.github/runs-on.yml` to the new id and merge. The id is pinned rather than
+   matched by `name:` on purpose: a name filter takes the lexicographically
+   highest match, which would adopt a broken rebuild the moment it exists.
+
+`.github/workflows/desktop-ami.yml` does the pipeline half of this from CI,
+but it is **not wired up yet**: it needs the repository variable
+`AWS_IMAGEBUILDER_ROLE_ARN` naming a GitHub-OIDC role, and
+`infra/ci-oidc/stack.yaml` is the (unapplied) template that creates one -
+scoped to starting these pipelines and reading image state, nothing more.
+Deploying it grants a GitHub workflow an identity in the AWS account, so it is
+a decision to take deliberately, not a side effect of this task. Until then the
+local `deploy.sh` above is the supported path.
+
+Where to look when a build fails:
+
+```bash
+aws imagebuilder get-image --region us-east-1 \
+  --image-build-version-arn <arn from deploy.sh> --output json
+aws s3 sync s3://subordinate-imagebuilder-<account>/linux-desktop/logs/ /tmp/ib-logs
+# console.log is the one to read; the failing step's stderr is quoted in it.
+```
+
+Image Builder also streams the same log to CloudWatch under
+`/aws/imagebuilder/subordinate-linux-desktop-desktop`.
+
+### Cost
+
+| | |
+| --- | --- |
+| One image build | two `g4dn.xlarge` on-demand instances in series (build, then test), us-east-1 $0.526/h, about 35-40 minutes in total - roughly **0.40 USD** |
+| Storage | one 100 GB gp3 snapshot per AMI, about **0.25 USD/month** each. Deregister old AMIs and delete their snapshots; keep the one `.github/runs-on.yml` points at and the one before it |
+| One smoke job | about 8 minutes of `g4dn.xlarge`, spot where capacity allows - **0.03-0.07 USD** |
+
+A failed build terminates its instance (`TerminateInstanceOnFailure: true`), so
+a broken component costs minutes, not hours. Watch for `VcpuLimitExceeded`: the
+account's on-demand G-family quota is 8 vCPU, which is exactly two
+`g4dn.xlarge`, so an image build and a GPU job can collide - re-run the
+pipeline, it is not a real failure.
 
 ## Self-hosted AMD runner ("box")
 

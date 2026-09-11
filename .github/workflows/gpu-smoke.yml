@@ -7,10 +7,31 @@ name: GPU smoke
 # "GPU CI". TASK-116 turns these checks into the real hardware verification.
 on:
   workflow_dispatch:
+    inputs:
+      only:
+        description: 'Run a single job (job id) instead of all of them'
+        type: choice
+        default: ''
+        options:
+          - ''
+          - nvidia-linux
+          - nvidia-desktop-linux
+          - amd-linux
+          - nvidia-windows
+          - amd-windows
+      desktop_runner:
+        description: >-
+          RunsOn selector for nvidia-desktop-linux. RunsOn reads
+          .github/runs-on.yml from the default branch only, so a new or
+          changed AMI has to be spelled out inline until it is merged:
+          image=ami-0123.../family=g4dn.xlarge/spot=false
+        type: string
+        default: runner=gpu-nvidia-desktop-linux
 
 jobs:
   nvidia-linux:
     name: NVIDIA T4 (g4dn.xlarge, Ubuntu 24.04)
+    if: inputs.only == '' || inputs.only == 'nvidia-linux'
     runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-linux
     timeout-minutes: 30
     steps:
@@ -49,6 +70,144 @@ jobs:
             || { echo "::error::nvh264enc missing"; gst-inspect-1.0 nvcodec || true; exit 1; }
           gst-inspect-1.0 nvh264enc | head -20
 
+  nvidia-desktop-linux:
+    # The desktop image (TASK-137): the same T4 instance, but booted into a
+    # real Xorg session on the NVIDIA driver instead of a bare console, with
+    # Subordinate, subordinate-mcp and the 4K60 test clip already installed.
+    # Nothing is downloaded or compiled here - if a step needs to install
+    # something, it belongs in infra/images/linux-desktop/component.yaml, not
+    # in this job.
+    name: NVIDIA T4 desktop (g4dn.xlarge, Xorg on :0)
+    if: inputs.only == '' || inputs.only == 'nvidia-desktop-linux'
+    runs-on: runs-on=${{ github.run_id }}/${{ inputs.desktop_runner || 'runner=gpu-nvidia-desktop-linux' }}
+    timeout-minutes: 30
+    env:
+      # The Actions runner is started by the RunsOn bootstrap, which reads no
+      # login profile, so the image's /etc/profile.d never reaches these steps.
+      DISPLAY: ':0'
+      XAUTHORITY: /run/subordinate/Xauthority
+      # Which headless engine the MCP bridge launches when it finds no editor
+      # listening. On the image the CLI is a wrapper in /usr/local/bin rather
+      # than a binary beside subordinate-mcp, so it has to be named.
+      SUBORDINATE_CLI: /usr/local/bin/subordinate-cli
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instance, image and GPU facts
+        run: |
+          echo "runner=$RUNNER_NAME ami=${RUNS_ON_AMI_ID:-unknown}"
+          curl -fsS -m 3 http://169.254.169.254/latest/meta-data/instance-type || true; echo
+          . /etc/os-release && echo "os=$PRETTY_NAME"
+          echo "release baked in: $(cat /opt/subordinate/RELEASE_TAG)"
+          nvidia-smi
+
+      - name: Xorg session is up on :0
+        run: |
+          systemctl is-active subordinate-xorg.service
+          systemctl is-active subordinate-wm.service
+          /usr/local/bin/subordinate-wait-for-display
+          xdpyinfo -display :0 | grep -E 'name of display|dimensions|depth of root'
+          xdpyinfo -display :0 | grep -q '1920x1080' \
+            || { echo "::error::the virtual screen is not 1920x1080"; exit 1; }
+
+      # --ui-smoke opens the committed sample project, pops the viewer out and
+      # holds both windows up while it prints a ready line naming what it
+      # painted. The hold is what the screenshot and the window queries below
+      # happen inside; the app closes itself afterwards either way.
+      - name: Editor on the real display
+        id: editor
+        run: |
+          set -o pipefail
+          out="$RUNNER_TEMP/desktop-smoke"
+          mkdir -p "$out"
+          echo "out=$out" >>"$GITHUB_OUTPUT"
+          subordinate --ui-smoke --hold-seconds 90 \
+            crates/sub-model/tests/fixtures/sample-project.sub >"$out/app.log" 2>&1 &
+          echo "app_pid=$!" >>"$GITHUB_OUTPUT"
+          for _ in $(seq 1 120); do
+            grep -q 'ui-smoke ready' "$out/app.log" && break
+            sleep 1
+          done
+          if ! grep -q 'ui-smoke ready' "$out/app.log"; then
+            echo "::error::the editor never reported ui-smoke ready"
+            cat "$out/app.log"
+            exit 1
+          fi
+          grep 'ui-smoke ready' "$out/app.log"
+
+      - name: Window, screenshot and adapter
+        run: |
+          set -o pipefail
+          out="${{ steps.editor.outputs.out }}"
+          # xdotool proves the window exists to another X client, which is the
+          # thing a human-style test will drive later (TASK-139).
+          xdotool search --name 'Subordinate' | tee "$out/window-ids.txt"
+          [ -s "$out/window-ids.txt" ] \
+            || { echo "::error::no window named Subordinate on :0"; exit 1; }
+          for id in $(cat "$out/window-ids.txt"); do
+            xwininfo -id "$id" | sed -n 's/^ *\(xwininfo\|Absolute\|Width\|Height\|Window id\)/\1/p'
+          done | tee "$out/windows.txt"
+          xwininfo -root -tree >"$out/window-tree.txt"
+          scrot -o "$out/display0.png"
+          identify "$out/display0.png" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          # The adapter the editor actually got. It is printed once at startup
+          # and shown in the app's own bar, which is what the screenshot
+          # carries; this is the machine-readable half of the same fact.
+          line=$(grep -m1 'render device ready on' "$out/app.log") \
+            || { echo "::error::the editor never logged its render device"; exit 1; }
+          echo "$line" | tee -a "$GITHUB_STEP_SUMMARY"
+          case "$line" in
+            *"render device ready on Vulkan"*) ;;
+            *) echo "::error::expected a Vulkan adapter: $line"; exit 1 ;;
+          esac
+          case "$line" in
+            *"(software,"*|*llvmpipe*|*lavapipe*|*SwiftShader*)
+              echo "::error::the editor fell back to software rendering: $line"; exit 1 ;;
+          esac
+          if grep -q 'falling back to software rendering' "$out/app.log"; then
+            echo "::error::the editor fell back to software rendering"; exit 1
+          fi
+
+      - name: Baked-in test media probes
+        run: |
+          set -o pipefail
+          media=$(ls /opt/subordinate/test-media/* | head -n1)
+          echo "media=$media"
+          ls -l "$media"
+          # The bundled GStreamer 1.28 inside the AppImage, not the host's apt
+          # 1.24: this is the runtime the editor itself decodes with.
+          subordinate-gst-discoverer "$media" | tee "${{ steps.editor.outputs.out }}/probe.txt"
+          grep -qi 'video' "${{ steps.editor.outputs.out }}/probe.txt"
+
+      # The editor does not bind the Command API endpoint yet, so the bridge
+      # starts `subordinate-cli serve` - the same engine and the same
+      # dispatcher with nothing drawn - and speaks to that. The round-trip is
+      # still the real one: a mutation goes over the socket and the timeline
+      # that comes back is the one it produced, while the editor window is up
+      # on :0 beside it.
+      - name: MCP round-trip while the window is up
+        run: |
+          set -o pipefail
+          out="${{ steps.editor.outputs.out }}"
+          python3 scripts/mcp-roundtrip.py --mcp /usr/local/bin/subordinate-mcp \
+            'project.new={"name":"Desktop smoke"}' 'timeline.get_state={}' \
+            | tee "$out/mcp.txt"
+          grep -q 'timeline.get_state' "$out/mcp.txt"
+          # The window is still the one that was photographed.
+          xdotool search --name 'Subordinate' >/dev/null
+
+      - name: Stop the editor
+        if: always()
+        run: kill "${{ steps.editor.outputs.app_pid }}" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-smoke-${{ github.sha }}
+          path: ${{ steps.editor.outputs.out }}
+          if-no-files-found: warn
+
   amd-linux:
     # AWS no longer offers AMD GPU instances (g4ad retired), so the AMD Linux
     # target runs on "box", a user-owned mini PC with an AMD Cezanne APU
@@ -56,6 +215,7 @@ jobs:
     # Packages (GStreamer 1.28 from Ubuntu 26.04, mesa-va-drivers, vainfo) are
     # preinstalled on the box; this job verifies rather than installs.
     name: AMD APU (box, self-hosted, Ubuntu 26.04)
+    if: inputs.only == '' || inputs.only == 'amd-linux'
     runs-on: [self-hosted, linux, box, amd-gpu]
     timeout-minutes: 15
     steps:
@@ -101,6 +261,7 @@ jobs:
     # from a restart. The driver loads immediately for NVENC without one -
     # nvidia-smi and nvh264enc both work in the same job.
     name: NVIDIA T4 (g4dn.xlarge, Windows Server 2022)
+    if: inputs.only == '' || inputs.only == 'nvidia-windows'
     runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-windows
     timeout-minutes: 20
     env:
@@ -210,6 +371,7 @@ jobs:
     # install nothing system-wide (GStreamer goes per-user under LOCALAPPDATA),
     # and leave no processes behind. Zero cost.
     name: AMD RX 9070 XT (yodaddy, self-hosted, Windows 11)
+    if: inputs.only == '' || inputs.only == 'amd-windows'
     runs-on: [self-hosted, windows, yodaddy, amd-gpu]
     timeout-minutes: 20
     defaults:

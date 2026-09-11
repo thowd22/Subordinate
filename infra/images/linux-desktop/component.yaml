@@ -1,0 +1,506 @@
+# EC2 Image Builder component: the Linux NVIDIA desktop runner image (TASK-137).
+#
+# Built on top of RunsOn's `ubuntu24-gpu-x64` base AMI, which already carries
+# the NVIDIA driver, CUDA, the `runner` user (uid 1001), the GitHub Actions
+# runner under /home/runner and the RunsOn bootstrap in /usr/local/bin. None of
+# that is touched here - RunsOn refuses to schedule on an image that has lost
+# any of it - this component only adds a desktop on top:
+#
+#   * Xorg on the NVIDIA driver, headless, one virtual 1920x1080 screen,
+#     started at boot on :0 by systemd, with openbox as the window manager
+#     running as the `runner` user;
+#   * the X automation tools a human-style test needs (xdotool, xdpyinfo,
+#     xwininfo, scrot, ImageMagick);
+#   * the latest Subordinate release: the AppImage extracted to
+#     /opt/subordinate/app, with `subordinate`, `subordinate-cli` and the
+#     bundled GStreamer 1.28 tools on PATH;
+#   * `subordinate-mcp` from the same release, so an agent round-trip can be
+#     proved on the image;
+#   * the user's 4K60 test clip at /opt/subordinate/test-media/.
+#
+# Ubuntu 24.04's apt GStreamer is 1.24, one minor below the project's 1.28 pin,
+# so no system GStreamer is installed at all: the AppImage carries its own 1.28
+# runtime and its own gst-discoverer-1.0, which is the runtime the editor
+# actually uses. `subordinate-gst-discoverer` on PATH runs that one.
+name: subordinate-linux-desktop
+description: Xorg on the NVIDIA driver with Subordinate, subordinate-mcp and the test media baked in.
+schemaVersion: 1.0
+
+parameters:
+  - ReleaseTag:
+      type: string
+      default: latest
+      description: >-
+        Which GitHub release to install. `latest` means the newest `v*` release,
+        pre-releases included (`/releases/latest` skips those).
+  - TestMediaUri:
+      type: string
+      default: s3://subordinate-test-media-731537225673/meld-4k60-excerpt-2min.mkv
+      description: The S3 object baked in at /opt/subordinate/test-media/.
+  - TestMediaSha256:
+      type: string
+      default: 63afa28c05a78ebcd2b678442721e7ac600f0525dbd4ad97175981ace3e62582
+      description: The expected sha256 of the test media object.
+  - Repository:
+      type: string
+      default: thowd22/Subordinate
+      description: The GitHub repository releases and sources are taken from.
+
+phases:
+  - name: build
+    steps:
+      # ------------------------------------------------------------------ apt
+      - name: DesktopPackages
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              # cloud-init's own apt run holds the dpkg lock for the first
+              # minute or so of a fresh instance.
+              for _ in $(seq 1 120); do
+                  fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break
+                  sleep 5
+              done
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                  xserver-xorg-core xinit xauth xfonts-base \
+                  x11-utils x11-xserver-utils x11-apps \
+                  openbox xdotool scrot imagemagick \
+                  vulkan-tools mesa-utils \
+                  jq unzip curl ca-certificates psmisc
+
+      # The base image ships the driver and CUDA, but not necessarily the X
+      # module the driver needs. Which branch is installed is whatever
+      # nvidia-smi reports, so the package name is derived rather than pinned.
+      #
+      # Ubuntu does not put nvidia_drv.so in Xorg's default module path: it
+      # lives under /usr/lib/<triplet>/nvidia/xorg and is reached through a
+      # ModulePath the driver package's own xorg.conf.d snippet adds. This
+      # image writes a whole xorg.conf rather than a snippet, so the directory
+      # is found here and recorded for subordinate-xorg-setup to point at.
+      - name: NvidiaXorgModule
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              nvidia-smi
+              branch=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader \
+                  | head -n1 | cut -d. -f1)
+              find_module() {
+                  find /usr/lib /usr/lib64 -name nvidia_drv.so 2>/dev/null | head -n1
+              }
+              module=$(find_module)
+              if [ -z "$module" ]; then
+                  apt-get install -y --no-install-recommends \
+                      "xserver-xorg-video-nvidia-${branch}" \
+                      || apt-get install -y --no-install-recommends \
+                      "xserver-xorg-video-nvidia-${branch}-server"
+                  module=$(find_module)
+              fi
+              [ -n "$module" ] || {
+                  echo "no nvidia_drv.so anywhere under /usr/lib" >&2
+                  dpkg -l | grep -i nvidia || true
+                  exit 1
+              }
+              dirname "$module" >/etc/subordinate-xorg-modulepath
+              echo "nvidia_drv.so: $module"
+              # Everything a later failure would want to know, recorded once.
+              ls -l /usr/share/X11/xorg.conf.d/ /etc/X11/xorg.conf.d/ 2>/dev/null || true
+              find /usr/lib -name 'libglxserver_nvidia.so*' 2>/dev/null || true
+
+      # ------------------------------------------------------------- Xorg boot
+      # The GPU's PCI address is read at boot rather than baked in, so the
+      # image still comes up if it is ever launched on something other than a
+      # g4dn. `UseDisplayDevice None` plus `Virtual` is the headless recipe:
+      # no monitor is attached to a T4, and without it Xorg exits with "no
+      # screens found".
+      - name: XorgSetupScript
+        action: CreateFile
+        inputs:
+          - path: /usr/local/bin/subordinate-xorg-setup
+            permissions: '0755'
+            content: |
+              #!/bin/bash
+              # Write /etc/X11/xorg.conf for whatever NVIDIA GPU this instance
+              # has, and mint the X cookie the runner user connects with.
+              set -euo pipefail
+
+              bus=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader | head -n1)
+              # 00000000:00:1E.0 -> PCI:0:30:0
+              domain_bus=$(echo "$bus" | cut -d: -f2)
+              devfn=$(echo "$bus" | cut -d: -f3)
+              busid=$(printf 'PCI:%d:%d:%d' "0x${domain_bus}" "0x${devfn%.*}" "0x${devfn#*.}")
+
+              # Where the driver package actually put nvidia_drv.so, recorded
+              # when the image was built. Xorg searches each ModulePath and its
+              # drivers/ subdirectory, so naming the directory is enough.
+              module_path=$(cat /etc/subordinate-xorg-modulepath 2>/dev/null || true)
+              files_section=""
+              if [ -n "$module_path" ] && [ "$module_path" != /usr/lib/xorg/modules/drivers ]; then
+                  files_section=$(cat <<FILES
+              Section "Files"
+                  ModulePath "$module_path"
+                  ModulePath "/usr/lib/xorg/modules"
+              EndSection
+              FILES
+              )
+              fi
+
+              cat >/etc/X11/xorg.conf <<EOF
+              # Generated by subordinate-xorg-setup at boot. Do not edit.
+              $files_section
+
+              Section "ServerLayout"
+                  Identifier     "Layout0"
+                  Screen      0  "Screen0"
+              EndSection
+
+              Section "Monitor"
+                  Identifier     "Monitor0"
+                  HorizSync       28.0 - 120.0
+                  VertRefresh     48.0 - 120.0
+              EndSection
+
+              Section "Device"
+                  Identifier     "Device0"
+                  Driver         "nvidia"
+                  VendorName     "NVIDIA Corporation"
+                  BusID          "${busid}"
+              EndSection
+
+              Section "Screen"
+                  Identifier     "Screen0"
+                  Device         "Device0"
+                  Monitor        "Monitor0"
+                  DefaultDepth    24
+                  # AllowEmptyInitialConfiguration is what lets an X screen
+                  # exist with no monitor plugged in, and Virtual below is what
+                  # gives it a size. Do NOT add UseDisplayDevice "None" or
+                  # ConnectedMonitor: on the 580 driver a T4 reports a virtual
+                  # display subsystem and refuses both -
+                  # "UseDisplayDevice \"None\" is not supported with virtual
+                  # display", then "no screens found".
+                  Option         "AllowEmptyInitialConfiguration" "true"
+                  SubSection     "Display"
+                      Depth       24
+                      Virtual     1920 1080
+                  EndSubSection
+              EndSection
+              EOF
+
+              # /run is a tmpfs, so the cookie is new every boot. It is
+              # world-readable on purpose: this is a single-tenant ephemeral
+              # CI instance and every job step has to be able to reach :0.
+              install -d -m 0755 /run/subordinate
+              rm -f /run/subordinate/Xauthority
+              : >/run/subordinate/Xauthority
+              xauth -f /run/subordinate/Xauthority add :0 . "$(mcookie)"
+              chmod 0644 /run/subordinate/Xauthority
+
+      - name: XorgWaitScript
+        action: CreateFile
+        inputs:
+          - path: /usr/local/bin/subordinate-wait-for-display
+            permissions: '0755'
+            content: |
+              #!/bin/bash
+              # Block until :0 answers, so anything that needs the display can
+              # order itself after this instead of sleeping and hoping.
+              set -euo pipefail
+              export DISPLAY=${DISPLAY:-:0}
+              export XAUTHORITY=${XAUTHORITY:-/run/subordinate/Xauthority}
+              for _ in $(seq 1 60); do
+                  if xdpyinfo >/dev/null 2>&1; then
+                      xdpyinfo | sed -n 's/^  dimensions: *//p'
+                      exit 0
+                  fi
+                  sleep 1
+              done
+              echo "subordinate-wait-for-display: $DISPLAY never came up" >&2
+              exit 1
+
+      - name: XorgService
+        action: CreateFile
+        inputs:
+          - path: /etc/systemd/system/subordinate-xorg.service
+            permissions: '0644'
+            content: |
+              [Unit]
+              Description=Headless Xorg on the NVIDIA GPU (:0, 1920x1080)
+              After=multi-user.target
+
+              [Service]
+              Type=simple
+              ExecStartPre=/usr/local/bin/subordinate-xorg-setup
+              ExecStart=/usr/bin/Xorg :0 -auth /run/subordinate/Xauthority -config /etc/X11/xorg.conf -nolisten tcp -noreset
+              Restart=on-failure
+              RestartSec=2
+
+              [Install]
+              WantedBy=multi-user.target
+
+      - name: WindowManagerService
+        action: CreateFile
+        inputs:
+          - path: /etc/systemd/system/subordinate-wm.service
+            permissions: '0644'
+            content: |
+              [Unit]
+              Description=Openbox on :0 for the runner user
+              Requires=subordinate-xorg.service
+              After=subordinate-xorg.service
+
+              [Service]
+              Type=simple
+              User=runner
+              Environment=DISPLAY=:0
+              Environment=XAUTHORITY=/run/subordinate/Xauthority
+              ExecStartPre=/usr/local/bin/subordinate-wait-for-display
+              ExecStart=/usr/bin/openbox
+              Restart=on-failure
+              RestartSec=2
+
+              [Install]
+              WantedBy=multi-user.target
+
+      # A login shell gets the display for free; a GitHub Actions step does
+      # not, because the runner process is started by the RunsOn bootstrap and
+      # never reads a profile. Jobs therefore still set DISPLAY themselves -
+      # see the nvidia-desktop-linux job in .github/workflows/gpu-smoke.yml -
+      # and this file is for anyone who SSHes in to look around.
+      - name: DisplayProfile
+        action: CreateFile
+        inputs:
+          - path: /etc/profile.d/subordinate-display.sh
+            permissions: '0644'
+            content: |
+              export DISPLAY=${DISPLAY:-:0}
+              export XAUTHORITY=${XAUTHORITY:-/run/subordinate/Xauthority}
+              export PATH="/opt/subordinate/bin:$PATH"
+
+      - name: EnableServices
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              systemctl daemon-reload
+              systemctl enable subordinate-xorg.service subordinate-wm.service
+
+      # Start the session here rather than waiting for the test phase. A bad
+      # xorg.conf is the most likely thing to be wrong with this image, and
+      # finding out on the build instance costs a few seconds instead of the
+      # 25 minutes it takes to snapshot an AMI and boot a test instance from
+      # it.
+      - name: XorgStartsOnThisInstance
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              systemctl start subordinate-xorg.service
+              cat /etc/X11/xorg.conf
+              if ! DISPLAY=:0 XAUTHORITY=/run/subordinate/Xauthority \
+                      /usr/local/bin/subordinate-wait-for-display; then
+                  journalctl -u subordinate-xorg.service --no-pager | tail -40
+                  tail -80 /var/log/Xorg.0.log || true
+                  exit 1
+              fi
+              systemctl start subordinate-wm.service
+              DISPLAY=:0 XAUTHORITY=/run/subordinate/Xauthority xdpyinfo \
+                  | grep -E 'name of display|dimensions|depth of root'
+              # Informative only: the editor picks its adapter through wgpu,
+              # and this is the same ICD it will find.
+              vulkaninfo --summary 2>&1 | head -40 || true
+
+      # --------------------------------------------------------- the release
+      - name: InstallRelease
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              repo='{{ Repository }}'
+              want='{{ ReleaseTag }}'
+              api="https://api.github.com/repos/${repo}/releases"
+
+              if [ "$want" = latest ]; then
+                  # /releases/latest skips pre-releases, and this project's
+                  # first releases are pre-releases, so pick the newest v* tag
+                  # out of the full list instead.
+                  tag=$(curl -fsSL "$api" | jq -r '
+                      [ .[] | select(.tag_name | startswith("v")) ]
+                      | sort_by(.published_at // .created_at) | last | .tag_name')
+              else
+                  tag=$want
+              fi
+              [ -n "$tag" ] && [ "$tag" != null ]
+              echo "release tag: $tag"
+
+              url=$(curl -fsSL "${api}/tags/${tag}" \
+                  | jq -r '.assets[] | select(.name | endswith(".AppImage")) | .browser_download_url' \
+                  | head -n1)
+              [ -n "$url" ]
+              echo "appimage: $url"
+
+              install -d /opt/subordinate /opt/subordinate/bin
+              echo "$tag" >/opt/subordinate/RELEASE_TAG
+              curl -fsSL -o /tmp/Subordinate.AppImage "$url"
+              chmod +x /tmp/Subordinate.AppImage
+              rm -rf /opt/subordinate/app /tmp/squashfs-root
+              # --appimage-extract unpacks without FUSE, which a headless image
+              # would otherwise have to carry a kernel module for.
+              (cd /tmp && ./Subordinate.AppImage --appimage-extract >/dev/null)
+              mv /tmp/squashfs-root /opt/subordinate/app
+              rm -f /tmp/Subordinate.AppImage
+              chmod -R a+rX /opt/subordinate
+
+      - name: LauncherScripts
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              # AppRun sets GST_PLUGIN_PATH and LD_LIBRARY_PATH for the bundled
+              # runtime; SUB_APPIMAGE_TOOL runs a bundled tool instead of the
+              # editor inside that same environment.
+              cat >/usr/local/bin/subordinate <<'EOF'
+              #!/bin/sh
+              exec /opt/subordinate/app/AppRun "$@"
+              EOF
+              for tool in subordinate-cli gst-discoverer-1.0 gst-inspect-1.0; do
+                  case "$tool" in
+                      gst-*) name="subordinate-${tool%-1.0}" ;;
+                      *)     name="$tool" ;;
+                  esac
+                  cat >"/usr/local/bin/$name" <<EOF
+              #!/bin/sh
+              SUB_APPIMAGE_TOOL=$tool
+              export SUB_APPIMAGE_TOOL
+              exec /opt/subordinate/app/AppRun "\$@"
+              EOF
+                  chmod 0755 "/usr/local/bin/$name"
+              done
+              chmod 0755 /usr/local/bin/subordinate
+              ls -l /usr/local/bin/subordinate*
+
+      # subordinate-mcp is not in the AppImage of the first releases (only the
+      # editor and the CLI are), so it is built from the sources of the very
+      # same tag when the package does not carry it. Its dependency tree is
+      # pure Rust - sub-command, sub-edit, sub-model, sub-time, sub-core, rmcp,
+      # tokio - with no GStreamer and no wgpu, so this is a couple of minutes,
+      # and the toolchain is thrown away afterwards rather than shipped.
+      - name: InstallMcp
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              tag=$(cat /opt/subordinate/RELEASE_TAG)
+              if [ -x /opt/subordinate/app/usr/bin/subordinate-mcp ]; then
+                  install -m 0755 /opt/subordinate/app/usr/bin/subordinate-mcp \
+                      /opt/subordinate/bin/subordinate-mcp
+                  echo "subordinate-mcp came from the AppImage"
+              else
+                  apt-get install -y --no-install-recommends build-essential git
+                  export CARGO_HOME=/tmp/cargo RUSTUP_HOME=/tmp/rustup
+                  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+                      | sh -s -- -y --profile minimal --no-modify-path
+                  export PATH="$CARGO_HOME/bin:$PATH"
+                  git clone --depth 1 --branch "$tag" \
+                      "https://github.com/{{ Repository }}.git" /tmp/subordinate-src
+                  (cd /tmp/subordinate-src && cargo build --release -p subordinate-mcp)
+                  install -m 0755 /tmp/subordinate-src/target/release/subordinate-mcp \
+                      /opt/subordinate/bin/subordinate-mcp
+                  rm -rf /tmp/subordinate-src /tmp/cargo /tmp/rustup
+                  echo "subordinate-mcp was built from $tag"
+              fi
+              ln -sf /opt/subordinate/bin/subordinate-mcp /usr/local/bin/subordinate-mcp
+              # SUBORDINATE_CLI tells the bridge which headless engine to
+              # launch: without it it looks for subordinate-cli beside itself,
+              # and the CLI here is a wrapper in /usr/local/bin.
+              echo 'SUBORDINATE_CLI=/usr/local/bin/subordinate-cli' >>/etc/environment
+
+      # --------------------------------------------------------- test media
+      - name: TestMedia
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              install -d /opt/subordinate/test-media
+              uri='{{ TestMediaUri }}'
+              name=${uri##*/}
+              aws s3 cp "$uri" "/opt/subordinate/test-media/$name"
+              echo '{{ TestMediaSha256 }}  /opt/subordinate/test-media/'"$name" | sha256sum -c -
+              chmod -R a+rX /opt/subordinate/test-media
+              ls -l /opt/subordinate/test-media
+
+  # --------------------------------------------------------------------------
+  # validate runs on the build instance, before the snapshot is taken: it only
+  # asks whether the pieces are in place.
+  - name: validate
+    steps:
+      - name: FilesArePresent
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              test -x /usr/local/bin/subordinate
+              test -x /usr/local/bin/subordinate-cli
+              test -x /usr/local/bin/subordinate-mcp
+              test -x /usr/local/bin/subordinate-gst-discoverer
+              test -x /usr/local/bin/subordinate-xorg-setup
+              test -s /opt/subordinate/RELEASE_TAG
+              ls /opt/subordinate/test-media/*.mkv
+              systemctl is-enabled subordinate-xorg.service
+              systemctl is-enabled subordinate-wm.service
+              # RunsOn refuses an image that lost any of these.
+              id -u runner
+              test -x /home/runner/run.sh
+              ls -d /usr/local/bin/runs-on-bootstrap-*
+
+  # --------------------------------------------------------------------------
+  # test runs on a fresh instance booted from the finished AMI, which is the
+  # only place the boot-time Xorg session can actually be proved.
+  - name: test
+    steps:
+      - name: DisplayIsUp
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              nvidia-smi
+              systemctl is-active subordinate-xorg.service
+              systemctl is-active subordinate-wm.service
+              export DISPLAY=:0 XAUTHORITY=/run/subordinate/Xauthority
+              /usr/local/bin/subordinate-wait-for-display
+              xdpyinfo | grep -E 'dimensions|depth of root'
+              xdpyinfo | grep -q '1920x1080'
+
+      - name: EditorStarts
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              cd /home/runner
+              sudo -u runner env DISPLAY=:0 XAUTHORITY=/run/subordinate/Xauthority \
+                  HOME=/home/runner /usr/local/bin/subordinate --smoke-test
+
+      - name: TestMediaProbes
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              media=$(ls /opt/subordinate/test-media/* | head -n1)
+              /usr/local/bin/subordinate-gst-discoverer "$media" | tee /tmp/probe.txt
+              grep -qi 'h.26[45]\|video' /tmp/probe.txt

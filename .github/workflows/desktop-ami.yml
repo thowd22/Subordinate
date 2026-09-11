@@ -1,0 +1,104 @@
+name: Desktop AMI
+
+# Rebuilds the Linux desktop runner image (TASK-137) by running the EC2 Image
+# Builder pipeline that infra/images/linux-desktop/deploy.sh created, and waits
+# for the AMI id. Run it after every release: the image bakes in the newest
+# `v*` release's AppImage, and GitHub also stops routing jobs to a runner agent
+# more than 30 days old, so a monthly rebuild is the floor either way.
+#
+# This workflow only *runs* the pipeline. Changing what the image contains -
+# component.yaml, the recipe, the instance type - is a local
+# `infra/images/linux-desktop/deploy.sh` away from a machine with admin
+# credentials, on purpose: the role assumed here can start a build and read its
+# state and nothing else. See docs/DEVELOPMENT.md "Desktop GPU runner (Linux)".
+#
+# Cost: one g4dn.xlarge for the build phase and one for the test phase,
+# us-east-1 on-demand $0.526/h, about 40 minutes in total - roughly $0.40 a
+# rebuild. The hosted runner this job itself sits on is free.
+
+on:
+  workflow_dispatch:
+    inputs:
+      wait:
+        description: 'Wait for the AMI instead of returning as soon as the build starts'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  # Image Builder refuses a second execution of the same pipeline anyway.
+  group: desktop-ami
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the Linux desktop AMI
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      AWS_REGION: us-east-1
+      PIPELINE_ARN: arn:aws:imagebuilder:us-east-1:731537225673:image-pipeline/subordinate-linux-desktop
+    steps:
+      - name: Check the role is configured
+        run: |
+          if [ -z "${{ vars.AWS_IMAGEBUILDER_ROLE_ARN }}" ]; then
+            echo "::error::repository variable AWS_IMAGEBUILDER_ROLE_ARN is not set."
+            echo "It names an IAM role this repository may assume through GitHub OIDC,"
+            echo "allowed only to start this pipeline and read image state."
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_IMAGEBUILDER_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: desktop-ami-${{ github.run_id }}
+
+      - name: Start the pipeline
+        id: start
+        run: |
+          arn=$(aws imagebuilder start-image-pipeline-execution \
+            --image-pipeline-arn "$PIPELINE_ARN" \
+            --query imageBuildVersionArn --output text)
+          echo "image=$arn" >>"$GITHUB_OUTPUT"
+          echo "::notice::image build $arn"
+
+      - name: Wait for the AMI
+        if: ${{ inputs.wait }}
+        run: |
+          arn='${{ steps.start.outputs.image }}'
+          while :; do
+            status=$(aws imagebuilder get-image --image-build-version-arn "$arn" \
+              --query 'image.state.status' --output text)
+            echo "$(date -u +%H:%M:%S) $status"
+            case "$status" in
+              AVAILABLE)
+                ami=$(aws imagebuilder get-image --image-build-version-arn "$arn" \
+                  --query 'image.outputResources.amis[0].image' --output text)
+                echo "::notice::AMI $ami"
+                {
+                  echo "### Linux desktop AMI"
+                  echo
+                  echo "| | |"
+                  echo "| --- | --- |"
+                  echo "| AMI | \`$ami\` |"
+                  echo "| build | \`$arn\` |"
+                  echo
+                  echo "Smoke test it before adopting it: dispatch **GPU smoke**"
+                  echo "with \`only=nvidia-desktop-linux\` and"
+                  echo "\`desktop_runner=image=$ami/family=g4dn.xlarge/spot=false\`,"
+                  echo "then set \`images.subordinate-desktop-linux.ami\` in"
+                  echo "\`.github/runs-on.yml\` to it."
+                } >>"$GITHUB_STEP_SUMMARY"
+                exit 0 ;;
+              FAILED|CANCELLED)
+                aws imagebuilder get-image --image-build-version-arn "$arn" \
+                  --query 'image.state.reason' --output text
+                echo "::error::image build $status"
+                exit 1 ;;
+            esac
+            sleep 60
+          done

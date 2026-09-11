@@ -1,0 +1,221 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  EC2 Image Builder pipeline for the Linux NVIDIA desktop runner image
+  (TASK-137): RunsOn's ubuntu24-gpu-x64 base plus a headless Xorg session on
+  the NVIDIA driver, Subordinate, subordinate-mcp and the test media.
+
+  Deployed by infra/images/linux-desktop/deploy.sh, which uploads
+  component.yaml to S3 and passes it in as ComponentUri. An inline component
+  body is not an option: AWS::ImageBuilder::Component caps Data at 16000
+  characters, and this one is longer than that.
+
+Parameters:
+  ComponentUri:
+    Type: String
+    Description: >-
+      s3:// URL of component.yaml, uploaded by deploy.sh under a key that
+      carries the component version so each version has its own object.
+  ParentImage:
+    Type: String
+    Description: >-
+      The RunsOn base AMI to build on - the same image `ubuntu24-gpu-x64`
+      resolves to (owner 135269210855, name runs-on-v2.2-ubuntu24-gpu-x64-*).
+      deploy.sh resolves the newest one unless --parent-image says otherwise.
+  ComponentVersion:
+    Type: String
+    Description: >-
+      Semantic version of the component. Image Builder components are
+      immutable, so this must be bumped for every change to component.yaml;
+      deploy.sh derives it from the content hash unless --component-version
+      says otherwise.
+  ReleaseTag:
+    Type: String
+    Default: latest
+    Description: Which Subordinate release to bake in (`latest` = newest v*).
+  BuildSubnetId:
+    Type: String
+    Description: >-
+      A subnet with a route to the internet. There is no default VPC in this
+      account, so this is required; the RunsOn public subnets are the obvious
+      choice.
+  BuildSecurityGroupId:
+    Type: String
+    Description: A security group allowing outbound HTTPS from the build instance.
+  LogBucket:
+    Type: String
+    Description: >-
+      Bucket the build instance writes its component logs to. Image Builder
+      also streams them to CloudWatch under /aws/imagebuilder/<image-name>,
+      but the S3 copy survives the log group's retention and is what a
+      post-mortem reads.
+  BuildInstanceType:
+    Type: String
+    Default: g4dn.xlarge
+    Description: >-
+      A GPU instance, so the NVIDIA X module resolves against a real T4 at
+      build time and the boot-time Xorg session is proved by the test phase.
+      us-east-1 on-demand is 0.526 USD/h.
+  TestMediaBucket:
+    Type: String
+    Default: subordinate-test-media-731537225673
+    Description: The private bucket the test clip is copied from (TASK-140).
+  VolumeSizeGb:
+    Type: Number
+    Default: 100
+    Description: >-
+      Root volume of the image. The base image is 80 GB of RunsOn tooling and
+      CUDA; the desktop, the AppImage and the 4K test clip need headroom.
+
+Resources:
+  # --------------------------------------------------------------------- IAM
+  BuildInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-build-instance'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilder
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        # The build instance copies the test clip in. The RunsOn instance role
+        # already has this read (TASK-140); the Image Builder instance is a
+        # different principal and needs its own grant.
+        - PolicyName: read-test-media
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${TestMediaBucket}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${TestMediaBucket}'
+        # The component document and the build logs both live in the assets
+        # bucket; EC2InstanceProfileForImageBuilder only covers Image
+        # Builder's own service-owned buckets.
+        - PolicyName: component-and-logs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${LogBucket}/*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub 'arn:aws:s3:::${LogBucket}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${LogBucket}'
+
+  BuildInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${AWS::StackName}-build-instance'
+      Roles:
+        - !Ref BuildInstanceRole
+
+  # --------------------------------------------------------------- the image
+  DesktopComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub '${AWS::StackName}-desktop'
+      Platform: Linux
+      Version: !Ref ComponentVersion
+      Description: Headless Xorg on the NVIDIA driver with Subordinate baked in.
+      SupportedOsVersions:
+        - Ubuntu 24
+      Uri: !Ref ComponentUri
+
+  DesktopRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Sub '${AWS::StackName}-desktop'
+      Version: !Ref ComponentVersion
+      ParentImage: !Ref ParentImage
+      Components:
+        - ComponentArn: !Ref DesktopComponent
+          Parameters:
+            - Name: ReleaseTag
+              Value:
+                - !Ref ReleaseTag
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: !Ref VolumeSizeGb
+            VolumeType: gp3
+            DeleteOnTermination: true
+      AdditionalInstanceConfiguration:
+        # The base image already has the SSM agent; Image Builder must not
+        # reinstall it, which is what this switch turns off.
+        SystemsManagerAgent:
+          UninstallAfterBuild: false
+
+  BuildInfrastructure:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties:
+      Name: !Sub '${AWS::StackName}-build'
+      InstanceProfileName: !Ref BuildInstanceProfile
+      InstanceTypes:
+        - !Ref BuildInstanceType
+      SubnetId: !Ref BuildSubnetId
+      SecurityGroupIds:
+        - !Ref BuildSecurityGroupId
+      Logging:
+        S3Logs:
+          S3BucketName: !Ref LogBucket
+          S3KeyPrefix: linux-desktop/logs
+      # A failed build must not leave a GPU instance running: the whole cost
+      # cap for this image is a few dollars.
+      TerminateInstanceOnFailure: true
+
+  Distribution:
+    Type: AWS::ImageBuilder::DistributionConfiguration
+    Properties:
+      Name: !Sub '${AWS::StackName}-us-east-1'
+      Distributions:
+        - Region: !Ref AWS::Region
+          AmiDistributionConfiguration:
+            Name: 'subordinate-linux-desktop-{{ imagebuilder:buildDate }}'
+            Description: Subordinate desktop runner image (RunsOn ubuntu24-gpu-x64 base).
+            AmiTags:
+              Project: Subordinate
+              Task: TASK-137
+              Runner: gpu-nvidia-desktop-linux
+
+  Pipeline:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Properties:
+      Name: !Sub '${AWS::StackName}'
+      Description: >-
+        Manual pipeline. Run it after a release with
+        `aws imagebuilder start-image-pipeline-execution`, or through the
+        "Desktop AMI" GitHub workflow.
+      ImageRecipeArn: !Ref DesktopRecipe
+      InfrastructureConfigurationArn: !Ref BuildInfrastructure
+      DistributionConfigurationArn: !Ref Distribution
+      Status: ENABLED
+      ImageTestsConfiguration:
+        ImageTestsEnabled: true
+        TimeoutMinutes: 60
+
+Outputs:
+  PipelineArn:
+    Description: Pass this to `aws imagebuilder start-image-pipeline-execution`.
+    Value: !Ref Pipeline
+  RecipeArn:
+    Value: !Ref DesktopRecipe
+  ComponentArn:
+    Value: !Ref DesktopComponent
+  BuildInstanceRoleName:
+    Value: !Ref BuildInstanceRole
