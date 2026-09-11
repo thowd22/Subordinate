@@ -13,8 +13,13 @@
 //! and the container's muxer, with every timestamp computed exactly from the
 //! sequence's rational frame rate.
 
+//! Presets live in [`presets`]: the container, codecs, resolution, rate and
+//! quality of a named export target, shipped as TOML data and extensible by a
+//! user file in the config directory.
+
 pub mod encoder;
 pub mod pipeline;
+pub mod presets;
 
 pub use encoder::{
     CODECS, ElementProbe, EncoderPreferences, EncoderProbe, EncoderStatus, EncoderVendor,
@@ -24,6 +29,10 @@ pub use pipeline::{
     AUDIO_CODECS, AudioCodec, AudioFrameSource, BYTES_PER_PIXEL, CONTAINERS, Container,
     ExportElements, ExportPipeline, ExportReport, ExportSettings, PcmAudioSource, SolidFrames,
     VideoFrameSource, export, export_with,
+};
+pub use presets::{
+    AudioPreset, PRESETS_FILE_NAME, Preset, PresetLibrary, VideoPreset, VideoQuality, config_dir,
+    presets_path,
 };
 
 /// Stable [`sub_core::ErrorCode`] constants this crate returns.
@@ -57,6 +66,14 @@ pub mod codes {
     pub const PUSH_FAILED: ErrorCode = ErrorCode::from_static("export.push_failed");
     /// The pipeline never reached end of stream inside its time budget.
     pub const EXPORT_TIMEOUT: ErrorCode = ErrorCode::from_static("export.timeout");
+    /// A preset file is not TOML of the preset shape, or a preset's field is
+    /// missing, empty, out of range or contradictory. The `field` detail names
+    /// the offending field.
+    pub const PRESET_INVALID: ErrorCode = ErrorCode::from_static("export.preset_invalid");
+    /// A user preset file exists but could not be read.
+    pub const PRESET_UNREADABLE: ErrorCode = ErrorCode::from_static("export.preset_unreadable");
+    /// No preset carries the requested id.
+    pub const PRESET_UNKNOWN: ErrorCode = ErrorCode::from_static("export.preset_unknown");
 }
 
 #[cfg(test)]
@@ -75,6 +92,9 @@ mod tests {
             super::codes::PIPELINE_FAILED,
             super::codes::PUSH_FAILED,
             super::codes::EXPORT_TIMEOUT,
+            super::codes::PRESET_INVALID,
+            super::codes::PRESET_UNREADABLE,
+            super::codes::PRESET_UNKNOWN,
         ];
         for code in &codes {
             assert_eq!(code.domain(), "export", "wrong domain for {code}");

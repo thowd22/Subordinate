@@ -1,0 +1,78 @@
+# The export presets Subordinate ships with (docs/PLAN.md §5.5).
+#
+# Presets are data: this file is embedded in the binary, and a user file of
+# exactly the same shape named `presets.toml` in the config directory adds to
+# it, or replaces a built-in that has the same id. Every field is documented
+# in `sub_export::presets`.
+#
+# Frame rates are written as an exact numerator and denominator, never a
+# decimal: 23.976 fps is 24000/1001. Video quality is either an average
+# bitrate in kbit/s or a constant-quality CRF, never both.
+
+[[preset]]
+id = "youtube-1080p"
+name = "YouTube 1080p"
+container = "mp4"
+video_codec = "h264"
+width = 1920
+height = 1080
+frame_rate_numerator = 30
+frame_rate_denominator = 1
+video_bitrate_kbps = 12000
+audio_codec = "aac"
+audio_bitrate_kbps = 192
+sample_rate = 48000
+channels = 2
+
+[[preset]]
+id = "youtube-4k"
+name = "YouTube 4K"
+container = "mp4"
+video_codec = "h264"
+width = 3840
+height = 2160
+frame_rate_numerator = 30
+frame_rate_denominator = 1
+video_bitrate_kbps = 45000
+audio_codec = "aac"
+audio_bitrate_kbps = 384
+sample_rate = 48000
+channels = 2
+
+[[preset]]
+id = "mezzanine"
+name = "Mezzanine, visually lossless (software)"
+container = "mkv"
+video_codec = "h264"
+width = 1920
+height = 1080
+frame_rate_numerator = 30
+frame_rate_denominator = 1
+video_crf = 0
+audio_codec = "flac"
+sample_rate = 48000
+channels = 2
+
+[[preset]]
+id = "h265-archive"
+name = "H.265 archive"
+container = "mkv"
+video_codec = "h265"
+width = 1920
+height = 1080
+frame_rate_numerator = 30
+frame_rate_denominator = 1
+video_crf = 20
+audio_codec = "opus"
+audio_bitrate_kbps = 160
+sample_rate = 48000
+channels = 2
+
+[[preset]]
+id = "audio-only"
+name = "Audio only"
+container = "mp4"
+audio_codec = "aac"
+audio_bitrate_kbps = 320
+sample_rate = 48000
+channels = 2
