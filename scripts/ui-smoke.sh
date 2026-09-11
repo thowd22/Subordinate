@@ -7,16 +7,27 @@
 # or a seat -- Mesa's lavapipe draws and Xvfb holds the display -- so it runs
 # on the free hosted Linux runner (TASK-123).
 #
-# The two monitors are two RandR monitors carved out of one wide Xvfb screen,
-# which is what makes them one desktop the app can place a window across; a
-# second X screen joined with Xinerama looks the same but breaks window
-# coordinate translation under winit. The head geometry is read back from the
-# server rather than assumed, and each head is cropped out of one root capture
-# into its own PNG.
+# The two heads are carved out of one wide Xvfb screen, which is what makes
+# them one desktop the app can place a window across; a second X screen joined
+# with Xinerama looks the same but breaks window coordinate translation under
+# winit. Two RandR monitors are asked for first, since that is what makes the
+# heads visible to the app's own display enumeration, and the server's answer
+# is recorded either way (Ubuntu 26.04's Xvfb takes the request and creates
+# nothing). Each head is cropped out of one root capture into its own PNG, with
+# whichever window landed on it outlined and named.
 #
-# Requires: Xvfb, xdpyinfo (x11-utils), xwd (x11-apps), ImageMagick.
+# --gpu asks for the machine's real adapter; a display that cannot present it
+# (Xvfb has no DRI3, so Mesa refuses the surface) falls back to lavapipe with
+# the reason printed. --require-popout-on-head N turns the pop-out's placement
+# from a picture someone has to look at into an assertion, by reading the
+# window's absolute geometry back off the server and checking it lies inside
+# that head's rectangle (TASK-118).
+#
+# Requires: Xvfb, xdpyinfo and xwininfo (x11-utils), xwd (x11-apps), ImageMagick.
 # Output: <out>/screen-0.png, <out>/screen-1.png, <out>/app.log,
-#         <out>/summary.md and <out>/screens.txt (one "name WxH" per line).
+#         <out>/summary.md, <out>/screens.txt (one "name WxH" per line),
+#         <out>/windows.txt (the top-level windows with their geometry) and
+#         <out>/monitors.txt (the server's RandR version, monitors and heads).
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -32,6 +43,13 @@ screen_size="2560x800x24"
 # cannot leave the process running. The wait below is bounded separately.
 hold_seconds=25
 ready_timeout=120
+# Hosted CI has no GPU, so the default stays on the software rasteriser; a job
+# on a machine with a real one passes --gpu.
+force_software=1
+# Empty means "photograph it and say where it landed"; a head index means
+# "fail the run if the pop-out is not on that head".
+require_popout_head=""
+
 
 usage() {
     cat <<'EOF'
@@ -44,6 +62,9 @@ Usage: scripts/ui-smoke.sh [options]
   --screen WxHxD      geometry of each of the two screens
   --hold SECONDS      how long the app keeps its windows up
   --timeout SECONDS   how long to wait for the ready line
+  --gpu               do not force the software rasteriser (real GPU present)
+  --require-popout-on-head N
+                      fail unless the pop-out window landed on head N
   -h, --help          show this help
 EOF
 }
@@ -57,12 +78,15 @@ while [ $# -gt 0 ]; do
     --screen) screen_size=${2:?--screen needs WxHxD}; shift 2 ;;
     --hold) hold_seconds=${2:?--hold needs seconds}; shift 2 ;;
     --timeout) ready_timeout=${2:?--timeout needs seconds}; shift 2 ;;
+    --gpu) force_software=0; shift ;;
+    --require-popout-on-head)
+        require_popout_head=${2:?--require-popout-on-head needs a head index}; shift 2 ;;
     -h | --help) usage; exit 0 ;;
     *) echo "ui-smoke: unknown option $1" >&2; usage >&2; exit 2 ;;
     esac
 done
 
-for tool in Xvfb xdpyinfo xwd; do
+for tool in Xvfb xdpyinfo xwd xwininfo; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "ui-smoke: $tool is not installed" >&2
         exit 1
@@ -141,19 +165,85 @@ if [ "$head_count" -lt 2 ] || [ "$first_origin" = "$second_origin" ]; then
     root_height=${root_size#* }
     half=$((root_width / 2))
     if command -v xrandr >/dev/null 2>&1; then
-        xrandr -display "$display" --setmonitor SUB-0 "$half/0x$root_height/0+0+0" none || true
-        xrandr -display "$display" --setmonitor SUB-1 "$half/0x$root_height/0+$half+0" none || true
+        # A RandR monitor with no output is how the protocol expresses a head
+        # that is not physically there, which is exactly a virtual second
+        # display. Which spelling of `--setmonitor` a given server accepts is
+        # not something to guess at, though: on box's Xvfb the first attempt
+        # below left the server with its automatic whole-screen monitor and
+        # said nothing about why (run 34615366090). So the spellings are tried
+        # in turn and each one is checked against the server's own monitor
+        # list, with everything xrandr said kept in the log.
+        #
+        # `--setmonitor` wants physical dimensions, and xrandr reads 0mm as
+        # "not specified", so they come from the pixel count at 96 dpi.
+        output=$(xrandr -display "$display" --listmonitors |
+            awk 'NR > 1 { print $NF; exit }')
+        [ -n "$output" ] || output=none
+        mm_w=$((half * 254 / 960))
+        mm_h=$((root_height * 254 / 960))
+        geom_0="$half/${mm_w}x$root_height/$mm_h+0+0"
+        geom_1="$half/${mm_w}x$root_height/$mm_h+$half+0"
+
+        monitor_count() {
+            xrandr -display "$display" --listmonitors 2>/dev/null |
+                sed -n 's/^Monitors: \([0-9]*\).*/\1/p' | head -1
+        }
+        try_split() {
+            echo "ui-smoke: monitor split attempt: $*"
+            set +e
+            "$@" >"$out_dir/setmonitor.log" 2>&1
+            set -e
+            sed 's/^/ui-smoke: xrandr: /' "$out_dir/setmonitor.log" || true
+            [ "$(monitor_count)" -ge 2 ] 2>/dev/null
+        }
+        xrandr -display "$display" --version 2>&1 | sed 's/^/ui-smoke: /' || true
+        # 1. one process, both monitors, the real output on the left head.
+        # 2. the same in two processes.
+        # 3. only the right-hand head, leaving the server's automatic monitor
+        #    as the left one - fewer requests, and the automatic monitor keeps
+        #    whatever the server thinks its output really is.
+        try_split xrandr -display "$display" \
+            --setmonitor SUB-0 "$geom_0" "$output" \
+            --setmonitor SUB-1 "$geom_1" none ||
+            try_split xrandr -display "$display" --setmonitor SUB-1 "$geom_1" none ||
+            try_split xrandr -display "$display" --setmonitor SUB-0 "$geom_0" none ||
+            echo "ui-smoke: no spelling of --setmonitor gave this server two monitors"
     fi
     heads=$(printf '%s %s 0 0\n%s %s %s 0\n' "$half" "$root_height" "$half" "$root_height" "$half")
 fi
+# What the server itself says its outputs are, kept as evidence beside the
+# screenshots: a job that claims a two-output desktop should be able to show
+# the monitor list that proves it (TASK-118).
+{
+    if command -v xrandr >/dev/null 2>&1; then
+        xrandr -display "$display" --version 2>&1
+        xrandr -display "$display" --listmonitors 2>&1
+    else
+        echo "xrandr is not installed; no monitor list"
+    fi
+    echo "--- XINERAMA ---"
+    # `| head` would close the pipe under the caller's `set -o pipefail` and
+    # take the whole script with it, so the trimming happens inside sed.
+    xdpyinfo -display "$display" -ext XINERAMA 2>&1 |
+        sed -n '/head #/p; /dimensions:/p; /number of screens/p' || true
+    echo "--- heads this run uses ---"
+    printf '%s\n' "$heads" | awk '{printf "head %d: %sx%s @ %s,%s\n", NR - 1, $1, $2, $3, $4}'
+} >"$out_dir/monitors.txt" 2>&1
+cat "$out_dir/monitors.txt"
+
 echo "ui-smoke: heads (WxH @ x,y)"
 printf '%s\n' "$heads" | awk '{printf "  head %d: %sx%s @ %s,%s\n", NR - 1, $1, $2, $3, $4}'
 second_x=$(printf '%s\n' "$heads" | sed -n '2p' | awk '{print $3}')
 second_y=$(printf '%s\n' "$heads" | sed -n '2p' | awk '{print $4}')
 
-# Software Vulkan, no GPU: the picture is what a headless runner can draw, and
-# the point is that the windows come up at all.
-export LIBGL_ALWAYS_SOFTWARE=1
+# A bare X root is black, and so is a viewer with nothing to show, so a
+# screenshot of the pop-out on an empty desktop is a black rectangle on a black
+# field and proves nothing to the eye. Painting the root a colour no part of
+# the editor uses makes each window's rectangle obvious in its own screenshot.
+if command -v xsetroot >/dev/null 2>&1; then
+    xsetroot -display "$display" -solid '#1d4f7c' || true
+fi
+
 export RUST_LOG="${RUST_LOG:-info}"
 export DISPLAY="$display"
 
@@ -162,29 +252,83 @@ if [ -n "$binary" ]; then
 else
     set -- cargo run --quiet -p subordinate --
 fi
-echo "ui-smoke: launching $* with the pop-out at $second_x,$second_y"
-"$@" --ui-smoke --hold-seconds "$hold_seconds" \
-    --popout-position "$second_x,$second_y" "$project" >"$log" 2>&1 &
-app_pid=$!
 
-# The app prints its ready line once the editor window and the pop-out have
-# each painted a frame; capturing before that photographs empty rectangles.
-ready=0
-for _ in $(seq 1 $((ready_timeout * 5))); do
-    if grep -q 'ui-smoke ready' "$log" 2>/dev/null; then
-        ready=1
-        break
+# launch_app -> 0 once the app has reported its first frame, 1 if it died or
+# never got there. The log is truncated per attempt, because there is at most
+# one retry and the failed attempt is kept beside it.
+launch_app() {
+    "$@" --ui-smoke --hold-seconds "$hold_seconds" \
+        --popout-position "$second_x,$second_y" "$project" >"$log" 2>&1 &
+    app_pid=$!
+    for _ in $(seq 1 $((ready_timeout * 5))); do
+        if grep -q 'ui-smoke ready' "$log" 2>/dev/null; then
+            return 0
+        fi
+        kill -0 "$app_pid" 2>/dev/null || break
+        sleep 0.2
+    done
+    return 1
+}
+
+# Vulkan on a real GPU cannot present into an Xvfb window: Mesa's WSI needs
+# DRI3, which Xvfb does not implement, so RADV refuses the surface with "There
+# was no valid format for the surface at all" before the first frame (run
+# 34614668762 on box). The GPU's own rendering is covered by the headless
+# readback and render jobs in this workflow; what this script is for is the
+# windows. So --gpu means "draw with the real adapter if this display can
+# present it", and a display that cannot falls back to the software rasteriser
+# with the reason said out loud rather than failing the run.
+#
+# LIBGL_ALWAYS_SOFTWARE is a GL variable and says nothing to Vulkan, which is
+# what the compositor actually uses: on a machine with more than one ICD the
+# loader still hands out the discrete driver (run 34615366090 picked RADV
+# twice). The Vulkan half is the loader's own driver-file override, pointed at
+# Mesa's lavapipe.
+use_software_rasteriser() {
+    export LIBGL_ALWAYS_SOFTWARE=1
+    lvp=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1 || true)
+    if [ -n "$lvp" ]; then
+        export VK_DRIVER_FILES="$lvp"
+        export VK_ICD_FILENAMES="$lvp" # the name the loader used before 1.3.207
+        echo "ui-smoke: software rasteriser: $lvp"
+    else
+        echo "ui-smoke: no lavapipe ICD installed; the loader will pick what it likes"
     fi
-    kill -0 "$app_pid" 2>/dev/null || break
-    sleep 0.2
-done
-if [ "$ready" -ne 1 ]; then
-    echo "ui-smoke: the app never reported a first frame" >&2
-    cat "$log" >&2 || true
-    exit 1
+}
+
+software=$force_software
+if [ "$software" -eq 1 ]; then
+    use_software_rasteriser
+else
+    unset LIBGL_ALWAYS_SOFTWARE VK_DRIVER_FILES VK_ICD_FILENAMES || true
+fi
+echo "ui-smoke: launching $* with the pop-out at $second_x,$second_y"
+if ! launch_app "$@"; then
+    if [ "$software" -eq 0 ] && grep -qi 'no valid format for the surface\|Found no drivers\|no suitable adapter' "$log"; then
+        echo "ui-smoke: the real adapter could not present on $display (an X server without DRI3, such as Xvfb); retrying on the software rasteriser"
+        cp "$log" "$out_dir/app-gpu-attempt.log"
+        kill "$app_pid" 2>/dev/null || true
+        wait "$app_pid" 2>/dev/null || true
+        app_pid=""
+        software=1
+        use_software_rasteriser
+        launch_app "$@" || {
+            echo "ui-smoke: the app never reported a first frame" >&2
+            cat "$log" >&2 || true
+            exit 1
+        }
+    else
+        echo "ui-smoke: the app never reported a first frame" >&2
+        cat "$log" >&2 || true
+        exit 1
+    fi
 fi
 ready_line=$(grep -m1 'ui-smoke ready' "$log")
 echo "ui-smoke: $ready_line"
+# Which wgpu adapter drew the picture. On a GPU runner this is the evidence
+# that the run was not quietly served by a software rasteriser.
+adapter_line=$(grep -m1 'adapter chosen' "$log" || true)
+[ -n "$adapter_line" ] && echo "ui-smoke: $adapter_line" || true
 case "$ready_line" in
 *project=loaded*) ;;
 *)
@@ -203,6 +347,95 @@ case "$ready_line" in
     ;;
 esac
 
+# Where the two windows actually are, read back off the server rather than
+# inferred from the position the app was asked for. Without a window manager
+# every top-level window is a direct child of the root, so the last "+x+y" on
+# an xwininfo tree line is its absolute origin on the desktop.
+xwininfo -display "$display" -root -tree >"$out_dir/windows.txt" 2>&1 || true
+
+# window_geometry TITLE -> "W H X Y" on stdout, empty if there is no such
+# window. The colon after the quoted title is what keeps "Subordinate" from
+# matching "Subordinate viewer".
+window_geometry() {
+    awk -v want="\"$1\":" '
+        index($0, want) == 0 || found { next }
+        {
+            # "... 1280x800+0+0  +1280+0": the last two fields are the size
+            # with its offset inside its parent, then the absolute origin.
+            size = $(NF - 1)
+            origin = $NF
+            if (size !~ /^[0-9]+x[0-9]+/) { next }
+            sub(/\+.*$/, "", size)
+            split(size, wh, "x")
+            n = split(substr(origin, 2), xy, "+")
+            if (n < 2) { next }
+            print wh[1], wh[2], xy[1], xy[2]
+            found = 1
+        }' "$out_dir/windows.txt"
+}
+
+editor_geom=$(window_geometry "Subordinate")
+popout_geom=$(window_geometry "Subordinate viewer")
+echo "ui-smoke: editor window  ${editor_geom:-<not found>}"
+echo "ui-smoke: pop-out window ${popout_geom:-<not found>}"
+
+# head_of X Y -> the index of the head whose rectangle contains that point, or
+# nothing. The heads are the same list the crops below are cut from, so a
+# window said to be on head 1 is a window inside screen-1.png.
+head_of() {
+    printf '%s\n' "$heads" | awk -v px="$1" -v py="$2" '
+        px >= $3 && px < $3 + $1 && py >= $4 && py < $4 + $2 { print NR - 1; exit }'
+}
+
+popout_head=""
+if [ -n "$popout_geom" ]; then
+    popout_head=$(head_of "$(echo "$popout_geom" | awk '{print $3}')" \
+        "$(echo "$popout_geom" | awk '{print $4}')")
+fi
+editor_head=""
+if [ -n "$editor_geom" ]; then
+    editor_head=$(head_of "$(echo "$editor_geom" | awk '{print $3}')" \
+        "$(echo "$editor_geom" | awk '{print $4}')")
+fi
+echo "ui-smoke: editor on head ${editor_head:-?}, pop-out on head ${popout_head:-?}"
+
+# outline_window PNG HEAD_X HEAD_Y "W H X Y" LABEL
+#
+# Draws the window's rectangle and names it on the head's screenshot. Both
+# windows paint the picture on black and the desktop behind them is black, so
+# an unannotated capture of the pop-out is a black rectangle on a black field:
+# the window is there, and the picture says nothing to the eye. The outline is
+# the evidence (TASK-118).
+#
+# box has no configured ImageMagick font and `-annotate` is fatal without one
+# (run 34618215215), so the text is drawn only when a TrueType file can be
+# found, and the whole annotation is best-effort: a screenshot is worth more
+# than a label.
+label_font=$(find /usr/share/fonts -name 'DejaVuSans.ttf' -print -quit 2>/dev/null || true)
+[ -n "$label_font" ] ||
+    label_font=$(find /usr/share/fonts -name '*.ttf' -print -quit 2>/dev/null || true)
+
+outline_window() {
+    png=$1
+    head_x=$2
+    head_y=$3
+    geom=$4
+    label=$5
+    [ -n "$geom" ] || return 0
+    read -r w h x y <<EOF2
+$geom
+EOF2
+    rx=$((x - head_x))
+    ry=$((y - head_y))
+    set -- "$png" -stroke '#ff4d3d' -strokewidth 3 -fill none \
+        -draw "rectangle $rx,$ry $((rx + w - 1)),$((ry + h - 1))"
+    if [ -n "$label_font" ]; then
+        set -- "$@" -stroke none -fill '#ff4d3d' -font "$label_font" -pointsize 20 \
+            -annotate "+$((rx + 10))+$((ry + 34))" "$label ${w}x$h"
+    fi
+    im "$@" "$png" || echo "ui-smoke: could not outline $label on $png"
+}
+
 # One capture of the whole Xinerama desktop, then a crop per head: two xwd
 # runs could catch the two windows a frame apart.
 xwd -display "$display" -root -silent >"$out_dir/root.xwd"
@@ -212,6 +445,12 @@ while read -r width height x y; do
     [ -n "$width" ] || continue
     png="$out_dir/screen-$index.png"
     im "xwd:$out_dir/root.xwd" -crop "${width}x${height}+${x}+${y}" +repage "$png"
+    if [ "${editor_head:-}" = "$index" ]; then
+        outline_window "$png" "$x" "$y" "$editor_geom" "Subordinate (editor)"
+    fi
+    if [ "${popout_head:-}" = "$index" ]; then
+        outline_window "$png" "$x" "$y" "$popout_geom" "Subordinate viewer (pop-out)"
+    fi
     echo "screen-$index.png $(im_identify -format '%wx%h' "$png")" >>"$out_dir/screens.txt"
     index=$((index + 1))
 done <<EOF
@@ -236,7 +475,29 @@ app_pid=""
     done <"$out_dir/screens.txt"
     echo "| \`app.log\` | $(wc -l <"$log" | tr -d ' ') lines |"
     echo
+    echo "| window | geometry (WxH, origin) | head |"
+    echo "| --- | --- | --- |"
+    echo "| Subordinate (editor) | ${editor_geom:-not found} | ${editor_head:-unknown} |"
+    echo "| Subordinate viewer (pop-out) | ${popout_geom:-not found} | ${popout_head:-unknown} |"
+    echo
     echo "Head 0 is the editor window, head 1 the pop-out viewer."
+    if [ -s "$out_dir/monitors.txt" ]; then
+        echo
+        echo "Outputs the X server reports:"
+        echo
+        echo '```'
+        cat "$out_dir/monitors.txt"
+        echo '```'
+    fi
+    if [ -n "$adapter_line" ]; then
+        echo
+        echo "\`$adapter_line\`"
+    fi
+    if [ "$force_software" -eq 0 ] && [ "$software" -eq 1 ]; then
+        echo
+        echo "The real adapter could not present on this display (Xvfb has no"
+        echo "DRI3), so the windows were drawn by the software rasteriser."
+    fi
     echo
     echo '```'
     echo "$ready_line"
@@ -245,3 +506,21 @@ app_pid=""
 
 cat "$out_dir/screens.txt"
 echo "ui-smoke: wrote $out_dir"
+
+# Asserted last, after the pictures and the summary are on disk: a run that
+# fails here is exactly the one whose screenshots someone wants to look at.
+if [ -n "$require_popout_head" ]; then
+    if [ -z "$popout_geom" ]; then
+        echo "ui-smoke: no pop-out window on the server; see windows.txt" >&2
+        exit 1
+    fi
+    if [ "${popout_head:-none}" != "$require_popout_head" ]; then
+        echo "ui-smoke: the pop-out is on head ${popout_head:-none}, expected head $require_popout_head" >&2
+        exit 1
+    fi
+    if [ -n "$editor_head" ] && [ "$editor_head" = "$require_popout_head" ]; then
+        echo "ui-smoke: the editor window is on head $editor_head too; the two windows share a head" >&2
+        exit 1
+    fi
+    echo "ui-smoke: pop-out confirmed on head $require_popout_head, editor on head ${editor_head:-?}"
+fi

@@ -538,6 +538,8 @@ jobs:
             target/ui-smoke/*.png
             target/ui-smoke/*.log
             target/ui-smoke/screens.txt
+            target/ui-smoke/windows.txt
+            target/ui-smoke/monitors.txt
           if-no-files-found: warn
           retention-days: 14
       # ---------------------------------------------------------------
