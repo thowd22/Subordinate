@@ -43,6 +43,20 @@ const FIXTURE_PATH: &str = "fixture/fixture.sub";
 /// The SDK version a scaffold depends on when no local checkout is named.
 const SDK_VERSION: &str = "0.1";
 
+/// The toolchain a scaffold pins in its `rust-toolchain.toml`: the one the
+/// host and the SDK are built with. A machine whose default toolchain is
+/// older than this would otherwise fail the build on the crate's
+/// `rust-version`, so the scaffold names the toolchain it needs rather than
+/// leaving it to be diagnosed.
+const TOOLCHAIN_CHANNEL: &str = "1.95.0";
+
+/// The `rust-version` a scaffolded crate declares: the `TOOLCHAIN_CHANNEL`
+/// without its patch component.
+const RUST_VERSION: &str = "1.95";
+
+/// The target a plugin is a component for.
+const TARGET: &str = "wasm32-wasip2";
+
 /// What `plugin new` was asked to generate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
@@ -176,6 +190,12 @@ pub fn new(options: &Options) -> SubResult<Value> {
         &mut written,
     )?;
     write(&root, ".gitignore", GITIGNORE, &mut written)?;
+    write(
+        &root,
+        "rust-toolchain.toml",
+        &rust_toolchain_toml(),
+        &mut written,
+    )?;
     write(
         &root,
         "src/lib.rs",
@@ -373,8 +393,9 @@ fn cargo_toml(crate_name: &str, display: &str, world: World, sdk_path: Option<&P
          description = \"{display}: a Subordinate {world} plugin\"\n\
          version = \"0.1.0\"\n\
          edition = \"2024\"\n\
-         # The SDK is built with the same toolchain the host is.\n\
-         rust-version = \"1.95\"\n\
+         # The SDK is built with the same toolchain the host is, and\n\
+         # rust-toolchain.toml pins it so this builds anywhere.\n\
+         rust-version = \"{RUST_VERSION}\"\n\
          publish = false\n\
          \n\
          # A plugin is one WASM component, so it is a cdylib and nothing else.\n\
@@ -391,6 +412,23 @@ fn cargo_toml(crate_name: &str, display: &str, world: World, sdk_path: Option<&P
          # The crate targets wasm32-wasip2, so it keeps a workspace of its own\n\
          # rather than joining whatever workspace it was scaffolded inside.\n\
          [workspace]\n",
+    )
+}
+
+/// The generated `rust-toolchain.toml`.
+///
+/// Without it the build depends on whatever toolchain the machine defaults
+/// to, and one older than the crate's `rust-version` fails with an error the
+/// reader has to work around. Naming the channel and the target makes rustup
+/// fetch both, so the one command the guide prints is the whole build.
+fn rust_toolchain_toml() -> String {
+    format!(
+        "# The toolchain this plugin is built with. rustup reads it from this\n\
+         # directory, installs it and the wasm target if they are missing, and\n\
+         # uses it however old the machine's default toolchain is.\n\
+         [toolchain]\n\
+         channel = \"{TOOLCHAIN_CHANNEL}\"\n\
+         targets = [\"{TARGET}\"]\n",
     )
 }
 
@@ -627,6 +665,12 @@ fn claude_md(id: &PluginId, display: &str, world: World, crate_name: &str) -> St
          [\"{feature}\"]`. Exactly one world feature may be on.\n\
          - Target: `wasm32-wasip2`. The Rust toolchain emits a component \
          directly, so there is no `cargo component` or `wasm-tools` step.\n\
+         - Toolchain: `rust-toolchain.toml` pins Rust `{TOOLCHAIN_CHANNEL}` and \
+         the `wasm32-wasip2` target, so rustup installs and uses both from this \
+         directory however old the machine's default toolchain is. Run the build \
+         from the crate root and it needs no toolchain flag; keep the file, or \
+         the build fails on a default toolchain older than \
+         `rust-version = \"{RUST_VERSION}\"`.\n\
          - Worked example: `plugins/cut-silence` in the Subordinate repository \
          is the first-party plugin this file is modelled on — an analyzer and \
          the command that acts on what it found. Its `CLAUDE.md` answers what \
@@ -663,6 +707,9 @@ fn claude_md(id: &PluginId, display: &str, world: World, crate_name: &str) -> St
          subordinate-cli plugin install ./target/wasm32-wasip2/release/{lib_name}.wasm --dev\n\
          subordinate-cli plugin test {id}\n\
          ```\n\n\
+         Run it from the crate root: `rust-toolchain.toml` is what selects the \
+         toolchain and the target, and rustup reads it from the working \
+         directory.\n\n\
          `--dev` links the component to its sources, so a running host watches the \
          file and hot-reloads it: rebuild and the editor picks it up without a \
          restart. `subordinate-cli plugin reload {id}` forces it. Every one of these \
@@ -809,7 +856,10 @@ mod tests {
 
     use sub_plugin::manifest::{Manifest, World};
 
-    use super::{Options, TEMPLATED_WORLDS, crate_name, display_name, new, parse_world};
+    use super::{
+        Options, RUST_VERSION, TARGET, TEMPLATED_WORLDS, TOOLCHAIN_CHANNEL, crate_name,
+        display_name, new, parse_world,
+    };
 
     /// A scratch directory of this test's own.
     fn scratch(name: &str) -> PathBuf {
@@ -849,6 +899,7 @@ mod tests {
                 "Cargo.toml",
                 "plugin.toml",
                 "CLAUDE.md",
+                "rust-toolchain.toml",
                 "src/lib.rs",
                 "fixture/fixture.sub",
             ] {
@@ -894,6 +945,44 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&root);
         }
+    }
+
+    #[test]
+    fn the_scaffold_pins_the_toolchain_its_rust_version_needs() {
+        let parent = scratch("toolchain");
+        new(&options(World::Command, "demo-plugin", &parent)).expect("a scaffold");
+        let root = parent.join("demo-plugin");
+
+        // The pin is what makes the one build command in the guide work on a
+        // machine whose default toolchain is older than the SDK's floor.
+        let toolchain = read(&root, "rust-toolchain.toml");
+        assert!(
+            toolchain.contains(&format!("channel = \"{TOOLCHAIN_CHANNEL}\"")),
+            "{toolchain}",
+        );
+        assert!(
+            toolchain.contains(&format!("targets = [\"{TARGET}\"]")),
+            "{toolchain}",
+        );
+
+        // A pin below what the crate declares would fail the build it exists to
+        // make work.
+        assert!(
+            TOOLCHAIN_CHANNEL.starts_with(RUST_VERSION),
+            "the pinned toolchain {TOOLCHAIN_CHANNEL} is not {RUST_VERSION} or later",
+        );
+        let cargo = read(&root, "Cargo.toml");
+        assert!(
+            cargo.contains(&format!("rust-version = \"{RUST_VERSION}\"")),
+            "{cargo}",
+        );
+
+        // And the guide says the pin is why no toolchain flag is needed.
+        let guide = read(&root, "CLAUDE.md");
+        assert!(guide.contains("rust-toolchain.toml"), "{guide}");
+        assert!(guide.contains(TOOLCHAIN_CHANNEL), "{guide}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
