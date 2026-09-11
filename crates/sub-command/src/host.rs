@@ -659,7 +659,7 @@ mod tests {
         assert!(
             by_media["path"]
                 .as_str()
-                .is_some_and(|path| path.ends_with("media/shot.mp4")),
+                .is_some_and(|path| path.replace('\\', "/").ends_with("media/shot.mp4")),
             "{by_media}",
         );
 
