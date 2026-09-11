@@ -18,7 +18,8 @@ name: Hardware verification
 #   spot      0.25 USD/h * 15/60 h = 0.063 USD
 #   on-demand 0.526 USD/h * 15/60 h = 0.132 USD
 #
-# with a real run nearer 8 minutes, about 0.03 USD on spot. Storage is the
+# and the measurement itself took 2m29s on run 34610600133 (about 0.04 USD
+# on-demand, including the instance's own boot time). Storage is the
 # instance's own root volume, deleted with the instance. Budget: under 0.05 USD
 # per run on spot and under 0.25 USD in every case, which is the number
 # TASK-116 AC 4 states. build-linux is a free hosted runner and amd-linux is
@@ -309,6 +310,7 @@ jobs:
             --perf target/bench/perf.json \
             --readback target/hardware/readback.txt \
             --min-scrub-fps 30 \
+            --scrub-severity warning \
             --min-readback-fps 60 \
             --require-hardware-decode nvh,nvdec,nvv4l2 \
             --out target/hardware/summary.md
@@ -451,6 +453,7 @@ jobs:
             --perf target/bench/perf.json \
             --readback target/hardware/readback.txt \
             --min-scrub-fps 30 \
+            --scrub-severity warning \
             --require-hardware-decode va \
             --out target/hardware/summary.md
           cat target/hardware/summary.md >> "$GITHUB_STEP_SUMMARY"

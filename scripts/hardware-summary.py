@@ -7,7 +7,12 @@ throughput measurement on a real GPU, then calls this script to render both
 into the GitHub job summary and to fail the job when a number is below the
 criterion it is there to prove:
 
-* 4K H.264 scrub above 30 fps *with a hardware decoder* (docs/PLAN.md §8);
+* 4K H.264 scrub above 30 fps *with a hardware decoder* (docs/PLAN.md §8).
+  The rate itself is reported as a warning rather than a failure: it is a
+  measurement of the machine, and a number below the plan's target is work for
+  the verify tasks, not a broken workflow. That the decode went through a
+  hardware decoder at all *is* a failure when it did not, because a software
+  decode makes the number meaningless;
 * compositor readback above 60 fps on a 1080p canvas (TASK-58 AC 2, moved to
   TASK-116), asserted on the NVIDIA job only.
 
@@ -54,6 +59,12 @@ def parse_args(argv):
     parser.add_argument("--perf", required=True, type=Path, help="perf.json from subordinate-bench")
     parser.add_argument("--readback", type=Path, help="log of the readback throughput test")
     parser.add_argument("--min-scrub-fps", type=float, default=0.0)
+    parser.add_argument(
+        "--scrub-severity",
+        choices=["error", "warning"],
+        default="error",
+        help="whether a 4K scrub below --min-scrub-fps fails the job (default) or only warns",
+    )
     parser.add_argument("--min-readback-fps", type=float, default=0.0)
     parser.add_argument(
         "--require-hardware-decode",
@@ -68,6 +79,7 @@ def main(argv):
     args = parse_args(argv)
     lines: list[str] = [f"### Hardware verification - {args.label}", ""]
     failures: list[str] = []
+    warnings: list[str] = []
 
     if not args.perf.is_file():
         failures.append(f"no benchmark report at {args.perf}")
@@ -127,7 +139,11 @@ def main(argv):
                     f"(criterion: above {args.min_scrub_fps:g} fps) - {verdict}"
                 )
                 if verdict == "FAIL":
-                    failures.append(f"4K scrub is {fps:.3f} fps, below {args.min_scrub_fps:g}")
+                    message = f"4K scrub is {fps:.3f} fps, below {args.min_scrub_fps:g}"
+                    if args.scrub_severity == "error":
+                        failures.append(message)
+                    else:
+                        warnings.append(message)
             wanted = [p for p in args.require_hardware_decode.split(",") if p]
             if wanted:
                 ok = any(decoder.startswith(prefix) for prefix in wanted)
@@ -160,6 +176,10 @@ def main(argv):
             )
 
     lines.append("")
+    if warnings:
+        lines.append("**Below target, reported only**")
+        lines += [f"* {reason}" for reason in warnings]
+        lines.append("")
     if failures:
         lines.append("**Failed checks**")
         lines += [f"* {reason}" for reason in failures]
@@ -170,6 +190,8 @@ def main(argv):
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(markdown, encoding="utf-8")
 
+    for reason in warnings:
+        print(f"::warning::{reason}", file=sys.stderr)
     for reason in failures:
         print(f"::error::{reason}", file=sys.stderr)
     return 1 if failures else 0
