@@ -255,10 +255,13 @@ jobs:
           # the pipeline through cmd with both streams captured to a log file.
           $log = "$env:RUNNER_TEMP\amf-test.log"
           $env:GST_DEBUG = "2,amf*:4"
-          cmd /c "gst-launch-1.0 videotestsrc num-buffers=120 ! video/x-raw,width=1920,height=1080,framerate=30/1 ! amfh264enc ! video/x-h264 ! h264parse ! mp4mux ! filesink location=`"$out`" > `"$log`" 2>&1"
+          $outFwd = $out -replace '\\', '/'
+          $logFwd = $log -replace '\\', '/'
+          cmd /c "gst-launch-1.0 videotestsrc num-buffers=120 ! video/x-raw,width=1920,height=1080,framerate=30/1 ! amfh264enc ! video/x-h264 ! h264parse ! mp4mux ! filesink location=$outFwd > $logFwd 2>&1"
           "gst-launch exit $LASTEXITCODE"
           Remove-Item Env:GST_DEBUG
           Get-Content $log | Select-Object -Last 30
+          Get-ChildItem $env:RUNNER_TEMP | Select-Object Name, Length | Format-Table -AutoSize | Out-String -Width 120
           if (Test-Path $out) { "size " + (Get-Item $out).Length } else { "no output file"; exit 1 }
           cmd /c "gst-discoverer-1.0 `"$out`" 2>&1" | Tee-Object -Variable info
           if (-not ($info -match 'H\.264')) { Write-Error "no H.264 stream"; exit 1 }
