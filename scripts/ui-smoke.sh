@@ -396,6 +396,33 @@ if [ -n "$editor_geom" ]; then
 fi
 echo "ui-smoke: editor on head ${editor_head:-?}, pop-out on head ${popout_head:-?}"
 
+# outline_window PNG HEAD_X HEAD_Y "W H X Y" LABEL
+#
+# Draws the window's rectangle and names it on the head's screenshot. Both
+# windows paint the picture on black and the desktop behind them is black, so
+# an unannotated capture of the pop-out is a black rectangle on a black field:
+# the window is there, and the picture says nothing to the eye. The outline is
+# the evidence (TASK-118).
+outline_window() {
+    png=$1
+    head_x=$2
+    head_y=$3
+    geom=$4
+    label=$5
+    [ -n "$geom" ] || return 0
+    read -r w h x y <<EOF2
+$geom
+EOF2
+    rx=$((x - head_x))
+    ry=$((y - head_y))
+    im "$png" \
+        -stroke '#ff4d3d' -strokewidth 3 -fill none \
+        -draw "rectangle $rx,$ry $((rx + w - 1)),$((ry + h - 1))" \
+        -stroke none -fill '#ff4d3d' -pointsize 20 \
+        -annotate "+$((rx + 10))+$((ry + 34))" "$label ${w}x$h" \
+        "$png"
+}
+
 # One capture of the whole Xinerama desktop, then a crop per head: two xwd
 # runs could catch the two windows a frame apart.
 xwd -display "$display" -root -silent >"$out_dir/root.xwd"
@@ -405,6 +432,12 @@ while read -r width height x y; do
     [ -n "$width" ] || continue
     png="$out_dir/screen-$index.png"
     im "xwd:$out_dir/root.xwd" -crop "${width}x${height}+${x}+${y}" +repage "$png"
+    if [ "${editor_head:-}" = "$index" ]; then
+        outline_window "$png" "$x" "$y" "$editor_geom" "Subordinate (editor)"
+    fi
+    if [ "${popout_head:-}" = "$index" ]; then
+        outline_window "$png" "$x" "$y" "$popout_geom" "Subordinate viewer (pop-out)"
+    fi
     echo "screen-$index.png $(im_identify -format '%wx%h' "$png")" >>"$out_dir/screens.txt"
     index=$((index + 1))
 done <<EOF
