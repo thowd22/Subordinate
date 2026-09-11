@@ -8,11 +8,22 @@
 //! the plan names, keeps the ones that reach `READY`, and picks per codec in
 //! the plan's order unless the user pinned one in settings.
 
+//! The pipeline itself lives in [`pipeline`]: two `appsrc` elements — the
+//! composited frames and the offline audio mix — feeding the chosen encoders
+//! and the container's muxer, with every timestamp computed exactly from the
+//! sequence's rational frame rate.
+
 pub mod encoder;
+pub mod pipeline;
 
 pub use encoder::{
     CODECS, ElementProbe, EncoderPreferences, EncoderProbe, EncoderStatus, EncoderVendor,
-    VideoCodec, encoder_names,
+    VideoCodec, element_is_usable, encoder_names,
+};
+pub use pipeline::{
+    AUDIO_CODECS, AudioCodec, AudioFrameSource, BYTES_PER_PIXEL, CONTAINERS, Container,
+    ExportElements, ExportPipeline, ExportReport, ExportSettings, PcmAudioSource, SolidFrames,
+    VideoFrameSource, export, export_with,
 };
 
 /// Stable [`sub_core::ErrorCode`] constants this crate returns.
@@ -32,6 +43,20 @@ pub mod codes {
     pub const UNKNOWN_ENCODER: ErrorCode = ErrorCode::from_static("export.unknown_encoder");
     /// The user pinned an encoder this machine cannot use.
     pub const ENCODER_UNAVAILABLE: ErrorCode = ErrorCode::from_static("export.encoder_unavailable");
+    /// The export settings do not describe a file that can be written.
+    pub const INVALID_SETTINGS: ErrorCode = ErrorCode::from_static("export.invalid_settings");
+    /// The container cannot carry one of the chosen codecs.
+    pub const UNSUPPORTED_COMBINATION: ErrorCode =
+        ErrorCode::from_static("export.unsupported_combination");
+    /// The muxer the container needs is missing on this machine.
+    pub const MUXER_UNAVAILABLE: ErrorCode = ErrorCode::from_static("export.muxer_unavailable");
+    /// The export pipeline could not be built, linked, started or completed.
+    pub const PIPELINE_FAILED: ErrorCode = ErrorCode::from_static("export.pipeline_failed");
+    /// The pipeline refused a buffer, which is how a failing encoder surfaces
+    /// in the middle of an export.
+    pub const PUSH_FAILED: ErrorCode = ErrorCode::from_static("export.push_failed");
+    /// The pipeline never reached end of stream inside its time budget.
+    pub const EXPORT_TIMEOUT: ErrorCode = ErrorCode::from_static("export.timeout");
 }
 
 #[cfg(test)]
@@ -44,6 +69,12 @@ mod tests {
             super::codes::NO_ENCODER,
             super::codes::UNKNOWN_ENCODER,
             super::codes::ENCODER_UNAVAILABLE,
+            super::codes::INVALID_SETTINGS,
+            super::codes::UNSUPPORTED_COMBINATION,
+            super::codes::MUXER_UNAVAILABLE,
+            super::codes::PIPELINE_FAILED,
+            super::codes::PUSH_FAILED,
+            super::codes::EXPORT_TIMEOUT,
         ];
         for code in &codes {
             assert_eq!(code.domain(), "export", "wrong domain for {code}");
