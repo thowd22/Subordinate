@@ -45,6 +45,13 @@ ogg
 # --- software decode and encode -------------------------------------------
 !libav
 !x264
+# An AAC encoder that is actually usable, which libav's is not: gst-libav
+# registers avenc_aac at rank NONE, and rank NONE is how a machine says "never
+# plug this unasked", so sub-export skips it (run 34630086856 rendered nothing
+# from the AppImage: "no aac encoder is available on this machine"). voaacenc
+# is ranked SECONDARY and is what the mp4 presets fall back to. Required: every
+# youtube-* preset is AAC in MP4, so a package without one cannot export at all.
+!voaacenc
 x265
 vpx
 opus

@@ -136,7 +136,9 @@ bad_entries=$(sed 's/#.*//' "$plugins" | tr -d ' \t' | grep -v '^$' |
 entries=$(sed 's/#.*//' "$plugins" | tr -d ' \t!' | grep -v '^$')
 duplicates=$(echo "$entries" | sort | uniq -d)
 [ -z "$duplicates" ] || fail "duplicate plugin entries: $(echo "$duplicates" | tr '\n' ' ')"
-for must in nvcodec va coreelements app playback libav x264 isomp4 matroska; do
+# voaacenc rather than libav for AAC: gst-libav registers avenc_aac at rank
+# NONE and sub-export will not plug a deranked element.
+for must in nvcodec va coreelements app playback libav x264 voaacenc isomp4 matroska; do
     grep -qx "!$must" <(sed 's/#.*//' "$plugins" | tr -d ' \t') ||
         fail "plugin allowlist does not mark $must as required"
 done
@@ -174,17 +176,28 @@ finish = m.get("finish-args", [])
 for arg in ("--device=dri", "--socket=wayland", "--socket=pulseaudio"):
     if arg not in finish:
         problems.append(f"finish-args lacks {arg}")
-if not any(a.startswith("--env=LD_LIBRARY_PATH=") and "ffmpeg" in a for a in finish):
-    problems.append("finish-args does not put the ffmpeg extension on LD_LIBRARY_PATH")
 
 # The GStreamer story is the reason this manifest exists: the freedesktop
-# runtime's own GStreamer plus its extension point, not a bundled copy.
-extensions = m.get("add-extensions", {})
-ffmpeg = extensions.get("org.freedesktop.Platform.ffmpeg-full")
-if ffmpeg is None:
-    problems.append("no org.freedesktop.Platform.ffmpeg-full extension")
-elif str(ffmpeg.get("version", "")) != runtime_version:
-    problems.append("ffmpeg-full extension version does not match runtime-version")
+# runtime's own GStreamer plus its extension point, not a bundled copy. Since
+# branch 25.08 the runtime also declares org.freedesktop.Platform.codecs-extra
+# (the replacement for the retired ffmpeg-full) and mounts it on
+# GST_PLUGIN_SYSTEM_PATH itself, so the app must NOT re-declare either one --
+# an add-extensions entry with the same name shadows the runtime's mount point
+# and the codecs disappear.
+if tuple(int(part) for part in runtime_version.split(".")) < (25, 8):
+    problems.append(
+        f"runtime-version {runtime_version} predates 25.08: its rust-stable SDK "
+        "extension is rustc 1.89, below the workspace rust-version"
+    )
+for retired in ("org.freedesktop.Platform.ffmpeg-full",):
+    if retired in (m.get("add-extensions") or {}):
+        problems.append(f"{retired} does not exist on runtime {runtime_version}")
+for shadowed in ("org.freedesktop.Platform.codecs-extra",
+                 "org.freedesktop.Platform.GStreamer"):
+    if shadowed in (m.get("add-extensions") or {}):
+        problems.append(f"add-extensions re-declares the runtime's own {shadowed}")
+if any("ffmpeg" in a for a in finish):
+    problems.append("finish-args still reference the retired ffmpeg-full extension")
 with open(path, encoding="utf-8") as handle:
     if "org.freedesktop.Platform.GStreamer" not in handle.read():
         problems.append("manifest never mentions the freedesktop GStreamer extension")
@@ -206,6 +219,8 @@ else:
     options = modules[0].get("build-options", {})
     if "/usr/lib/sdk/rust-stable/bin" not in options.get("append-path", ""):
         problems.append("the rust-stable SDK extension is not on PATH")
+if "org.freedesktop.Sdk.Extension.rust-stable" not in (m.get("sdk-extensions") or []):
+    problems.append("the rust-stable SDK extension is not requested")
 
 for problem in problems:
     print(f"FAIL: flatpak manifest: {problem}")
