@@ -74,6 +74,7 @@ fn a_scaffold_is_a_crate_a_manifest_a_guide_and_a_fixture_project() {
         "Cargo.toml",
         "plugin.toml",
         "CLAUDE.md",
+        "rust-toolchain.toml",
         "src/lib.rs",
         "fixture/fixture.sub",
     ] {
@@ -158,6 +159,47 @@ fn plugin_new_without_a_world_or_a_name_says_which_is_missing() {
     assert!(stderr.contains("name"), "{stderr}");
 }
 
+/// A command run with none of the toolchain overrides `cargo test` sets, so
+/// rustup picks the toolchain from the `rust-toolchain.toml` in the working
+/// directory rather than from the toolchain that built this test.
+fn toolchain_free(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("CARGO")
+        .env_remove("RUSTC")
+        .env_remove("RUSTDOC");
+    command
+}
+
+/// The channel the scaffold pinned in its `rust-toolchain.toml`.
+fn pinned_channel(root: &Path) -> String {
+    let toolchain =
+        std::fs::read_to_string(root.join("rust-toolchain.toml")).expect("a pinned toolchain");
+    let Some(channel) = toolchain
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("channel = "))
+    else {
+        panic!("no channel in {toolchain}")
+    };
+    channel.trim().trim_matches('"').to_owned()
+}
+
+/// What rustup resolves in the scaffold directory, when rustup is what runs
+/// cargo here at all.
+fn active_toolchain(root: &Path) -> Option<String> {
+    let output = toolchain_free("rustup")
+        .current_dir(root)
+        .args(["show", "active-toolchain"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    Some(text.trim().to_owned())
+}
+
 /// The SDK checkout a build test depends on by path, when one was named.
 fn sdk_path() -> Option<PathBuf> {
     std::env::var_os("SUBORDINATE_SCAFFOLD_BUILD")?;
@@ -191,15 +233,23 @@ fn a_scaffold_builds_and_installs_with_no_edits() {
             &arg(&sdk),
         ]);
         let root = directory.join(name);
-        let built = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()))
-            .args([
-                "build",
-                "--release",
-                "--target",
-                "wasm32-wasip2",
-                "--manifest-path",
-            ])
-            .arg(root.join("Cargo.toml"))
+
+        // The scaffold pins its own toolchain, and that pin is the whole point
+        // of this build: rustup must select it from the crate directory even
+        // when the machine's default toolchain is older than the crate's
+        // rust-version. So the build goes through the plain `cargo` shim with
+        // every toolchain override this test inherited stripped off, exactly as
+        // the guide prints it.
+        let pinned = pinned_channel(&root);
+        if let Some(active) = active_toolchain(&root) {
+            assert!(
+                active.starts_with(&pinned),
+                "{world}: rustup chose {active}, not the pinned {pinned}",
+            );
+        }
+        let built = toolchain_free("cargo")
+            .current_dir(&root)
+            .args(["build", "--release", "--target", "wasm32-wasip2"])
             // Whatever host flags built this test are for the host triple:
             // a component is linked by wasm-component-ld, which takes none of
             // them.
