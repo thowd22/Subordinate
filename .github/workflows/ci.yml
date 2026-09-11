@@ -351,10 +351,19 @@ jobs:
       # Windows and macOS alike (TASK-109 criterion 2), and a run that skipped
       # the test because the fetch step went wrong would prove nothing. The
       # fetch step above ran on every OS, so the media is there.
+      #
+      # The Windows runners have the Media Foundation H.264 encoder registered
+      # -- the MFT is part of Windows -- but no GPU behind it, and it reaches
+      # READY and then refuses to negotiate any input format, so every export
+      # that picked it died with "streaming stopped, reason not-negotiated" at
+      # the appsrc feeding it (run 34590849305). It outranks x264enc in the
+      # selection order, so that was every real export on Windows. Deranking it
+      # to NONE is the same escape hatch as vtdec above, and the encoder probe
+      # honours a NONE rank, so selection falls through to x264enc.
       - name: Test
         shell: bash
         env:
-          GST_PLUGIN_FEATURE_RANK: ${{ runner.os == 'macOS' && 'vtdec:NONE,vtdec_hw:NONE' || '' }}
+          GST_PLUGIN_FEATURE_RANK: ${{ runner.os == 'macOS' && 'vtdec:NONE,vtdec_hw:NONE' || runner.os == 'Windows' && 'mfh264enc:NONE,mfh265enc:NONE' || '' }}
           SUB_REQUIRE_SAMPLE_MEDIA: '1'
         run: cargo test --workspace -- --test-threads=1
 

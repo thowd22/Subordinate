@@ -511,6 +511,13 @@ impl EncoderProbe {
 /// machine with the nvcodec plugin, and fails the state change when no NVIDIA
 /// device answers.
 fn probe_element(name: &str) -> ElementProbe {
+    if is_deranked(name) {
+        tracing::debug!(
+            element = name,
+            "element deranked to NONE, treating it as unusable"
+        );
+        return ElementProbe::not_ready("the element is ranked NONE on this machine");
+    }
     let element = match gst::ElementFactory::make(name).build() {
         Ok(element) => element,
         Err(err) => {
@@ -530,6 +537,20 @@ fn probe_element(name: &str) -> ElementProbe {
     };
     let _ = element.set_state(gst::State::Null);
     outcome
+}
+
+/// Whether `name` has been deranked to `NONE`, by
+/// `GST_PLUGIN_FEATURE_RANK` or by the application itself.
+///
+/// Rank `NONE` is how a machine says "never plug this": it is what keeps a
+/// decoder or encoder that registers but cannot work here out of every
+/// autoplugged pipeline. Selection picks its elements by name rather than by
+/// autoplugging, so it has to honour that answer itself -- otherwise the one
+/// escape hatch a user (or a GPU-less CI runner) has does not reach the
+/// exporter. An element whose factory is gone counts as not deranked; the
+/// probe below then reports it missing.
+fn is_deranked(name: &str) -> bool {
+    gst::ElementFactory::find(name).is_some_and(|factory| factory.rank() == gst::Rank::NONE)
 }
 
 /// Whether `name` is an element this machine can actually run.
@@ -689,6 +710,32 @@ mod tests {
             "x265enc"
         );
         assert!(probe.select(VideoCodec::Av1, &prefs).is_err());
+    }
+
+    /// A machine says "never plug this" by ranking a factory NONE, and
+    /// selection picks by name rather than by autoplugging, so the probe has
+    /// to read that rank itself. The GPU-less Windows CI runners rank
+    /// `mfh264enc` NONE for exactly this reason.
+    #[test]
+    fn an_element_ranked_none_is_reported_present_but_unusable() {
+        use gstreamer::prelude::PluginFeatureExtManual;
+
+        let _ = gstreamer::init();
+        let Some(factory) = gstreamer::ElementFactory::find("videotestsrc") else {
+            eprintln!("skipping: this machine has no videotestsrc");
+            return;
+        };
+        let rank = factory.rank();
+        factory.set_rank(gstreamer::Rank::NONE);
+        let probe = super::probe_element("videotestsrc");
+        factory.set_rank(rank);
+
+        assert!(probe.present, "the factory is registered");
+        assert!(!probe.ready, "but a NONE rank means it is not to be used");
+        assert!(
+            probe.detail.is_some_and(|why| why.contains("NONE")),
+            "the reason says so"
+        );
     }
 
     #[test]
