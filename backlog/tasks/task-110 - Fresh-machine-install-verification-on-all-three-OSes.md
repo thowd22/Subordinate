@@ -4,13 +4,12 @@ title: Fresh-machine install verification on all three OSes
 status: To Do
 assignee: []
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-11 13:41'
+updated_date: '2026-09-11 19:41'
 labels:
   - release
   - verify
 milestone: m-7
 dependencies:
-  - TASK-106
   - TASK-107
   - TASK-109
 references:
@@ -36,4 +35,6 @@ Phase 7 exit criterion.
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-09-11 supervisor: macOS half of the fresh-install check is deferred with TASK-105/117; Linux and Windows proceed.
+
+2026-09-11 supervisor: dependency on TASK-106 dropped; use the release.yml dry-run artifacts (or the packaging workflows' artifacts) for the Linux and Windows fresh-machine installs. macOS half deferred with TASK-105.
 <!-- SECTION:NOTES:END -->

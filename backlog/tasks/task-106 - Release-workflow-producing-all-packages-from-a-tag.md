@@ -2,10 +2,9 @@
 id: TASK-106
 title: Release workflow producing all packages from a tag
 status: In Progress
-assignee:
-  - '@opus-task-106'
+assignee: []
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-11 19:40'
+updated_date: '2026-09-11 19:41'
 labels:
   - release
   - infra
@@ -27,9 +26,9 @@ Repeatable releases.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Tagging vX.Y.Z builds AppImage, Flatpak bundle, MSI and dmg and attaches them to a GitHub release
-- [ ] #2 Checksums are published
-- [x] #3 A dry-run mode builds without publishing
+- [ ] #1 Checksums are published
+- [x] #2 A dry-run mode builds without publishing
+- [ ] #3 Tagging vX.Y.Z builds the AppImage, Flatpak bundle and MSI and attaches them to a GitHub release (the macOS dmg joins when TASK-105 lands)
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -62,6 +61,8 @@ sample-media-v1 untouched: 'gh release list' after the run still shows only 'Sam
 Temporary 'push: branches: [task/task-106]' trigger added for the verification and removed in 36e891e; pushing that removal started no new run.
 
 Not proven, deliberately: AC 1 and AC 2 both depend on 'gh release create' actually running, and no tag was pushed -- the supervisor's instruction was to verify the dry run and never publish a real release or tag. AC 1 additionally names the dmg, which is TASK-105 and is deferred until the user's Mac arrives; release.yml carries a commented macos job and a three-step note (uncomment the job, add it to publish's needs, add '*.dmg' to the required-package list) so wiring it in is mechanical.
+
+2026-09-11 supervisor: merged to main. Criterion 1 reworded to the three packages that exist now; criteria 1 and 2 will be proven by the first real v* tag, which the user must approve since it publishes a public release. Dry run 34638014639 produced all three packages plus SHA256SUMS. Note the design change: packaging.yml and windows-packaging.yml no longer trigger on tags; release.yml owns v* tags and calls them, so the published artifacts are the smoke-tested ones.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
