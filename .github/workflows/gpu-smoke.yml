@@ -90,3 +90,115 @@ jobs:
             ! vapostproc ! vah264enc ! h264parse ! mp4mux ! filesink location="$RUNNER_TEMP/va-test.mp4"
           gst-discoverer-1.0 "$RUNNER_TEMP/va-test.mp4" | tee /dev/stderr | grep -q 'H.264'
           ls -l "$RUNNER_TEMP/va-test.mp4"
+
+  nvidia-windows:
+    # No custom AMI (TASK-115). RunsOn's stock `windows22-full-x64` image runs
+    # on a g4dn instance perfectly well, it just ships without an NVIDIA
+    # driver; this job installs the AWS-published one at the start of the run,
+    # in about 100 seconds, from the anonymously readable bucket
+    # s3://ec2-windows-nvidia-drivers. `-s -n` is silent + no reboot, which is
+    # mandatory here: a RunsOn runner is ephemeral and would never come back
+    # from a restart. The driver loads immediately for NVENC without one -
+    # nvidia-smi and nvh264enc both work in the same job.
+    name: NVIDIA T4 (g4dn.xlarge, Windows Server 2022)
+    runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-windows
+    timeout-minutes: 20
+    env:
+      GST_VERSION: "1.28.6"
+      GST_MINOR: "1.28"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instance facts
+        shell: pwsh
+        run: |
+          "runner=$env:RUNNER_NAME"
+          try {
+            $t = Invoke-RestMethod -Method Put -Uri http://169.254.169.254/latest/api/token `
+                   -Headers @{'X-aws-ec2-metadata-token-ttl-seconds'='60'} -TimeoutSec 3
+            $h = @{'X-aws-ec2-metadata-token'=$t}
+            "instance-type=" + (Invoke-RestMethod -Uri http://169.254.169.254/latest/meta-data/instance-type -Headers $h -TimeoutSec 3)
+            "lifecycle=" + (Invoke-RestMethod -Uri http://169.254.169.254/latest/meta-data/instance-life-cycle -Headers $h -TimeoutSec 3)
+          } catch { "imds unavailable: $_" }
+          (Get-CimInstance Win32_OperatingSystem).Caption
+          Get-CimInstance Win32_VideoController | Format-List Name, DriverVersion, AdapterRAM
+
+      - name: Install NVIDIA driver (AWS public bucket, no reboot)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $bucket = "https://ec2-windows-nvidia-drivers.s3.amazonaws.com"
+
+          # The bucket is world-readable AND world-listable over plain HTTPS, so
+          # no AWS credentials are involved. That matters: the RunsOn instance
+          # role is scoped to the stack's own buckets, so the `aws s3 cp` the
+          # AWS docs suggest fails here with AccessDenied on ListObjectsV2
+          # (verified, run 34617932919).
+          [xml]$list = (Invoke-WebRequest -UseBasicParsing "$bucket/?list-type=2&prefix=latest/").Content
+          $key = $list.ListBucketResult.Contents |
+                 Where-Object { $_.Key -like "*.exe" } |
+                 Sort-Object Key -Descending | Select-Object -First 1 -ExpandProperty Key
+          if (-not $key) { throw "no .exe under s3://ec2-windows-nvidia-drivers/latest/" }
+          $exe = Join-Path $env:RUNNER_TEMP (Split-Path $key -Leaf)
+          "driver=$key"
+
+          # curl.exe ships with Windows and is much faster than
+          # Invoke-WebRequest for a 750 MB file.
+          curl.exe -sS -L -o "$exe" "$bucket/$key"
+          if ($LASTEXITCODE -ne 0) { throw "driver download failed ($LASTEXITCODE)" }
+          $dl = $sw.Elapsed.TotalSeconds
+          "downloaded {0:N0} MB in {1:N0}s" -f ((Get-Item $exe).Length / 1MB), $dl
+
+          # -s silent, -n no reboot. Exit 0 = installed; 1/1641/3010 mean the
+          # installer would *like* a reboot, which NVENC does not need - and a
+          # RunsOn runner could not survive one anyway. Anything else is a
+          # real failure.
+          $p = Start-Process -Wait -PassThru -FilePath $exe -ArgumentList "-s","-n"
+          "installer exit code = $($p.ExitCode)"
+          if ($p.ExitCode -notin 0,1,1641,3010) { throw "driver install failed ($($p.ExitCode))" }
+          $sw.Stop()
+          "::notice::NVIDIA driver ready in {0:N0}s total (download {1:N0}s, install {2:N0}s)" -f $sw.Elapsed.TotalSeconds, $dl, ($sw.Elapsed.TotalSeconds - $dl)
+
+      - name: nvidia-smi
+        shell: pwsh
+        run: |
+          $smi = "$env:SystemRoot\System32\nvidia-smi.exe"
+          if (-not (Test-Path $smi)) { $smi = "nvidia-smi" }
+          & $smi
+          if ($LASTEXITCODE -ne 0) { throw "nvidia-smi failed ($LASTEXITCODE)" }
+
+      - name: Install GStreamer (Windows, official installer)
+        shell: pwsh
+        run: |
+          $ver = $env:GST_VERSION
+          $exe = "gstreamer-1.0-msvc-x86_64-$ver.exe"
+          $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc/$exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          $dir = "C:\gstreamer\1.0\msvc_x86_64"
+          Start-Process -Wait -FilePath ".\$exe" -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/TYPE=devel","/ALLUSERS","/DIR=$dir"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$dir\lib\pkgconfig" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Hardware encoder elements present
+        shell: pwsh
+        run: |
+          gst-inspect-1.0 --version
+          $v = (pkg-config --modversion gstreamer-1.0)
+          "gstreamer-1.0 = $v"
+          if (-not $v.StartsWith("$env:GST_MINOR.")) {
+            "::error::expected GStreamer $env:GST_MINOR.x, got $v"
+            exit 1
+          }
+          $fail = $false
+          foreach ($e in @("nvh264enc","mfh264enc")) {
+            gst-inspect-1.0 --exists $e
+            if ($LASTEXITCODE -eq 0) { "present  $e" } else { "::error::$e missing"; $fail = $true }
+          }
+          if ($fail) {
+            gst-inspect-1.0 nvcodec
+            gst-inspect-1.0 mediafoundation
+            exit 1
+          }
+          gst-inspect-1.0 nvh264enc | Select-Object -First 20

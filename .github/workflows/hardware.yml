@@ -465,13 +465,13 @@ jobs:
   # ----------------------------------------------------------------------
   # Windows jobs: deliberately absent, not forgotten (TASK-116 AC 1).
   #
-  #   nvidia-windows - needs the GPU AMI TASK-115 builds (NVIDIA driver,
-  #     GStreamer 1.28 and the RunsOn agent). Until that AMI id replaces the
-  #     placeholder in .github/runs-on.yml, a job asking for
-  #     `runner=gpu-nvidia-windows` fails to launch. When it exists, copy the
-  #     nvidia-linux job, swap the shell to pwsh, install GStreamer with the
-  #     official MSVC installer as ci.yml does, and pin `--encoder mfh264enc`
-  #     or `nvh264enc`.
+  #   nvidia-windows - the runner now works (TASK-115): `gpu-nvidia-windows`
+  #     is the stock windows22-full-x64 image on a g4dn.xlarge, and the job
+  #     installs the AWS-published NVIDIA driver itself in ~100s. No custom AMI.
+  #     To add the job, copy the nvidia-windows job from
+  #     .github/workflows/gpu-smoke.yml (driver + GStreamer 1.28 steps
+  #     verbatim), then run the encode matrix with `--encoder nvh264enc` and
+  #     `--encoder mfh264enc`. About 0.10 USD per run.
   #
   #   amd-windows - no hardware exists at all: AWS retired g4ad, there is no
   #     AMD Windows host, and AMF cannot be exercised anywhere this project can
