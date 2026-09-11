@@ -233,6 +233,14 @@ printf '%s\n' "$heads" | awk '{printf "  head %d: %sx%s @ %s,%s\n", NR - 1, $1, 
 second_x=$(printf '%s\n' "$heads" | sed -n '2p' | awk '{print $3}')
 second_y=$(printf '%s\n' "$heads" | sed -n '2p' | awk '{print $4}')
 
+# A bare X root is black, and so is a viewer with nothing to show, so a
+# screenshot of the pop-out on an empty desktop is a black rectangle on a black
+# field and proves nothing to the eye. Painting the root a colour no part of
+# the editor uses makes each window's rectangle obvious in its own screenshot.
+if command -v xsetroot >/dev/null 2>&1; then
+    xsetroot -display "$display" -solid '#1d4f7c' || true
+fi
+
 export RUST_LOG="${RUST_LOG:-info}"
 export DISPLAY="$display"
 
