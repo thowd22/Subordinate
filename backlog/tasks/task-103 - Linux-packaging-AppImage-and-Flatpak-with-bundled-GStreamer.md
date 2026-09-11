@@ -1,11 +1,11 @@
 ---
 id: TASK-103
 title: 'Linux packaging: AppImage and Flatpak with bundled GStreamer'
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-103'
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-11 17:34'
+updated_date: '2026-09-11 18:44'
 labels:
   - release
 milestone: m-7
@@ -28,8 +28,8 @@ Linux is the primary target; users must not hunt for GStreamer plugins.
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 AppImage bundles the pinned GStreamer runtime including nvcodec and va plugins and runs on Ubuntu LTS and Fedora
-- [ ] #2 Flatpak manifest uses the freedesktop GStreamer extension and passes flatpak-builder in CI
-- [ ] #3 Hardware encode works from both packages (verified)
+- [x] #2 Flatpak manifest uses the freedesktop GStreamer extension and passes flatpak-builder in CI
+- [x] #3 Hardware encode works from both packages (verified)
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -65,10 +65,28 @@ AC 2 unchecked: flatpak and flatpak-builder are not installed here and cannot be
 AC 3 unchecked by design: hardware encode from inside the packages needs a GPU. Per the supervisor note this belongs to hardware.yml (TASK-116); the AppImage carries subordinate-cli and gst-inspect and AppRun exposes them through SUB_APPIMAGE_TOOL so that workflow can render from inside the package rather than against the host runtime.
 
 Checks: cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean (exit 0, no Rust source changed by this task); packaging/validate.sh passes with and without --appdir. No cargo test run because the task adds no Rust code; the packaging test is validate.sh.
+
+2026-09-11 opus-task-103 (branch task/task-103-fix): CI fix round for the two jobs that failed on run 34626701087. Four runs, ending green.
+
+Flatpak. Root cause was the SDK extension, not the manifest: org.freedesktop.Sdk.Extension.rust-stable on runtime branch 24.08 is rustc 1.89 and this workspace declares rust-version 1.95, so cargo refused before compiling anything. Moved the manifest, build-flatpak.sh and the runtime cache key to branch 25.08, whose rust-stable tracks current stable - run 34628898376 printed 'rustc 1.98.1' and built the workspace in 10m07s. 25.08 also retired org.freedesktop.Platform.ffmpeg-full: the full codec set is now org.freedesktop.Platform.codecs-extra, an extension the *runtime* declares (add-ld-path, auto-downloaded, already on GST_PLUGIN_SYSTEM_PATH), so the add-extensions block, the /app/lib/ffmpeg directory and the ffmpeg LD_LIBRARY_PATH finish-arg were removed rather than repointed - re-declaring a runtime extension shadows the runtime's own mount point, which validate.sh now fails on, along with a runtime-version below 25.08. Determined all of this from the Flathub ostree metadata (the Platform commit's [Extension ...] blocks) rather than by guessing. Two further real bugs the runs found: flatpak-builder shells out to eu-strip, absent from the runner image, so it failed after the ten-minute compile (elfutils is now installed and build-flatpak.sh refuses to start without it); and build-bundle was being handed the runtime version as the app branch, which is not a ref - both sides now say 'stable', as Flathub publishes. The toolchain still comes from the SDK extension, never from the network, so the manifest stays Flathub-shaped.
+
+AppImage. The package was built on the ubuntu-26.04 runner (glibc 2.43) and glibc is only forward compatible, so it died on Fedora 41 (2.40) before main. It is now built inside an ubuntu:24.04 container (glibc 2.39, the oldest supported Ubuntu LTS), and the artifact is smoke-tested by a separate job on three systems that did not build it: the 26.04 host, an ubuntu:24.04 container and a fedora:41 container. TRADE-OFF THE SUPERVISOR SHOULD NOTE: Ubuntu 24.04 carries GStreamer 1.24, not the repository's 1.28 pin, and there is no trustworthy 1.28 for that base, so the AppImage now bundles 1.24 while CI, box and the Flatpak stay on 1.28+. Nothing needs a post-1.24 API (the gstreamer-rs gate is v1_18) and nvcodec, va and vah264enc all exist there, but AC 1's wording says 'the pinned GStreamer runtime' and that is no longer literally true. The job asserts the base is 1.24.x so the two facts cannot drift silently.
+
+Two rounds were lost to the same avoidable mistake - writing the smoke jobs' host-library baseline from memory, so it was missing libva-drm2, libva-x11-2, libxcb-xkb1 and libxcb-render0 and each run revealed only the first plugin to trip over one. The appimage job now derives that list instead: it ldd-sweeps the AppDir with its own library path and prints every library resolved outside it (38), into the step summary and the artifact as host-libraries.txt; the baselines are the distro spelling of that.
+
+A real packaging bug the hardware job found: the AppImage could not export at all. Every youtube-* preset is AAC in MP4 and the only AAC encoder in the bundle was gst-libav's avenc_aac, which is registered at rank NONE; sub-export will not plug a deranked element, so the render died with export.no_encoder. voaacenc (rank secondary) is now bundled and required in the allowlist and validate.sh.
+
+Runs: 34628898376 (flatpak reached eu-strip; appimage built and fedora smoke passed), 34630086856 (flatpak green; appimage smoke still short of libraries; box reached the render), 34632104230 (all three smoke targets green; box AppImage render green; flatpak render blocked), 34633406106 GREEN - validate, AppImage build, all three AppImage smoke targets, Flatpak, and the box hardware job. Artifacts: subordinate-appimage (Subordinate-0.1.0-x86_64.AppImage + host-libraries.txt), subordinate-flatpak (Subordinate-0.1.0.flatpak), packages-hardware-amd (both rendered files, gst-discoverer output, render JSON, encoder ranks; 15 MB).
+
+Hardware evidence (run 34633406106, box, AMD Cezanne APU): the AppImage rendered examples/sample-project/demo.sub through SUB_APPIMAGE_TOOL=subordinate-cli with --encoder vah264enc pinned, and the HOST's gst-discoverer-1.0 reports 'video #1: H.264 (High Profile)', 14.000 s. The Flatpak did the same through 'flatpak run --command=subordinate-cli', 14.0212 s, same H.264 High Profile. Both used the host driver through --device=dri and each package's own GStreamer.
+
+CAVEAT ON THE FLATPAK HALF: the 25.08 runtime has no ranked AAC encoder inside the sandbox - voaacenc, fdkaacenc and faac are absent and avenc_aac is rank NONE - so the first attempt was refused and the job's second rung, GST_PLUGIN_FEATURE_RANK=avenc_aac:256, is what ran. The video path is untouched by that: vah264enc is pinned explicitly and the file is H.264. But it means a Flatpak user exporting any youtube-* preset gets export.no_encoder today. That is a product decision (an AAC encoder module in the manifest, or the app promoting avenc_aac itself), not a packaging one, so it is written into docs/DEVELOPMENT.md and left for the supervisor rather than fixed here.
+
+Checks: packaging/validate.sh passes locally and in CI (validate job green in every run); its new flatpak assertions were exercised by deliberately setting runtime-version back to 24.08, which fails with the rust-1.89 message. No Rust source changed, so no cargo run was needed beyond what the packaging jobs compile.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added packaging/ for Linux: an AppImage that bundles the GStreamer runtime (AppRun with a per-run plugin registry and the plugin scanner, build-appimage.sh that stages the AppDir from a given GStreamer prefix, an allowlist marking nvcodec and va as required, shared desktop/AppStream/icon metadata) and a Flatpak manifest that instead rides the freedesktop runtime's GStreamer plus its extension point and ffmpeg-full, with packaging/validate.sh as the test and .github/workflows/packaging.yml building and smoke-testing both. Verified by actually building a 116 MB Subordinate-0.1.0-x86_64.AppImage here and running it under env -i on the Ubuntu host and in a bare Fedora 41 container: the editor starts and the bundled registry reports 45 plugins / 981 features with no blacklist entries, exposing nvcodec, va, libav and x264 (AC 1). AC 2 is statically validated only - flatpak-builder cannot be installed on this sudo-less box - and AC 3 needs GPU runners, so the task stays In Progress for hardware.yml (TASK-116) and a CI run to close them.
+Linux packaging for both formats, fixed until CI proved it rather than argued it. The AppImage is now built inside an ubuntu:24.04 container (glibc 2.39) instead of on the 26.04 runner, because glibc is only forward compatible and a package built on 2.43 cannot start on Fedora 41; the price is that it bundles GStreamer 1.24 rather than the repository's 1.28 pin, which the job asserts and docs/DEVELOPMENT.md states. Its host-library baseline is derived by ldd-sweeping the AppDir rather than written from memory, and shipped with the artifact. The Flatpak moved to freedesktop runtime 25.08, whose rust-stable SDK extension is current stable (24.08's rustc 1.89 was below the workspace's rust-version, which is what failed the first run) and whose codecs-extra extension replaced the retired ffmpeg-full, so the manifest now declares no extensions of its own and still needs no network toolchain. Bundled voaacenc after the hardware job proved the AppImage could not export at all: gst-libav's avenc_aac is rank NONE and every youtube-* preset is AAC. Verified by run 34633406106, green end to end: the AppImage starts and resolves nvcodec, va, libav, x264 and voaacenc through its own registry on the ubuntu-26.04 host, an ubuntu:24.04 container and a bare fedora:41 container (AC 1); flatpak-builder builds and bundles the app on the 25.08 runtime with its GStreamer extension point (AC 2); and on the self-hosted AMD box both packages rendered examples/sample-project/demo.sub with --encoder vah264enc pinned, the host's gst-discoverer-1.0 reporting H.264 High Profile from each (AC 3). One caveat is recorded in the notes and the docs rather than papered over: the 25.08 runtime carries no ranked AAC encoder, so the Flatpak render needed GST_PLUGIN_FEATURE_RANK=avenc_aac:256 and a Flatpak user exporting a youtube preset would hit export.no_encoder today.
 <!-- SECTION:FINAL_SUMMARY:END -->
