@@ -1,17 +1,15 @@
 ---
 id: TASK-37
 title: Inspector panel for clip parameters
-status: In Progress
-assignee:
-  - '@opus-task-37'
+status: To Do
+assignee: []
 created_date: '2026-09-08 21:04'
-updated_date: '2026-09-10 16:30'
+updated_date: '2026-09-11 04:18'
 labels:
   - ui
 milestone: m-2
 dependencies:
-  - TASK-30
-  - TASK-21
+  - TASK-127
 references:
   - docs/PLAN.md
 priority: medium
@@ -50,6 +48,8 @@ Implemented crates/sub-ui/src/inspector.rs: InspectorPanel paints opacity, posit
 Verification: cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean; cargo test -p sub-ui green (all 21 targets, including the new tests/inspector.rs with 7 tests). New committed snapshot crates/sub-ui/tests/snapshots/inspector_clip_parameters.png shows the panel over the sample project's 'shot 1' (opacity 0.9, gain -3.0 dB, fade in 6). The interaction tests drag the opacity slider through the shared harness and assert the SetClipParams issued (sequence/track/clip ids, opacity only, no other field named), that the clip changed while the pointer was still down with no undo entry pushed yet, and that releasing left exactly one undo entry that puts every edited clip back.
 
 AC #2 left unchecked: the live-apply and one-command-on-release halves are proven by the interaction tests through the Command API, but the app-side half cannot be proven here. SubordinateApp owns no engine handle yet, so app.rs logs the inspector's response exactly as it logs the timeline's clip moves and the media bin's actions ('not wired up yet'); applying edits on the UI thread would duplicate the engine thread that TASK-12 makes the owner of project state. Nothing therefore reaches the compositor, so no viewer refresh could be demonstrated. Wiring the panels to the engine handle is the outstanding work; it is not inspector-specific and was not added here to avoid expanding scope.
+
+2026-09-10 supervisor: requeued. TASK-127 wired the engine into SubordinateApp, so criterion 2 (edits apply live to the viewer and commit one undoable command on release) can now be completed through the app's engine handle.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

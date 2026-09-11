@@ -1,11 +1,10 @@
 ---
 id: TASK-126
 title: Linux CI build regressed from 5 to 13 minutes after the sccache change
-status: In Progress
-assignee:
-  - '@opus-task-126'
+status: To Do
+assignee: []
 created_date: '2026-09-10 00:47'
-updated_date: '2026-09-10 18:22'
+updated_date: '2026-09-11 04:18'
 labels:
   - infra
   - ci
@@ -93,6 +92,8 @@ The load-bearing assumption of the fixture cache -- that a restored fixtures/ ma
 No Rust source is touched by this diff, so clippy and the test suite cannot be affected and were not re-run here (GStreamer is not installed system-wide in this worktree).
 
 Projection, and it is only a projection: 647 s minus 129 s (long fixture) minus 14 s (short fixtures) minus roughly 150 s of Build, 38 s of Clippy and 18 s of reference plugin that the workspace-crate cache should remove, plus perhaps 40 s of extra restore time for the larger archive and the fixture entry, lands near 5m30s. AC #1 stays UNCHECKED: it asks for a measured warm no-change rerun with a run id, this worktree must never push, and a projection is not a measurement. Note also that the first run after this merges is cold twice over -- the rust-cache key changes (the saved contents change shape) and the fixture entry does not exist yet -- so the run to measure is the second one on main, rerun with no changes.
+
+2026-09-10 supervisor: requeued for a final pass. Re-measure with a warm no-change rerun after fixture caching; if the remaining Linux time is the build itself plus fixed steps (window smoke, benchmark), record the number and propose the realistic target in notes so the supervisor can close it. TASK-131 (Windows) depends on this.
 <!-- SECTION:NOTES:END -->
 
 ## Comments

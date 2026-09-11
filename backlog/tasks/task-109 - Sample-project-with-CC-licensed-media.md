@@ -1,17 +1,17 @@
 ---
 id: TASK-109
 title: Sample project with CC-licensed media
-status: In Progress
-assignee:
-  - '@opus-task-109'
+status: To Do
+assignee: []
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-10 22:26'
+updated_date: '2026-09-11 04:18'
 labels:
   - docs
   - test
 milestone: m-7
 dependencies:
-  - TASK-100
+  - TASK-132
+  - TASK-87
 references:
   - docs/PLAN.md
 priority: medium
@@ -58,6 +58,8 @@ AC #1 left unchecked for one part only: the applied effect. The project model ca
 AC #2 left unchecked because only Linux could be proven here: the real app opened the project on this machine ('target/debug/subordinate --ui-smoke --hold-seconds 3 examples/sample-project/demo.sub' logged 'opened examples/sample-project/demo.sub' and 'ui-smoke ready: ... project=loaded', exit 0, llvmpipe). Windows and macOS are covered by construction (every media path is relative and forward-slashed, asserted by every_media_path_is_relative_and_forward_slashed, and resolved through MediaPath::resolve, which builds the native path) and will be exercised for real by the new CI steps on all three runners, but that evidence does not exist yet.
 
 Verification run here: cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean; cargo test -p sub-model green (4 new tests in demo_project.rs); cargo test -p sub-ui -- --test-threads=1 green, including the six sample_project_render tests, which really decoded the three files with GStreamer and composited them on llvmpipe (no skip line printed): the first clip composites a non-black canvas, the overlay changes the canvas, the dissolve resolves to porters + pigeon at half weight + the overlay and differs from the same frame with the incoming clip suppressed, and the colour grade runs with no effect failures and lifts the mean by more than eight codes.
+
+2026-09-10 supervisor: requeued. Media now comes from the GitHub release via TASK-132. For criterion 1's 'applied effect', use the shader-effect model from TASK-87 (effects on clips in the compositor); if the project model still lacks an effect stack, add the minimal field in sub-model with a migration and record it. Criterion 2 (opens without relinking on all three OSes) is provable from the CI render step on each OS.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
