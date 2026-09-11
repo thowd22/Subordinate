@@ -974,3 +974,113 @@ summary. The numbers land in docs/PERFORMANCE.md.
 There are no Windows jobs: there is no AMD Windows host anywhere this project
 can reach, and the NVIDIA Windows AMI is TASK-115. The workflow carries a
 commented placeholder rather than a job that would quietly pass on software.
+
+## Linux packaging (AppImage and Flatpak)
+
+`packaging/` holds everything the Linux packages are built from (TASK-103).
+Both packages are built and smoke-tested by `.github/workflows/packaging.yml`,
+which runs on demand, on a `v*` tag and on any pull request touching
+`packaging/`.
+
+```
+packaging/
+  validate.sh                        metadata tests; run this first
+  linux/AppRun                       AppImage entry point (POSIX sh)
+  linux/build-appimage.sh            stages the AppDir and packs it
+  linux/gst-plugins.txt              which GStreamer plugins get bundled
+  linux/subordinate.desktop          desktop entry, shared by both packages
+  linux/subordinate.svg              icon, shared by both packages
+  linux/io.github.thowd22.Subordinate.metainfo.xml   AppStream, shared
+  flatpak/io.github.thowd22.Subordinate.yml          manifest
+  flatpak/build-flatpak.sh           flatpak-builder wrapper
+```
+
+The application ID is `io.github.thowd22.Subordinate` everywhere: desktop
+entry, icon file, metainfo and Flatpak. `packaging/validate.sh` fails if any of
+them drifts, or if the metainfo's newest `<release>` stops matching the
+workspace version in `Cargo.toml` -- bump both together.
+
+### AppImage
+
+The AppImage carries the GStreamer runtime, because the promise is that a user
+downloads one file and hardware export works. Only the driver stack
+(Mesa/NVIDIA), the display server and the audio daemon come from the host:
+bundling libc, libstdc++, libGL, libva or libcuda is what makes an AppImage
+refuse to start on a newer distro or fall back to software rendering, so
+`build-appimage.sh` excludes them by name and `validate.sh --appdir` fails if
+one appears anyway.
+
+```bash
+packaging/linux/build-appimage.sh                  # CI-style, needs pkg-config
+packaging/linux/build-appimage.sh --stage-only     # AppDir only, no FUSE needed
+packaging/linux/build-appimage.sh --gst-prefix "$GSTROOT/usr" --skip-build
+```
+
+On the sudo-less dev boxes there is no system GStreamer, so pass
+`--gst-prefix "$GSTROOT/usr"` (the prefix `env-gst.sh` sets up) and
+`--stage-only`; that exercises everything except `appimagetool` itself.
+
+`linux/gst-plugins.txt` is an allowlist, not the whole plugin directory -- the
+full Ubuntu set is about 100 MB of things Subordinate never loads. A leading
+`!` marks a plugin the package cannot ship without, and `nvcodec` (NVENC) and
+`va` (VA-API, which replaced `gstreamer-vaapi` in 1.28) are both marked: a
+runtime image that quietly dropped one fails the build instead of shipping a
+package that silently software-encodes. Add a module here whenever an export
+preset or decode path starts using a new element.
+
+After staging, the script runs `ldd` over every bundled plugin with the
+AppDir's own library path and drops the ones whose dependencies are not in the
+bundle -- a plugin with an unsatisfiable `dlopen`-only dependency (`libmfx` for
+`msdk`, `libopenh264`) is not a loud failure, it is silently blacklisted at
+scan time and the element is simply missing at runtime. Optional plugins are
+dropped with a note; a **required** one that cannot resolve fails the build.
+
+Two AppRun details are load-bearing:
+
+- **A private plugin registry per run.** GStreamer's registry caches absolute
+  paths, and an AppImage mounts at a different `/tmp/.mount_XXXX` every time,
+  so a stale registry points at directories that no longer exist. AppRun points
+  `GST_REGISTRY` at a per-process file and deletes it on exit.
+- **`GST_PLUGIN_SCANNER`.** Without the scanner binary every plugin is loaded
+  in-process, and one bad module takes the editor down with it.
+
+`SUB_APPIMAGE_TOOL=gst-inspect-1.0 ./Subordinate-*.AppImage va` runs a bundled
+GStreamer tool instead of the editor, which is how CI checks the package's own
+registry rather than the host's.
+
+What the host must still provide is the flip side of the excludelist: libc and
+libstdc++, the GL/EGL/gbm/libdrm stack, libva (and libvdpau, vulkan-loader),
+X11 and Wayland client libraries, `libasound` and `libpulse`. Every desktop
+install has all of it; a *bare* Fedora container does not, which is why the
+Fedora job in `packaging.yml` installs exactly that list and nothing
+GStreamer-shaped before running the package. If the smoke test there ever needs
+a package outside that list, the bundle is missing something.
+
+### Flatpak
+
+The Flatpak does the opposite: it bundles no GStreamer at all. The freedesktop
+runtime ships one and declares the `org.freedesktop.Platform.GStreamer`
+extension point (`lib/extensions/gstreamer-1.0`, already on the runtime's
+`GST_PLUGIN_SYSTEM_PATH`), so plugin sets drop in without rebuilding the app,
+and `org.freedesktop.Platform.ffmpeg-full` adds the codecs the base runtime
+leaves out. VA-API works through `--device=dri` plus the host driver; NVENC
+works through the `org.freedesktop.Platform.GL.nvidia-*` extension flatpak
+mounts to match the host's kernel module.
+
+```bash
+packaging/flatpak/build-flatpak.sh --install-deps   # first time
+packaging/flatpak/build-flatpak.sh --no-bundle      # rebuild the app only
+```
+
+The cargo build runs with `--share=network` because crate sources are fetched
+at build time. A Flathub submission would have to replace that with a generated
+`cargo-sources.json`; that file is deliberately not committed, as it is a
+six-figure-line artefact that churns with every `Cargo.lock` change.
+
+### What is not verified here
+
+Hardware encode *from inside the packages* needs a GPU, so `packaging.yml`
+proves only that the bundled runtime exposes `nvcodec` and `va` and that the
+binary starts on Ubuntu LTS and on a bare Fedora container. Running an actual
+NVENC or VA-API export out of the AppImage belongs to `hardware.yml`
+(TASK-116), which has the runners.

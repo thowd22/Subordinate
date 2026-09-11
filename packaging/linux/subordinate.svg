@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Subordinate application icon: a filmstrip frame with a play head. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="48" fill="#15181d"/>
+  <rect x="40" y="64" width="176" height="128" rx="12" fill="#1f6feb"/>
+  <g fill="#15181d">
+    <rect x="52" y="76" width="20" height="20" rx="4"/>
+    <rect x="52" y="118" width="20" height="20" rx="4"/>
+    <rect x="52" y="160" width="20" height="20" rx="4"/>
+    <rect x="184" y="76" width="20" height="20" rx="4"/>
+    <rect x="184" y="118" width="20" height="20" rx="4"/>
+    <rect x="184" y="160" width="20" height="20" rx="4"/>
+  </g>
+  <path d="M108 96 L160 128 L108 160 Z" fill="#f0f6fc"/>
+</svg>

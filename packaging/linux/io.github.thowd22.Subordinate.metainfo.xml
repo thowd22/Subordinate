@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata shared by the AppImage and the Flatpak. The <release>
+     version must match the workspace version in Cargo.toml; packaging/validate.sh
+     enforces that. -->
+<component type="desktop-application">
+  <id>io.github.thowd22.Subordinate</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Subordinate</name>
+  <summary>Agent-first non-linear video editor</summary>
+  <developer id="io.github.thowd22">
+    <name>Subordinate contributors</name>
+  </developer>
+  <description>
+    <p>
+      Subordinate is a cross-platform video editor built around a small Rust
+      core: exact rational timeline math, an undoable command for every
+      mutation, and a local Command API so agents and scripts drive the same
+      edits a person does from the timeline.
+    </p>
+    <p>
+      Media decode, encode and muxing run on GStreamer, which this package
+      bundles together with the hardware plugins, so no separate codec install
+      is needed.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.thowd22.Subordinate.desktop</launchable>
+  <url type="homepage">https://github.com/thowd22/Subordinate</url>
+  <url type="bugtracker">https://github.com/thowd22/Subordinate/issues</url>
+  <categories>
+    <category>AudioVideo</category>
+    <category>AudioVideoEditing</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-09-11">
+      <description>
+        <p>First packaged preview.</p>
+      </description>
+    </release>
+  </releases>
+</component>

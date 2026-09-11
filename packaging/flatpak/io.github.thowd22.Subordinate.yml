@@ -1,0 +1,96 @@
+# Flatpak manifest for Subordinate.
+#
+# Unlike the AppImage, this package does not carry its own GStreamer: the
+# freedesktop runtime already ships GStreamer 1.24+ and declares the
+# `org.freedesktop.Platform.GStreamer` extension point
+# (directory lib/extensions/gstreamer-1.0, already on the runtime's
+# GST_PLUGIN_SYSTEM_PATH), so extra plugin sets drop in without rebuilding the
+# app. `org.freedesktop.Platform.ffmpeg-full` adds the encoders and decoders
+# the base runtime leaves out for patent reasons, and is what the libav
+# elements behind several export presets need.
+#
+# Hardware paths:
+#   * VA-API  -- the runtime's `va` plugin over the host driver through
+#                --device=dri, plus org.freedesktop.Platform.VAAPI.Intel on
+#                Intel hosts.
+#   * NVENC   -- the nvcodec plugin over the NVIDIA userspace that flatpak
+#                mounts as org.freedesktop.Platform.GL.nvidia-<version>.
+# Neither driver is ever bundled; the host's must match its kernel module.
+#
+# Build it with packaging/flatpak/build-flatpak.sh (or flatpak-builder
+# directly). The cargo build runs with --share=network because the crate
+# sources are fetched at build time; a Flathub submission would replace that
+# with a generated cargo-sources.json, which is deliberately not committed here
+# (it is a six-figure-line file that churns with every Cargo.lock change).
+id: io.github.thowd22.Subordinate
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: subordinate
+
+finish-args:
+  # Display and input.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # wgpu needs the GPU; so do the va and nvcodec plugins.
+  - --device=dri
+
+  # Audio monitoring.
+  - --socket=pulseaudio
+  # Media files and projects live wherever the user keeps them.
+  - --filesystem=home
+  # The ffmpeg-full extension mounts here.
+  - --env=LD_LIBRARY_PATH=/app/lib:/usr/lib/x86_64-linux-gnu/ffmpeg
+
+# Extensions the app expects to find, all part of the freedesktop runtime.
+# ffmpeg-full is not auto-downloaded, so build-flatpak.sh installs it.
+add-extensions:
+  org.freedesktop.Platform.ffmpeg-full:
+    directory: lib/ffmpeg
+    add-ld-path: .
+    version: '24.08'
+    autodelete: false
+    no-autodownload: false
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+  - '*.a'
+
+modules:
+  - name: subordinate
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      build-args:
+        - --share=network
+      env:
+        CARGO_HOME: /run/build/subordinate/cargo
+        # Matches the workspace jobs cap the agents use; flatpak-builder runs
+        # on shared CI hardware.
+        CARGO_BUILD_JOBS: '2'
+    build-commands:
+      - cargo build --release -p subordinate -p subordinate-cli
+      - install -Dm755 target/release/subordinate /app/bin/subordinate
+      - install -Dm755 target/release/subordinate-cli /app/bin/subordinate-cli
+      - install -Dm644 packaging/linux/subordinate.desktop
+        /app/share/applications/io.github.thowd22.Subordinate.desktop
+      - install -Dm644 packaging/linux/io.github.thowd22.Subordinate.metainfo.xml
+        /app/share/metainfo/io.github.thowd22.Subordinate.metainfo.xml
+      - install -Dm644 packaging/linux/subordinate.svg
+        /app/share/icons/hicolor/scalable/apps/io.github.thowd22.Subordinate.svg
+      - mkdir -p /app/lib/ffmpeg
+    sources:
+      - type: dir
+        path: ../..
+        # A local build tree holds gigabytes flatpak-builder would otherwise
+        # copy into the build directory before compiling anything.
+        skip:
+          - target
+          - .git
+          - fixtures
+          - .claude
