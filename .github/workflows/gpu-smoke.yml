@@ -202,3 +202,56 @@ jobs:
             exit 1
           }
           gst-inspect-1.0 nvh264enc | Select-Object -First 20
+
+  amd-windows:
+    # AWS has no AMD GPU instances, so AMF (AMD Windows) runs on "yodaddy", the
+    # user's own Windows 11 desktop (Radeon RX 9070 XT, two monitors) registered
+    # as a self-hosted runner. It is a daily-use machine: keep this job short,
+    # install nothing system-wide (GStreamer goes per-user under LOCALAPPDATA),
+    # and leave no processes behind. Zero cost.
+    name: AMD RX 9070 XT (yodaddy, self-hosted, Windows 11)
+    runs-on: [self-hosted, windows, yodaddy, amd-gpu]
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GST_VERSION: "1.28.6"
+    steps:
+      - name: Host and GPU facts
+        run: |
+          "runner=$env:RUNNER_NAME"
+          (Get-CimInstance Win32_OperatingSystem).Caption
+          Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion | Format-Table -AutoSize | Out-String -Width 120
+          "monitors=" + (Get-CimInstance Win32_DesktopMonitor | Measure-Object).Count
+
+      - name: Install GStreamer per-user if missing
+        run: |
+          $dir = "$env:LOCALAPPDATA\gstreamer\1.0\msvc_x86_64"
+          if (-not (Test-Path "$dir\bin\gst-inspect-1.0.exe")) {
+            $exe = "$env:RUNNER_TEMP\gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.exe"
+            Invoke-WebRequest -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc/$exe.Split('\')[-1]" -OutFile $exe
+            $p = Start-Process -Wait -PassThru -FilePath $exe -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/CURRENTUSER","/TYPE=devel","/DIR=$dir"
+            "installer exit $($p.ExitCode)"
+            Remove-Item $exe -ErrorAction SilentlyContinue
+          } else { "already installed" }
+          "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          "GST_DIR=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: AMF and Media Foundation encoder elements
+        run: |
+          gst-inspect-1.0 --version
+          foreach ($e in 'amfh264enc','amfh265enc','amfav1enc','mfh264enc','x264enc') {
+            gst-inspect-1.0 --exists $e; if ($LASTEXITCODE -eq 0) { "present  $e" } else { "absent   $e" }
+          }
+          gst-inspect-1.0 --exists amfh264enc; if ($LASTEXITCODE -ne 0) { Write-Error "amfh264enc missing"; exit 1 }
+
+      - name: Hardware H.264 encode round-trip (AMF)
+        run: |
+          $out = "$env:RUNNER_TEMP\amf-test.mp4"
+          gst-launch-1.0 -q videotestsrc num-buffers=120 ! "video/x-raw,width=1920,height=1080,framerate=30/1" ! amfh264enc ! h264parse ! mp4mux ! filesink location="$out"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          gst-discoverer-1.0 "$out" | Tee-Object -Variable info
+          if (-not ($info -match 'H\.264')) { Write-Error "no H.264 stream"; exit 1 }
+          (Get-Item $out).Length
+          Remove-Item $out -ErrorAction SilentlyContinue
