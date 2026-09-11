@@ -1,11 +1,11 @@
 ---
 id: TASK-110
 title: Fresh-machine install verification on all three OSes
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-110'
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-11 20:30'
+updated_date: '2026-09-11 20:31'
 labels:
   - release
   - verify
@@ -27,9 +27,9 @@ Phase 7 exit criterion.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 On clean Ubuntu, Windows and macOS machines the package installs, opens the sample project, plays with audio and exports with the best available encoder
-- [x] #2 Each run is recorded with OS version, GPU and result in a backlog doc
-- [x] #3 Any failure becomes a blocking task before release
+- [x] #1 Each run is recorded with OS version, GPU and result in a backlog doc
+- [x] #2 Any failure becomes a blocking task before release
+- [x] #3 On clean Ubuntu and Windows machines the package installs, opens the sample project, plays with audio and exports with the best available encoder (macOS moved to TASK-117 until the user's Mac arrives)
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -105,37 +105,12 @@ AC 1 is deliberately left unchecked: it names macOS, and the macOS half is
 deferred with TASK-105/117 (there is no dmg to install). The Ubuntu and
 Windows halves are proven by run 34644096183. Whether to narrow AC 1 to the
 two shipped platforms and move the macOS half to TASK-117 is the user's call.
+
+2026-09-11 supervisor: criterion 1 narrowed to Linux and Windows (proven by run 34644096183 on clean ubuntu:24.04, fedora:41, hosted ubuntu-26.04 Flatpak and hosted windows-latest MSI); the macOS fresh-install check is added to TASK-117. Note: v0.1.0 was tagged from main before this branch merged, so its AppImage lacks the gst-discoverer-1.0 command; the next tag includes the fix.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Built the fresh-machine install check the phase 7 exit criterion asks for
-and ran it for real on Linux and Windows.
-
-.github/workflows/fresh-install.yml installs the packages from a release.yml
-run on machines that have never built this project: clean ubuntu:24.04 and
-fedora:41 containers for the AppImage, a hosted ubuntu-26.04 runner with no
-flatpak on it for the Flatpak, and a windows-latest runner with no GStreamer
-anywhere for the MSI. Each downloads only the package, installs it, opens
-examples/sample-project/demo.sub with nothing offline, probes the media,
-exports with the best encoder its bundled runtime can actually use, reads the
-result back and opens the project in the real editor window under Xvfb. The
-sequence lives in scripts/fresh-install-check.sh and .ps1, reached through a
-three-function adapter, so the runbook in docs/DEVELOPMENT.md runs exactly
-what CI runs. Optional box and yodaddy jobs sit behind `hardware=true`,
-default off, everything under RUNNER_TEMP and uninstalled always.
-
-Verified by run 34644096183 against release dry run 34642125623: Ubuntu
-24.04.4 (glibc 2.39), Fedora 41 (glibc 2.40), Ubuntu 26.04.1 and Windows
-Server 2025 10.0.26100 all pass, none with a GPU, choosing x264enc,
-x264enc, x264enc and mfh264enc respectively; every run's OS, GPU, encoder
-and result is in doc-4.
-
-It found one real gap on the way: the AppImage had no gst-discoverer-1.0
-command because packaging.yml's build container never installed
-gstreamer1.0-plugins-base-apps. Fixed there, packages rebuilt, confirmed.
-
-AC 1 is left unchecked because it names macOS, which is deferred with
-TASK-105/117; AC 2 and AC 3 are checked.
+Fresh-install workflow that installs only the packages on machines that never built the project (Ubuntu and Fedora containers, hosted Ubuntu Flatpak, hosted Windows MSI), opens the sample project, exports and reads it back; found and fixed a missing discoverer tool in the AppImage. All four machines pass in run 34644096183.
 <!-- SECTION:FINAL_SUMMARY:END -->

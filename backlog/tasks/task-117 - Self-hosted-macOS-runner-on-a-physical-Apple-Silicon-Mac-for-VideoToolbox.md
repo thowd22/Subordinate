@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-09 17:29'
-updated_date: '2026-09-10 00:03'
+updated_date: '2026-09-11 20:31'
 labels:
   - infra
   - gpu
@@ -30,6 +30,7 @@ Every hosted macOS VM (GitHub arm64 runners, Tart-based providers) exposes Metal
 - [ ] #2 hardware.yml gains a macOS job that renders with vtenc_h264_hw and confirms hardware acceleration in the log
 - [ ] #3 A self-hosted runner labelled macos-vt on a user-owned Apple Silicon Mac is registered and online
 - [ ] #4 hardware.yml gains a macOS job gated on that label that renders with vtenc_h264_hw and confirms hardware acceleration in the log
+- [ ] #5 Fresh-install check on the Mac: install the dmg, open the sample project, play with audio, export with vtenc_h264_hw (moved from TASK-110)
 <!-- AC:END -->
 
 ## Implementation Notes
