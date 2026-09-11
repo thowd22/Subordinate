@@ -411,18 +411,12 @@ jobs:
       # element deranked to NONE, which is how gst-libav registers avenc_aac.
       # Printed for both packages before either render so a failure names
       # itself instead of appearing as "no aac encoder is available".
-      - name: Which AAC encoders each package can actually use
+      - name: Which AAC encoders the AppImage can actually use
         run: |
           {
             echo "--- AppImage ---"
             for e in avenc_aac voaacenc fdkaacenc faac vah264enc; do
               rank=$(SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$APPIMAGE" --appimage-extract-and-run "$e" 2>/dev/null |
-                sed -n 's/^  Rank  *//p')
-              echo "${e}: ${rank:-absent}"
-            done
-            echo "--- Flatpak ---"
-            for e in avenc_aac voaacenc fdkaacenc faac vah264enc; do
-              rank=$(flatpak run --user --command=gst-inspect-1.0 io.github.thowd22.Subordinate "$e" 2>/dev/null |
                 sed -n 's/^  Rank  *//p')
               echo "${e}: ${rank:-absent}"
             done
@@ -432,6 +426,8 @@ jobs:
       # NONE, so autoplugging would never pick it even where it works.
       - name: Render with vah264enc from inside the AppImage
         run: |
+          # Without this the render's exit status is tee's, which is always 0.
+          set -o pipefail
           out=$PWD/target/packages/appimage-vah264enc.mp4
           render() {
             SUB_APPIMAGE_TOOL=subordinate-cli xvfb-run -a "$APPIMAGE" --appimage-extract-and-run \
@@ -467,7 +463,14 @@ jobs:
             https://dl.flathub.org/repo/flathub.flatpakrepo
           bundle=$(ls packages/Subordinate-*.flatpak)
           flatpak install --user --noninteractive --bundle "$bundle"
-          flatpak list --user --app
+          # The codec set the export presets need lives in this runtime
+          # extension (it replaced ffmpeg-full on 25.08). It normally arrives
+          # with the runtime; asking for it by name makes a missing one a
+          # visible install failure instead of an unexplained "no encoder".
+          flatpak install --user --noninteractive flathub \
+            org.freedesktop.Platform.codecs-extra//25.08-extra ||
+            echo "::warning::could not install codecs-extra explicitly"
+          flatpak list --user
 
       - name: The Flatpak's runtime sees the VA-API encoder
         run: |
@@ -476,6 +479,14 @@ jobs:
             | tee target/packages/flatpak-va.txt | sed -n '1,25p'
           grep -q vah264enc target/packages/flatpak-va.txt \
             || { echo "::error::the runtime's va plugin has no vah264enc inside the sandbox"; exit 1; }
+          {
+            echo "--- Flatpak ---"
+            for e in avenc_aac voaacenc fdkaacenc faac vah264enc flacenc; do
+              rank=$(flatpak run --user --command=gst-inspect-1.0 io.github.thowd22.Subordinate "$e" 2>/dev/null |
+                sed -n 's/^  Rank  *//p')
+              echo "${e}: ${rank:-absent}"
+            done
+          } | tee -a target/packages/aac-encoders.txt
 
       # --filesystem=host-os is not needed: the manifest already grants
       # --filesystem=home and the runner's work directory is under it. The
@@ -487,18 +498,37 @@ jobs:
       # side is untouched either way: vah264enc is pinned explicitly.
       - name: Render with vah264enc from inside the Flatpak
         run: |
+          set -o pipefail
           out=$PWD/target/packages/flatpak-vah264enc.mp4
+          # $1 is the preset, the rest are extra flatpak-run flags. The preset
+          # decides the container, so the fallback writes a .mkv.
           render() {
+            preset=$1; shift
+            case $preset in mezzanine) out=$PWD/target/packages/flatpak-vah264enc.mkv ;; esac
             xvfb-run -a flatpak run --user --filesystem="$PWD" --device=dri "$@" \
               --command=subordinate-cli io.github.thowd22.Subordinate \
               render "$PWD/examples/sample-project/demo.sub" \
-              --preset "$PRESET" --sequence "$SEQUENCE" --encoder vah264enc --verify \
+              --preset "$preset" --sequence "$SEQUENCE" --encoder vah264enc --verify \
               --out "$out" | tee target/packages/flatpak-render.json
           }
-          if ! render; then
-            echo "::warning::the runtime has no ranked AAC encoder; retrying with avenc_aac promoted"
-            render --env=GST_PLUGIN_FEATURE_RANK=avenc_aac:256
+          # Every attempt encodes video with the same pinned vah264enc; what
+          # varies is the audio side, which can stop the render before it ever
+          # reaches the GPU and would then say nothing about hardware encode.
+          # GST_PLUGIN_FEATURE_RANK is GStreamer's own way to promote an
+          # element the runtime registered at rank NONE (gst-libav does that to
+          # avenc_aac); mezzanine is the preset whose audio is FLAC, which no
+          # runtime is short of. Whichever one works is recorded.
+          if render "$PRESET"; then
+            echo "flatpak render: $PRESET, stock runtime" > target/packages/flatpak-attempt.txt
+          elif render "$PRESET" --env=GST_PLUGIN_FEATURE_RANK=avenc_aac:256; then
+            echo "::warning::the runtime has no ranked AAC encoder; avenc_aac was promoted"
+            echo "flatpak render: $PRESET with avenc_aac promoted to rank 256" > target/packages/flatpak-attempt.txt
+          else
+            echo "::warning::no AAC path in the runtime; falling back to the FLAC-audio mezzanine preset"
+            render mezzanine
+            echo "flatpak render: mezzanine preset (FLAC audio, MKV)" > target/packages/flatpak-attempt.txt
           fi
+          cat target/packages/flatpak-attempt.txt
           ls -l "$out"
           gst-discoverer-1.0 "$out" | tee target/packages/flatpak-discoverer.txt
           grep -q 'H.264' target/packages/flatpak-discoverer.txt \
@@ -511,13 +541,23 @@ jobs:
             echo "## Hardware encode from the Linux packages (box, AMD Cezanne APU)"
             echo
             for package in appimage flatpak; do
-              file=target/packages/$package-vah264enc.mp4
-              if [ -f "$file" ]; then
+              file=$(ls target/packages/$package-vah264enc.* 2>/dev/null | head -n1)
+              if [ -n "$file" ] && [ -f "$file" ]; then
                 echo "* \`$package\`: rendered $(stat -c %s "$file") bytes with vah264enc, $(grep -c 'H.264' target/packages/$package-discoverer.txt) H.264 stream(s) reported by gst-discoverer-1.0"
               else
                 echo "* \`$package\`: no output"
               fi
             done
+            echo
+            if [ -f target/packages/flatpak-attempt.txt ]; then
+              echo "$(cat target/packages/flatpak-attempt.txt)"
+              echo
+            fi
+            echo "Encoder ranks inside the packages:"
+            echo
+            echo '```'
+            cat target/packages/aac-encoders.txt 2>/dev/null || echo "not collected"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifacts
