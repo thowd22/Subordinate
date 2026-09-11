@@ -93,6 +93,23 @@ impl Project {
             .map(|item| item.absolute_path(project_dir))
     }
 
+    /// The absolute path a media item is read from for `media_use`.
+    ///
+    /// The one difference from [`Project::absolute_path`] is that a preview
+    /// with the proxy switch on reads a ready proxy; an export reads the
+    /// original whatever the item's proxy state is
+    /// ([`MediaUse`](crate::MediaUse)).
+    #[must_use]
+    pub fn absolute_source(
+        &self,
+        project_dir: &Path,
+        media: MediaId,
+        media_use: crate::MediaUse,
+    ) -> Option<std::path::PathBuf> {
+        self.media_item(media)
+            .map(|item| item.absolute_source(project_dir, media_use))
+    }
+
     /// Looks for every source file and updates each item's offline flag.
     ///
     /// Returns the items that are missing, in project order. Call it after

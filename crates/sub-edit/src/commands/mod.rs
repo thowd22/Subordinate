@@ -48,7 +48,7 @@ pub use effect::{
     AddClipEffect, InsertClipEffect, MoveClipEffect, RemoveClipEffect, SetClipEffectParam,
 };
 pub use marker::{AddMarker, MarkerTarget, MoveMarker, RemoveMarker, RenameMarker};
-pub use media::{Filing, ImportMedia, InsertMedia, RelinkMedia, RemoveMedia};
+pub use media::{Filing, ImportMedia, InsertMedia, RelinkMedia, RemoveMedia, SetProxyState};
 pub use params::SetClipParams;
 pub use sequence::{
     CreateSequence, DeleteSequence, InsertSequence, RenameSequence, SetSequenceSettings,
@@ -107,6 +107,7 @@ pub fn register_builtin(registry: &mut CommandRegistry) -> SubResult<()> {
     registry.register::<InsertMedia>()?;
     registry.register::<RemoveMedia>()?;
     registry.register::<RelinkMedia>()?;
+    registry.register::<SetProxyState>()?;
     registry.register::<SetMediaAnalysis>()?;
     registry.register::<RemoveMediaAnalysis>()?;
     registry.register::<ReplaceMediaAnalyses>()?;
@@ -403,6 +404,7 @@ mod tests {
                 "media.remove_analysis",
                 "media.replace_analyses",
                 "media.set_analysis",
+                "media.set_proxy",
                 "sequence.create",
                 "sequence.delete",
                 "sequence.insert",

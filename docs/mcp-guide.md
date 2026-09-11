@@ -132,7 +132,7 @@ as an ordinary undoable command.
 
 | Family | Tools |
 | --- | --- |
-| Media | `media_import`, `media_insert`, `media_relink`, `media_remove`, `media_set_analysis`, `media_remove_analysis`, `media_replace_analyses` |
+| Media | `media_import`, `media_insert`, `media_relink`, `media_remove`, `media_set_analysis`, `media_remove_analysis`, `media_replace_analyses`, `media_set_proxy` |
 | Bins | `bin_create`, `bin_insert`, `bin_move`, `bin_move_media`, `bin_remove`, `bin_rename` |
 
 ### Undo, redo and grouping

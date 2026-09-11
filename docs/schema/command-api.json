@@ -1570,7 +1570,7 @@
       "type": "object"
     },
     "ProxyState": {
-      "description": "Whether a reduced-resolution proxy exists for a media item (TASK-69,\nTASK-70).\n\nThe proxy path is project-relative like every other media path; proxies live\nin the `project.sub.d/` sidecar folder.",
+      "description": "Whether a reduced-resolution proxy exists for a media item (TASK-69,\nTASK-70).\n\nThe proxy path is project-relative like every other media path; proxies live\nin the `project.sub.d/` sidecar folder.\n\nA proxy stands in for exactly the bytes it was made from, so the state also\nrecords the two ways a proxy stops standing for anything: generation failed,\nor the source changed under it and the file on disk is\n[`Stale`](ProxyState::Stale). A stale proxy is kept rather than deleted —\nthe path is what a regeneration overwrites, and undoing the edit that\ninvalidated it puts the item back on the proxy it had.",
       "oneOf": [
         {
           "const": "none",
@@ -1579,7 +1579,7 @@
         },
         {
           "const": "pending",
-          "description": "A proxy job has been queued or is running.",
+          "description": "A proxy job has been queued or is running. This is the \"generating\"\nstate the bin shows; the tag is `pending` on disk, where it has been\nsince the first project schema.",
           "type": "string"
         },
         {
@@ -1592,6 +1592,19 @@
           },
           "required": [
             "ready"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A proxy exists at this project-relative path but was made from other\nbytes than the item now refers to, so preview must not use it until it\nhas been generated again.",
+          "properties": {
+            "stale": {
+              "$ref": "#/$defs/MediaPath"
+            }
+          },
+          "required": [
+            "stale"
           ],
           "type": "object"
         },
@@ -1654,7 +1667,7 @@
     },
     "RelinkMedia": {
       "additionalProperties": false,
-      "description": "Points a media item at another file.\n\nThe item keeps its identifier, so every clip cut from it survives the\nrelink. The command carries the new hash and offline flag as well as the\npath, because relinking is what a successful search for a moved file\nconcludes with, and the inverse carries the three values the item had.",
+      "description": "Points a media item at another file.\n\nThe item keeps its identifier, so every clip cut from it survives the\nrelink. The command carries the new hash and offline flag as well as the\npath, because relinking is what a successful search for a moved file\nconcludes with, and the inverse carries the values the item had.\n\nA proxy stands in for particular bytes, so pointing the item at a file that\nhashes differently invalidates a ready proxy: it goes\n[`Stale`](ProxyState::Stale) and preview falls back to the original until\nthe proxy is generated again (TASK-70). Re-hashing a file that changed in\nplace is the same command with the item's own path, and invalidates the\nsame way. The inverse carries the proxy state the item had, so undo puts a\nready proxy back.",
       "properties": {
         "hash": {
           "anyOf": [
@@ -1679,6 +1692,17 @@
         "path": {
           "$ref": "#/$defs/MediaPath",
           "description": "The file it now refers to, relative to the project folder."
+        },
+        "proxy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProxyState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The proxy state to force, which only an inverse sets. Left out, the\ncommand invalidates a ready proxy when the hash it records differs from\nthe one the item had."
         }
       },
       "required": [
@@ -2349,6 +2373,25 @@
       "required": [
         "media",
         "analysis"
+      ],
+      "type": "object"
+    },
+    "SetProxyState": {
+      "additionalProperties": false,
+      "description": "Sets a media item's proxy state.\n\nProxy generation is a background job, and what it reports — queued,\nfinished at a path, failed — is project state that is saved, undone and\nredone like any other, so it arrives as a command rather than as a direct\nmutation. The inverse carries the state the item had, which is what puts a\nready proxy back after an undo.\n\n```\nuse sub_edit::History;\nuse sub_edit::commands::{ImportMedia, SetProxyState};\nuse sub_model::{MediaItem, MediaPath, ProxyState, Project};\n\nlet mut project = Project::new(\"Doc cut\");\nlet item = MediaItem::new(MediaPath::new(\"footage/interview.mp4\").unwrap());\nlet media = item.id;\nlet mut history = History::new();\nhistory.apply(&mut project, ImportMedia::new(item)).unwrap();\n\nlet proxy = MediaPath::new(\"cut.sub.d/interview.proxy.mov\").unwrap();\nlet command = SetProxyState::new(media, ProxyState::Ready(proxy));\nhistory.apply(&mut project, command).unwrap();\nassert!(project.media_item(media).unwrap().proxy.is_ready());\n\nhistory.undo(&mut project).unwrap();\nassert_eq!(project.media_item(media).unwrap().proxy, ProxyState::None);\n```",
+      "properties": {
+        "media": {
+          "$ref": "#/$defs/MediaId",
+          "description": "The item whose proxy state changes."
+        },
+        "proxy": {
+          "$ref": "#/$defs/ProxyState",
+          "description": "The state it takes."
+        }
+      },
+      "required": [
+        "media",
+        "proxy"
       ],
       "type": "object"
     },
@@ -3404,6 +3447,17 @@
       "name": "media.set_analysis",
       "params": {
         "$ref": "#/$defs/SetMediaAnalysis"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Set a media item's proxy state: none, generating, ready at a path, stale or failed.",
+      "kind": "command",
+      "name": "media.set_proxy",
+      "params": {
+        "$ref": "#/$defs/SetProxyState"
       },
       "result": {
         "$ref": "#/$defs/AppliedResult"
