@@ -109,5 +109,26 @@ lives in `otio-core`:
   source ranges, absolute `target_url`s, guides as one-frame stack markers,
   mixes as `SMPTE_Dissolve` transitions, a colour generator and a subtitle
   track.
+- `tests/reference.rs` imports three files the **reference OpenTimelineIO
+  Python library** wrote, because a round trip through one implementation only
+  proves it agrees with itself:
+
+  | Fixture                        | Where it came from                                          |
+  | ------------------------------ | ----------------------------------------------------------- |
+  | `reference_multitrack.otio`    | `tests/sample_data/multiple_track.otio` (OTIO v0.18.1)       |
+  | `reference_nucoda_edl.otio`    | `nucoda_example.edl` through the `cmx_3600` adapter          |
+  | `reference_screening_edl.otio` | `screening_example.edl` through the `cmx_3600` adapter       |
+
+  `scripts/generate-reference-fixtures.py` is what produced them and
+  regenerates them from the pinned upstream sources; it needs
+
+  ```sh
+  python3 -m pip install opentimelineio==0.18.1 otio-cmx3600-adapter==1.0.0
+  python3 scripts/generate-reference-fixtures.py          # rewrite them
+  python3 scripts/generate-reference-fixtures.py --check  # or just compare
+  ```
+
+  It downloads from the network, so it is run by hand rather than in CI; the
+  fixtures it writes are committed and the tests read those.
 
 [otio]: https://opentimelineio.readthedocs.io/

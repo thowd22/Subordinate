@@ -1,10 +1,11 @@
 ---
 id: TASK-101
 title: 'First-party plugin: OpenTimelineIO JSON importer and exporter'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@opus-task-101'
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-11 04:20'
+updated_date: '2026-09-11 04:28'
 labels:
   - plugins
   - first-party
@@ -28,18 +29,17 @@ Interchange lives in plugins; OTIO is the sensible target (§3).
 <!-- AC:BEGIN -->
 - [x] #1 Exports a sequence as OTIO JSON with tracks, clips, gaps, transitions and markers
 - [x] #2 Effects are documented as not exported
-- [ ] #3 Imports OTIO JSON produced by the exporter (round-trip test) and OTIO files written by the reference OpenTimelineIO Python library (pip opentimelineio, v0.18.x): at least one of its shipped sample timelines and one converted from CMX 3600 EDL via its adapter, committed as fixtures with their generating script
+- [x] #3 Imports OTIO JSON produced by the exporter (round-trip test) and OTIO files written by the reference OpenTimelineIO Python library (pip opentimelineio, v0.18.x): at least one of its shipped sample timelines and one converted from CMX 3600 EDL via its adapter, committed as fixtures with their generating script
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Add plugins/otio as its own cargo workspace (like plugins/gain): otio-core (pure Rust, host-testable), otio-importer (importer world) and otio-exporter (command world), each with wit-bindgen against the shared wit directory.
-2. otio-core: OTIO JSON schema types (Timeline.1, Stack.1, Track.1, Clip.1 and Clip.2, Gap.1, Transition.1, Marker.2, ExternalReference.1, RationalTime.1, TimeRange.1), exact conversion between Rational and the OTIO double rate so no timeline math is done in floats, a minimal serde mirror of the .sub project JSON, sequence-to-OTIO export and OTIO-to-import-plan parsing.
-3. otio-importer: importer world, maps the import plan onto importer-api media and sequence specs. otio-exporter: command world, queries project.get, exports the named sequence, returns the JSON and optionally writes it.
-4. Fixtures and tests: exporter output round-trips through the importer, plus a Kdenlive-shaped otio file (fields taken from the KDE kdenlive otioexport source) covering Clip.2 media_references, track source_range, kdenlive metadata and one-frame markers.
-5. plugin.toml manifests for both components, README documenting that effects and per-clip parameters are not exported, and CI build steps mirroring plugins/gain.
-6. Verify: cargo fmt check, clippy with -D warnings and tests in both the host workspace and the plugin workspace.
+1. Install the reference OpenTimelineIO Python library (0.18.1) plus otio-cmx3600-adapter and use it to produce two fixtures: one of the reference repo's shipped sample timelines (tests/sample_data at tag v0.18.1) re-serialised by the library's otio_json adapter, and one timeline converted from a CMX 3600 EDL through the cmx_3600 adapter.
+2. Commit both fixtures under plugins/otio/otio-core/tests/fixtures/ together with the generating script (scripts/generate_reference_fixtures.py) that downloads the pinned sources and regenerates them, with its provenance and requirements documented in the script header and the README.
+3. Add plugins/otio/otio-core/tests/reference.rs: import both fixtures through import_document and assert the cut survives (rate, tracks, clips, source ranges, gaps, transitions, media) and that whatever the model cannot hold is reported in notes rather than dropped silently.
+4. Fix any importer defects the real reference files expose, staying inside the existing conversion design (exact rational time, notes for loss).
+5. Verify: cargo fmt --all --check, cargo clippy --workspace --all-targets -D warnings and cargo test --workspace in plugins/otio, plus cargo test -p sub-plugin in the host workspace. Then finalise the task.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -65,10 +65,18 @@ Verification:
 Acceptance criterion 2 is left unchecked, deliberately and only for its second half. The round-trip half is proven: tests/roundtrip.rs exports fixtures/project.json, compares it against a committed golden document and imports it back, asserting the media list, both track kinds, the clip source ranges, the gap, the crossfade offsets and both markers come back unchanged at 24000/1001. The Kdenlive half is exercised by tests/kdenlive.rs against fixtures/kdenlive.otio, which was written field by field against Kdenlive's own exporter (src/otio/otioexport.cpp in KDE/kdenlive) and carries its idioms: kdenlive metadata, a null global_start_time, per-track source ranges, Clip.2 media_references with an active key, absolute percent-escaped target_urls, a GeneratorReference colour clip, guides as one-frame stack markers with their text in comment, a mix as an asymmetric SMPTE_Dissolve, and a Subtitle track. It is a faithful reconstruction, not a file captured from a Kdenlive run: this machine has no sudo and no Qt or MLT, so Kdenlive cannot be installed to produce one. Running a real Kdenlive export through the importer is the one thing left to confirm the criterion.
 
 2026-09-10 supervisor: replaced the Kdenlive half of criterion 2. A Kdenlive-authored OTIO file requires a GUI export no agent can perform; the reference OpenTimelineIO Python library is the canonical producer and can be driven headlessly (pip install opentimelineio, otioconvert). Round-trip half already proven. Requeued.
+
+2026-09-10 (wave 9): completed criterion 3, the half that had been left open. The Kdenlive half was replaced by the reference OpenTimelineIO Python library, which can be driven headlessly here.
+
+- Installed opentimelineio 0.18.1 and otio-cmx3600-adapter 1.0.0 (pip --target into a scratch directory; this machine has no python3-venv and no sudo) and used them to produce three fixtures, committed unedited under otio-core/tests/fixtures/: reference_multitrack.otio (the reference repo's own tests/sample_data/multiple_track.otio at tag v0.18.1, read and rewritten through its otio_json adapter), reference_nucoda_edl.otio and reference_screening_edl.otio (nucoda_example.edl and screening_example.edl from the cmx3600 adapter's samples at v1.0.0, converted with the cmx_3600 adapter at 24 fps).
+- plugins/otio/scripts/generate-reference-fixtures.py is the generating script: it pins both library versions and both upstream tags, downloads the sources rather than vendoring them, refuses to run against a different opentimelineio version, and has a --check mode that regenerates in memory and diffs against what is committed. --check passes against the committed files, so the fixtures are reproducible. It needs the network, so it is run by hand and not from CI; CI reads the committed fixtures.
+- otio-core/tests/reference.rs imports all three and asserts what survived: 24 fps exactly from global_start_time in one file and from a track span in the other two, the three video tracks and their names, file:// URLs and Windows FROM FILE paths reduced to project-relative file names with one media item for the file used on two tracks, every source range and gap length frame-exact (86501 frames for 01:00:04:05 at 24 fps), and the screening EDL's nine MissingReference events importing as nine gaps of the same lengths (1049 frames total) rather than as invented media.
+- One importer change: a clip that imports as a gap because it names no file now also notes the markers that went with it, which the screening EDL's three * LOC markers exposed. The cut was already right; the loss was silent.
+- Verification: cargo test --workspace in plugins/otio now 34 tests (13 core unit, 3 kdenlive, 3 reference, 4 roundtrip, 5 exporter, 4 importer, 2 doc), all passing; cargo clippy --workspace --all-targets -- -D warnings and cargo fmt --all --check clean. No host-workspace crate was touched.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added the first-party OpenTimelineIO plugins as plugins/otio: otio-core holds the OTIO schema, the sequence-to-timeline export, the timeline-to-import-plan read and the one place an exact rate crosses OTIO's f64 encoding; otio-importer implements the importer world and otio-exporter the command world (not the exporter world, which is for encoder presets). Tracks, clips, gaps, crossfades and markers cross in both directions, canvas and audio rate ride in a subordinate metadata namespace, and effects and per-clip parameters are deliberately not exported, documented in the README, the module docs and a test. Verified with 31 tests in the plugin workspace, clippy and fmt clean in both workspaces, a wasm32-wasip2 build of both components, a new sub-plugin test that parses both shipped plugin.toml files, and an end-to-end subordinate-cli plugin install plus plugin test run that exported the sample project under wasmtime (5 passed, 0 failed, 1 skipped). Acceptance criterion 2 stays unchecked for its Kdenlive half only: the fixture reproduces Kdenlive's exporter faithfully but was not captured from a Kdenlive run, which this machine cannot install.
+plugins/otio ships the first-party OpenTimelineIO pair: otio-core holds the OTIO schema, the sequence-to-timeline export, the timeline-to-import-plan read and the single place an exact rate crosses OTIO's f64 encoding; otio-importer implements the importer world and otio-exporter the command world. Tracks, clips, gaps, crossfades and markers cross in both directions, canvas and audio rate ride in a subordinate metadata namespace, and effects and per-clip parameters are deliberately not exported, documented in the README and asserted in a test. Interchange is proven against the reference implementation, not only against itself: three fixtures written by the OpenTimelineIO Python library 0.18.1 (one of its shipped sample timelines plus two CMX 3600 EDLs converted with the cmx_3600 adapter) are committed with the pinned generating script that reproduces them, and tests/reference.rs imports all three with frame-exact source ranges, media paths and gap lengths. Verified with 34 tests in the plugin workspace, clippy and fmt clean, a wasm32-wasip2 build of both components, and an earlier end-to-end subordinate-cli plugin install plus plugin test run under wasmtime.
 <!-- SECTION:FINAL_SUMMARY:END -->
