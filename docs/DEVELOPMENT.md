@@ -1540,7 +1540,8 @@ neither `nvh264enc` nor `amfh264enc` appears (`mfh264enc` does, because the
 Media Foundation transform is part of Windows). The job reports that rather
 than asserting it. An actual NVENC export out of the installed package is
 TASK-115's job, on the hardware workflow's runners. Installing on a clean
-Windows image that has never had a build toolchain on it is TASK-110.
+Windows image that has never had a build toolchain on it is
+`fresh-install.yml` -- see "Fresh-machine install verification".
 
 ## Releasing
 
@@ -1643,3 +1644,164 @@ artifact named `subordinate-dmg`, wiring it up is three edits:
 Nothing else changes: the download step already globs `subordinate-*`, the
 collect step already copies `*.dmg`, and the checksum and release steps take
 whatever ended up in `dist/`.
+
+## Fresh-machine install verification
+
+`.github/workflows/fresh-install.yml` installs the packages on machines that
+have never built this project (TASK-110, the phase 7 exit criterion).
+
+This is the check `packaging.yml` and `windows-packaging.yml` cannot make.
+Their install smoke steps run on the machine that *just built* the package,
+which still has the Rust toolchain, the GStreamer development files and, on
+Windows, `C:\gstreamer` on `PATH`. A machine like that cannot tell a package
+that carries its dependencies from one that found them lying around. So every
+job here starts somewhere that has never seen the project, downloads nothing
+but the package, and installs it the way a user would.
+
+```
+fresh-install.yml
+  resolve   pick a release.yml run and check it still has all three packages
+  appimage  clean ubuntu:24.04 and fedora:41 containers   AppImage
+  flatpak   a hosted ubuntu-26.04 runner with no flatpak  Flatpak bundle
+  msi       a hosted windows-latest runner with no GStreamer anywhere  MSI
+  report    one table, and a failure if any machine failed
+```
+
+Nothing is ever checked out: a fresh machine has no source tree. The sample
+project and its media are fetched by URL at the commit the packages were built
+from, so what is opened is what they were built against. No Rust toolchain and
+no GStreamer development files are installed on any of these machines; the
+Linux containers assert their own absence (`--strict`), and the Windows job
+asserts there is no `C:\gstreamer`, no `gst-inspect-1.0` on `PATH` and no
+`GSTREAMER_1_0_ROOT_MSVC_X86_64` before it installs anything.
+
+### Which packages get tested
+
+The packages come from a `release.yml` run -- the same artifacts a release
+publishes -- rather than being rebuilt, because a package rebuilt for the test
+is not the package the user gets. The `release_run_id` input names that run and
+defaults to the latest successful one, which for an untagged repository is
+`release.yml`'s dry run:
+
+```bash
+gh workflow run release.yml            # dry_run defaults to true; note its run id
+gh workflow run fresh-install.yml      # takes the latest successful release run
+gh workflow run fresh-install.yml -f release_run_id=34642125623
+```
+
+`fresh-install.yml` also has a `workflow_call` trigger, so `release.yml` can
+gate a tag on it later by passing `release_run_id: ${{ github.run_id }}`;
+artifacts uploaded by earlier jobs of a run are downloadable from within it.
+
+### What each machine does
+
+The sequence is the same everywhere and lives in
+`scripts/fresh-install-check.sh` (and `scripts/fresh-install-check.ps1` for
+Windows), not in the workflow, so that a person checking a download by hand
+runs exactly what CI runs:
+
+1. record the machine: OS version, kernel, libc, architecture, GPU (none on a
+   hosted runner -- no `/dev/dri`, and `Microsoft Hyper-V Video` on Windows);
+2. start the editor, print the bundled GStreamer version, and fail if the
+   plugin scanner blacklisted anything -- a blacklisted plugin is a library
+   whose dependencies did not come along, which is exactly what only shows up
+   away from the build machine;
+3. open the sample project through the installed CLI and fail unless its
+   `offline` list is empty: a relink prompt on a fresh machine is the classic
+   packaging failure, a path that only resolved because of where the build
+   tree happened to be;
+4. probe the media with the bundled discoverer;
+5. export with the **best available encoder**: the candidates are
+   `sub_export`'s own order (`nvh264enc`, `vah264enc`, `amfh264enc`,
+   `mfh264enc`, `x264enc`), each pinned with `--encoder` and tried in turn, so
+   a hosted runner ends up on software x264 and a machine with a GPU does not.
+   Registered is not the same as usable -- `nvcodec` and `va` register
+   elements that need a driver behind them -- so a candidate that cannot
+   render falls through to the next one;
+6. validate what was written: `--verify` makes the package read its own output
+   back in process, and where the package ships `gst-discoverer-1.0` as a
+   command it is read again from outside;
+7. open the project in the real editor window under Xvfb
+   (`subordinate --ui-smoke`), which paints, pops the viewer out and prints a
+   ready line. On these machines wgpu lands on Mesa's lavapipe.
+
+The preset is `mezzanine` -- H.264 in MKV with FLAC audio -- so no machine is
+failed for want of an AAC encoder, and one second of the sequence is rendered:
+this workflow is about the install, not the throughput, which `hardware.yml`
+measures. "Plays with audio" is verified as decode, mix and encode, with an
+audio stream in the output: a hosted runner has no sound card to play to.
+
+Each job writes its facts into the job summary and uploads them, along with
+every log, as a `fresh-install-*` artifact.
+
+### Optional: the machines with real GPUs
+
+`-f hardware=true` adds two jobs that are skipped by default, because the
+standard run has to stay hosted-only and short -- that is what a release can
+afford to wait for, and what can be relied on to be switched on:
+
+* **box**, the self-hosted AMD mini PC, runs the AppImage check with the
+  `youtube-1080p` preset, where "best available encoder" resolves to
+  `vah264enc` rather than x264;
+* **yodaddy**, the user's daily-use Windows desktop, installs the MSI, runs the
+  same check and uninstalls it again.
+
+Both work entirely inside `$RUNNER_TEMP`, and yodaddy's uninstall step runs
+`if: always()`: leaving a package installed on somebody's own machine is not
+this workflow's business. Neither machine is fresh in the strict sense, so
+`--strict` is off there and the check records what they already had rather
+than failing on it.
+
+### By hand, on a physical fresh machine
+
+This is the version to run when a real laptop is available -- a friend's
+Ubuntu install, a newly imaged Windows box, or the user's Mac once TASK-105
+lands a dmg. Download the package and the sample project, write a two-line
+adapter saying how the package is reached, and run the same script:
+
+```bash
+# the package, the project and its media
+curl -fLO https://github.com/thowd22/Subordinate/releases/download/v0.1.0/Subordinate-0.1.0-x86_64.AppImage
+curl -fLO https://raw.githubusercontent.com/thowd22/Subordinate/main/examples/sample-project/demo.sub
+curl -fLO https://raw.githubusercontent.com/thowd22/Subordinate/main/scripts/get-sample-media.sh
+curl -fLO https://raw.githubusercontent.com/thowd22/Subordinate/main/scripts/fresh-install-check.sh
+sh get-sample-media.sh --out "$PWD/media"
+
+# how this package is reached (a desktop with FUSE needs no extraction)
+chmod +x Subordinate-*-x86_64.AppImage
+cat > adapter.sh <<'EOF'
+SUB_PACKAGE_LABEL="AppImage"
+appimage=$(ls "$PWD"/Subordinate-*-x86_64.AppImage)
+sub_gui() { "$appimage" "$@"; }
+sub_cli() { SUB_APPIMAGE_TOOL=subordinate-cli "$appimage" "$@"; }
+sub_tool() { tool=$1; shift; SUB_APPIMAGE_TOOL=$tool "$appimage" "$@"; }
+EOF
+
+sh fresh-install-check.sh --adapter "$PWD/adapter.sh" --project "$PWD/demo.sub"
+```
+
+On a machine with a desktop session already running, `DISPLAY` is set and the
+editor opens a real window on the real GPU instead of an Xvfb one; the facts
+record which adapter it chose. On Windows, install the MSI by double-clicking
+it and then:
+
+```powershell
+.\fresh-install-check.ps1 -Project .\demo.sub
+```
+
+Record the result -- OS version, GPU, encoder used, pass or fail -- in the
+[fresh-machine install verification log](../backlog/docs/) beside the CI runs,
+and open a blocking task for any failure before the release goes out.
+
+### What is not covered
+
+* **macOS.** Deferred with TASK-105/117 until the user's Apple silicon Mac
+  arrives: there is no dmg to install yet. The shell check script already
+  handles Darwin, so the third leg is a job and an adapter when the package
+  exists.
+* **Hardware encode from a fresh install**, unless `hardware=true` is passed.
+  The hosted runners have no GPU; `hardware.yml` (TASK-116) owns the GPUs.
+* **The FUSE path.** A desktop double-clicks an AppImage and libfuse mounts
+  it; a container has no `/dev/fuse`, so the CI jobs use the same runtime's
+  `--appimage-extract`, which unpacks the identical AppDir. The by-hand
+  runbook above is the one that exercises the mount.

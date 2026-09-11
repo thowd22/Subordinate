@@ -788,7 +788,7 @@ jobs:
   report:
     name: Result
     if: always()
-    needs: [resolve, appimage, flatpak, msi]
+    needs: [resolve, appimage, flatpak, msi, box, yodaddy]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
@@ -798,6 +798,8 @@ jobs:
           APPIMAGE: ${{ needs.appimage.result }}
           FLATPAK: ${{ needs.flatpak.result }}
           MSI: ${{ needs.msi.result }}
+          BOX: ${{ needs.box.result }}
+          YODADDY: ${{ needs.yodaddy.result }}
           RUN_ID: ${{ needs.resolve.outputs.run_id }}
           RUN_URL: ${{ needs.resolve.outputs.run_url }}
           MODE: ${{ needs.resolve.outputs.mode }}
@@ -813,6 +815,8 @@ jobs:
             echo "| clean ubuntu:24.04 and fedora:41 containers | AppImage | none | $APPIMAGE |"
             echo "| clean ubuntu-26.04 hosted runner | Flatpak | none | $FLATPAK |"
             echo "| clean windows-latest hosted runner | MSI | none | $MSI |"
+            echo "| box (self-hosted, optional) | AppImage | AMD Cezanne | $BOX |"
+            echo "| yodaddy (self-hosted, optional) | MSI | AMD RX 9070 XT | $YODADDY |"
             echo
             echo "Per-machine OS versions and the encoder each one chose are in the"
             echo "job summaries above and in the \`fresh-install-*\` artifacts."
@@ -821,7 +825,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           failed=0
-          for result in "$RESOLVE" "$APPIMAGE" "$FLATPAK" "$MSI"; do
+          for result in "$RESOLVE" "$APPIMAGE" "$FLATPAK" "$MSI" "$BOX" "$YODADDY"; do
             case "$result" in success | skipped) ;; *) failed=1 ;; esac
           done
           [ "$failed" -eq 0 ] || {
