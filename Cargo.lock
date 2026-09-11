@@ -4931,9 +4931,13 @@ name = "sub-export"
 version = "0.1.0"
 dependencies = [
  "gstreamer",
+ "gstreamer-app",
  "serde",
  "serde_json",
+ "sub-audio",
  "sub-core",
+ "sub-media",
+ "sub-time",
  "tracing",
 ]
 

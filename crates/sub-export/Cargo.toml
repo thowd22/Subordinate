@@ -9,10 +9,16 @@ repository.workspace = true
 
 [dependencies]
 sub-core = { path = "../sub-core" }
+sub-time = { path = "../sub-time" }
 gstreamer = "0.25"
+gstreamer-app = "0.25"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+sub-audio = { path = "../sub-audio" }
+sub-media = { path = "../sub-media" }

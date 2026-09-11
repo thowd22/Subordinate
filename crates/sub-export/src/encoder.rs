@@ -24,7 +24,7 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -530,6 +530,31 @@ fn probe_element(name: &str) -> ElementProbe {
     };
     let _ = element.set_state(gst::State::Null);
     outcome
+}
+
+/// Whether `name` is an element this machine can actually run.
+///
+/// The same `READY` test the encoder probe uses, for the elements the probe
+/// does not catalogue: muxers, parsers and audio encoders. Results are cached
+/// for the life of the process, because building an element is not free and
+/// the answer cannot change while the process runs.
+///
+/// GStreamer must already be initialised; every caller inside this crate
+/// builds a pipeline first, which initialises it.
+pub fn element_is_usable(name: &str) -> bool {
+    static CACHE: OnceLock<Mutex<BTreeMap<String, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Ok(seen) = cache.lock()
+        && let Some(&usable) = seen.get(name)
+    {
+        return usable;
+    }
+    let probe = probe_element(name);
+    let usable = probe.present && probe.ready;
+    if let Ok(mut seen) = cache.lock() {
+        seen.insert(name.to_owned(), usable);
+    }
+    usable
 }
 
 #[cfg(test)]
