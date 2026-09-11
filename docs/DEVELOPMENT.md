@@ -135,6 +135,9 @@ launches an editor when no GUI is running and knows when to connect.
 
 ## Driving the editor from an agent (MCP)
 
+This section is the setup; [docs/mcp-guide.md](mcp-guide.md) is the whole agent
+surface — every tool family, the resources, the error codes and the runbook.
+
 `subordinate-mcp` speaks the Model Context Protocol on stdin and stdout and
 forwards every tool call to the Command API (PLAN.md §7). It holds no state of
 its own: it connects to the editor the socket lock file advertises, and starts
@@ -228,6 +231,10 @@ workspace root. CI generates the small fixtures before building, so the media
 tests have their inputs on every runner.
 
 ## Reference plugins
+
+[docs/plugin-guide.md](plugin-guide.md) is the author's guide: every world, the
+manifest, the capability model, the developer loop and the test harness. What
+follows is where the worked examples live and how to build them.
 
 `plugins/` holds the first-party plugins. They are worked examples as much as
 they are shipped code: one per world that is worth a template, licensed
