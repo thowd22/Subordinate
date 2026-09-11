@@ -1,11 +1,10 @@
 ---
 id: TASK-133
 title: '4K H.264 scrub is seek-bound: 8.3 fps with NVDEC versus a 30 fps target'
-status: In Progress
-assignee:
-  - '@opus-task-133'
+status: To Do
+assignee: []
 created_date: '2026-09-11 14:48'
-updated_date: '2026-09-11 15:36'
+updated_date: '2026-09-11 17:25'
 labels:
   - media
   - performance
@@ -75,6 +74,8 @@ It is two claims and neither is provable here. The hardware half needs the NVIDI
 ## Validation
 
 cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean; cargo test -p sub-media -p subordinate-bench all green (111 lib + 61 bench unit tests and every fixture suite), including seek_fixtures, which judges a seek by the burnt-in timecode and by the whole picture -- that is the AC #3 evidence, and it is unchanged. New tests: five planner cases in decode.rs (keyframe aim, in-GOP forward step, next-GOP step, index that cannot answer, backward target) plus a SeekTiming billing test, and two fixture tests in index_fixtures.rs that prove the seek is removed on the long-GOP clip and the overshoot retry on the colour bars.
+
+2026-09-11 supervisor measurement after the merge (hardware run 34626676058): 4K scrub 9.161 fps on the T4 (seek p50 31.7 ms, decode-forward p50 72.4 ms, 14.2 pictures decoded per seek) and 9.945 fps on the box APU (seek p50 11.3 ms, decode-forward p50 61.5 ms, 14.2 pictures per seek). The instrumentation (criterion 1) is in; the speed-up is not. The split shows decode-forward dominates: every scrub step re-decodes about half a GOP from the keyframe. Direction for the next pass: when consecutive scrub targets fall inside the same GOP and move forward, continue decoding from the last decoded picture instead of seeking to the keyframe again (the decoder already holds the reference state), and keep the decoded pictures of the current GOP in the frame cache so backward steps within the GOP are cache hits. A forward sweep should then cost one decode per step, which is the 30 fps target. Requeued.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
