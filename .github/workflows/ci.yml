@@ -35,13 +35,14 @@ jobs:
   check:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # The Windows job is the long one: about 35 minutes when the rust-cache
-    # archive restores cleanly, and a cold cache or a slow GStreamer download
-    # pushes it past 40. As the suite grew it started hitting 60 exactly --
-    # cancelled mid Clippy or mid GUI smoke test in roughly half the runs on
-    # main -- so Windows gets 90 while the other two keep the tighter bound
-    # that still catches a genuine hang.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 90 || 60 }}
+    # Windows is the slowest of the three and used to be the one that hit the
+    # limit: half the runs on main were cancelled at 60, so it was given 90 as
+    # a stopgap. The cause was never a hang -- it was the test and smoke-test
+    # steps recompiling the workspace two more times, see the Test step below
+    # (TASK-131). With that gone a Windows job is about 13 minutes warm and
+    # about 20 cold, so 40 is back: high enough for a cold cache and a slow
+    # GStreamer download, low enough to still catch a genuine hang.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -315,13 +316,34 @@ jobs:
       # scan sub-media promotes from (it only considers factories at MARGINAL
       # or above), so macOS CI decodes in software. Hardware decode on Apple
       # silicon is covered by the manual `verify` tasks, not here.
+      #
+      # One invocation, and it selects exactly what the Build step above
+      # selected (TASK-131). Cargo unifies features across the packages a
+      # command selects, so a different selection is a different feature set
+      # and invalidates the previous step's artifacts. This step used to be
+      # `cargo test --workspace --exclude sub-ui` followed by `cargo test -p
+      # sub-ui`, which is three selections in a row counting the Build step:
+      # windows-latest in run 34574614657 spent 156 s recompiling before the
+      # first test ran, then a further 197 s recompiling before the second,
+      # against 89 s of tests actually executing -- 353 s of a 462 s step, and
+      # the same shape on the other two runners. Keep the selection here equal
+      # to the Build step's or the recompiles come straight back.
+      #
+      # `--test-threads=1` is what lets the two invocations become one.
       # sub-ui's snapshot tests each build their own wgpu device, and on Linux
       # that device is Mesa's lavapipe. Several of them rendering at once (the
       # default is one test thread per core) crashes the driver: the job dies
       # with "signal: 11, SIGSEGV" part way through whichever sub-ui test
-      # binary got there first, with no panic and no failing assertion. Running
-      # sub-ui one test at a time keeps a single software device alive at a
-      # time; every other crate still runs fully parallel.
+      # binary got there first, with no panic and no failing assertion. One
+      # test at a time keeps a single software device alive at a time. It
+      # applies to the whole workspace rather than to sub-ui alone, which costs
+      # about a minute of lost parallelism in the non-UI crates. The five
+      # slowest Windows test binaries in that run were sub-media's
+      # seek_fixtures at 9.3 s, sub-test-support's sample_media_catalogue at
+      # 5.4 s and sub-ui's timeline_selection at 3.8 s, inspector at 3.6 s and
+      # timeline_transition at 3.1 s; everything else was under 3 s and the
+      # whole suite executes in 89 s. No test is skipped, gated or moved to
+      # another OS by any of this.
       #
       # SUB_REQUIRE_SAMPLE_MEDIA turns sub-ui's sample-project render test from
       # "skip when the media is missing" into "fail": this job is the evidence
@@ -334,9 +356,7 @@ jobs:
         env:
           GST_PLUGIN_FEATURE_RANK: ${{ runner.os == 'macOS' && 'vtdec:NONE,vtdec_hw:NONE' || '' }}
           SUB_REQUIRE_SAMPLE_MEDIA: '1'
-        run: |
-          cargo test --workspace --exclude sub-ui
-          cargo test -p sub-ui -- --test-threads=1
+        run: cargo test --workspace -- --test-threads=1
 
       # egui_kittest writes <name>.new.png and <name>.diff.png next to the
       # committed reference whenever a UI snapshot does not match (TASK-119).
@@ -424,17 +444,28 @@ jobs:
 
       # Start the real app, paint a few empty frames and exit. This is what
       # proves eframe comes up on the wgpu backend on every OS (TASK-19 #3).
+      #
+      # The binary the Build step produced, not `cargo run -p subordinate`:
+      # a single-package selection is a different feature unification from the
+      # Build step's `--workspace`, so cargo relinked four crates and the
+      # binary every time -- 55 s of the windows-latest job in run 34574614657
+      # (TASK-131). The window smoke test below already invokes the binary this
+      # way.
       - name: GUI smoke test (Linux)
         if: runner.os == 'Linux'
         env:
           RUST_LOG: info
-        run: xvfb-run -a cargo run -p subordinate -- --smoke-test
+        run: xvfb-run -a target/debug/subordinate --smoke-test
 
       - name: GUI smoke test (Windows and macOS)
         if: runner.os != 'Linux'
+        shell: bash
         env:
           RUST_LOG: info
-        run: cargo run -p subordinate -- --smoke-test
+        run: |
+          bin=target/debug/subordinate
+          if [ "$RUNNER_OS" = "Windows" ]; then bin=target/debug/subordinate.exe; fi
+          "$bin" --smoke-test
 
       # ---------------- Window smoke test (TASK-123) ----------------
       # The assembled app rather than a panel in isolation: Xvfb gives it one
