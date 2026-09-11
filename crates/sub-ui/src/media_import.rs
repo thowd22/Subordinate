@@ -23,7 +23,8 @@ use std::sync::{Arc, Mutex};
 
 use sub_core::{JobContext, JobHandle, JobService, Priority, SubError, SubResult};
 use sub_media::{
-    MediaInfo, ProbeOptions, ThumbnailJob, ThumbnailOptions, probe_with, spawn_thumbnail_job,
+    MediaInfo, ProbeOptions, ThumbnailJob, ThumbnailOptions, WaveformJob, WaveformOptions,
+    probe_with, spawn_thumbnail_job, spawn_waveform_job,
 };
 use sub_model::media::{AudioStream, StreamInfo, VideoStream};
 use sub_model::{BinId, ContentHash, MediaItem, MediaPath};
@@ -46,6 +47,8 @@ pub struct ImportOptions {
     pub probe: ProbeOptions,
     /// The strip generated for each imported item.
     pub thumbnails: ThumbnailOptions,
+    /// The peak pyramid generated for each imported item that has sound.
+    pub waveforms: WaveformOptions,
     /// The priority both jobs run at. Import is what the user is watching, so
     /// it defaults to [`Priority::Interactive`]; the strip that follows runs
     /// at [`Priority::Normal`], because the bin can draw a row without it.
@@ -57,6 +60,7 @@ impl Default for ImportOptions {
         Self {
             probe: ProbeOptions::default(),
             thumbnails: ThumbnailOptions::default(),
+            waveforms: WaveformOptions::default(),
             priority: Priority::Interactive,
         }
     }
@@ -219,12 +223,48 @@ pub fn spawn_import_job(
     ImportJob { handle, item }
 }
 
+/// One batch of imports: everything one Import gesture asked for.
+///
+/// A gesture is one undo step, so the host waits for the whole batch before it
+/// applies anything. The identifier is what lets it tell two overlapping
+/// gestures apart — a drop from the desktop while a dialog selection is still
+/// probing is two batches, and two entries in the undo stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImportBatch(u64);
+
+impl ImportBatch {
+    /// The batch's number, in the order the queue handed them out.
+    #[must_use]
+    pub const fn index(self) -> u64 {
+        self.0
+    }
+}
+
+/// Everything one Import gesture produced, once all of it has finished.
+///
+/// The host turns the [`ImportOutcome::Ready`] entries into one history group
+/// and shows the [`ImportOutcome::Failed`] ones in the bin.
+#[derive(Debug, Clone)]
+pub struct FinishedImport {
+    /// The gesture these outcomes belong to.
+    pub batch: ImportBatch,
+    /// The bin every file in the gesture was filed in.
+    pub bin: Option<BinId>,
+    /// One outcome per file asked for, in the order they were asked for.
+    pub outcomes: Vec<ImportOutcome>,
+}
+
 /// One import in flight, and where its item is to be filed.
 #[derive(Debug)]
 struct Pending {
     job: ImportJob,
     source: PathBuf,
     bin: Option<BinId>,
+    batch: ImportBatch,
+    /// Where in its batch this file was asked for, so the outcomes come back
+    /// in the order the user chose the files rather than the order the jobs
+    /// happened to finish.
+    slot: usize,
 }
 
 /// The imports and thumbnail strips a media bin has in flight.
@@ -237,7 +277,16 @@ pub struct ImportQueue {
     cache_dir: PathBuf,
     options: ImportOptions,
     imports: Vec<Pending>,
+    /// The batches asked for and not yet collected, each with the bin its
+    /// files are filed in. A batch is only collected once nothing of it is
+    /// still probing, which is what makes one gesture one undo step.
+    open: Vec<(ImportBatch, Option<BinId>)>,
+    /// The outcomes of a batch whose other files are still probing, kept until
+    /// the batch is whole.
+    held: Vec<(ImportBatch, usize, ImportOutcome)>,
     thumbnails: Vec<ThumbnailJob>,
+    waveforms: Vec<WaveformJob>,
+    next_batch: u64,
 }
 
 impl ImportQueue {
@@ -250,7 +299,11 @@ impl ImportQueue {
             cache_dir: cache_dir.into(),
             options: ImportOptions::default(),
             imports: Vec::new(),
+            open: Vec::new(),
+            held: Vec::new(),
             thumbnails: Vec::new(),
+            waveforms: Vec::new(),
+            next_batch: 0,
         }
     }
 
@@ -268,41 +321,52 @@ impl ImportQueue {
     }
 
     /// Queues one job per path, filing what they produce in `bin`.
-    pub fn submit(&mut self, jobs: &JobService, paths: &[PathBuf], bin: Option<BinId>) {
-        for path in paths {
+    ///
+    /// The paths are one gesture, so they are one batch: nothing is applied
+    /// until every one of them has finished, and the whole batch then becomes
+    /// a single undo step. An empty `paths` still takes a batch number and
+    /// comes straight back out of the next [`ImportQueue::poll`] with no
+    /// outcomes, so a caller never has to special-case it.
+    pub fn submit(
+        &mut self,
+        jobs: &JobService,
+        paths: &[PathBuf],
+        bin: Option<BinId>,
+    ) -> ImportBatch {
+        let batch = ImportBatch(self.next_batch);
+        self.next_batch += 1;
+        self.open.push((batch, bin));
+        for (slot, path) in paths.iter().enumerate() {
             let job = spawn_import_job(jobs, &self.project_dir, path, self.options);
             self.imports.push(Pending {
                 job,
                 source: path.clone(),
                 bin,
+                batch,
+                slot,
             });
         }
+        batch
     }
 
-    /// Collects the imports that have finished since the last call, and queues
-    /// a thumbnail strip for each one that succeeded.
+    /// Collects the batches that have finished since the last call, and queues
+    /// a thumbnail strip and a waveform for each file that succeeded.
     ///
-    /// Finished strips are dropped: their pictures are files on disk, named
-    /// after the source's content hash, so the bin finds them without holding
-    /// the job.
-    pub fn poll(&mut self, jobs: &JobService) -> Vec<ImportOutcome> {
-        let mut finished = Vec::new();
+    /// A batch appears exactly once, and only when every file in it has
+    /// finished, because the host applies it as one undo step. Finished strips
+    /// and waveforms are dropped: both write files on disk named after the
+    /// source's content hash, so the bin and the timeline find them without
+    /// holding the job.
+    pub fn poll(&mut self, jobs: &JobService) -> Vec<FinishedImport> {
         let mut still_running = Vec::with_capacity(self.imports.len());
         for pending in std::mem::take(&mut self.imports) {
-            if pending.job.handle().is_finished() {
-                finished.push(pending);
-            } else {
+            if !pending.job.handle().is_finished() {
                 still_running.push(pending);
+                continue;
             }
-        }
-        self.imports = still_running;
-        self.thumbnails.retain(|job| !job.handle().is_finished());
-
-        finished
-            .into_iter()
-            .map(|pending| match pending.job.wait() {
+            let outcome = match pending.job.wait() {
                 Ok(item) => {
-                    self.queue_thumbnails(jobs, &pending.source, &item);
+                    self.queue_followups(jobs, &pending.source, &item);
                     ImportOutcome::Ready {
                         item: Box::new(item),
                         bin: pending.bin,
@@ -312,29 +376,88 @@ impl ImportQueue {
                     path: pending.source,
                     error,
                 },
-            })
-            .collect()
+            };
+            self.held.push((pending.batch, pending.slot, outcome));
+        }
+        self.imports = still_running;
+        self.thumbnails.retain(|job| !job.handle().is_finished());
+        self.waveforms.retain(|job| !job.handle().is_finished());
+
+        // A batch is whole once none of its files is still probing. That is
+        // the whole of the batching rule: the host applies what comes back
+        // here as one history group, so half a gesture is never applied.
+        let running = &self.imports;
+        let (whole, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.open)
+            .into_iter()
+            .partition(|(batch, _)| !running.iter().any(|pending| pending.batch == *batch));
+        self.open = waiting;
+
+        let mut finished: Vec<FinishedImport> = Vec::with_capacity(whole.len());
+        for (batch, bin) in whole {
+            let mut entries: Vec<(usize, ImportOutcome)> = Vec::new();
+            self.held.retain(|(held, slot, outcome)| {
+                if *held == batch {
+                    entries.push((*slot, outcome.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            entries.sort_by_key(|(slot, _)| *slot);
+            finished.push(FinishedImport {
+                batch,
+                bin,
+                outcomes: entries.into_iter().map(|(_, outcome)| outcome).collect(),
+            });
+        }
+        finished.sort_by_key(|done| done.batch);
+        finished
     }
 
-    /// Queues the strip for a freshly imported item, when it has pictures to
-    /// make one from.
-    fn queue_thumbnails(&mut self, jobs: &JobService, source: &Path, item: &MediaItem) {
-        let has_video = item.info.as_ref().is_some_and(StreamInfo::has_video);
-        let has_duration = item
-            .info
-            .as_ref()
+    /// Queues the strip and the peaks for a freshly imported item.
+    ///
+    /// Both are only worth asking for when the file has the stream they
+    /// summarise: a sound-only file gets no strip, and a silent one gets no
+    /// waveform.
+    fn queue_followups(&mut self, jobs: &JobService, source: &Path, item: &MediaItem) {
+        let info = item.info.as_ref();
+        let has_duration = info
             .and_then(|info| info.duration)
             .is_some_and(|duration| !duration.is_zero());
-        if !(has_video && has_duration) {
+        if !has_duration {
             return;
         }
-        self.thumbnails.push(spawn_thumbnail_job(
-            jobs,
-            source,
-            &self.cache_dir,
-            self.options.thumbnails,
-            Priority::Normal,
-        ));
+        if info.is_some_and(StreamInfo::has_video) {
+            self.thumbnails.push(spawn_thumbnail_job(
+                jobs,
+                source,
+                &self.cache_dir,
+                self.options.thumbnails,
+                Priority::Normal,
+            ));
+        }
+        if info.is_some_and(|info| !info.audio.is_empty()) {
+            self.waveforms.push(spawn_waveform_job(
+                jobs,
+                source,
+                &self.cache_dir,
+                self.options.waveforms,
+                Priority::Normal,
+            ));
+        }
+    }
+
+    /// The files still being hashed and probed, in the order they were asked
+    /// for.
+    ///
+    /// This is what the bin draws as its pending state: a row per file that
+    /// has been asked for and has not yet become a media item.
+    #[must_use]
+    pub fn pending_paths(&self) -> Vec<&Path> {
+        self.imports
+            .iter()
+            .map(|pending| pending.source.as_path())
+            .collect()
     }
 
     /// How many imports are still running.
@@ -349,10 +472,16 @@ impl ImportQueue {
         self.thumbnails.len()
     }
 
+    /// How many waveforms are still being generated.
+    #[must_use]
+    pub fn waveforming(&self) -> usize {
+        self.waveforms.len()
+    }
+
     /// True when nothing is in flight.
     #[must_use]
     pub fn is_idle(&self) -> bool {
-        self.imports.is_empty() && self.thumbnails.is_empty()
+        self.imports.is_empty() && self.thumbnails.is_empty() && self.waveforms.is_empty()
     }
 
     /// Asks every job in flight to stop.
@@ -361,6 +490,9 @@ impl ImportQueue {
             pending.job.cancel();
         }
         for job in &self.thumbnails {
+            job.cancel();
+        }
+        for job in &self.waveforms {
             job.cancel();
         }
     }
@@ -430,18 +562,28 @@ mod tests {
         let mut queue = ImportQueue::new("/projects/cut", "/projects/cut.sub.d");
         queue.submit(&jobs, &[PathBuf::from("/elsewhere/take.mov")], None);
         assert_eq!(queue.importing(), 1);
+        assert_eq!(
+            queue.pending_paths(),
+            [std::path::Path::new("/elsewhere/take.mov")],
+            "the bin has a pending row to draw while the job runs"
+        );
 
         jobs.wait_idle();
-        let outcomes = queue.poll(&jobs);
-        assert_eq!(outcomes.len(), 1);
-        match &outcomes[0] {
+        let mut finished = queue.poll(&jobs);
+        assert_eq!(finished.len(), 1, "one gesture, one batch");
+        let batch = finished.remove(0);
+        assert_eq!(batch.outcomes.len(), 1);
+        match &batch.outcomes[0] {
             ImportOutcome::Failed { path, error } => {
                 assert_eq!(path, &PathBuf::from("/elsewhere/take.mov"));
                 assert_eq!(error.code, sub_model::codes::INVALID_PATH);
             }
             ImportOutcome::Ready { .. } => panic!("the import should have been refused"),
         }
-        assert!(queue.is_idle(), "a refused import queues no thumbnails");
+        assert!(
+            queue.is_idle(),
+            "a refused import queues no thumbnails and no waveform"
+        );
     }
 
     #[test]
@@ -452,8 +594,11 @@ mod tests {
         queue.submit(&jobs, &[dir.join("gone.mov")], None);
 
         jobs.wait_idle();
-        let outcomes = queue.poll(&jobs);
-        assert!(matches!(outcomes[0], ImportOutcome::Failed { .. }));
+        let finished = queue.poll(&jobs);
+        assert!(matches!(
+            finished[0].outcomes[0],
+            ImportOutcome::Failed { .. }
+        ));
         assert_eq!(queue.importing(), 0);
     }
 }

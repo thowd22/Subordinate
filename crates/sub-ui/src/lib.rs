@@ -43,7 +43,10 @@ pub mod trim;
 pub mod viewer;
 pub mod waveform;
 
-pub use app::{AppOptions, ProjectState, SubordinateApp, UI_SMOKE_READY, edit_mode_for, run};
+pub use app::{
+    AppOptions, IMPORT_GROUP_LABEL, NO_IMPORT_REASON, ProjectState, SubordinateApp, UI_SMOKE_READY,
+    edit_mode_for, run,
+};
 pub use audio_settings::{AudioSettingsAction, AudioSettingsPanel, device_label, status_line};
 pub use diagnostics::DiagnosticsPanel;
 pub use dock::{DockLayout, LAYOUT_FILE_NAME, LAYOUT_VERSION, LoadedLayout, Panel, layout_menu_ui};
@@ -72,13 +75,14 @@ pub use markers::{
     DEFAULT_MARKER_NAME, MARKER_PALETTE, MarkerAction, MarkerState, marker_color, moved_range,
 };
 pub use media_bin::{
-    BinDrag, BinSelection, BinSort, BinViewMode, MediaBinAction, MediaBinPanel, SortColumn,
-    bin_path, drag_source_id, dragged_media, dropped_paths, duration_text, folder_name,
-    frame_rate_text, pick_media_files, resolution_text, sorted_media,
+    BinDrag, BinSelection, BinSort, BinStatus, BinViewMode, MediaBinAction, MediaBinPanel,
+    PENDING_LABEL, SortColumn, bin_path, drag_source_id, dragged_media, dropped_paths,
+    duration_text, file_label, folder_name, frame_rate_text, pick_media_files, resolution_text,
+    sorted_media,
 };
 pub use media_import::{
-    IMPORT_JOB_KIND, ImportJob, ImportOptions, ImportOutcome, ImportQueue, imported_item,
-    spawn_import_job, stream_info,
+    FinishedImport, IMPORT_JOB_KIND, ImportBatch, ImportJob, ImportOptions, ImportOutcome,
+    ImportQueue, imported_item, spawn_import_job, stream_info,
 };
 pub use meter::{
     CLIP_COLOR, CLIP_HOLD_SECONDS, MIN_DB, MeterState, NORMAL_COLOR, PEAK_FALL_DB_PER_SECOND,
@@ -150,6 +154,10 @@ pub use waveform::{
 /// The stable error codes this crate reports.
 pub mod codes {
     use sub_core::ErrorCode;
+
+    /// Media was asked to be imported into a project that has never been
+    /// saved, so there is no folder for its path to be relative to.
+    pub const IMPORT_NOT_READY: ErrorCode = ErrorCode::from_static("ui.import_not_ready");
 
     /// A zoom level falls outside the timeline's zoom ladder.
     pub const INVALID_ZOOM: ErrorCode = ErrorCode::from_static("ui.invalid_zoom");

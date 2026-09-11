@@ -17,13 +17,18 @@ use std::path::PathBuf;
 use sub_core::JobService;
 use sub_edit::History;
 use sub_edit::commands::ImportMedia;
-use sub_media::{ThumbnailOptions, ThumbnailStrip};
+use sub_media::{ThumbnailOptions, ThumbnailStrip, Waveform, WaveformOptions};
 use sub_model::Project;
 use sub_time::Rational;
 use sub_ui::media_import::{ImportOptions, ImportOutcome, ImportQueue};
 
 /// The constant-rate fixture: 125 frames at 25 fps, five seconds of bars.
+/// Video only, so it gets a thumbnail strip and no waveform.
 const CLIP: &str = "bars_1080p_h264.mp4";
+
+/// The audio fixture: five seconds of tone. Sound only, so it gets a waveform
+/// and no thumbnail strip.
+const TONE: &str = "tone_48k_stereo.wav";
 
 /// Small strips keep this test to a few seeks.
 fn options() -> ImportOptions {
@@ -46,39 +51,68 @@ fn fixture(name: &str) -> Option<PathBuf> {
     path
 }
 
-/// A private project folder holding a copy of `fixture`, and its sidecar.
-fn project_folder(fixture: &std::path::Path) -> (PathBuf, PathBuf) {
+/// A private project folder holding a copy of each fixture, and its sidecar.
+fn project_folder(fixtures: &[(&str, PathBuf)]) -> (PathBuf, PathBuf) {
     let dir = std::env::temp_dir().join(format!("sub-ui-import-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("footage")).expect("a project folder");
     let sidecar = dir.join("cut.sub.d");
     std::fs::create_dir_all(&sidecar).expect("a sidecar folder");
-    let copied = dir.join("footage").join(CLIP);
-    std::fs::copy(fixture, &copied).expect("the fixture copies into the project folder");
+    for (name, source) in fixtures {
+        std::fs::copy(source, dir.join("footage").join(name))
+            .expect("the fixture copies into the project folder");
+    }
     (dir, sidecar)
 }
 
 #[test]
 fn importing_a_file_hashes_probes_and_thumbnails_it_off_the_ui_thread() {
-    let Some(source) = fixture(CLIP) else {
+    let (Some(clip), Some(tone)) = (fixture(CLIP), fixture(TONE)) else {
         return;
     };
-    let (dir, sidecar) = project_folder(&source);
+    let (dir, sidecar) = project_folder(&[(CLIP, clip), (TONE, tone)]);
     let jobs = JobService::new(2);
     let mut queue = ImportQueue::new(&dir, &sidecar).with_options(options());
 
-    queue.submit(&jobs, &[dir.join("footage").join(CLIP)], None);
-    assert_eq!(queue.importing(), 1, "the import runs as a job");
+    // Both files in one gesture, which is one batch and therefore one entry in
+    // the undo stack once the host applies it.
+    queue.submit(
+        &jobs,
+        &[
+            dir.join("footage").join(CLIP),
+            dir.join("footage").join(TONE),
+        ],
+        None,
+    );
+    assert_eq!(queue.importing(), 2, "each import runs as its own job");
 
     // The UI thread would poll once a frame; here one wait stands in for that.
     let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
-    let mut outcomes = Vec::new();
-    while outcomes.is_empty() && std::time::Instant::now() < deadline {
-        outcomes = queue.poll(&jobs);
+    let mut finished = Vec::new();
+    while finished.is_empty() && std::time::Instant::now() < deadline {
+        finished = queue.poll(&jobs);
     }
-    assert_eq!(outcomes.len(), 1, "the import finished");
+    assert_eq!(finished.len(), 1, "one gesture, one batch");
+    let mut batch = finished.remove(0);
+    assert_eq!(
+        batch.outcomes.len(),
+        2,
+        "a batch comes back whole, never half"
+    );
+    assert_eq!(batch.bin, None, "an unfiled gesture lands in the root bin");
 
-    let ImportOutcome::Ready { item, bin } = outcomes.remove(0) else {
+    // The outcomes come back in the order the files were asked for, not the
+    // order the jobs happened to finish.
+    let ImportOutcome::Ready { item: sound, .. } = batch.outcomes.remove(1) else {
+        panic!("the audio import failed");
+    };
+    assert_eq!(sound.path.as_str(), "footage/tone_48k_stereo.wav");
+    let sound_hash = sound.hash.expect("the audio bytes were hashed");
+    let sound_info = sound.info.as_ref().expect("the audio was probed");
+    assert!(sound_info.video.is_empty(), "the tone has no picture");
+    assert_eq!(sound_info.audio[0].sample_rate, 48_000);
+
+    let ImportOutcome::Ready { item, bin } = batch.outcomes.remove(0) else {
         panic!("the import failed");
     };
     assert_eq!(bin, None, "an unfiled import lands in the root bin");
@@ -111,13 +145,31 @@ fn importing_a_file_hashes_probes_and_thumbnails_it_off_the_ui_thread() {
     history.undo(&mut project).expect("the import undoes");
     assert!(project.media.is_empty());
 
-    // The strip was queued off the back of the import and lands in the
-    // sidecar folder, named after the content hash.
+    // The strip and the waveform were queued off the back of the import and
+    // land in the sidecar folder, both named after the content hash.
     jobs.wait_idle();
     assert_eq!(queue.poll(&jobs).len(), 0, "nothing else was imported");
     assert!(queue.is_idle(), "every job finished");
 
-    let strip = ThumbnailStrip::load(&sidecar, hash.expect("hashed"), options().thumbnails)
+    let hash = hash.expect("hashed");
+    // A follow-up job only runs for a stream the file actually has: the bars
+    // get a strip and no waveform, the tone a waveform and no strip.
+    assert!(
+        Waveform::load(&sidecar, hash, WaveformOptions::default()).is_none(),
+        "a silent file queues no waveform"
+    );
+    let waveform = Waveform::load(&sidecar, sound_hash, WaveformOptions::default())
+        .expect("the audio import queued a waveform of its own");
+    assert!(
+        !waveform.levels().is_empty(),
+        "the tone summarises to peaks the timeline can draw"
+    );
+    assert!(
+        ThumbnailStrip::load(&sidecar, sound_hash, options().thumbnails).is_none(),
+        "a file with no picture queues no strip"
+    );
+
+    let strip = ThumbnailStrip::load(&sidecar, hash, options().thumbnails)
         .expect("the strip was generated");
     assert_eq!(strip.frames().len(), 3);
     for frame in strip.frames() {
