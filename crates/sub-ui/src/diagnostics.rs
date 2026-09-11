@@ -186,8 +186,14 @@ fn codec_heading(
 
 /// One encoder's line: whether it can be used, and what stopped it.
 fn encoder_line(status: &EncoderStatus) -> String {
-    if status.ready {
+    if status.is_usable() {
         format!("[x] {} ({}) - ready", status.element, status.vendor.label())
+    } else if status.deranked && status.ready {
+        format!(
+            "[ ] {} ({}) - ready, ranked NONE here: used only when it is pinned",
+            status.element,
+            status.vendor.label()
+        )
     } else if status.present {
         format!(
             "[ ] {} ({}) - registered but not usable: {}",
@@ -244,7 +250,7 @@ mod tests {
         DiagnosticsPanel, codec_heading, element_line, encoder_line, summary_line, vendor_heading,
     };
     use eframe::egui;
-    use sub_export::{CODECS, EncoderPreferences, EncoderProbe, VideoCodec};
+    use sub_export::{CODECS, EncoderPreferences, EncoderProbe, EncoderStatus, VideoCodec};
     use sub_media::{HardwareDiagnostics, Vendor};
 
     fn scan() -> HardwareDiagnostics {
@@ -430,8 +436,28 @@ mod tests {
         for status in &probe.encoders {
             let line = encoder_line(status);
             assert!(line.contains(&status.element), "line: {line}");
-            assert_eq!(line.starts_with("[x]"), status.ready, "line: {line}");
+            assert_eq!(line.starts_with("[x]"), status.is_usable(), "line: {line}");
         }
+    }
+
+    /// A hardware encoder ranked NONE runs here but is never picked by the
+    /// automatic order, so its line has to say both (TASK-134).
+    #[test]
+    fn a_deranked_encoder_reads_as_pinned_only() {
+        let status = EncoderStatus {
+            element: "vah264enc".to_owned(),
+            codec: VideoCodec::H264,
+            vendor: sub_export::EncoderVendor::Va,
+            hardware: true,
+            present: true,
+            ready: true,
+            deranked: true,
+            detail: Some("the element is ranked NONE on this machine".to_owned()),
+        };
+        let line = encoder_line(&status);
+        assert!(line.starts_with("[ ]"), "line: {line}");
+        assert!(line.contains("ranked NONE"), "line: {line}");
+        assert!(line.contains("pinned"), "line: {line}");
     }
 
     #[test]
