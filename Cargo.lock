@@ -5076,6 +5076,7 @@ dependencies = [
  "sub-core",
  "sub-edit",
  "sub-media",
+ "sub-model",
  "sub-render",
  "sub-test-support",
  "sub-time",

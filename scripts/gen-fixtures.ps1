@@ -20,6 +20,10 @@
 .PARAMETER Long
     Also generate the 10-minute long-GOP clip (slow; skipped in CI).
 
+.PARAMETER Hour
+    Also generate the one-hour long-GOP clip (very slow; skipped in CI). It is
+    what subordinate-bench --proxy is measured against.
+
 .PARAMETER Force
     Regenerate files that already exist.
 
@@ -33,6 +37,7 @@
 param(
     [string]$OutDir,
     [switch]$Long,
+    [switch]$Hour,
     [switch]$Force,
     [switch]$List,
     [switch]$DryRun
@@ -59,50 +64,54 @@ if (-not $OutDir) { $OutDir = Join-Path $repoRoot 'fixtures' }
 # VFR: 90 frames at 30/1 (3 s) then 180 frames at 60/1 (3 s) = 6 s.
 $catalogue = @(
     [pscustomobject]@{ name = 'bars_1080p_h264.mp4'; kind = 'video'; width = 1920; height = 1080
-        duration_ns = 5000000000L; fps_num = 25; fps_den = 1; vfr = $false; lossy = $false; long = $false
+        duration_ns = 5000000000L; fps_num = 25; fps_den = 1; vfr = $false; lossy = $false; tier = 'always'
         description = '1080p SMPTE colour bars, H.264, timecode burn-in'
     }
     [pscustomobject]@{ name = 'bars_2160p_h264.mp4'; kind = 'video'; width = 3840; height = 2160
-        duration_ns = 5000000000L; fps_num = 25; fps_den = 1; vfr = $false; lossy = $false; long = $false
+        duration_ns = 5000000000L; fps_num = 25; fps_den = 1; vfr = $false; lossy = $false; tier = 'always'
         description = '4K SMPTE colour bars, H.264, timecode burn-in'
     }
     [pscustomobject]@{ name = 'dropframe_2997_h264.mp4'; kind = 'video'; width = 1920; height = 1080
-        duration_ns = 10010000000L; fps_num = 30000; fps_den = 1001; vfr = $false; lossy = $false; long = $false
+        duration_ns = 10010000000L; fps_num = 30000; fps_den = 1001; vfr = $false; lossy = $false; tier = 'always'
         description = '29.97 drop-frame clip with drop-frame timecode burn-in'
     }
     [pscustomobject]@{ name = 'vfr_60_30.mkv'; kind = 'video'; width = 1280; height = 720
-        duration_ns = 6000000000L; fps_num = 60; fps_den = 1; vfr = $true; lossy = $false; long = $false
+        duration_ns = 6000000000L; fps_num = 60; fps_den = 1; vfr = $true; lossy = $false; tier = 'always'
         description = 'Variable-frame-rate clip: 3 s at 30 fps then 3 s at 60 fps'
     }
     [pscustomobject]@{ name = 'longgop_720p_10min.mp4'; kind = 'video'; width = 1280; height = 720
-        duration_ns = 600000000000L; fps_num = 25; fps_den = 1; vfr = $false; lossy = $false; long = $true
+        duration_ns = 600000000000L; fps_num = 25; fps_den = 1; vfr = $false; lossy = $false; tier = 'long'
         description = '10-minute long-GOP H.264 clip (250-frame GOP, B-frames)'
     }
+    [pscustomobject]@{ name = 'longgop_1080p_1h.mp4'; kind = 'video'; width = 1920; height = 1080
+        duration_ns = 3600000000000L; fps_num = 25; fps_den = 1; vfr = $false; lossy = $false; tier = 'hour'
+        description = 'One-hour long-GOP H.264 clip (250-frame GOP, B-frames), the proxy editing source'
+    }
     [pscustomobject]@{ name = 'tone_48k_stereo.wav'; kind = 'audio'; width = 0; height = 0
-        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $false; long = $false
+        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $false; tier = 'always'
         description = 'Audio only: 5 s 440 Hz sine, 48 kHz stereo, 16-bit WAV'
     }
     [pscustomobject]@{ name = 'tone_48k_stereo.flac'; kind = 'audio'; width = 0; height = 0
-        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $false; long = $false
+        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $false; tier = 'always'
         description = 'Audio only: 5 s 440 Hz sine, 48 kHz stereo, FLAC'
     }
     [pscustomobject]@{ name = 'tone_48k_stereo.mp3'; kind = 'audio'; width = 0; height = 0
-        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $true; long = $false
+        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $true; tier = 'always'
         description = 'Audio only: 5 s 440 Hz sine, 48 kHz stereo, MP3 at 192 kbit/s CBR'
     }
     [pscustomobject]@{ name = 'tone_48k_stereo.m4a'; kind = 'audio'; width = 0; height = 0
-        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $true; long = $false
+        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $true; tier = 'always'
         description = 'Audio only: 5 s 440 Hz sine, 48 kHz stereo, AAC-LC in MP4'
     }
     [pscustomobject]@{ name = 'tone_48k_stereo.ogg'; kind = 'audio'; width = 0; height = 0
-        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $true; long = $false
+        duration_ns = 5000000000L; fps_num = 0; fps_den = 1; vfr = $false; lossy = $true; tier = 'always'
         description = 'Audio only: 5 s 440 Hz sine, 48 kHz stereo, Ogg Vorbis'
     }
 )
 
 if ($List) {
     $catalogue | Format-Table name, kind,
-    @{ Label = 'ms'; Expression = { $_.duration_ns / 1000000 } }, vfr, lossy, long, description
+    @{ Label = 'ms'; Expression = { $_.duration_ns / 1000000 } }, vfr, lossy, tier, description
     exit 0
 }
 
@@ -206,6 +215,23 @@ function New-VideoFixture {
                 '!', 'h264parse', '!', 'mp4mux', '!', 'filesink', "location=$(Join-Path $OutDir $Name)"
             )
         }
+        'longgop_1080p_1h.mp4' {
+            # An hour of 1080p long-GOP footage: what phase 5's exit criterion
+            # is stated against (docs/PLAN.md section 8), and what
+            # subordinate-bench --proxy measures. The GOP and B-frame structure
+            # matches the ten-minute clip, so the only thing that changes with
+            # the hour is the length. No timecodestamper here: a running-time
+            # overlay needs no timecode metadata, and this clip exists to be
+            # scrubbed, not to be read.
+            Invoke-Pipeline @(
+                'videotestsrc', 'pattern=ball', 'num-buffers=90000',
+                '!', 'video/x-raw,format=I420,width=1920,height=1080,framerate=25/1',
+                '!', 'timeoverlay', 'time-mode=running-time', 'halignment=center', 'valignment=bottom',
+                'font-desc=Monospace 67',
+                '!', 'x264enc', 'bitrate=2500', 'key-int-max=250', 'bframes=3', 'speed-preset=veryfast',
+                '!', 'h264parse', '!', 'mp4mux', '!', 'filesink', "location=$(Join-Path $OutDir $Name)"
+            )
+        }
         default { throw "gen-fixtures: no pipeline for '$Name'" }
     }
 }
@@ -256,8 +282,12 @@ function New-AudioFixture {
 # ------------------------------------------------------------------- generate
 $entries = foreach ($f in $catalogue) {
     $generated = $true
-    if ($f.long -and (-not $Long)) {
+    if (($f.tier -eq 'long') -and (-not $Long)) {
         Write-Host "gen-fixtures: skipping $($f.name) (pass -Long to generate it)"
+        $generated = $false
+    }
+    elseif (($f.tier -eq 'hour') -and (-not $Hour)) {
+        Write-Host "gen-fixtures: skipping $($f.name) (pass -Hour to generate it)"
         $generated = $false
     }
     elseif (($f.kind -eq 'audio') -and (-not (Test-AudioEncoderAvailable $f.name))) {

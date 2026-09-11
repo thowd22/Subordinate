@@ -15,6 +15,7 @@ set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 out_dir="$repo_root/fixtures"
 include_long=0
+include_hour=0
 force=0
 dry_run=0
 list_only=0
@@ -25,6 +26,8 @@ Usage: scripts/gen-fixtures.sh [options]
 
   --out DIR    write fixtures to DIR (default: <repo>/fixtures)
   --long       also generate the 10-minute long-GOP clip (slow; skipped in CI)
+  --hour       also generate the one-hour long-GOP clip (very slow; skipped in
+               CI; what subordinate-bench --proxy is measured against)
   --force      regenerate files that already exist
   --list       list the fixture catalogue and exit
   --dry-run    print the pipelines instead of running them
@@ -43,6 +46,7 @@ while [ $# -gt 0 ]; do
         shift 2
         ;;
     --long) include_long=1 && shift ;;
+    --hour) include_hour=1 && shift ;;
     --force) force=1 && shift ;;
     --list) list_only=1 && shift ;;
     --dry-run) dry_run=1 && shift ;;
@@ -61,8 +65,12 @@ done
 # ---------------------------------------------------------------- catalogue --
 #
 # One record per fixture, tab separated:
-#   name  kind  width  height  duration_ns  fps_num  fps_den  vfr  lossy  long
+#   name  kind  width  height  duration_ns  fps_num  fps_den  vfr  lossy  tier
 #   description
+#
+# tier is when a fixture is generated: "always", "long" (only with --long) or
+# "hour" (only with --hour). The two long-GOP clips cost minutes of encoding,
+# so nothing generates them by accident.
 #
 # duration_ns is an exact integer count of nanoseconds; frame rates are exact
 # rationals. Nothing here is ever expressed as a float.
@@ -78,25 +86,27 @@ done
 # VFR: 90 frames at 30/1 (3 s) followed by 180 frames at 60/1 (3 s) = 6 s.
 catalogue=$(
     cat <<'EOF'
-bars_1080p_h264.mp4	video	1920	1080	5000000000	25	1	false	false	false	1080p SMPTE colour bars, H.264, timecode burn-in
-bars_2160p_h264.mp4	video	3840	2160	5000000000	25	1	false	false	false	4K SMPTE colour bars, H.264, timecode burn-in
-dropframe_2997_h264.mp4	video	1920	1080	10010000000	30000	1001	false	false	false	29.97 drop-frame clip with drop-frame timecode burn-in
-vfr_60_30.mkv	video	1280	720	6000000000	60	1	true	false	false	Variable-frame-rate clip: 3 s at 30 fps then 3 s at 60 fps
-longgop_720p_10min.mp4	video	1280	720	600000000000	25	1	false	false	true	10-minute long-GOP H.264 clip (250-frame GOP, B-frames)
-tone_48k_stereo.wav	audio	0	0	5000000000	0	1	false	false	false	Audio only: 5 s 440 Hz sine, 48 kHz stereo, 16-bit WAV
-tone_48k_stereo.flac	audio	0	0	5000000000	0	1	false	false	false	Audio only: 5 s 440 Hz sine, 48 kHz stereo, FLAC
-tone_48k_stereo.mp3	audio	0	0	5000000000	0	1	false	true	false	Audio only: 5 s 440 Hz sine, 48 kHz stereo, MP3 at 192 kbit/s CBR
-tone_48k_stereo.m4a	audio	0	0	5000000000	0	1	false	true	false	Audio only: 5 s 440 Hz sine, 48 kHz stereo, AAC-LC in MP4
-tone_48k_stereo.ogg	audio	0	0	5000000000	0	1	false	true	false	Audio only: 5 s 440 Hz sine, 48 kHz stereo, Ogg Vorbis
+bars_1080p_h264.mp4	video	1920	1080	5000000000	25	1	false	false	always	1080p SMPTE colour bars, H.264, timecode burn-in
+bars_2160p_h264.mp4	video	3840	2160	5000000000	25	1	false	false	always	4K SMPTE colour bars, H.264, timecode burn-in
+dropframe_2997_h264.mp4	video	1920	1080	10010000000	30000	1001	false	false	always	29.97 drop-frame clip with drop-frame timecode burn-in
+vfr_60_30.mkv	video	1280	720	6000000000	60	1	true	false	always	Variable-frame-rate clip: 3 s at 30 fps then 3 s at 60 fps
+longgop_720p_10min.mp4	video	1280	720	600000000000	25	1	false	false	long	10-minute long-GOP H.264 clip (250-frame GOP, B-frames)
+longgop_1080p_1h.mp4	video	1920	1080	3600000000000	25	1	false	false	hour	One-hour long-GOP H.264 clip (250-frame GOP, B-frames), the proxy editing source
+tone_48k_stereo.wav	audio	0	0	5000000000	0	1	false	false	always	Audio only: 5 s 440 Hz sine, 48 kHz stereo, 16-bit WAV
+tone_48k_stereo.flac	audio	0	0	5000000000	0	1	false	false	always	Audio only: 5 s 440 Hz sine, 48 kHz stereo, FLAC
+tone_48k_stereo.mp3	audio	0	0	5000000000	0	1	false	true	always	Audio only: 5 s 440 Hz sine, 48 kHz stereo, MP3 at 192 kbit/s CBR
+tone_48k_stereo.m4a	audio	0	0	5000000000	0	1	false	true	always	Audio only: 5 s 440 Hz sine, 48 kHz stereo, AAC-LC in MP4
+tone_48k_stereo.ogg	audio	0	0	5000000000	0	1	false	true	always	Audio only: 5 s 440 Hz sine, 48 kHz stereo, Ogg Vorbis
 EOF
 )
 
 if [ "$list_only" -eq 1 ]; then
     printf '%-26s %-6s %-9s %-5s %-6s %s\n' NAME KIND DURATION VFR LOSSY DESCRIPTION
-    while IFS=$'\t' read -r name kind _w _h dur_ns _fn _fd vfr lossy long desc; do
+    while IFS=$'\t' read -r name kind _w _h dur_ns _fn _fd vfr lossy tier desc; do
         [ -n "$name" ] || continue
         suffix=""
-        [ "$long" = "true" ] && suffix=" (--long only)"
+        [ "$tier" = "long" ] && suffix=" (--long only)"
+        [ "$tier" = "hour" ] && suffix=" (--hour only)"
         printf '%-26s %-6s %6s ms %-5s %-6s %s%s\n' \
             "$name" "$kind" "$((dur_ns / 1000000))" "$vfr" "$lossy" "$desc" "$suffix"
     done <<<"$catalogue"
@@ -201,6 +211,20 @@ gen_video() {
             ! x264enc bitrate=4000 key-int-max=250 bframes=3 speed-preset=veryfast \
             ! h264parse ! mp4mux ! filesink location="$out_dir/$1"
         ;;
+    longgop_1080p_1h.mp4)
+        # An hour of 1080p long-GOP footage: what phase 5's exit criterion is
+        # stated against (docs/PLAN.md §8), and what subordinate-bench --proxy
+        # measures. The GOP and B-frame structure matches the ten-minute clip,
+        # so the only thing that changes with the hour is the length. No
+        # timecodestamper here: a running-time overlay needs no timecode
+        # metadata, and this clip exists to be scrubbed, not to be read.
+        run videotestsrc pattern=ball num-buffers=90000 \
+            ! "video/x-raw,format=I420,width=1920,height=1080,framerate=25/1" \
+            ! timeoverlay time-mode=running-time halignment=center valignment=bottom \
+            font-desc="Monospace 67" \
+            ! x264enc bitrate=2500 key-int-max=250 bframes=3 speed-preset=veryfast \
+            ! h264parse ! mp4mux ! filesink location="$out_dir/$1"
+        ;;
     *)
         echo "gen-fixtures: no pipeline for '$1'" >&2
         exit 1
@@ -256,11 +280,14 @@ gen_audio() {
 
 # ---------------------------------------------------------------- generate --
 manifest_entries=""
-while IFS=$'\t' read -r name kind width height dur_ns fps_n fps_d vfr lossy long desc; do
+while IFS=$'\t' read -r name kind width height dur_ns fps_n fps_d vfr lossy tier desc; do
     [ -n "$name" ] || continue
     generated=true
-    if [ "$long" = "true" ] && [ "$include_long" -eq 0 ]; then
+    if [ "$tier" = "long" ] && [ "$include_long" -eq 0 ]; then
         echo "gen-fixtures: skipping $name (pass --long to generate it)"
+        generated=false
+    elif [ "$tier" = "hour" ] && [ "$include_hour" -eq 0 ]; then
+        echo "gen-fixtures: skipping $name (pass --hour to generate it)"
         generated=false
     elif [ "$kind" = audio ] && ! audio_encoder_available "$name"; then
         echo "gen-fixtures: skipping $name (its encoder is not installed)"

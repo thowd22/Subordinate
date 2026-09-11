@@ -37,6 +37,19 @@ impl Samples {
         self.nanos.is_empty()
     }
 
+    /// How many measurements were strictly longer than `threshold_nanos`.
+    ///
+    /// This is what counts a stall: a playback step that did not fit inside
+    /// the frame interval it had to be shown in.
+    pub fn count_over(&self, threshold_nanos: u64) -> u64 {
+        let over = self
+            .nanos
+            .iter()
+            .filter(|nanos| **nanos > threshold_nanos)
+            .count();
+        u64::try_from(over).unwrap_or(u64::MAX)
+    }
+
     /// The summary of the series, or `None` when nothing was recorded.
     pub fn summary(&self) -> Option<Stats> {
         if self.nanos.is_empty() {
@@ -148,6 +161,15 @@ mod tests {
         assert_eq!(stats.p50_nanos, 7);
         assert_eq!(stats.p95_nanos, 7);
         assert_eq!(stats.max_nanos, 7);
+    }
+
+    #[test]
+    fn a_stall_is_a_sample_strictly_over_the_threshold() {
+        let series = samples(&[39_000_000, 40_000_000, 41_000_000, 400_000_000]);
+        // One frame interval at 25 fps: the 40 ms sample still fits.
+        assert_eq!(series.count_over(40_000_000), 2);
+        assert_eq!(series.count_over(1_000_000_000), 0);
+        assert_eq!(Samples::new().count_over(0), 0);
     }
 
     #[test]

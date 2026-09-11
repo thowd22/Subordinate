@@ -181,3 +181,107 @@ every CI Linux job, printing the summary into the job log and the step summary
 and uploading `target/bench/av-sync.json` as the `av-sync-report` artifact (30
 days). This step is allowed to fail the job: that failure is how "under one
 frame on Linux" is asserted.
+
+## Editing an hour of long-GOP footage with proxies
+
+Phase 5's exit criterion is about editing rather than decoding: a one-hour
+long-GOP source, proxies switched on, a scrub that stays above 30 fps, no stall
+over five seconds of playback, and memory inside a documented budget
+(PLAN.md §5.2, §8). The same binary measures it in a third mode:
+`subordinate-bench --proxy` (TASK-74).
+
+### What the harness measures
+
+One run takes `longgop_1080p_1h.mp4` — an hour of 1920x1080 H.264 with a
+250-frame GOP and B-frames, the same structure as the ten-minute clip — and:
+
+* makes an intra-only proxy of it through the production `sub_media::Proxy`
+  path, at half resolution in whichever of `DNxHR` LB and MJPEG this
+  installation can write at that size, or reuses one already in the cache
+  exactly as the editor would;
+* scrubs and plays **both** files through the same `sub_media::Decoder` and
+  `sub_render::Nv12Converter` path the other scenarios use, so the four
+  scenarios sit in one report and the proxy's advantage is visible rather than
+  asserted;
+* reads the process's own peak resident size (`VmHWM` on Linux) at the end.
+
+Three integer comparisons come out of it, and they are what the criterion is:
+
+| Criterion | How it is judged |
+| --- | --- |
+| Scrub above 30 fps | the proxy's sustained scrub rate, in milli-fps, against `30_000` |
+| No stalls over 5 s of playback | timed playback steps that took longer than one frame interval (40 ms at 25 fps); zero is the passing value |
+| Memory under a documented budget | peak RSS against 2048 MiB, `--memory-budget` to change it |
+
+The budget is a constant, not a fraction of the source: an editor holding an
+hour-long file open must not grow with the length of that file. 2 GiB is the
+frame cache's own default budget (512 MiB) with room around it for the
+decoder's buffers, the pictures in flight, the upload staging and the driver's
+allocations. Peak memory is only measured on Linux; elsewhere the report
+carries no `peak_rss_bytes` and that criterion is recorded as unmeasured rather
+than guessed at.
+
+### Running it
+
+```
+./scripts/gen-fixtures.sh --hour                      # ~15 min, ~380 MB
+cargo run --release -p subordinate-bench -- --proxy   # target/bench/proxy.json
+cargo run --release -p subordinate-bench -- --proxy --seconds 2 --seeks 10
+```
+
+The first run also transcodes the proxy, which takes minutes; every run after
+it reuses the proxy from `target/bench/proxy-cache` (`--proxy-cache` puts it
+somewhere else). Without the fixture the run is a `skipped` section and exits
+0. Like `--sync`, a *measured* run fails on its numbers: a missed criterion
+exits non-zero with `bench.proxy_below_target` and the summary names which one.
+
+### CI
+
+This mode is not in CI and is not meant to be: the fixture costs a quarter of
+an hour of encoding and the proxy another few minutes, against a CI Linux job
+that currently runs in about eleven minutes in total. It is a run made by hand
+on a machine worth measuring, and its numbers are recorded below.
+
+### Baseline: Linux software decode, software rasteriser
+
+Recorded 2026-09-11 (TASK-74). WSL2 on an AMD Ryzen 9 9900X (24 threads), no
+GPU and no hardware decoder: GStreamer 1.24 with `avdec_h264`, Mesa llvmpipe
+25.2.8 for the NV12 upload and YUV-to-RGB pass, release build, harness
+defaults (60 seeks, 5 s of playback).
+
+Source: `longgop_1080p_1h.mp4`, 1920x1080 at 25 fps, one hour, 365 MiB.
+Proxy: MJPEG 960x540, 90 000 frames, 1832 MiB, transcoded in 72 s.
+
+| File | Scenario | Sustained fps | Latency p50 | Latency p95 | Stalls |
+| --- | --- | --- | --- | --- | --- |
+| source | playback | 265.7 | 3.764 ms | 4.028 ms | 0 of 125 |
+| source | scrub | 8.8 | 111.689 ms | 203.457 ms | — |
+| proxy | playback | 472.5 | 2.108 ms | 2.298 ms | 0 of 125 |
+| proxy | scrub | 299.3 | 3.328 ms | 3.557 ms | — |
+
+| Criterion | Result | Verdict |
+| --- | --- | --- |
+| Proxy scrub above 30 fps | 299.274 fps | PASS |
+| No stall over 5 s of playback | 0 steps over 40 ms, slowest 2.437 ms | PASS |
+| Peak memory under 2048 MiB | 514 MiB | PASS |
+
+The scrub row is the whole argument for proxies, and it is the only row that
+changes by an order of magnitude: on the original, every seek lands inside a
+250-frame GOP and pays for the pictures in front of it, so a drag across the
+hour runs at 8.8 fps — a quarter of the criterion — while the same drag on the
+intra-only proxy costs one picture and runs at 299 fps. Playback is fast on
+both, because playback decodes forward and a long GOP is *cheaper* to decode
+sequentially than an intra-only file is; what the proxy buys there is headroom,
+not a rescue.
+
+Memory is the number to watch over time. 514 MiB peak is the frame cache's
+budget plus the decoder and the transcode that ran in the same process, against
+an hour-long, 365 MiB source — and it must stay a constant as sources get
+longer. A peak that tracks the length of the file is the regression this row
+exists to catch.
+
+Read the whole table as a floor: software decode on a software rasteriser is
+the slowest way to run any of this, and it still clears every number. A machine
+with a hardware decoder and a real GPU has no way to be worse — and the row for
+one should be added here (rather than replacing this one) when the `verify`
+tasks run on real hardware (TASK-116's GPU runners).

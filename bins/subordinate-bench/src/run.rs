@@ -41,6 +41,10 @@ pub struct Options {
     pub hardware: HardwarePreference,
     /// Whether the texture stage runs at all.
     pub use_gpu: bool,
+    /// How long a playback step may take before it counts as a stall, in
+    /// nanoseconds. `None` counts no stalls, which is what the colour-bar
+    /// scenarios want: they measure a rate, not real-time playback.
+    pub stall_threshold_nanos: Option<u64>,
 }
 
 impl Default for Options {
@@ -52,6 +56,7 @@ impl Default for Options {
             warmup: 3,
             hardware: HardwarePreference::Prefer,
             use_gpu: true,
+            stall_threshold_nanos: None,
         }
     }
 }
@@ -115,7 +120,7 @@ pub fn run(options: &Options) -> SubResult<Report> {
 ///
 /// Any adapter failure other than "there is no adapter": a driver that
 /// refuses a device is a real problem, not an absent GPU.
-fn open_adapter() -> SubResult<Option<RenderContext>> {
+pub fn open_adapter() -> SubResult<Option<RenderContext>> {
     match RenderContext::headless() {
         Ok(context) => Ok(Some(context)),
         Err(RenderError::NoAdapter { backends }) => {
@@ -138,7 +143,7 @@ fn locate(dir: &Path, name: &str) -> Result<(PathBuf, u64), String> {
 }
 
 /// Decode `options.frames` consecutive frames and put every one on the GPU.
-fn measure_playback(
+pub fn measure_playback(
     path: &Path,
     name: &str,
     options: &Options,
@@ -185,6 +190,10 @@ fn measure_playback(
     scenario.decode = decode.summary();
     scenario.upload = context.and(upload.summary());
     scenario.decode_to_texture = context.and(total.summary());
+    if let Some(threshold) = options.stall_threshold_nanos {
+        scenario.stall_threshold_nanos = Some(threshold);
+        scenario.stalls = Some(total.count_over(threshold));
+    }
     finish(&mut scenario, frames, wall);
     Ok(scenario)
 }
@@ -193,7 +202,7 @@ fn measure_playback(
 ///
 /// This is what dragging the scrub bar costs: each step is a frame-accurate
 /// seek followed by the same upload the viewer does.
-fn measure_scrub(
+pub fn measure_scrub(
     path: &Path,
     name: &str,
     duration_nanos: u64,
