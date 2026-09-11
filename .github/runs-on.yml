@@ -6,7 +6,7 @@
 #
 # Schema: https://runs-on.com/configuration/repo-config/
 # GPU images: https://runs-on.com/runners/gpu/
-# Built-in images: https://runs-on.com/docs/runners/platforms/
+# Built-in images (incl. windows22-full-x64): https://runs-on.com/docs/runners/platforms/
 #
 # Cost: RunsOn has no per-runner cost-cap field in this schema (v3.3.0), so the
 # us-east-1 list prices are recorded in the comments on each runner. Instances
@@ -17,23 +17,8 @@
 # spot capacity is unavailable, re-dispatch the job with `/spot=false` appended
 # to the runs-on label to force on-demand.
 #
-# All four runners need the EC2 G-family vCPU quotas in us-east-1 above zero
+# All GPU runners need the EC2 G-family vCPU quotas in us-east-1 above zero
 # (L-DB2E81BA on-demand, L-3819A6DF spot) - see TASK-113.
-
-images:
-  # PLACEHOLDER - not yet usable. TASK-115 builds the Windows GPU AMI (NVIDIA
-  # and AMD drivers, GStreamer 1.28, the RunsOn agent) and replaces the `ami`
-  # values below with the real IDs. Until then any job that asks for
-  # gpu-nvidia-windows or gpu-amd-windows will fail to launch.
-  windows-gpu-nvidia-placeholder:
-    platform: "windows"
-    arch: "x64"
-    ami: "ami-00000000000000000"
-
-  windows-gpu-amd-placeholder:
-    platform: "windows"
-    arch: "x64"
-    ami: "ami-00000000000000000"
 
 runners:
   # NVIDIA T4 (16 GB), 4 vCPU / 16 GB RAM.
@@ -69,26 +54,29 @@ runners:
     volume: 80gb:gp3:125mbs:3000iops
     ssh: false
 
-  # NOT YET USABLE - points at the TASK-115 AMI placeholder above.
-  # g4dn.xlarge, us-east-1 on-demand $0.526/h.
+  # NVIDIA T4 (16 GB) on Windows Server 2022, 4 vCPU / 16 GB RAM.
+  # us-east-1 on-demand $0.746/h (Windows licence included); Windows spot is
+  # rarely discounted, so budget the on-demand rate.
+  #
+  # No custom AMI is needed (TASK-115): RunsOn's stock `windows22-full-x64`
+  # image boots fine on a g4dn instance, it simply has no NVIDIA driver. The
+  # job installs the AWS-published driver from the public bucket
+  # s3://ec2-windows-nvidia-drivers with `-s -n` (silent, no reboot); the
+  # driver loads without a restart, which matters because a RunsOn ephemeral
+  # runner cannot survive one. See docs/DEVELOPMENT.md "GPU CI (RunsOn)" and
+  # the `nvidia-windows` job in .github/workflows/gpu-smoke.yml for the recipe
+  # to copy into any job that uses this runner.
   gpu-nvidia-windows:
     family: ["g4dn.xlarge"]
     cpu: [4, 4]
     ram: [16, 16]
-    image: windows-gpu-nvidia-placeholder
+    image: windows22-full-x64
     spot: price-capacity-optimized
     retry: when-interrupted
     volume: 120gb:gp3:125mbs:3000iops
     ssh: false
 
-  # NOT YET USABLE - points at the TASK-115 AMI placeholder above.
-  # g4ad.xlarge, us-east-1 on-demand $0.37853/h.
-  gpu-amd-windows:
-    family: ["g4ad.xlarge"]
-    cpu: [4, 4]
-    ram: [16, 16]
-    image: windows-gpu-amd-placeholder
-    spot: price-capacity-optimized
-    retry: when-interrupted
-    volume: 120gb:gp3:125mbs:3000iops
-    ssh: false
+  # There is deliberately no `gpu-amd-windows` runner: AWS has retired g4ad and
+  # offers no other AMD GPU instance type, so AMF/amfh264enc cannot be verified
+  # in this account at all. AMD Linux (VA-API) runs on the self-hosted `box`
+  # runner; AMD Windows stays manual until an AMD Windows machine exists.

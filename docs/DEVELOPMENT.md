@@ -882,11 +882,40 @@ on EC2 instances in the project's AWS account through
   | --- | --- | --- | --- | --- |
   | `gpu-nvidia-linux` | `g4dn.xlarge` (T4) | `ubuntu24-gpu-x64` | 0.526 | ready |
   | `gpu-amd-linux` | `g4ad.xlarge` (Radeon Pro V520) | `ubuntu26-full-x64` | 0.379 | ready |
-  | `gpu-nvidia-windows` | `g4dn.xlarge` | custom AMI placeholder | 0.526 | not usable until TASK-115 |
-  | `gpu-amd-windows` | `g4ad.xlarge` | custom AMI placeholder | 0.379 | not usable until TASK-115 |
+  | `gpu-nvidia-windows` | `g4dn.xlarge` (T4) | `windows22-full-x64` | 0.752 | ready |
 
-  All four need the EC2 G-family vCPU quotas (`L-DB2E81BA` on-demand,
+  There is no `gpu-amd-windows` runner and there cannot be one: AWS retired
+  g4ad and offers no other AMD GPU instance type, so AMF (`amfh264enc`) has no
+  cloud host at all.
+
+  All three need the EC2 G-family vCPU quotas (`L-DB2E81BA` on-demand,
   `L-3819A6DF` spot) above zero in us-east-1.
+- **The config is read from `main`, not from your branch.** For public repos
+  RunsOn only reads `.github/runs-on.yml` from the default branch, so a runner
+  added or changed on a feature branch is invisible and the job fails to
+  launch (`InvalidAMIID.Malformed` if the old definition had a placeholder
+  AMI). To test a runner definition before merging, spell its parameters out
+  inline instead - `runs-on=${{ github.run_id }}/image=windows22-full-x64/family=g4dn.xlarge/spot=false`
+  - and switch back to `runner=<name>` in the merge commit.
+- **Windows GPU needs no custom AMI** (TASK-115). The stock
+  `windows22-full-x64` image boots fine on a `g4dn`; the only thing missing is
+  the NVIDIA driver, and the job installs it itself in about 100 seconds:
+
+  - AWS publishes the driver in `s3://ec2-windows-nvidia-drivers/latest/`
+    (one ~713 MB `*_grid_*_aws_swl.exe`). Fetch it over **plain anonymous
+    HTTPS** (`https://ec2-windows-nvidia-drivers.s3.amazonaws.com/?list-type=2&prefix=latest/`
+    to find the key, then `curl.exe` the object). Do *not* use `aws s3 cp` as
+    the AWS docs suggest: the RunsOn instance role is scoped to the stack's
+    own buckets and returns `AccessDenied` on `ListObjectsV2`.
+  - Install with `-s -n` (silent, no reboot). It exits 0 and the driver loads
+    straight away - `nvidia-smi` reports the Tesla T4 and `nvh264enc`
+    registers in the same job. This is essential: a RunsOn runner is ephemeral
+    and cannot survive a restart.
+  - Then install GStreamer 1.28 with the same official MSVC installer recipe
+    `ci.yml` uses. Both `nvh264enc` (NVENC) and `mfh264enc` (Media Foundation)
+    are present afterwards.
+  - Copy the `nvidia-windows` job in `.github/workflows/gpu-smoke.yml`
+    verbatim for any new Windows GPU job.
 - RunsOn's `*-gpu-*` images carry the NVIDIA driver and CUDA only, so the AMD
   runner uses the plain Ubuntu 26.04 image and jobs install the Mesa VA-API
   stack (`mesa-va-drivers`, `vainfo`) themselves. The GStreamer `va` plugin
@@ -895,7 +924,8 @@ on EC2 instances in the project's AWS account through
   apt GStreamer is 1.24, not the 1.28 pinned everywhere else.
 - GPU smoke test: run the **GPU smoke** workflow (`workflow_dispatch`). It
   checks `nvidia-smi` plus `gst-inspect-1.0 --exists nvh264enc` on the NVIDIA
-  runner, and `/dev/dri` + `vainfo` plus `vah264enc` on the AMD one.
+  Linux runner, `/dev/dri` + `vainfo` plus `vah264enc` on the AMD box, and
+  `nvidia-smi` plus `nvh264enc`/`mfh264enc` on the NVIDIA Windows runner.
 - Cost: the RunsOn config schema has no per-runner price cap, so hourly prices
   are recorded in comments there and every GPU job must set `timeout-minutes`.
   Runners request spot (`price-capacity-optimized`) with
@@ -903,6 +933,13 @@ on EC2 instances in the project's AWS account through
   `/spot=false` appended to the label to force on-demand. Instances are billed
   by AWS with no markup; every job gets a fresh instance that is terminated
   when the job ends.
+- Measured cost of one GPU smoke run (run 34618546433, 2026-09-11): the
+  Windows NVIDIA job billed about 7.5 minutes of `g4dn.xlarge` Windows
+  on-demand (instance launched 15:50:54Z, job finished 15:58:22Z) - roughly
+  **0.10 USD**. Of the 3m22s inside the job, 1m40s was the NVIDIA driver
+  (14s download, 86s install) and 1m19s was the GStreamer installer; the
+  remaining 4m06s was Windows boot and runner registration before the job
+  started. Windows spot is rarely discounted, so budget the on-demand rate.
 - Idle cost: the stack runs in public mode (`Private: false`, changed
   2026-09-09) so there is no NAT gateway; the only idle cost is the small
   Fargate scheduler (about 9 USD/month). Do not enable private mode: the
