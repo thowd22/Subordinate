@@ -4797,7 +4797,7 @@ dependencies = [
 
 [[package]]
 name = "spike-nv12-viewport"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eframe",
  "gstreamer",
@@ -4812,7 +4812,7 @@ dependencies = [
 
 [[package]]
 name = "spike-wasm-command-world"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "sub-core",
@@ -4872,7 +4872,7 @@ dependencies = [
 
 [[package]]
 name = "sub-audio"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cpal",
  "ringbuf",
@@ -4887,7 +4887,7 @@ dependencies = [
 
 [[package]]
 name = "sub-command"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "interprocess",
  "schemars",
@@ -4904,7 +4904,7 @@ dependencies = [
 
 [[package]]
 name = "sub-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4915,7 +4915,7 @@ dependencies = [
 
 [[package]]
 name = "sub-edit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "schemars",
  "serde",
@@ -4928,7 +4928,7 @@ dependencies = [
 
 [[package]]
 name = "sub-export"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gstreamer",
  "gstreamer-app",
@@ -4948,7 +4948,7 @@ dependencies = [
 
 [[package]]
 name = "sub-media"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gstreamer",
  "gstreamer-app",
@@ -4969,7 +4969,7 @@ dependencies = [
 
 [[package]]
 name = "sub-model"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "schemars",
@@ -4982,7 +4982,7 @@ dependencies = [
 
 [[package]]
 name = "sub-plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "jsonschema",
@@ -5007,7 +5007,7 @@ dependencies = [
 
 [[package]]
 name = "sub-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "pollster 1.0.1",
@@ -5018,7 +5018,7 @@ dependencies = [
 
 [[package]]
 name = "sub-test-support"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5026,7 +5026,7 @@ dependencies = [
 
 [[package]]
 name = "sub-time"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proptest",
  "schemars",
@@ -5037,7 +5037,7 @@ dependencies = [
 
 [[package]]
 name = "sub-ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eframe",
  "egui_dock",
@@ -5063,7 +5063,7 @@ dependencies = [
 
 [[package]]
 name = "subordinate"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "sub-core",
  "sub-ui",
@@ -5072,7 +5072,7 @@ dependencies = [
 
 [[package]]
 name = "subordinate-bench"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5090,7 +5090,7 @@ dependencies = [
 
 [[package]]
 name = "subordinate-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "png",
  "serde",
@@ -5113,7 +5113,7 @@ dependencies = [
 
 [[package]]
 name = "subordinate-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rmcp",
  "serde_json",
@@ -5129,7 +5129,7 @@ dependencies = [
 
 [[package]]
 name = "subordinate-sdk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",

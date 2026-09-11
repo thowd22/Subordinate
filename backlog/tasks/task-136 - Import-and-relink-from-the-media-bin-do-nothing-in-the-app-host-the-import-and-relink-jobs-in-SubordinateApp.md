@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-11 21:01'
-updated_date: '2026-09-11 21:32'
+updated_date: '2026-09-11 22:21'
 labels:
   - ui
   - media
@@ -64,6 +64,50 @@ Validation (WSL, software Vulkan, GStreamer from the local gstroot, SUB_FIXTURES
 - cargo test -p sub-ui: 373 unit + every integration suite green, including the new tests/media_import_app.rs (3 tests) and the extended tests/media_bin.rs (14) and tests/media_import_fixtures.rs.
 - cargo test -p sub-edit: green.
 - New snapshot crates/sub-ui/tests/snapshots/media_bin_importing.png recorded with UPDATE_SNAPSHOTS=1 and eyeballed: two 'Importing... <file>' rows and one '[model.invalid_path] ...' line above the folder tree.
+
+## Follow-up: the import and relink jobs were refused on Windows and macOS (PR #1, branch `fix/import-tests-windows`)
+
+CI run 34649952281 was green on ubuntu-26.04 and failed on windows-latest and macos-latest with two of this task's own tests:
+
+- `importing_from_the_bin_probes_off_the_ui_thread_and_lands_as_one_undo_step` at `media_import_app.rs:170` — "the bin shows the files as pending while they are probed"
+- `relinking_from_the_bin_searches_as_a_job_and_clears_the_offline_badge` at `media_import_app.rs:396` — "the offline badge is cleared"
+
+### Root cause: one, and it was product code, not the tests
+
+`SubordinateApp::project_dir` canonicalises the folder holding the project file. Everything it is then compared against arrives as the OS handed it over: a file dialog's answer, an OS drop, a `scan_folder` result. `MediaPath::relative_to` compared the two with a plain textual `strip_prefix`, and the two spellings do not agree off Linux:
+
+- **Windows** — `std::fs::canonicalize` answers with a verbatim `\\?\C:\Users\runneradmin\AppData\Local\Temp\...` path, while `temp_dir()` and the shell hand out the 8.3 short name `C:\Users\RUNNER~1\AppData\Local\Temp\...`.
+- **macOS** — it resolves `/var/folders/...` to `/private/var/folders/...`, because `/var` is a symlink.
+
+So `strip_prefix` failed on both. Every import job bounced with `model.invalid_path` on its first line, before a byte was read, and `RelinkPlan::build` rejected every match, so the item stayed offline. On Linux the two spellings already agree, which is the whole of why it passed there.
+
+This was never only about the tests: **no import and no relink would have worked at all in the shipped v0.1.1 editor on Windows or macOS.** The 0.32 s test binary was the tell — the jobs were not probing, they were returning immediately.
+
+That immediate return is also why line 170 was the first assertion to fail rather than one further down: a job that fails before any I/O is collected by the very next frame's `poll_media`, which clears the pending row before the test reads it.
+
+### Fix
+
+- `MediaPath::relative_to` compares textually first and asks the filesystem only when that fails, resolving **both** sides through `canonicalize` — which settles symlinks, 8.3 short names, `.`/`..` and the letter case the volume stores. A file not on disk yet resolves through its folder, which a relink target that has moved away needs. Resolving both sides never turns an outsider into an insider, and that is asserted.
+- New `sub_model::plain_path` drops Windows' verbatim prefix, and `project_dir` uses it. `\\?\` is contagious: it leaks into the error details a user reads and into the `file://` URI GLib is asked to build, and GLib will not build one from a verbatim path.
+
+### Test changes, kept to the timing assumption only
+
+- The pending-rows assertion read the bin *after* a frame, but the frame that collects a finished import is the same frame that clears its pending row, so a machine quick enough to probe both fixtures inside one frame looks like a window that never showed them. It now reads before the next frame, where the answer cannot race, and checks the count rather than mere non-emptiness.
+- `SubordinateApp::media_bin` refreshes the panel's status on the way out, so a caller reaching for it between frames sees the jobs as they stand rather than as they stood when the last frame started.
+- Two new `sub-model` unit tests: a canonicalised project folder against a dialog-shaped path, and (Unix only) a file reached through a symlinked folder — the same mismatch the Windows runner hits, reproduced where it can be reproduced.
+
+### Note
+
+`the_callback_allocates_nothing_over_ten_seconds` in sub-audio was reported failing once on macOS and passed on the rerun of the same commit. Treated as a flake; not investigated further.
+
+### CI result
+
+PR #1, run 34652279671 (first push): **windows-latest, macos-latest and ubuntu-26.04 all green.** Confirmed from the job logs that the two tests ran rather than skipping:
+
+- windows-latest: `importing_from_the_bin_probes_off_the_ui_thread_and_lands_as_one_undo_step ... ok`, `relinking_from_the_bin_searches_as_a_job_and_clears_the_offline_badge ... ok`
+- macos-latest: both, plus `a_file_that_cannot_be_read_surfaces_a_sub_error_in_the_bin ... ok`
+
+`the_callback_allocates_nothing_over_ten_seconds` passed on macOS in this run, which with the earlier rerun makes two clean passes against one failure — a flake, as called above.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
