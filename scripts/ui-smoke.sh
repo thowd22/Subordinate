@@ -219,8 +219,10 @@ fi
         echo "xrandr is not installed; no monitor list"
     fi
     echo "--- XINERAMA ---"
+    # `| head` would close the pipe under the caller's `set -o pipefail` and
+    # take the whole script with it, so the trimming happens inside sed.
     xdpyinfo -display "$display" -ext XINERAMA 2>&1 |
-        sed -n '/XINERAMA/,$p' | head -20
+        sed -n '/head #/p; /dimensions:/p; /number of screens/p' || true
     echo "--- heads this run uses ---"
     printf '%s\n' "$heads" | awk '{printf "head %d: %sx%s @ %s,%s\n", NR - 1, $1, $2, $3, $4}'
 } >"$out_dir/monitors.txt" 2>&1
