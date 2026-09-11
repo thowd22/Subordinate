@@ -513,8 +513,9 @@ jobs:
       - name: Virtual display tooling and GPU facts
         run: |
           . /etc/os-release && echo "os=$PRETTY_NAME"
-          for tool in Xvfb xdpyinfo xwd xwininfo xrandr xdotool magick convert; do
-            printf '%-10s %s\n' "$tool" "$(command -v "$tool" || echo MISSING)"
+          for tool in Xvfb xdpyinfo xwd xwininfo xrandr xdotool magick convert \
+                      sway weston cage labwc grim wayland-info; do
+            printf '%-14s %s\n' "$tool" "$(command -v "$tool" || echo MISSING)"
           done
           ls -l /dev/dri || true
           ls -l /usr/share/vulkan/icd.d/ || true
@@ -556,11 +557,16 @@ jobs:
       - name: Build the editor (debug)
         run: cargo build -p subordinate
 
-      # --gpu drops LIBGL_ALWAYS_SOFTWARE so the picture is RADV's, and
-      # --require-popout-on-head 1 turns "look at the screenshots" into an
-      # assertion: the pop-out's absolute geometry is read back off the server
-      # and has to lie inside head 1's rectangle, with the editor window on a
-      # different head.
+      # --gpu asks for the machine's real adapter. On Xvfb it does not get it:
+      # Mesa's Vulkan WSI needs DRI3, Xvfb has none, and RADV refuses the
+      # surface outright ("no valid format for the surface at all", run
+      # 34614668762), so the script says so and redraws on the software
+      # rasteriser. The GPU's own rendering is proved headlessly by the
+      # amd-linux job in this same workflow; what this job proves is the
+      # windows. --require-popout-on-head 1 turns "look at the screenshots"
+      # into an assertion: the pop-out's absolute geometry is read back off the
+      # server and has to lie inside head 1's rectangle, with the editor window
+      # on a different head.
       - name: Pop-out smoke on two outputs
         env:
           RUST_LOG: info

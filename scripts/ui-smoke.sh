@@ -162,8 +162,26 @@ if [ "$head_count" -lt 2 ] || [ "$first_origin" = "$second_origin" ]; then
     root_height=${root_size#* }
     half=$((root_width / 2))
     if command -v xrandr >/dev/null 2>&1; then
-        xrandr -display "$display" --setmonitor SUB-0 "$half/0x$root_height/0+0+0" none || true
-        xrandr -display "$display" --setmonitor SUB-1 "$half/0x$root_height/0+$half+0" none || true
+        # The first monitor takes the server's real output, the second takes
+        # none: a monitor with no output is how RandR expresses a head that is
+        # not physically there, and leaving the output unclaimed would keep the
+        # server's automatic whole-screen monitor alive beside these two.
+        # `--setmonitor` also needs physical dimensions that are not zero --
+        # xrandr takes 0mm as "not specified" -- so they are derived from the
+        # pixel count at a plausible 96 dpi.
+        output=$(xrandr -display "$display" --listmonitors |
+            awk 'NR > 1 { print $NF; exit }')
+        [ -n "$output" ] || output=none
+        mm_w=$((half * 254 / 960))
+        mm_h=$((root_height * 254 / 960))
+        set +e
+        xrandr -display "$display" --setmonitor SUB-0 \
+            "$half/${mm_w}x$root_height/$mm_h+0+0" "$output" 2>&1 |
+            sed 's/^/ui-smoke: xrandr: /'
+        xrandr -display "$display" --setmonitor SUB-1 \
+            "$half/${mm_w}x$root_height/$mm_h+$half+0" none 2>&1 |
+            sed 's/^/ui-smoke: xrandr: /'
+        set -e
     fi
     heads=$(printf '%s %s 0 0\n%s %s %s 0\n' "$half" "$root_height" "$half" "$root_height" "$half")
 fi
@@ -183,15 +201,6 @@ printf '%s\n' "$heads" | awk '{printf "  head %d: %sx%s @ %s,%s\n", NR - 1, $1, 
 second_x=$(printf '%s\n' "$heads" | sed -n '2p' | awk '{print $3}')
 second_y=$(printf '%s\n' "$heads" | sed -n '2p' | awk '{print $4}')
 
-# Software Vulkan where there is no GPU: the picture is what a headless runner
-# can draw, and the point is that the windows come up at all. With --gpu the
-# override is dropped instead, so the adapter the app names in its log is the
-# machine's real one -- which is the whole reason to run this on a GPU runner.
-if [ "$force_software" -eq 1 ]; then
-    export LIBGL_ALWAYS_SOFTWARE=1
-else
-    unset LIBGL_ALWAYS_SOFTWARE || true
-fi
 export RUST_LOG="${RUST_LOG:-info}"
 export DISPLAY="$display"
 
@@ -200,26 +209,58 @@ if [ -n "$binary" ]; then
 else
     set -- cargo run --quiet -p subordinate --
 fi
-echo "ui-smoke: launching $* with the pop-out at $second_x,$second_y"
-"$@" --ui-smoke --hold-seconds "$hold_seconds" \
-    --popout-position "$second_x,$second_y" "$project" >"$log" 2>&1 &
-app_pid=$!
 
-# The app prints its ready line once the editor window and the pop-out have
-# each painted a frame; capturing before that photographs empty rectangles.
-ready=0
-for _ in $(seq 1 $((ready_timeout * 5))); do
-    if grep -q 'ui-smoke ready' "$log" 2>/dev/null; then
-        ready=1
-        break
+# launch_app -> 0 once the app has reported its first frame, 1 if it died or
+# never got there. The log is truncated per attempt, because there is at most
+# one retry and the failed attempt is kept beside it.
+launch_app() {
+    "$@" --ui-smoke --hold-seconds "$hold_seconds" \
+        --popout-position "$second_x,$second_y" "$project" >"$log" 2>&1 &
+    app_pid=$!
+    for _ in $(seq 1 $((ready_timeout * 5))); do
+        if grep -q 'ui-smoke ready' "$log" 2>/dev/null; then
+            return 0
+        fi
+        kill -0 "$app_pid" 2>/dev/null || break
+        sleep 0.2
+    done
+    return 1
+}
+
+# Vulkan on a real GPU cannot present into an Xvfb window: Mesa's WSI needs
+# DRI3, which Xvfb does not implement, so RADV refuses the surface with "There
+# was no valid format for the surface at all" before the first frame (run
+# 34614668762 on box). The GPU's own rendering is covered by the headless
+# readback and render jobs in this workflow; what this script is for is the
+# windows. So --gpu means "draw with the real adapter if this display can
+# present it", and a display that cannot falls back to the software rasteriser
+# with the reason said out loud rather than failing the run.
+software=$force_software
+if [ "$software" -eq 1 ]; then
+    export LIBGL_ALWAYS_SOFTWARE=1
+else
+    unset LIBGL_ALWAYS_SOFTWARE || true
+fi
+echo "ui-smoke: launching $* with the pop-out at $second_x,$second_y"
+if ! launch_app "$@"; then
+    if [ "$software" -eq 0 ] && grep -qi 'no valid format for the surface\|Found no drivers\|no suitable adapter' "$log"; then
+        echo "ui-smoke: the real adapter could not present on $display (an X server without DRI3, such as Xvfb); retrying on the software rasteriser"
+        cp "$log" "$out_dir/app-gpu-attempt.log"
+        kill "$app_pid" 2>/dev/null || true
+        wait "$app_pid" 2>/dev/null || true
+        app_pid=""
+        software=1
+        export LIBGL_ALWAYS_SOFTWARE=1
+        launch_app "$@" || {
+            echo "ui-smoke: the app never reported a first frame" >&2
+            cat "$log" >&2 || true
+            exit 1
+        }
+    else
+        echo "ui-smoke: the app never reported a first frame" >&2
+        cat "$log" >&2 || true
+        exit 1
     fi
-    kill -0 "$app_pid" 2>/dev/null || break
-    sleep 0.2
-done
-if [ "$ready" -ne 1 ]; then
-    echo "ui-smoke: the app never reported a first frame" >&2
-    cat "$log" >&2 || true
-    exit 1
 fi
 ready_line=$(grep -m1 'ui-smoke ready' "$log")
 echo "ui-smoke: $ready_line"
@@ -347,6 +388,11 @@ app_pid=""
     if [ -n "$adapter_line" ]; then
         echo
         echo "\`$adapter_line\`"
+    fi
+    if [ "$force_software" -eq 0 ] && [ "$software" -eq 1 ]; then
+        echo
+        echo "The real adapter could not present on this display (Xvfb has no"
+        echo "DRI3), so the windows were drawn by the software rasteriser."
     fi
     echo
     echo '```'
