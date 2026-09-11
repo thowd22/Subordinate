@@ -1177,8 +1177,8 @@ left running is the most expensive mistake available in this repository.
 
 `packaging/` holds everything the Linux packages are built from (TASK-103).
 Both packages are built and smoke-tested by `.github/workflows/packaging.yml`,
-which runs on demand, on a `v*` tag and on any pull request touching
-`packaging/`.
+which runs on demand, on any pull request touching `packaging/`, and as a
+reusable workflow called by `release.yml` on a `v*` tag (see "Releasing").
 
 ```
 packaging/
@@ -1380,8 +1380,9 @@ NVENC or VA-API export out of the AppImage belongs to `hardware.yml`
 `packaging/windows/` builds a single Windows installer that carries the pinned
 GStreamer 1.28 runtime, so a user installs one thing and can export (TASK-104).
 `.github/workflows/windows-packaging.yml` builds it, installs it, renders with
-it and uninstalls it on a hosted `windows-latest` runner, on demand, on a `v*`
-tag and on any pull request touching `packaging/windows/`. It is a separate
+it and uninstalls it on a hosted `windows-latest` runner, on demand, on any
+pull request touching `packaging/windows/`, and as a reusable workflow called
+by `release.yml` on a `v*` tag (see "Releasing"). It is a separate
 workflow from `packaging.yml` because that one is Linux end to end, down to the
 `validate` job that gates it.
 
@@ -1540,3 +1541,105 @@ Media Foundation transform is part of Windows). The job reports that rather
 than asserting it. An actual NVENC export out of the installed package is
 TASK-115's job, on the hardware workflow's runners. Installing on a clean
 Windows image that has never had a build toolchain on it is TASK-110.
+
+## Releasing
+
+`.github/workflows/release.yml` turns a tag into a GitHub release with every
+package attached (TASK-106). It builds nothing itself: it calls the two
+packaging workflows above as **reusable workflows** and then collects what
+they produced.
+
+```
+release.yml
+  linux    -> packaging.yml         AppImage + Flatpak bundle   (TASK-103)
+  windows  -> windows-packaging.yml MSI                         (TASK-104)
+  macos    -> (commented placeholder)  dmg                      (TASK-105)
+  publish  -> collect, SHA256SUMS, gh release create
+```
+
+Because `release.yml` owns the `v*` tags, neither `packaging.yml` nor
+`windows-packaging.yml` has a tag trigger of its own any more. That is
+deliberate: a tag produces exactly one run, so the packages that were smoke
+tested are the packages that get published, rather than a second set built by
+a parallel run that nobody looked at.
+
+The self-hosted AMD job (`packages-amd`) is skipped when the release workflow
+calls `packaging.yml` -- it passes `hardware: 'false'`. box is a mini PC in the
+user's house, and a release must neither wait on it nor fail because it is
+switched off. Everything else in `packaging.yml`, including the three-target
+AppImage smoke matrix, still runs against the artifacts being published.
+
+### Cutting a release
+
+1. Bump `version` in the workspace `Cargo.toml` **and** add a matching
+   `<release>` to `packaging/linux/io.github.thowd22.Subordinate.metainfo.xml`.
+   `packaging/validate.sh` fails if they drift, and the release workflow fails
+   if the tag and the packaged version disagree.
+2. Merge that to `main`.
+3. Tag and push:
+
+   ```bash
+   git tag -a v0.2.0 -m "Subordinate 0.2.0"
+   git push origin v0.2.0
+   ```
+
+4. Watch the run (`gh run watch`). About an hour cold: the AppImage and the
+   MSI are both full release builds, and they run in parallel.
+
+The `publish` job then:
+
+* downloads the `subordinate-*` artifacts and copies the packages -- and only
+  the packages -- into `dist/`, failing if any of the three is missing;
+* checks that all packages agree on a version, and that the version matches
+  the tag with its leading `v` removed;
+* writes `dist/SHA256SUMS` with bare filenames and immediately verifies it
+  with `sha256sum -c`, so a corrupt artifact is caught before publication
+  rather than by the first person to download it;
+* runs `gh release create <tag> --verify-tag --generate-notes dist/*`.
+
+A user checks a download with:
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS
+```
+
+### The dry run
+
+Every step above except `gh release create` runs in dry-run mode, so the
+release path is exercised without publishing anything:
+
+```bash
+gh workflow run release.yml --ref main          # dry_run defaults to true
+```
+
+A run publishes **only** when all three of these hold: the ref is a tag, the
+tag starts with `v`, and the `dry_run` input is not `true`. Anything else --
+a dispatch, a branch, a tag that is not a `v*` -- builds the packages, checks
+the versions, writes and verifies `SHA256SUMS`, uploads the whole of `dist/`
+as the `subordinate-release-<version>` artifact, and prints the asset list it
+*would* have published. The decision is made once, in the "Decide whether this
+run publishes" step, and the job summary states which mode ran and why.
+
+The `sample-media-v1` release -- where `scripts/get-sample-media.sh` fetches
+the test fixtures from -- is untouchable from this workflow. The only release
+name it ever mentions is `github.ref_name`, it refuses a ref that is not a
+`v*` tag, and `gh release create` fails rather than modifying an existing
+release; there is no `gh release edit`, `upload` or `delete` anywhere in it.
+
+### Where the dmg slots in
+
+The macOS package (TASK-105) is deferred until the user's Apple silicon Mac
+arrives: a dmg has to be built, and notarised, on a Mac, and the hosted macOS
+runners are not in this project's CI budget. `release.yml` carries a commented
+`macos` job marking the spot. When TASK-105 adds
+`.github/workflows/macos-packaging.yml` with a `workflow_call` trigger and an
+artifact named `subordinate-dmg`, wiring it up is three edits:
+
+1. uncomment the `macos` job,
+2. add `macos` to the `publish` job's `needs`,
+3. add `'*.dmg'` to the required-package list in the "Collect the packages"
+   step.
+
+Nothing else changes: the download step already globs `subordinate-*`, the
+collect step already copies `*.dmg`, and the checksum and release steps take
+whatever ended up in `dist/`.

@@ -4,7 +4,9 @@ name: Windows packaging
 # packaging.yml: that one is a Linux workflow end to end (its validate job
 # gates the AppImage and Flatpak jobs and runs Linux-only validators), and a
 # single Windows job bolted onto it would share none of that. TASK-106's
-# release workflow calls both.
+# release workflow calls both as reusable workflows, which is why there is no
+# `push: tags` trigger here -- release.yml owns the `v*` tags, so a tag builds
+# one MSI and that MSI is the one published.
 #
 # What this proves, on a hosted windows-latest runner and nothing else:
 # the MSI builds, installs silently, the installed editor starts, the
@@ -15,8 +17,7 @@ name: Windows packaging
 
 on:
   workflow_dispatch:
-  push:
-    tags: ['v*']
+  workflow_call:
   pull_request:
     paths:
       - 'packaging/windows/**'

@@ -1,0 +1,274 @@
+name: Release
+
+# Cuts a release from a tag (TASK-106). Everything a user can download is
+# built here, by calling the two packaging workflows as reusable workflows
+# rather than duplicating their steps:
+#
+#   * packaging.yml         AppImage + Flatpak bundle (TASK-103)
+#   * windows-packaging.yml MSI                       (TASK-104)
+#   * macOS dmg             (TASK-105) -- not yet; see the `macos` block below
+#
+# Those two workflows have no `push: tags` trigger of their own precisely so
+# that a tag produces exactly one run: this one. The packages that were smoke
+# tested are then the packages that get published, rather than a second set
+# built by a parallel run.
+#
+# Two modes:
+#
+#   * a `v*` tag push          builds everything and creates the GitHub
+#                              release for that tag with the packages and
+#                              SHA256SUMS attached
+#   * anything else, or a
+#     workflow_dispatch with
+#     dry_run left true        builds everything, writes and checks
+#                              SHA256SUMS, uploads the lot as artifacts, and
+#                              prints what it *would* have published
+#
+# Safety: the only release this workflow can ever touch is the one named by
+# the tag that triggered it. It refuses any ref that is not a `v*` tag, it
+# never lists, edits or uploads to an existing release, and it uses
+# `gh release create`, which fails rather than overwriting. Unrelated
+# releases -- `sample-media-v1`, which the test fixtures are pulled from --
+# are therefore untouchable from here.
+
+on:
+  push:
+    tags: ['v*']
+    # TEMPORARY (TASK-106): a new workflow cannot be started with
+    # workflow_dispatch until it exists on the default branch, so the dry run
+    # is verified from the task branch. Removed before the task is finished.
+    branches: [task/task-106]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and check everything but do not create a release'
+        type: boolean
+        default: true
+
+concurrency:
+  # Not cancel-in-progress: a half-cancelled publish is worse than a slow one,
+  # and tags do not get pushed twice.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux packages
+    uses: ./.github/workflows/packaging.yml
+    with:
+      # box is a mini PC in the user's house. A release must not wait on it,
+      # and must not fail because it is switched off. The hosted smoke jobs
+      # inside packaging.yml still run against the very artifacts published
+      # here; hardware encode from the packages is packaging.yml's own job on
+      # demand, and hardware.yml's in general.
+      hardware: 'false'
+
+  windows:
+    name: Windows package
+    uses: ./.github/workflows/windows-packaging.yml
+
+  # ---------------------------------------------------------------- macOS dmg
+  # PLACEHOLDER -- TASK-105, deferred until the user's Apple silicon Mac
+  # arrives (a dmg has to be built, and notarised, on a Mac; the hosted macOS
+  # runners are not part of this project's CI budget). When that task lands it
+  # adds `.github/workflows/macos-packaging.yml` with a `workflow_call`
+  # trigger and an artifact named `subordinate-dmg`, and slotting it in here
+  # is exactly three edits:
+  #
+  #   1. uncomment this job,
+  #   2. add `macos` to the `publish` job's `needs`,
+  #   3. add '*.dmg' to the required-package list in "Collect the packages".
+  #
+  # Nothing else in this workflow is platform-specific: the download step
+  # already globs `subordinate-*`, the collect step already copies `*.dmg`,
+  # and the checksum and release steps take whatever ended up in dist/.
+  #
+  # macos:
+  #   name: macOS package
+  #   uses: ./.github/workflows/macos-packaging.yml
+
+  publish:
+    name: ${{ github.ref_type == 'tag' && !inputs.dry_run && 'Publish' || 'Dry run' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    needs: [linux, windows]
+    permissions:
+      # Only what `gh release create` needs, and only on this job: the build
+      # jobs above run with the workflow's read-only default.
+      contents: write
+    steps:
+      # Decided once, in one place, so every later step and the job summary
+      # agree about which mode this run is in. A release is created only by a
+      # `v*` tag push whose dry_run input is not true -- and `inputs.dry_run`
+      # is empty for a push, so the `= 'true'` comparison is between strings.
+      - name: Decide whether this run publishes
+        id: mode
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          publish=false
+          if [ "$REF_TYPE" != "tag" ]; then
+            reason="ref $REF_NAME is a $REF_TYPE, not a tag"
+          elif [ "${REF_NAME#v}" = "$REF_NAME" ]; then
+            reason="tag $REF_NAME does not start with v"
+          elif [ "$DRY_RUN_INPUT" = "true" ]; then
+            reason="dry_run was requested"
+          else
+            publish=true
+            reason="tag $REF_NAME"
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish ($reason)"
+
+      - name: Download the package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: subordinate-*
+          path: artifacts
+          merge-multiple: true
+
+      # The artifacts carry a little more than the release does -- the
+      # AppImage job also uploads host-libraries.txt, which is build evidence,
+      # not something a user downloads. dist/ is exactly what gets published.
+      - name: Collect the packages
+        id: collect
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          echo "downloaded:"
+          find artifacts -type f -printf '  %p (%s bytes)\n' | sort
+          find artifacts -type f \
+            \( -name '*.AppImage' -o -name '*.flatpak' -o -name '*.msi' -o -name '*.dmg' \) \
+            -exec cp -n {} dist/ \;
+
+          # One missing package must fail the run rather than quietly
+          # publishing two thirds of a release. Add '*.dmg' here when TASK-105
+          # lands (see the commented macos job above).
+          missing=0
+          for pattern in '*.AppImage' '*.flatpak' '*.msi'; do
+            # shellcheck disable=SC2086
+            if ! ls dist/$pattern >/dev/null 2>&1; then
+              echo "::error::no package matching $pattern was produced"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+          # Every package is named Subordinate-<version>-... by its build
+          # script, from the workspace version in Cargo.toml. Three packages
+          # disagreeing means one of them was built from a different commit.
+          versions=$(for f in dist/*; do
+            basename "$f" | sed -E 's/^Subordinate-([0-9][^-]*)(-x86_64)?\.(AppImage|flatpak|msi|dmg)$/\1/'
+          done | sort -u)
+          echo "package version(s): $(echo "$versions" | tr '\n' ' ')"
+          if [ "$(echo "$versions" | wc -l)" -ne 1 ]; then
+            echo "::error::the packages do not agree on a version: $versions"
+            exit 1
+          fi
+          echo "version=$versions" >> "$GITHUB_OUTPUT"
+
+      # A tag that says v0.2.0 while the packages inside say 0.1.0 is a
+      # release nobody can reason about afterwards. Checked on a tag only; a
+      # dry run from a branch has no tag to compare against.
+      - name: Check the tag against the package version
+        if: github.ref_type == 'tag'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ steps.collect.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${REF_NAME#v}" != "$VERSION" ]; then
+            echo "::error::tag $REF_NAME does not match the packaged version $VERSION; bump Cargo.toml (and the metainfo release) or retag"
+            exit 1
+          fi
+          echo "tag $REF_NAME matches the packaged version $VERSION"
+
+      # AC 2. Written in dist/ with bare filenames so `sha256sum -c
+      # SHA256SUMS` works from whatever directory a user downloaded into, and
+      # verified here so a corrupt artifact is caught before it is published
+      # rather than by the first person to download it.
+      - name: Write and verify SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum -- * > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
+      - name: Create the GitHub release
+        if: steps.mode.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Only ever the tag that triggered this run. No other release is
+          # named anywhere in this workflow, and `create` refuses to touch one
+          # that already exists.
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Subordinate $TAG" \
+            --generate-notes \
+            dist/*
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | "\(.name)  \(.size) bytes"'
+
+      # The dry run's actual product, beyond the artifacts: the list of what a
+      # real tag would have published, in a form that can be read at a glance.
+      - name: Report what would be published
+        if: steps.mode.outputs.publish != 'true'
+        env:
+          REASON: ${{ steps.mode.outputs.reason }}
+        run: |
+          set -euo pipefail
+          echo "DRY RUN -- no release was created ($REASON)."
+          echo "A v* tag push would have created a release with these assets:"
+          ls -l dist/
+
+      # AC 3: in a dry run these artifacts are the whole result, so the
+      # checksum file has to be downloadable too, not just printed.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: subordinate-release-${{ steps.collect.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Job summary
+        if: always()
+        env:
+          PUBLISH: ${{ steps.mode.outputs.publish }}
+          REASON: ${{ steps.mode.outputs.reason }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.collect.outputs.version }}
+        run: |
+          {
+            if [ "$PUBLISH" = "true" ]; then
+              echo "## Released \`$TAG\`"
+            else
+              echo "## Dry run -- nothing was published"
+              echo
+              echo "Reason: $REASON"
+            fi
+            echo
+            echo "Packaged version: \`${VERSION:-unknown}\`"
+            echo
+            if [ -f dist/SHA256SUMS ]; then
+              echo '```'
+              cat dist/SHA256SUMS
+              echo '```'
+            else
+              echo "No packages were collected."
+            fi
+            echo
+            echo "_The macOS dmg (TASK-105) is not built yet; see the commented"
+            echo "\`macos\` job in \`.github/workflows/release.yml\`._"
+          } >> "$GITHUB_STEP_SUMMARY"

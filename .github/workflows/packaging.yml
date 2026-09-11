@@ -20,18 +20,30 @@ name: Packaging
 #     1.89, below this workspace's rust-version). The full codec set comes from
 #     the runtime's own codecs-extra extension, which replaced ffmpeg-full.
 #
-# Runs on demand, on a tag, and on pushes that touch packaging, so a change to
-# the manifest or the plugin allowlist is checked before a release needs it.
-# TASK-106 calls these jobs from the release workflow; hardware encode from
-# inside the packages is verified separately by hardware.yml (TASK-116), which
-# has the GPUs.
+# Runs on demand and on pushes that touch packaging, so a change to the
+# manifest or the plugin allowlist is checked before a release needs it, and as
+# a reusable workflow called by release.yml (TASK-106). There is deliberately
+# no `push: tags` trigger here: release.yml owns the `v*` tags and calls this
+# workflow, so a tag produces one run whose artifacts are the ones published,
+# rather than two runs racing to build the same packages.
+#
+# Hardware encode from inside the packages is verified separately by
+# hardware.yml (TASK-116), which has the GPUs.
 
 on:
   workflow_dispatch:
-  # No `paths` filter on the tag trigger: GitHub ANDs the two, so a release tag
-  # whose commit happens not to touch packaging/ would be skipped.
-  push:
-    tags: ['v*']
+  workflow_call:
+    inputs:
+      hardware:
+        description: >-
+          Run packages-amd, the self-hosted AMD hardware-encode job. A string
+          rather than a boolean on purpose: for events that are not
+          workflow_call the `inputs` context is empty, and GitHub compares an
+          empty string to a boolean `false` numerically (both become 0), so a
+          `!= false` guard would skip the job on every push. Comparing two
+          strings has no such trap.
+        type: string
+        default: 'true'
   pull_request:
     paths:
       - 'packaging/**'
@@ -355,6 +367,11 @@ jobs:
   # independent check of the file rather than of the pipeline that wrote it.
   packages-amd:
     name: Hardware encode from the packages (box, self-hosted, AMD)
+    # Skipped when release.yml calls this workflow: box is a mini PC in the
+    # user's house and a release must not wait on, or fail because of, a
+    # machine that may be switched off. The packages it would test are the
+    # ones the release publishes, and they are separately smoke-tested above.
+    if: inputs.hardware != 'false'
     runs-on: [self-hosted, linux, box, amd-gpu]
     timeout-minutes: 45
     needs: [appimage, flatpak]
