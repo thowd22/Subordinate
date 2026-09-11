@@ -162,26 +162,49 @@ if [ "$head_count" -lt 2 ] || [ "$first_origin" = "$second_origin" ]; then
     root_height=${root_size#* }
     half=$((root_width / 2))
     if command -v xrandr >/dev/null 2>&1; then
-        # The first monitor takes the server's real output, the second takes
-        # none: a monitor with no output is how RandR expresses a head that is
-        # not physically there, and leaving the output unclaimed would keep the
-        # server's automatic whole-screen monitor alive beside these two.
-        # `--setmonitor` also needs physical dimensions that are not zero --
-        # xrandr takes 0mm as "not specified" -- so they are derived from the
-        # pixel count at a plausible 96 dpi.
+        # A RandR monitor with no output is how the protocol expresses a head
+        # that is not physically there, which is exactly a virtual second
+        # display. Which spelling of `--setmonitor` a given server accepts is
+        # not something to guess at, though: on box's Xvfb the first attempt
+        # below left the server with its automatic whole-screen monitor and
+        # said nothing about why (run 34615366090). So the spellings are tried
+        # in turn and each one is checked against the server's own monitor
+        # list, with everything xrandr said kept in the log.
+        #
+        # `--setmonitor` wants physical dimensions, and xrandr reads 0mm as
+        # "not specified", so they come from the pixel count at 96 dpi.
         output=$(xrandr -display "$display" --listmonitors |
             awk 'NR > 1 { print $NF; exit }')
         [ -n "$output" ] || output=none
         mm_w=$((half * 254 / 960))
         mm_h=$((root_height * 254 / 960))
-        set +e
-        xrandr -display "$display" --setmonitor SUB-0 \
-            "$half/${mm_w}x$root_height/$mm_h+0+0" "$output" 2>&1 |
-            sed 's/^/ui-smoke: xrandr: /'
-        xrandr -display "$display" --setmonitor SUB-1 \
-            "$half/${mm_w}x$root_height/$mm_h+$half+0" none 2>&1 |
-            sed 's/^/ui-smoke: xrandr: /'
-        set -e
+        geom_0="$half/${mm_w}x$root_height/$mm_h+0+0"
+        geom_1="$half/${mm_w}x$root_height/$mm_h+$half+0"
+
+        monitor_count() {
+            xrandr -display "$display" --listmonitors 2>/dev/null |
+                sed -n 's/^Monitors: \([0-9]*\).*/\1/p' | head -1
+        }
+        try_split() {
+            echo "ui-smoke: monitor split attempt: $*"
+            set +e
+            "$@" >"$out_dir/setmonitor.log" 2>&1
+            set -e
+            sed 's/^/ui-smoke: xrandr: /' "$out_dir/setmonitor.log" || true
+            [ "$(monitor_count)" -ge 2 ] 2>/dev/null
+        }
+        xrandr --version 2>&1 | sed 's/^/ui-smoke: /' || true
+        # 1. one process, both monitors, the real output on the left head.
+        # 2. the same in two processes.
+        # 3. only the right-hand head, leaving the server's automatic monitor
+        #    as the left one - fewer requests, and the automatic monitor keeps
+        #    whatever the server thinks its output really is.
+        try_split xrandr -display "$display" \
+            --setmonitor SUB-0 "$geom_0" "$output" \
+            --setmonitor SUB-1 "$geom_1" none ||
+            try_split xrandr -display "$display" --setmonitor SUB-1 "$geom_1" none ||
+            try_split xrandr -display "$display" --setmonitor SUB-0 "$geom_0" none ||
+            echo "ui-smoke: no spelling of --setmonitor gave this server two monitors"
     fi
     heads=$(printf '%s %s 0 0\n%s %s %s 0\n' "$half" "$root_height" "$half" "$root_height" "$half")
 fi
@@ -235,11 +258,29 @@ launch_app() {
 # windows. So --gpu means "draw with the real adapter if this display can
 # present it", and a display that cannot falls back to the software rasteriser
 # with the reason said out loud rather than failing the run.
+#
+# LIBGL_ALWAYS_SOFTWARE is a GL variable and says nothing to Vulkan, which is
+# what the compositor actually uses: on a machine with more than one ICD the
+# loader still hands out the discrete driver (run 34615366090 picked RADV
+# twice). The Vulkan half is the loader's own driver-file override, pointed at
+# Mesa's lavapipe.
+use_software_rasteriser() {
+    export LIBGL_ALWAYS_SOFTWARE=1
+    lvp=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1 || true)
+    if [ -n "$lvp" ]; then
+        export VK_DRIVER_FILES="$lvp"
+        export VK_ICD_FILENAMES="$lvp" # the name the loader used before 1.3.207
+        echo "ui-smoke: software rasteriser: $lvp"
+    else
+        echo "ui-smoke: no lavapipe ICD installed; the loader will pick what it likes"
+    fi
+}
+
 software=$force_software
 if [ "$software" -eq 1 ]; then
-    export LIBGL_ALWAYS_SOFTWARE=1
+    use_software_rasteriser
 else
-    unset LIBGL_ALWAYS_SOFTWARE || true
+    unset LIBGL_ALWAYS_SOFTWARE VK_DRIVER_FILES VK_ICD_FILENAMES || true
 fi
 echo "ui-smoke: launching $* with the pop-out at $second_x,$second_y"
 if ! launch_app "$@"; then
@@ -250,7 +291,7 @@ if ! launch_app "$@"; then
         wait "$app_pid" 2>/dev/null || true
         app_pid=""
         software=1
-        export LIBGL_ALWAYS_SOFTWARE=1
+        use_software_rasteriser
         launch_app "$@" || {
             echo "ui-smoke: the app never reported a first frame" >&2
             cat "$log" >&2 || true
