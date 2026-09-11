@@ -34,10 +34,6 @@ name: Release
 on:
   push:
     tags: ['v*']
-    # TEMPORARY (TASK-106): a new workflow cannot be started with
-    # workflow_dispatch until it exists on the default branch, so the dry run
-    # is verified from the task branch. Removed before the task is finished.
-    branches: [task/task-106]
   workflow_dispatch:
     inputs:
       dry_run:
