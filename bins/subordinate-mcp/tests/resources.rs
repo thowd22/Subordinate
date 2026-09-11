@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rmcp::model::{CallToolRequestParams, ResourceContents};
+use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, ResourceContents};
 use serde_json::{Value, json};
 use sub_command::Dispatcher;
 use sub_command::endpoint::Endpoint;
@@ -64,6 +64,21 @@ fn call(name: &str, arguments: &Value) -> CallToolRequestParams {
             .clone(),
     );
     request
+}
+
+/// One tool call, run to completion.
+///
+/// A destructive tool answers `input_required` before it runs anything (see
+/// `tests/confirmations.rs`); nothing called here is one, so every call
+/// finishes in a single round trip.
+fn run(
+    bridge: &subordinate_mcp::Bridge,
+    request: CallToolRequestParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    bridge.call(request).map(|response| match response {
+        CallToolResponse::Complete(result) => result,
+        other => panic!("the call did not complete: {other:?}"),
+    })
 }
 
 /// The JSON one resource read carries.
@@ -176,16 +191,18 @@ fn an_edit_reaches_the_change_feed_as_the_resources_it_made_stale() {
     assert!(bridge.watch().is_watching());
 
     // A track added to the sequence stales the project and the timeline.
-    let added = bridge
-        .call(call(
+    let added = run(
+        &bridge,
+        call(
             "track_add",
             &json!({
                 "sequence": sequence.trim_start_matches("sequence://"),
                 "name": "V1",
                 "kind": "video",
             }),
-        ))
-        .expect("track.add is a tool");
+        ),
+    )
+    .expect("track.add is a tool");
     assert_eq!(added.is_error, Some(false), "{added:?}");
 
     let deadline = Instant::now() + PATIENCE;
@@ -201,9 +218,7 @@ fn an_edit_reaches_the_change_feed_as_the_resources_it_made_stale() {
     assert!(!update.touches("media://anything"));
 
     // A new media item changes the set of resources, not only their contents.
-    bridge
-        .call(call("bin_create", &json!({ "name": "Footage" })))
-        .expect("bin.create is a tool");
+    run(&bridge, call("bin_create", &json!({ "name": "Footage" }))).expect("bin.create is a tool");
     let update = updates.blocking_recv().expect("the change feed stays open");
     assert!(update.touches(PROJECT_URI));
     assert!(!update.list_changed, "a bin is not a listed resource");

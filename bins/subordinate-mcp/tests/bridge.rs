@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rmcp::ServerHandler as _;
-use rmcp::model::CallToolRequestParams;
+use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult};
 use serde_json::json;
 use sub_command::Dispatcher;
 use sub_command::endpoint::Endpoint;
@@ -77,6 +77,18 @@ fn call(name: &str, arguments: &serde_json::Value) -> CallToolRequestParams {
     request
 }
 
+/// One tool call, run to completion.
+///
+/// A destructive tool answers `input_required` before it runs anything (see
+/// `tests/confirmations.rs`); nothing called here is one, so every call
+/// finishes in a single round trip.
+fn run(bridge: &Bridge, request: CallToolRequestParams) -> Result<CallToolResult, rmcp::ErrorData> {
+    bridge.call(request).map(|response| match response {
+        CallToolResponse::Complete(result) => result,
+        other => panic!("the call did not complete: {other:?}"),
+    })
+}
+
 #[test]
 fn tool_calls_reach_a_running_editor_and_come_back_as_content() {
     let directory = workspace("running");
@@ -120,9 +132,8 @@ fn tool_calls_reach_a_running_editor_and_come_back_as_content() {
     assert!(info.instructions.is_some());
 
     // A mutating tool is an undoable command in the engine.
-    let created = bridge
-        .call(call("bin_create", &json!({ "name": "Footage" })))
-        .expect("the tool exists");
+    let created =
+        run(&bridge, call("bin_create", &json!({ "name": "Footage" }))).expect("the tool exists");
     assert_eq!(created.is_error, Some(false));
     let structured = created.structured_content.expect("structured content");
     assert_eq!(structured["revision"], 1);
@@ -131,55 +142,51 @@ fn tool_calls_reach_a_running_editor_and_come_back_as_content() {
         "Footage",
     );
 
-    let undone = bridge
-        .call(call("edit_undo", &json!({})))
-        .expect("undo is a tool");
+    let undone = run(&bridge, call("edit_undo", &json!({}))).expect("undo is a tool");
     assert_eq!(undone.is_error, Some(false));
     assert!(engine.handle().snapshot().root_bin.children.is_empty());
 
     // The plugin management tools reach the registry the editor was given, so
     // an agent lists and switches plugins without leaving MCP.
-    let listed = bridge
-        .call(call("plugin_list", &json!({})))
-        .expect("plugin.list is a tool");
+    let listed = run(&bridge, call("plugin_list", &json!({}))).expect("plugin.list is a tool");
     assert_eq!(listed.is_error, Some(false));
     let scan = listed.structured_content.expect("structured content");
     assert_eq!(scan["plugins"][0]["id"], "com.example.demo");
     assert_eq!(scan["plugins"][0]["enabled"], true);
 
-    let disabled = bridge
-        .call(call("plugin_disable", &json!({ "id": "com.example.demo" })))
-        .expect("plugin.disable is a tool");
+    let disabled = run(
+        &bridge,
+        call("plugin_disable", &json!({ "id": "com.example.demo" })),
+    )
+    .expect("plugin.disable is a tool");
     assert_eq!(disabled.is_error, Some(false));
-    let listed = bridge
-        .call(call("plugin_list", &json!({})))
-        .expect("plugin.list is a tool");
+    let listed = run(&bridge, call("plugin_list", &json!({}))).expect("plugin.list is a tool");
     let scan = listed.structured_content.expect("structured content");
     assert_eq!(scan["plugins"][0]["enabled"], false);
 
-    let removed = bridge
-        .call(call("plugin_remove", &json!({ "id": "com.example.demo" })))
-        .expect("plugin.remove is a tool");
+    let removed = run(
+        &bridge,
+        call("plugin_remove", &json!({ "id": "com.example.demo" })),
+    )
+    .expect("plugin.remove is a tool");
     assert_eq!(removed.is_error, Some(false));
     assert!(!plugins.join("com.example.demo").exists());
 
     // A failure is a tool error carrying the engine's stable code, not a
     // protocol error.
-    let failed = bridge
-        .call(call(
-            "bin_rename",
-            &json!({ "bin": "bin_absent", "name": "x" }),
-        ))
-        .expect("the tool exists");
+    let failed = run(
+        &bridge,
+        call("bin_rename", &json!({ "bin": "bin_absent", "name": "x" })),
+    )
+    .expect("the tool exists");
     assert_eq!(failed.is_error, Some(true));
     let error = failed.structured_content.expect("structured content");
     let code = error["code"].as_str().expect("a code");
     assert!(code.contains('.'), "{code} is not a stable error code");
 
     // A tool this bridge does not serve is a protocol error.
-    let unknown = bridge
-        .call(call("bin.create", &json!({})))
-        .expect_err("dotted names are not tool names");
+    let unknown =
+        run(&bridge, call("bin.create", &json!({}))).expect_err("dotted names are not tool names");
     assert_eq!(unknown.code, rmcp::model::ErrorCode::INVALID_PARAMS);
 
     drop(bridge);
@@ -224,9 +231,7 @@ fn with_no_editor_running_the_bridge_launches_a_headless_one() {
     assert!(backend.launched_server());
 
     let bridge = bridge(backend);
-    let revision = bridge
-        .call(call("project_revision", &json!({})))
-        .expect("the tool exists");
+    let revision = run(&bridge, call("project_revision", &json!({}))).expect("the tool exists");
     assert_eq!(revision.is_error, Some(false));
     assert_eq!(
         revision.structured_content.expect("structured content")["revision"],
@@ -308,12 +313,14 @@ fn a_plugins_tools_are_offered_under_its_id_and_route_back_to_it() {
     // registry's methods and no plugin host — so the answer is the Command
     // API's own stable code and not a protocol error. `tests/plugin_tools.rs`
     // is the same call against an editor that does serve it.
-    let forwarded = bridge
-        .call(call(
+    let forwarded = run(
+        &bridge,
+        call(
             "com_example_demo_cut_silence",
             &json!({ "threshold_db": -40 }),
-        ))
-        .expect("a plugin tool is a tool this bridge serves");
+        ),
+    )
+    .expect("a plugin tool is a tool this bridge serves");
     assert_eq!(forwarded.is_error, Some(true));
     let error = forwarded.structured_content.expect("structured content");
     assert_eq!(error["code"], "command.unknown_method");

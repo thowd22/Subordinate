@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rmcp::model::CallToolRequestParams;
+use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult};
 use serde_json::{Value, json};
 use sub_command::Dispatcher;
 use sub_command::endpoint::Endpoint;
@@ -65,6 +65,18 @@ fn call(name: &str, arguments: &Value) -> CallToolRequestParams {
     let mut request = CallToolRequestParams::new(name.to_owned());
     request.arguments = Some(arguments.as_object().expect("an object").clone());
     request
+}
+
+/// One tool call, run to completion.
+///
+/// A destructive tool answers `input_required` before it runs anything (see
+/// `tests/confirmations.rs`); nothing called here is one, so every call
+/// finishes in a single round trip.
+fn run(bridge: &Bridge, request: CallToolRequestParams) -> Result<CallToolResult, rmcp::ErrorData> {
+    bridge.call(request).map(|response| match response {
+        CallToolResponse::Complete(result) => result,
+        other => panic!("the call did not complete: {other:?}"),
+    })
 }
 
 /// Lays out a plugin source directory around the built guest component: the
@@ -140,12 +152,14 @@ fn a_plugin_installed_over_mcp_contributes_a_tool_an_agent_can_call() {
     assert!(bridge.plugin_tools().is_empty());
 
     // The agent installs its plugin: one tool call, no shell.
-    let installed = bridge
-        .call(call(
+    let installed = run(
+        &bridge,
+        call(
             "plugin_install",
             &json!({ "path": source.display().to_string(), "dev": true }),
-        ))
-        .expect("plugin.install is a tool");
+        ),
+    )
+    .expect("plugin.install is a tool");
     let report = installed
         .structured_content
         .clone()
@@ -173,8 +187,7 @@ fn a_plugin_installed_over_mcp_contributes_a_tool_an_agent_can_call() {
 
     // Calling it runs the component. The bin it creates is an ordinary
     // undoable command on the editor's own stack, which is the whole claim.
-    let answered = bridge
-        .call(call(PUBLISHED, &json!({ "name": "Footage" })))
+    let answered = run(&bridge, call(PUBLISHED, &json!({ "name": "Footage" })))
         .expect("a plugin tool is a tool this bridge serves");
     let structured = answered
         .structured_content
@@ -189,9 +202,7 @@ fn a_plugin_installed_over_mcp_contributes_a_tool_an_agent_can_call() {
         "Footage",
     );
 
-    let undone = bridge
-        .call(call("edit_undo", &json!({})))
-        .expect("undo is a tool");
+    let undone = run(&bridge, call("edit_undo", &json!({}))).expect("undo is a tool");
     assert_eq!(undone.is_error, Some(false));
     assert!(
         engine.handle().snapshot().root_bin.children.is_empty(),
@@ -200,17 +211,14 @@ fn a_plugin_installed_over_mcp_contributes_a_tool_an_agent_can_call() {
 
     // Arguments the tool's schema rejects never reach the plugin, and come
     // back as the host's own stable code.
-    let refused = bridge
-        .call(call(PUBLISHED, &json!({ "name": 7 })))
-        .expect("the tool exists");
+    let refused = run(&bridge, call(PUBLISHED, &json!({ "name": 7 }))).expect("the tool exists");
     assert_eq!(refused.is_error, Some(true));
     let error = refused.structured_content.expect("structured content");
     assert_eq!(error["code"], "plugin.invalid_tool_arguments");
 
     // A plugin switched off contributes nothing, and the listing says so —
     // which is what makes tools/list_changed worth sending.
-    let disabled = bridge
-        .call(call("plugin_disable", &json!({ "id": PLUGIN_ID })))
+    let disabled = run(&bridge, call("plugin_disable", &json!({ "id": PLUGIN_ID })))
         .expect("plugin.disable is a tool");
     assert_eq!(disabled.is_error, Some(false));
     // `published_tools` is what refreshes the cache, so it comes first; what it
