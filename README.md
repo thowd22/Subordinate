@@ -3,9 +3,12 @@
 A cross-platform video editor with a small Rust core and an agent-friendly plugin system.
 
 - Plan: [docs/PLAN.md](docs/PLAN.md)
-- Driving it from an agent: `subordinate-mcp` bridges the Command API to MCP;
-  see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#driving-the-editor-from-an-agent-mcp)
-  and the `.mcp.json` example in [docs/examples/mcp.json](docs/examples/mcp.json)
+- Writing a plugin: [docs/plugin-guide.md](docs/plugin-guide.md) — every world,
+  the manifest, capabilities, the developer loop and the headless test harness
+- Driving it from an agent: [docs/mcp-guide.md](docs/mcp-guide.md) —
+  `subordinate-mcp` bridges the Command API to MCP; `.mcp.json` setup, every
+  tool family and the runbook. The example config is
+  [docs/examples/mcp.json](docs/examples/mcp.json)
 - Tasks, milestones and decisions: managed with [Backlog.md](https://github.com/MrLesk/Backlog.md) in `backlog/` (`backlog board`, `backlog browser`)
 
 ## Licence
