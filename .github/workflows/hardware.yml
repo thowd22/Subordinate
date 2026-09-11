@@ -30,6 +30,13 @@ name: Hardware verification
 # free but the NVIDIA job is not, and box is a machine in someone's home (see
 # docs/DEVELOPMENT.md, "Self-hosted AMD runner").
 on:
+  # TEMPORARY (TASK-118 verification): a workflow that is not on the default
+  # branch cannot be dispatched, so the two-output job is proved from a branch
+  # push. build-linux, nvidia-linux and amd-linux are skipped on a push so no
+  # GPU spot instance is launched. Remove this trigger and the three `if:`
+  # guards before merging.
+  push:
+    branches: [task/task-118]
   workflow_dispatch:
   schedule:
     # 04:30 UTC, once a day. One NVIDIA job a night is about 2.50 USD a month.
@@ -67,6 +74,8 @@ jobs:
   # artifact; the GPU job downloads them and spends its minutes measuring.
   build-linux:
     name: Build the Linux binaries (hosted, free)
+    # TEMPORARY (TASK-118): see the push trigger above.
+    if: github.event_name != 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -141,6 +150,9 @@ jobs:
   nvidia-linux:
     name: NVIDIA T4 (g4dn.xlarge, Ubuntu 24.04)
     needs: build-linux
+    # TEMPORARY (TASK-118): see the push trigger above. Never let a push start
+    # this job: it is the only one that costs money.
+    if: github.event_name != 'push'
     runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-linux
     # Hard stop on GPU spend; see the cost note in the header. With the build
     # moved off this instance the job is apt, fixtures, one render and two
@@ -327,6 +339,8 @@ jobs:
     # tools are already installed, so this job validates rather than installs,
     # and it costs nothing. See docs/DEVELOPMENT.md, "Self-hosted AMD runner".
     name: AMD APU (box, self-hosted, Ubuntu 26.04)
+    # TEMPORARY (TASK-118): see the push trigger above.
+    if: github.event_name != 'push'
     runs-on: [self-hosted, linux, box, amd-gpu]
     timeout-minutes: 30
     env:
@@ -459,6 +473,121 @@ jobs:
           name: hardware-amd-linux
           path: |
             target/hardware/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # The pop-out viewer and fullscreen-on-a-chosen-monitor (TASK-67, TASK-68)
+  # were written against a machine with one head and a software adapter, so the
+  # one thing their tests could not prove is the one thing they are for: a
+  # second OS window, on a second output, drawn by a real GPU. This job is that
+  # proof (TASK-118).
+  #
+  # It runs on box, not on the NVIDIA spot instance. Nothing here is
+  # NVDEC-specific - it is a window manager and RandR question plus a real
+  # Vulkan adapter, and box has RADV - so putting it on the paid runner would
+  # buy nothing. box is free, which is also why this job may build.
+  #
+  # Two outputs come from one wide Xvfb screen split into two RandR monitors
+  # with `xrandr --setmonitor`, not from two X screens: Xinerama across two
+  # screens breaks XTranslateCoordinates under winit and the app panics on its
+  # first paint (TASK-123). A monitor with no output attached is exactly how a
+  # headless server emulates a second display.
+  popout-two-output-linux:
+    name: Pop-out on two virtual outputs (box, self-hosted, AMD GPU)
+    runs-on: [self-hosted, linux, box, amd-gpu]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same reason as amd-linux: the runner is a systemd service with a
+      # minimal environment, so rustup's shims are not on PATH.
+      - name: Put the Rust toolchain on PATH
+        run: |
+          found=""
+          for d in "$HOME/.cargo/bin" /usr/local/cargo/bin /opt/rust/bin; do
+            if [ -x "$d/cargo" ]; then found=$d; break; fi
+          done
+          [ -n "$found" ] || { echo "::error::no cargo on this runner; install rustup for the runner user"; exit 1; }
+          echo "$found" >> "$GITHUB_PATH"
+
+      - name: Virtual display tooling and GPU facts
+        run: |
+          . /etc/os-release && echo "os=$PRETTY_NAME"
+          for tool in Xvfb xdpyinfo xwd xwininfo xrandr xdotool magick convert; do
+            printf '%-10s %s\n' "$tool" "$(command -v "$tool" || echo MISSING)"
+          done
+          ls -l /dev/dri || true
+          ls -l /usr/share/vulkan/icd.d/ || true
+          for tool in Xvfb xdpyinfo xwd xwininfo xrandr; do
+            command -v "$tool" >/dev/null 2>&1 \
+              || { echo "::error::$tool is missing on box: install xvfb, x11-utils, x11-apps and x11-xserver-utils"; exit 1; }
+          done
+          command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1 \
+            || { echo "::error::ImageMagick is missing on box"; exit 1; }
+          # Without an ICD wgpu picks nothing at all and the window never
+          # paints a frame; without RADV it would quietly paint on llvmpipe,
+          # which is what the free hosted job already covers.
+          ls /usr/share/vulkan/icd.d/*.json >/dev/null 2>&1 \
+            || { echo "::error::no Vulkan ICD on this runner: install mesa-vulkan-drivers (RADV)"; exit 1; }
+
+      # The GUI binary, which the other jobs on this workflow never build. box
+      # keeps its target directory on local disk between runs, so this is
+      # incremental after the first run.
+      - name: Build the editor (debug)
+        run: cargo build -p subordinate
+
+      # --gpu drops LIBGL_ALWAYS_SOFTWARE so the picture is RADV's, and
+      # --require-popout-on-head 1 turns "look at the screenshots" into an
+      # assertion: the pop-out's absolute geometry is read back off the server
+      # and has to lie inside head 1's rectangle, with the editor window on a
+      # different head.
+      - name: Pop-out smoke on two outputs
+        env:
+          RUST_LOG: info
+        run: |
+          ./scripts/ui-smoke.sh \
+            --binary target/debug/subordinate \
+            --out target/ui-smoke \
+            --screen 2560x800x24 \
+            --gpu \
+            --require-popout-on-head 1
+
+      # Two RandR monitors, asserted from the server's own list rather than
+      # from the script's arithmetic.
+      - name: Two outputs present
+        if: always()
+        run: |
+          cat target/ui-smoke/monitors.txt || true
+          grep -q '^Monitors: 2' target/ui-smoke/monitors.txt \
+            || { echo "::error::the X server did not report two monitors"; exit 1; }
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Pop-out on two virtual outputs (box, RADV)"
+            echo
+            cat target/ui-smoke/summary.md 2>/dev/null || echo "The smoke run produced no summary."
+            echo
+            echo "4K H.264 hardware-decode scrub is measured by the \`nvidia-linux\` and"
+            echo "\`amd-linux\` jobs of this same workflow and printed in their summaries"
+            echo "(TASK-116): 8.256 fps through \`nvh264dec\` on the Tesla T4 and 9.131 fps"
+            echo "through \`vah264dec\` on box, run 34612380072. It is not measured again"
+            echo "here - this job is about the windows."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: popout-two-output-${{ github.sha }}
+          path: |
+            target/ui-smoke/*.png
+            target/ui-smoke/*.log
+            target/ui-smoke/screens.txt
+            target/ui-smoke/windows.txt
+            target/ui-smoke/monitors.txt
+            target/ui-smoke/summary.md
           if-no-files-found: warn
           retention-days: 30
 

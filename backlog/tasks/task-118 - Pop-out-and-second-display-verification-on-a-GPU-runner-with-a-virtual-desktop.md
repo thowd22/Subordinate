@@ -1,10 +1,11 @@
 ---
 id: TASK-118
 title: Pop-out and second-display verification on a GPU runner with a virtual desktop
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@opus-task-118'
 created_date: '2026-09-09 17:29'
-updated_date: '2026-09-09 21:35'
+updated_date: '2026-09-11 15:05'
 labels:
   - infra
   - gpu
@@ -28,6 +29,16 @@ The decode spike and the pop-out viewer have criteria that need a real GPU and a
 - [ ] #2 Procedure for an interactive RDP session with two monitors on the Windows GPU runner is documented in docs/DEVELOPMENT.md
 - [ ] #3 The job also records 4K H.264 scrub fps with hardware decode from the benchmark harness in the job summary, closing TASK-22 criterion 3 and TASK-7 criterion 1 when met
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. scripts/ui-smoke.sh: add --gpu (do not force LIBGL_ALWAYS_SOFTWARE so the real adapter is used), probe window geometry with xwininfo -root -tree into windows.txt, and add --require-popout-on-head N which fails the run unless the pop-out window's origin lies inside that head's rectangle; keep the hosted CI behaviour unchanged by default.
+2. .github/workflows/hardware.yml: new free job on box (self-hosted, amd-gpu) that builds the GUI debug binary, runs the script under Xvfb with one wide screen split into two RandR monitors (two outputs), requires the pop-out on head 1, appends the summary and uploads one PNG per output plus the logs as an artifact. The NVIDIA spot runner is deliberately left out: nothing here is NVDEC-specific and box is free.
+3. docs/DEVELOPMENT.md: document the interactive RDP-with-two-monitors procedure for the future Windows GPU runner (mstsc /multimon, the RDP display settings, how to confirm two heads and drive the pop-out and fullscreen-on-monitor checks by hand).
+4. Record the 4K H.264 hardware-decode scrub numbers already produced by hardware.yml (TASK-116 runs) in the task notes rather than re-measuring them.
+5. Verify: push task/task-118, run the workflow, watch it, download the artifacts and look at both PNGs; iterate up to three times. Then finalize per the guide with run ids.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 

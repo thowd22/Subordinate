@@ -696,7 +696,18 @@ Read the PNGs directly; that is the point of the job. The artifact is uploaded
 even when the step failed, because a screenshot of a broken window is the
 fastest way to see what went wrong. Windows and macOS skip it: there is no
 Xvfb there, and `--smoke-test` already proves the window comes up on each OS.
-Real multi-monitor presentation on real hardware is TASK-118, not this.
+
+Two flags exist for the GPU runner (TASK-118) and are off by default here:
+
+| Flag | What it changes |
+| --- | --- |
+| `--gpu` | does not set `LIBGL_ALWAYS_SOFTWARE`, so the picture is the machine's real adapter — the `adapter chosen:` line from `app.log` goes into the summary as the proof |
+| `--require-popout-on-head N` | reads the pop-out window's absolute geometry back with `xwininfo -root -tree` and fails unless it lies inside head `N`, with the editor window on a different head |
+
+Either way the run now also writes `windows.txt` (the top-level windows with
+their geometry) and `monitors.txt` (`xrandr --listmonitors`), which is what
+turns "the pop-out is on the second display" from a picture someone has to
+squint at into an assertion.
 
 ## CI build speed
 
@@ -933,13 +944,14 @@ criteria are proved (TASK-116). It runs on `workflow_dispatch` and once a night
 at 04:30 UTC, and never on a push or a pull request: the NVIDIA job costs
 money and `box` is a machine in someone's home.
 
-Three jobs:
+Four jobs:
 
 | Job | Runner | Cost | What it proves |
 | --- | --- | --- | --- |
 | `build-linux` | hosted `ubuntu-24.04` | free | builds `subordinate-bench` (release), `subordinate-cli` (debug) and the `sub-render` readback test binary, and uploads them as `hardware-linux-binaries` |
 | `nvidia-linux` | RunsOn `gpu-nvidia-linux` | about 0.04 USD | NVENC render, 4K hardware-decode scrub, 1080p compositor readback |
 | `amd-linux` | self-hosted `box` | free | the same through VA-API (`vah264enc`, `vah264dec`) |
+| `popout-two-output-linux` | self-hosted `box` | free | the pop-out viewer as a real OS window on a second output, drawn by RADV (TASK-118) |
 
 Nothing is compiled on the GPU instance. A cold `cargo build -p
 subordinate-cli` there took 10m52s on 4 vCPU and burned the whole job budget
@@ -974,3 +986,112 @@ summary. The numbers land in docs/PERFORMANCE.md.
 There are no Windows jobs: there is no AMD Windows host anywhere this project
 can reach, and the NVIDIA Windows AMI is TASK-115. The workflow carries a
 commented placeholder rather than a job that would quietly pass on software.
+
+## Pop-out and second display
+
+Two displays are an MVP requirement, and the two features that serve them --
+the pop-out viewer (TASK-67) and fullscreen on a chosen monitor (TASK-68) --
+were both written on a machine with one head and a software adapter. Their
+`egui_kittest` tests cover the menu item, the toggle, the picker and the
+keyboard; what those tests cannot cover is the only thing the features are
+for: a second OS window, on a second output, drawn by a real GPU.
+
+### Linux: automated, free, on box
+
+`hardware.yml`'s `popout-two-output-linux` job does it on every dispatch:
+
+1. one 2560x800 Xvfb screen, split into two 1280x800 RandR monitors with
+   `xrandr --setmonitor` (two X screens joined by Xinerama break
+   `XTranslateCoordinates` under winit -- see the window smoke test above);
+2. `scripts/ui-smoke.sh --gpu`, so the editor draws on RADV rather than
+   llvmpipe and the `adapter chosen:` line proves which;
+3. `--require-popout-on-head 1`, which reads the pop-out window's absolute
+   geometry back off the server with `xwininfo -root -tree` and fails the job
+   unless it is inside head 1's rectangle with the editor on another head;
+4. one PNG per output, plus `windows.txt`, `monitors.txt` and `app.log`,
+   uploaded as `popout-two-output-<sha>` and listed in the job summary.
+
+```bash
+gh workflow run hardware.yml
+gh run download <run-id> -n popout-two-output-$(git rev-parse HEAD) -D /tmp/popout
+# screen-0.png is the editor window, screen-1.png the pop-out viewer
+```
+
+It runs on `box` rather than on the NVIDIA spot instance on purpose: nothing
+about it is NVDEC-specific -- it is RandR, window placement and a real Vulkan
+adapter -- so the paid runner would buy nothing. That is also why the job is
+allowed to compile: box is free.
+
+### Windows: interactive, by hand, over RDP with two monitors
+
+There is no Windows GPU runner yet (the AMI is TASK-115), and a second display
+on Windows cannot be faked the way Xvfb fakes one: RDP hands the session
+exactly as many displays as the *client* has, so the procedure below is what
+someone runs by hand once such a host exists. It closes the Windows half of
+TASK-68 AC 3.
+
+**1. Get a Windows GPU host with a session you can log into.** Launch the
+TASK-115 AMI by hand (EC2 console, `g4dn.xlarge`) rather than through a
+workflow -- a job ends and takes the instance with it. Open TCP 3389 in the
+security group to your own address only, never `0.0.0.0/0`, and fetch the
+password:
+
+```bash
+aws ec2 get-password-data --instance-id i-... --priv-launch-key ~/.ssh/runs-on.pem
+```
+
+**2. Give the remote session two displays.** RDP mirrors the client's monitor
+layout, so the client is where the two heads have to exist:
+
+- Windows client: `mstsc /multimon`, or in `mstsc.exe` -> Display -> "Use all
+  my monitors for the remote session".
+- Linux client (which is what this project is developed on):
+  `xfreerdp3 /v:<public-ip> /u:Administrator /p:'<password>' /multimon
+  /gdi:hw /cert:ignore`.
+
+Do **not** use `/span`. It makes one wide desktop out of both monitors, so
+Windows sees a single display, the monitor picker lists one entry, and
+fullscreen-on-monitor is untested. If the client physically has only one
+monitor, add a virtual one *on the client* (an Indirect Display Driver such as
+the Virtual Display Driver, or a second head on the dev machine's own X
+server); adding one on the remote host does not help, because RDP replaces the
+host's display topology with the client's for the duration of the session.
+
+**3. Confirm two displays inside the session,** before touching the app:
+
+```powershell
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.Screen]::AllScreens | Format-Table DeviceName, Bounds, Primary
+```
+
+Two rows at two different `Bounds` origins, or nothing below is meaningful.
+
+**4. Confirm the app is on the GPU, not on WARP.** An RDP session normally
+draws through the Microsoft Remote Display Adapter, and a Vulkan application
+can end up on a software adapter without saying so anywhere but its log. Turn
+on *Computer Configuration -> Administrative Templates -> Windows Components ->
+Remote Desktop Services -> Remote Desktop Session Host -> Remote Session
+Environment -> Use hardware graphics adapters for all Remote Desktop Services
+sessions*, reconnect, then run the app with `RUST_LOG=info` and read the
+`adapter chosen:` line it prints. If it names a software adapter, the run
+proves nothing about the GPU: use NICE DCV or a VNC server on the host instead
+of RDP, which do not swap the display driver out.
+
+**5. Drive the criteria by hand** with the sample project open
+(`target\debug\subordinate.exe examples\sample-project\demo.sub`):
+
+| Check | Criterion |
+| --- | --- |
+| View -> Viewer pops the preview into its own window; drag it to the second display; the picture keeps painting | TASK-67 AC 1 |
+| J/K/L, space and the frame steps move the playhead while the pop-out window has focus | TASK-67 AC 3 |
+| Closing the pop-out window returns the picture to the docked viewer | TASK-67 AC 2 |
+| The View menu's monitor picker lists **two** displays | TASK-68 AC 1 |
+| Fullscreen on display 2 shows the frame on black with no chrome | TASK-68 AC 1 |
+| Escape leaves fullscreen and keeps the window | TASK-68 AC 2 |
+| Restart the app: the chosen display is still chosen (`fullscreen.json`) | TASK-68 AC 2 |
+
+**6. Record the evidence.** One screenshot per monitor (`Win+Shift+S`, or
+`[System.Windows.Forms.Screen]::AllScreens` plus a `Graphics.CopyFromScreen`
+script), the `adapter chosen:` line, the instance id and the driver version,
+attached to the task. Then terminate the instance -- an interactive GPU host
+left running is the most expensive mistake available in this repository.
