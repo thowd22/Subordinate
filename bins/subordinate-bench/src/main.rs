@@ -17,11 +17,19 @@
 //! mode that can fail a build on a number rather than on an environment
 //! problem: drift of a whole frame or more exits non-zero.
 //!
+//! `--proxy` runs the third measurement: the proxy editing validation of
+//! [`proxy`], which makes an intra-only proxy of the one-hour long-GOP fixture
+//! and measures scrubbing, playback and peak memory on both files. Like
+//! `--sync` it can fail on a number rather than on the machine.
+//!
 //! ```text
 //! subordinate-bench [--out PATH] [--frames N] [--seeks N] [--warmup N]
 //!                   [--fixtures DIR] [--software] [--no-gpu]
 //! subordinate-bench --sync [--out PATH] [--seconds N] [--fixtures DIR]
 //!                   [--software]
+//! subordinate-bench --proxy [--out PATH] [--seconds N] [--seeks N]
+//!                   [--fixtures DIR] [--proxy-cache DIR]
+//!                   [--memory-budget MIB] [--software] [--no-gpu]
 //! ```
 //!
 //! The harness never fails a build because of the machine it runs on: a
@@ -34,6 +42,8 @@ use std::process::ExitCode;
 use sub_core::{ResultExt as _, SubError, SubResult};
 use sub_media::HardwarePreference;
 
+mod memory;
+mod proxy;
 mod report;
 mod run;
 mod stats;
@@ -58,6 +68,9 @@ pub mod codes {
     /// The picture drifted a whole frame or more from the audio clock, which
     /// is phase 3's exit criterion failing.
     pub const DRIFT_EXCEEDED: ErrorCode = ErrorCode::from_static("bench.drift_exceeded");
+    /// Editing the hour-long source with a proxy missed one of phase 5's
+    /// numbers: the scrub rate, a stall-free playback, or the memory budget.
+    pub const PROXY_BELOW_TARGET: ErrorCode = ErrorCode::from_static("bench.proxy_below_target");
 }
 
 /// Where the report goes when `--out` is not given.
@@ -65,6 +78,9 @@ const DEFAULT_OUT: &str = "target/bench/perf.json";
 
 /// Where the sync report goes when `--out` is not given.
 const DEFAULT_SYNC_OUT: &str = "target/bench/av-sync.json";
+
+/// Where the proxy report goes when `--out` is not given.
+const DEFAULT_PROXY_OUT: &str = "target/bench/proxy.json";
 
 /// The usage text, printed by `--help` and by a bad argument.
 const USAGE: &str = "\
@@ -84,7 +100,14 @@ Options:
   --sync            measure A/V sync and drift over the long fixture instead
                     (default report: target/bench/av-sync.json); exits
                     non-zero when the picture drifts a whole frame or more
-  --seconds N       with --sync, stop after N seconds of timeline
+  --proxy           validate editing the one-hour long-GOP fixture with a
+                    proxy instead (default report: target/bench/proxy.json);
+                    exits non-zero when the scrub rate, the stall count or
+                    the peak memory misses phase 5's numbers
+  --seconds N       with --sync, stop after N seconds of timeline; with
+                    --proxy, seconds of timeline played (default: 5)
+  --proxy-cache DIR with --proxy, keep the generated proxy here
+  --memory-budget N with --proxy, the memory budget in MiB (default: 2048)
   -h, --help        print this text
 ";
 
@@ -107,6 +130,13 @@ enum Command {
         /// How the run is configured.
         options: sync::Options,
     },
+    /// Validate editing the hour-long source with a proxy instead.
+    Proxy {
+        /// Where the JSON report goes.
+        out: PathBuf,
+        /// How the run is configured.
+        options: proxy::Options,
+    },
 }
 
 /// Parses the command line.
@@ -116,30 +146,101 @@ enum Command {
 /// [`codes::BAD_ARGUMENT`] for an unknown option, a missing value, or a count
 /// that is not a positive integer.
 fn parse(args: &[String]) -> SubResult<Command> {
-    let mut out: Option<PathBuf> = None;
-    let mut options = run::Options::default();
-    let mut run_sync = false;
-    let mut seconds: Option<u64> = None;
+    choose(scan(args)?)
+}
+
+/// Which measurement the command line asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// The scrub and playback scenarios, which is what no mode switch means.
+    Measure,
+    /// `--sync`: A/V sync and drift.
+    Sync,
+    /// `--proxy`: editing the hour-long source with a proxy.
+    Proxy,
+    /// `-h` or `--help`: print the usage text and measure nothing.
+    Help,
+}
+
+impl Mode {
+    /// The switch that asks for this mode, for an error message.
+    fn as_switch(self) -> &'static str {
+        match self {
+            Self::Measure => "the default run",
+            Self::Sync => "--sync",
+            Self::Proxy => "--proxy",
+            Self::Help => "--help",
+        }
+    }
+}
+
+/// The switches one command line carried, before a mode is chosen from them.
+struct Parsed {
+    /// Where the report should go, when `--out` was given.
+    out: Option<PathBuf>,
+    /// The scrub and playback options, which also carry the settings every
+    /// mode shares.
+    options: run::Options,
+    /// The measurement asked for.
+    mode: Mode,
+    /// The value of `--seconds`.
+    seconds: Option<u64>,
+    /// Whether `--seeks` was given, which decides whether a mode's own
+    /// default applies instead.
+    seeks_given: bool,
+    /// The value of `--proxy-cache`.
+    proxy_cache: Option<PathBuf>,
+    /// The value of `--memory-budget`, in mebibytes.
+    memory_budget: Option<u64>,
+}
+
+/// Reads the command line into [`Parsed`], rejecting what it cannot read.
+///
+/// # Errors
+///
+/// [`codes::BAD_ARGUMENT`] for an unknown option, a missing value, or a count
+/// that is not a positive integer.
+fn scan(args: &[String]) -> SubResult<Parsed> {
+    let mut parsed = Parsed {
+        out: None,
+        options: run::Options::default(),
+        mode: Mode::Measure,
+        seconds: None,
+        seeks_given: false,
+        proxy_cache: None,
+        memory_budget: None,
+    };
     let mut index = 0;
 
     while index < args.len() {
         let arg = args[index].as_str();
         index += 1;
         match arg {
-            "-h" | "--help" => return Ok(Command::Help),
-            "--software" => options.hardware = HardwarePreference::Software,
-            "--no-gpu" => options.use_gpu = false,
-            "--sync" => run_sync = true,
-            "--seconds" => seconds = Some(count(args, &mut index, arg)?),
-            "--out" => out = Some(PathBuf::from(value(args, &mut index, arg)?)),
-            "--fixtures" => {
-                options.fixtures_dir = Some(PathBuf::from(value(args, &mut index, arg)?));
+            "-h" | "--help" => {
+                parsed.mode = Mode::Help;
+                return Ok(parsed);
             }
-            "--frames" => options.frames = count(args, &mut index, arg)?,
-            "--seeks" => options.seeks = count(args, &mut index, arg)?,
+            "--software" => parsed.options.hardware = HardwarePreference::Software,
+            "--no-gpu" => parsed.options.use_gpu = false,
+            "--sync" => parsed.mode = one_mode(parsed.mode, Mode::Sync)?,
+            "--proxy" => parsed.mode = one_mode(parsed.mode, Mode::Proxy)?,
+            "--seconds" => parsed.seconds = Some(count(args, &mut index, arg)?),
+            "--memory-budget" => parsed.memory_budget = Some(count(args, &mut index, arg)?),
+            "--out" => parsed.out = Some(PathBuf::from(value(args, &mut index, arg)?)),
+            "--proxy-cache" => {
+                parsed.proxy_cache = Some(PathBuf::from(value(args, &mut index, arg)?));
+            }
+            "--fixtures" => {
+                parsed.options.fixtures_dir = Some(PathBuf::from(value(args, &mut index, arg)?));
+            }
+            "--frames" => parsed.options.frames = count(args, &mut index, arg)?,
+            "--seeks" => {
+                parsed.options.seeks = count(args, &mut index, arg)?;
+                parsed.seeks_given = true;
+            }
             "--warmup" => {
                 let raw = value(args, &mut index, arg)?;
-                options.warmup = raw
+                parsed.options.warmup = raw
                     .parse::<u64>()
                     .sub_context_with(codes::BAD_ARGUMENT, || {
                         format!("{arg} needs a whole number of frames, not '{raw}'")
@@ -153,7 +254,83 @@ fn parse(args: &[String]) -> SubResult<Command> {
             }
         }
     }
-    if run_sync {
+    Ok(parsed)
+}
+
+/// `wanted` when no other measurement has been asked for already.
+///
+/// # Errors
+///
+/// [`codes::BAD_ARGUMENT`] when the command line asks for two measurements at
+/// once, which would leave it ambiguous which numbers were wanted.
+fn one_mode(current: Mode, wanted: Mode) -> SubResult<Mode> {
+    if current == Mode::Measure || current == wanted {
+        return Ok(wanted);
+    }
+    Err(SubError::new(
+        codes::BAD_ARGUMENT,
+        format!(
+            "{} and {} are separate runs; ask for one of them",
+            current.as_switch(),
+            wanted.as_switch()
+        ),
+    ))
+}
+
+/// The run those switches ask for.
+///
+/// # Errors
+///
+/// [`codes::BAD_ARGUMENT`] when two modes were asked for at once, or when an
+/// option belongs to a mode that was not asked for.
+fn choose(parsed: Parsed) -> SubResult<Command> {
+    let Parsed {
+        out,
+        options,
+        mode,
+        seconds,
+        seeks_given,
+        proxy_cache,
+        memory_budget,
+    } = parsed;
+    if mode == Mode::Help {
+        return Ok(Command::Help);
+    }
+    if mode == Mode::Proxy {
+        let defaults = proxy::Options::default();
+        return Ok(Command::Proxy {
+            out: out.unwrap_or_else(|| PathBuf::from(DEFAULT_PROXY_OUT)),
+            options: proxy::Options {
+                fixtures_dir: options.fixtures_dir,
+                cache_dir: proxy_cache,
+                hardware: options.hardware,
+                use_gpu: options.use_gpu,
+                seeks: if seeks_given {
+                    options.seeks
+                } else {
+                    defaults.seeks
+                },
+                seconds: seconds.unwrap_or(defaults.seconds),
+                memory_budget_mib: memory_budget.unwrap_or(defaults.memory_budget_mib),
+            },
+        });
+    }
+    if let Some(dir) = proxy_cache {
+        return Err(SubError::new(
+            codes::BAD_ARGUMENT,
+            format!(
+                "--proxy-cache only applies to --proxy, not to '{}'",
+                dir.display()
+            ),
+        ));
+    }
+    if memory_budget.is_some() {
+        return Err(SubError::new(
+            codes::BAD_ARGUMENT,
+            "--memory-budget only applies to --proxy",
+        ));
+    }
+    if mode == Mode::Sync {
         return Ok(Command::Sync {
             out: out.unwrap_or_else(|| PathBuf::from(DEFAULT_SYNC_OUT)),
             options: sync::Options {
@@ -166,7 +343,7 @@ fn parse(args: &[String]) -> SubResult<Command> {
     if seconds.is_some() {
         return Err(SubError::new(
             codes::BAD_ARGUMENT,
-            "--seconds only applies to --sync",
+            "--seconds only applies to --sync or --proxy",
         ));
     }
     Ok(Command::Measure {
@@ -261,6 +438,43 @@ fn measure_sync(out: &std::path::Path, options: &sync::Options) -> SubResult<()>
     Ok(())
 }
 
+/// Runs the proxy editing validation, writes the report and prints the
+/// summary.
+///
+/// # Errors
+///
+/// [`codes::PROXY_BELOW_TARGET`] when a measured criterion failed — the scrub
+/// rate, a stall-free playback or the memory budget — plus whatever the
+/// measurement or the report writer reports. A machine without the one-hour
+/// fixture is a skipped section, not an error.
+fn measure_proxy(out: &std::path::Path, options: &proxy::Options) -> SubResult<()> {
+    let outcome = proxy::run(options)?;
+    let mut report = report::Report::new(outcome.gpu);
+    report.scenarios = outcome.scenarios;
+    report.proxy = Some(outcome.section.clone());
+    write_report(out, &report)?;
+
+    for line in report.summary_lines() {
+        println!("{line}");
+    }
+    println!("report       {}", out.display());
+    if outcome.section.status == report::ScenarioStatus::Skipped {
+        println!(
+            "the proxy validation was not measured: generate the one-hour fixture with \
+             scripts/gen-fixtures.sh --hour first"
+        );
+        return Ok(());
+    }
+    let failures = outcome.section.failures();
+    if failures.is_empty() {
+        return Ok(());
+    }
+    Err(
+        SubError::new(codes::PROXY_BELOW_TARGET, failures.join("; "))
+            .with_detail("failed_criteria", failures.len()),
+    )
+}
+
 /// Writes the report as pretty JSON, creating the parent directory.
 fn write_report(out: &std::path::Path, report: &report::Report) -> SubResult<()> {
     if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
@@ -287,6 +501,7 @@ fn main() -> ExitCode {
         }
         Command::Measure { out, options } => measure(&out, &options),
         Command::Sync { out, options } => measure_sync(&out, &options),
+        Command::Proxy { out, options } => measure_proxy(&out, &options),
     });
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -302,7 +517,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, DEFAULT_OUT, DEFAULT_SYNC_OUT, codes, parse};
+    use super::{Command, DEFAULT_OUT, DEFAULT_PROXY_OUT, DEFAULT_SYNC_OUT, codes, parse};
     use std::path::PathBuf;
     use sub_media::HardwarePreference;
 
@@ -382,6 +597,64 @@ mod tests {
         assert_eq!(options.seconds, Some(30));
         assert_eq!(options.fixtures_dir, Some(PathBuf::from("/media")));
         assert_eq!(options.hardware, HardwarePreference::Software);
+    }
+
+    fn proxy(values: &[&str]) -> (PathBuf, crate::proxy::Options) {
+        match parse(&args(values)).expect("the arguments parse") {
+            Command::Proxy { out, options } => (out, options),
+            other => panic!("expected a proxy run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proxy_validates_editing_into_its_own_report() {
+        let (out, options) = proxy(&["--proxy"]);
+        assert_eq!(out, PathBuf::from(DEFAULT_PROXY_OUT));
+        assert_eq!(options, crate::proxy::Options::default());
+    }
+
+    #[test]
+    fn proxy_takes_a_length_a_seek_count_a_cache_and_a_budget() {
+        let (out, options) = proxy(&[
+            "--proxy",
+            "--seconds",
+            "10",
+            "--seeks",
+            "12",
+            "--proxy-cache",
+            "/cache",
+            "--memory-budget",
+            "512",
+            "--software",
+            "--no-gpu",
+            "--out",
+            "/tmp/proxy.json",
+        ]);
+        assert_eq!(out, PathBuf::from("/tmp/proxy.json"));
+        assert_eq!(options.seconds, 10);
+        assert_eq!(options.seeks, 12);
+        assert_eq!(options.cache_dir, Some(PathBuf::from("/cache")));
+        assert_eq!(options.memory_budget_mib, 512);
+        assert_eq!(options.hardware, HardwarePreference::Software);
+        assert!(!options.use_gpu);
+    }
+
+    #[test]
+    fn the_two_measuring_modes_are_not_asked_for_together() {
+        let error = parse(&args(&["--sync", "--proxy"])).expect_err("one mode at a time");
+        assert_eq!(error.code, codes::BAD_ARGUMENT);
+    }
+
+    #[test]
+    fn the_proxy_only_options_are_rejected_elsewhere() {
+        for bad in [
+            vec!["--proxy-cache", "/cache"],
+            vec!["--memory-budget", "512"],
+            vec!["--sync", "--memory-budget", "512"],
+        ] {
+            let error = parse(&args(&bad)).expect_err("the arguments are rejected");
+            assert_eq!(error.code, codes::BAD_ARGUMENT, "for {bad:?}");
+        }
     }
 
     #[test]

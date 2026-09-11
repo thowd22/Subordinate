@@ -102,6 +102,15 @@ pub struct Scenario {
     /// Frames per second sustained across the whole run, in milli-fps.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sustained_milli_fps: Option<u64>,
+    /// How long a step could take before it counted as a stall, in
+    /// nanoseconds. Present only for a scenario that counted stalls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stall_threshold_nanos: Option<u64>,
+    /// Timed steps that took longer than that threshold: frames that would
+    /// not have been on screen in time. Present only when stalls were
+    /// counted; zero is the passing value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stalls: Option<u64>,
 }
 
 impl Scenario {
@@ -121,6 +130,8 @@ impl Scenario {
             upload: None,
             decode_to_texture: None,
             sustained_milli_fps: None,
+            stall_threshold_nanos: None,
+            stalls: None,
         }
     }
 
@@ -145,7 +156,7 @@ impl Scenario {
             },
         );
         format!(
-            "{:<10} {:<24} {}x{:<5} {:>4} frames  {:>8} fps  p50 {:>10}  p95 {:>10}{}",
+            "{:<10} {:<24} {}x{:<5} {:>4} frames  {:>8} fps  p50 {:>10}  p95 {:>10}{}{}",
             self.kind.as_str(),
             self.fixture,
             self.width,
@@ -154,6 +165,10 @@ impl Scenario {
             format_milli_fps(self.sustained_milli_fps),
             p50,
             p95,
+            match self.stalls {
+                Some(stalls) => format!("  {stalls} stalls"),
+                None => String::new(),
+            },
             if self.upload.is_none() {
                 "  [decode only: no GPU]"
             } else {
@@ -293,6 +308,217 @@ impl SyncSection {
     }
 }
 
+/// What the proxy editing validation measured (or why it could not run).
+///
+/// Phase 5's exit criterion is stated about editing, not about decoding: a
+/// one-hour long-GOP source, a proxy made from it, and an editor that scrubs
+/// above 30 fps, never stalls while playing and stays inside a memory budget
+/// (docs/PLAN.md §8). Each of those is an integer comparison here; the
+/// per-scenario numbers behind them are ordinary [`Scenario`] entries in the
+/// same report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxySection {
+    /// Fixture file name of the long-GOP source.
+    pub source: String,
+    /// Whether numbers were produced.
+    pub status: ScenarioStatus,
+    /// Why a skipped run was skipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<String>,
+    /// File name of the proxy that was measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    /// The intra-only codec the proxy was written in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_codec: Option<String>,
+    /// How far the proxy was scaled down.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_scale: Option<String>,
+    /// Proxy picture width in pixels.
+    pub proxy_width: u32,
+    /// Proxy picture height in pixels.
+    pub proxy_height: u32,
+    /// Frames the proxy holds, from its manifest.
+    pub proxy_frames: u64,
+    /// Bytes the source file occupies.
+    pub source_bytes: u64,
+    /// Bytes the proxy file occupies.
+    pub proxy_bytes: u64,
+    /// Wall time the proxy took to make, in nanoseconds. Zero when a proxy
+    /// already in the cache was reused.
+    pub generation_nanos: u64,
+    /// True when this run transcoded the proxy rather than reusing one.
+    pub generated: bool,
+    /// Seconds of timeline the playback scenario covered.
+    pub playback_seconds: u64,
+    /// One frame interval of the source, in nanoseconds: the budget a
+    /// playback step has to fit inside.
+    pub frame_interval_nanos: u64,
+    /// The scrub rate the criterion asks for, in milli-fps.
+    pub scrub_target_milli_fps: u64,
+    /// Scrub rate the proxy sustained, in milli-fps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_scrub_milli_fps: Option<u64>,
+    /// Scrub rate the original sustained, for comparison.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_scrub_milli_fps: Option<u64>,
+    /// Playback steps on the proxy that overran a frame interval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_playback_stalls: Option<u64>,
+    /// The slowest playback step on the proxy, in nanoseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_playback_max_nanos: Option<u64>,
+    /// The documented memory budget for the run, in bytes.
+    pub memory_budget_bytes: u64,
+    /// Peak resident set size of the process, in bytes, or `None` where this
+    /// platform does not report one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_rss_bytes: Option<u64>,
+}
+
+impl ProxySection {
+    /// A run that could not happen on this machine.
+    pub fn skipped(source: &str, reason: impl Into<String>) -> Self {
+        Self {
+            source: source.to_owned(),
+            status: ScenarioStatus::Skipped,
+            skipped_reason: Some(reason.into()),
+            proxy: None,
+            proxy_codec: None,
+            proxy_scale: None,
+            proxy_width: 0,
+            proxy_height: 0,
+            proxy_frames: 0,
+            source_bytes: 0,
+            proxy_bytes: 0,
+            generation_nanos: 0,
+            generated: false,
+            playback_seconds: 0,
+            frame_interval_nanos: 0,
+            scrub_target_milli_fps: 0,
+            proxy_scrub_milli_fps: None,
+            source_scrub_milli_fps: None,
+            proxy_playback_stalls: None,
+            proxy_playback_max_nanos: None,
+            memory_budget_bytes: 0,
+            peak_rss_bytes: None,
+        }
+    }
+
+    /// True when scrubbing the proxy reached the rate the criterion asks for.
+    pub fn scrub_ok(&self) -> bool {
+        self.proxy_scrub_milli_fps
+            .is_some_and(|rate| rate >= self.scrub_target_milli_fps)
+    }
+
+    /// True when no playback step on the proxy overran its frame interval.
+    pub fn playback_ok(&self) -> bool {
+        self.proxy_playback_stalls == Some(0)
+    }
+
+    /// True when the process stayed inside the memory budget.
+    ///
+    /// A platform that reports no peak counts as passing: the criterion is
+    /// then simply unmeasured, and the section says so by carrying no
+    /// `peak_rss_bytes`.
+    pub fn memory_ok(&self) -> bool {
+        self.peak_rss_bytes
+            .is_none_or(|peak| peak <= self.memory_budget_bytes)
+    }
+
+    /// The criteria this run failed, empty when it passed or was skipped.
+    pub fn failures(&self) -> Vec<String> {
+        if self.status == ScenarioStatus::Skipped {
+            return Vec::new();
+        }
+        let mut failures = Vec::new();
+        if !self.scrub_ok() {
+            failures.push(format!(
+                "proxy scrub reached {} fps, under the {} fps the criterion asks for",
+                format_milli_fps(self.proxy_scrub_milli_fps),
+                format_milli_fps(Some(self.scrub_target_milli_fps))
+            ));
+        }
+        if !self.playback_ok() {
+            failures.push(match self.proxy_playback_stalls {
+                Some(stalls) => format!(
+                    "{stalls} of the timed playback steps overran a {} frame interval",
+                    format_millis(self.frame_interval_nanos)
+                ),
+                None => "playback was not measured".to_owned(),
+            });
+        }
+        if !self.memory_ok() {
+            failures.push(format!(
+                "peak memory was {}, over the {} budget",
+                format_mib(self.peak_rss_bytes.unwrap_or(0)),
+                format_mib(self.memory_budget_bytes)
+            ));
+        }
+        failures
+    }
+
+    /// The lines the summary prints for the proxy run.
+    pub fn summary_lines(&self) -> Vec<String> {
+        if self.status == ScenarioStatus::Skipped {
+            return vec![format!(
+                "proxy      {:<24} skipped: {}",
+                self.source,
+                self.skipped_reason.as_deref().unwrap_or("no reason given")
+            )];
+        }
+        let mut lines = vec![
+            format!(
+                "proxy      {:<24} {}x{} {} ({}), {} frames, {} -> {}{}",
+                self.source,
+                self.proxy_width,
+                self.proxy_height,
+                self.proxy_codec.as_deref().unwrap_or("unknown codec"),
+                self.proxy_scale.as_deref().unwrap_or("unknown scale"),
+                self.proxy_frames,
+                format_mib(self.source_bytes),
+                format_mib(self.proxy_bytes),
+                if self.generated {
+                    format!(", made in {}", format_millis(self.generation_nanos))
+                } else {
+                    ", reused from the cache".to_owned()
+                }
+            ),
+            format!(
+                "proxy      scrub {} fps (target {}) [{}]  playback {} stalls over {} s [{}]",
+                format_milli_fps(self.proxy_scrub_milli_fps),
+                format_milli_fps(Some(self.scrub_target_milli_fps)),
+                verdict(self.scrub_ok()),
+                self.proxy_playback_stalls
+                    .map_or_else(|| "n/a".to_owned(), |stalls| stalls.to_string()),
+                self.playback_seconds,
+                verdict(self.playback_ok()),
+            ),
+            format!(
+                "proxy      peak memory {} of a {} budget [{}]",
+                self.peak_rss_bytes
+                    .map_or_else(|| "unmeasured".to_owned(), format_mib),
+                format_mib(self.memory_budget_bytes),
+                verdict(self.memory_ok()),
+            ),
+        ];
+        for failure in self.failures() {
+            lines.push(format!("proxy      FAILED: {failure}"));
+        }
+        lines
+    }
+}
+
+/// `PASS` or `FAIL`, for a criterion line.
+fn verdict(ok: bool) -> &'static str {
+    if ok { "PASS" } else { "FAIL" }
+}
+
+/// A byte count as whole mebibytes, rounded down.
+pub fn format_mib(bytes: u64) -> String {
+    format!("{} MiB", bytes / (1024 * 1024))
+}
+
 /// A milli-frame count as frames with three decimal places, sign included.
 pub fn format_milli_frames(milli: i64) -> String {
     let sign = if milli < 0 { "-" } else { "" };
@@ -315,6 +541,9 @@ pub struct Report {
     /// What the A/V sync and drift harness measured, when it ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncSection>,
+    /// What the proxy editing validation measured, when it ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxySection>,
 }
 
 impl Report {
@@ -334,6 +563,7 @@ impl Report {
             gpu,
             scenarios: Vec::new(),
             sync: None,
+            proxy: None,
         }
     }
 
@@ -361,6 +591,9 @@ impl Report {
         if let Some(sync) = &self.sync {
             lines.extend(sync.summary_lines());
         }
+        if let Some(proxy) = &self.proxy {
+            lines.extend(proxy.summary_lines());
+        }
         lines
     }
 
@@ -373,6 +606,10 @@ impl Report {
                 .sync
                 .as_ref()
                 .is_some_and(|sync| sync.status == ScenarioStatus::Measured)
+            || self
+                .proxy
+                .as_ref()
+                .is_some_and(|proxy| proxy.status == ScenarioStatus::Measured)
     }
 }
 
@@ -386,8 +623,8 @@ pub fn finish(scenario: &mut Scenario, frames: u64, wall_nanos: u64) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Gpu, REPORT_VERSION, Report, Scenario, ScenarioKind, ScenarioStatus, SyncSection, finish,
-        format_milli_frames,
+        Gpu, ProxySection, REPORT_VERSION, Report, Scenario, ScenarioKind, ScenarioStatus,
+        SyncSection, finish, format_mib, format_milli_frames,
     };
     use crate::stats::Samples;
     use sub_time::Rational;
@@ -529,6 +766,127 @@ mod tests {
         let parsed: Report = serde_json::from_str(&json).expect("the report parses back");
         assert_eq!(parsed, report);
         assert!(!json.contains("null"), "unexpected null in {json}");
+    }
+
+    fn proxy_section() -> ProxySection {
+        let mut section = ProxySection::skipped("longgop_1080p_1h.mp4", "unused");
+        section.status = ScenarioStatus::Measured;
+        section.skipped_reason = None;
+        section.proxy = Some("proxy-abc-mjpeg-half-q75.mov".to_owned());
+        section.proxy_codec = Some("mjpeg".to_owned());
+        section.proxy_scale = Some("half".to_owned());
+        section.proxy_width = 960;
+        section.proxy_height = 540;
+        section.proxy_frames = 90_000;
+        section.source_bytes = 400 * 1024 * 1024;
+        section.proxy_bytes = 900 * 1024 * 1024;
+        section.generated = true;
+        section.generation_nanos = 1_200_000_000_000;
+        section.playback_seconds = 5;
+        section.frame_interval_nanos = 40_000_000;
+        section.scrub_target_milli_fps = 30_000;
+        section.proxy_scrub_milli_fps = Some(42_500);
+        section.source_scrub_milli_fps = Some(3_200);
+        section.proxy_playback_stalls = Some(0);
+        section.proxy_playback_max_nanos = Some(18_000_000);
+        section.memory_budget_bytes = 2_048 * 1024 * 1024;
+        section.peak_rss_bytes = Some(700 * 1024 * 1024);
+        section
+    }
+
+    #[test]
+    fn a_proxy_run_that_meets_every_number_passes() {
+        let section = proxy_section();
+        assert!(section.scrub_ok());
+        assert!(section.playback_ok());
+        assert!(section.memory_ok());
+        assert!(section.failures().is_empty());
+        let summary = section.summary_lines().join("\n");
+        assert!(
+            summary.contains("scrub 42.500 fps (target 30.000) [PASS]"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("playback 0 stalls over 5 s [PASS]"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("peak memory 700 MiB of a 2048 MiB budget [PASS]"),
+            "{summary}"
+        );
+        assert!(!summary.contains("FAILED"), "{summary}");
+    }
+
+    #[test]
+    fn each_missed_number_is_named_once() {
+        let mut section = proxy_section();
+        section.proxy_scrub_milli_fps = Some(29_999);
+        section.proxy_playback_stalls = Some(3);
+        section.peak_rss_bytes = Some(4_096 * 1024 * 1024);
+        assert!(!section.scrub_ok());
+        assert!(!section.playback_ok());
+        assert!(!section.memory_ok());
+        assert_eq!(section.failures().len(), 3);
+        let summary = section.summary_lines().join("\n");
+        assert!(summary.contains("under the 30.000 fps"), "{summary}");
+        assert!(
+            summary.contains("3 of the timed playback steps overran"),
+            "{summary}"
+        );
+        assert!(summary.contains("over the 2048 MiB budget"), "{summary}");
+    }
+
+    #[test]
+    fn an_unmeasurable_peak_does_not_fail_the_memory_criterion() {
+        let mut section = proxy_section();
+        section.peak_rss_bytes = None;
+        assert!(section.memory_ok());
+        assert!(section.failures().is_empty());
+        assert!(
+            section.summary_lines().join("\n").contains("unmeasured"),
+            "the summary says the peak was not measured"
+        );
+    }
+
+    #[test]
+    fn a_skipped_proxy_run_says_why_and_fails_nothing() {
+        let mut report = Report::new(None);
+        report.proxy = Some(ProxySection::skipped("longgop_1080p_1h.mp4", "no file"));
+        assert!(!report.measured_anything());
+        let section = report.proxy.as_ref().expect("the section is there");
+        assert!(section.failures().is_empty());
+        assert!(
+            report
+                .summary_lines()
+                .join("\n")
+                .contains("skipped: no file")
+        );
+    }
+
+    #[test]
+    fn a_proxy_report_round_trips_through_json() {
+        let mut report = Report::new(None);
+        report.proxy = Some(proxy_section());
+        let mut playback = measured();
+        playback.stall_threshold_nanos = Some(40_000_000);
+        playback.stalls = Some(0);
+        report.scenarios.push(playback);
+        assert!(report.measured_anything());
+        let json = serde_json::to_string_pretty(&report).expect("the report serialises");
+        let parsed: Report = serde_json::from_str(&json).expect("the report parses back");
+        assert_eq!(parsed, report);
+        assert!(!json.contains("null"), "unexpected null in {json}");
+        assert!(
+            report.summary_lines().join("\n").contains("0 stalls"),
+            "a scenario that counted stalls says so"
+        );
+    }
+
+    #[test]
+    fn byte_counts_print_as_whole_mebibytes() {
+        assert_eq!(format_mib(0), "0 MiB");
+        assert_eq!(format_mib(1024 * 1024), "1 MiB");
+        assert_eq!(format_mib(3 * 1024 * 1024 - 1), "2 MiB");
     }
 
     #[test]

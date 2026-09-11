@@ -194,17 +194,23 @@ Media tests need deterministic sample files, and binaries are never committed.
 them with `gst-launch-1.0` into `fixtures/`, which is gitignored:
 
 ```
-./scripts/gen-fixtures.sh            # everything except the 10-minute clip
+./scripts/gen-fixtures.sh            # everything except the two long-GOP clips
 ./scripts/gen-fixtures.sh --long     # add the 10-minute long-GOP clip
+./scripts/gen-fixtures.sh --hour     # add the one-hour long-GOP clip
 ./scripts/gen-fixtures.sh --list     # show the catalogue
 ./scripts/gen-fixtures.sh --dry-run  # print the pipelines without running them
 ```
 
 The catalogue is 1080p and 4K H.264 colour bars with a burnt-in timecode, a
 29.97 drop-frame clip, a variable-frame-rate clip, a 10-minute long-GOP clip,
-and 48 kHz stereo audio-only files in WAV, FLAC, MP3, AAC (in MP4) and Ogg
-Vorbis. Existing files are kept unless `--force` is given, so re-running the
-script is cheap.
+a one-hour long-GOP clip, and 48 kHz stereo audio-only files in WAV, FLAC,
+MP3, AAC (in MP4) and Ogg Vorbis. Existing files are kept unless `--force` is
+given, so re-running the script is cheap.
+
+The two long-GOP clips are behind their own switches because they cost real
+time to encode: minutes for the ten-minute clip, a quarter of an hour and a
+few hundred megabytes for the one-hour clip, which only
+`subordinate-bench --proxy` needs (docs/PERFORMANCE.md).
 
 The lossy audio fixtures need `lamemp3enc` (plugins-ugly), `avenc_aac`
 (libav) and `vorbisenc` with `oggmux` (plugins-base). Where one of those is
