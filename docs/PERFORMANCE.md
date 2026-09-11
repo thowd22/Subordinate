@@ -35,16 +35,16 @@ Two numbers come out of each scenario:
 A scrub scenario also reports where that latency went, because the two halves of
 a scrub step answer to different fixes (TASK-133):
 
-* **`seek`** — the flushing keyframe seek: the flush itself, the demuxer's
-  re-prime, and the keyframe frame it produces. Zero for a step that was reached
-  by decoding forward.
-* **`decode_forward`** — every picture between that keyframe and the frame that
+* **`seek`** — the flushing seek: the flush itself, the demuxer's re-prime, the
+  reference chain the decoder works through before it can produce anything, and
+  the first picture it delivers. Zero for a step that was reached by decoding
+  forward.
+* **`decode_forward`** — the pictures delivered between there and the frame that
   was actually asked for.
-* **`frames_decoded`** and **`seeks_issued`** — pictures produced and flushes
-  issued across the timed steps. `frames_decoded / frames` is how deep into a
-  GOP an average step landed, and it is the number to watch: every picture over
-  one is a picture decoded only to build the reference chain of the frame the
-  scrub wanted.
+* **`frames_decoded`** and **`seeks_issued`** — pictures delivered and flushes
+  issued across the timed steps. `frames_decoded / frames` is how many pictures
+  a step handed back, and it is the number to watch: every picture over one is a
+  picture converted, downloaded and copied only to be thrown away.
 
 The summary line prints the split, so a workflow log shows it without opening
 the JSON:
@@ -83,8 +83,9 @@ hardware decoders out of the measurement, for a comparable software number),
 * **A software adapter is an upper bound**, not a measurement of the machine:
   llvmpipe does the YUV-to-RGB pass on the CPU, and on a 4K frame that
   dominates everything else.
-* **Scrub is slower than playback by design.** Each step is a keyframe seek
-  plus a decode-forward, so it costs a fraction of a GOP, not one frame.
+* **Scrub is slower than playback by design.** Each step flushes the pipeline
+  and decodes the reference chain of the frame it wants, so it costs a fraction
+  of a GOP of decoding, not one frame.
 
 ## Baseline: Linux software (no GPU, no hardware decode)
 
@@ -121,39 +122,61 @@ Recorded 2026-09-11 (TASK-133) on the same WSL2 machine as the software
 baseline above, release build, software decode, `--no-gpu --seeks 20`, so these
 are decode-only numbers: no upload, no YUV-to-RGB pass.
 
-| Fixture | seek p50 | decode-forward p50 | pictures decoded per timed step |
+| Fixture | seek p50 | decode-forward p50 | pictures delivered per timed step |
 | --- | --- | --- | --- |
-| `bars_1080p_h264.mp4` | 19.6 ms | 10.1 ms | 12.7 |
-| `bars_2160p_h264.mp4` | 39.6 ms | 46.6 ms | 12.0 |
+| `bars_1080p_h264.mp4` | 25.0 ms | 0.8 ms | 3.0 |
+| `bars_2160p_h264.mp4` | 47.2 ms | 3.6 ms | 3.0 |
 
-Both halves are large, and neither is the decode of the frame that was asked
-for. The fixtures have a one-second GOP at 25 fps, so a random target sits about
-twelve pictures past its keyframe; those twelve are decoded and thrown away, and
-on the 4K clip they are more than half the step. The rest is the flush: about
-20 ms at 1080p and 40 ms at 4K, spent before a single picture of the new
-position exists.
+The fixtures have a one-second GOP at 25 fps, so a random target sits about
+twelve pictures past the keyframe its decode has to start from. Those pictures
+still have to be *decoded* — they are the frame's reference chain — but they no
+longer have to be *delivered*. A seek is issued as a flushing accurate seek
+whose segment opens just before the target (TASK-133), so the decoder clips them
+instead of pushing them: nothing between the keyframe and the target is colour
+converted, downloaded out of the decoder's memory or copied into a `VideoFrame`,
+which at 4K is 12 MB a picture. A step delivers three pictures instead of
+thirteen, and `decode_forward` collapses to the decode of the one that was
+asked for. The reference chain is now inside the `seek` half, because it is
+decoded before the first delivered picture exists.
 
-That is the shape of the gap to phase 1's ">30 fps" criterion, and it is why
-the T4 run is only marginally better than software: a hardware decoder makes
-the pictures cheaper, not the flush, and not the number of pictures.
+Measured on the same machine, before and after that change, `--no-gpu
+--seeks 20`:
 
-What the index removed (TASK-133): aiming a seek at the keyframe the index names
-rather than at the target itself. A target expressed in stream time does not
-carry the offset a reordered stream's timestamps start with — 80 ms on these
-fixtures — so the demuxer could snap to the keyframe *after* the one the target
-needed, and the decoder then had to seek a second time, aiming blindly further
-back, to recover the frame: a whole extra flush plus another pass over a GOP.
-Over the 20-step 4K scrub it took the pictures decoded from 302 to 240, a fifth
-of the decode-forward work, and it removed the retry seeks. The sustained rate
-moved from 11.3 to 11.7 fps, which is inside this machine's run-to-run spread:
-the win is in the counts, and the flush is untouched.
+| Fixture | pictures delivered over 20 steps | step p50 | sustained |
+| --- | --- | --- | --- |
+| `bars_1080p_h264.mp4` before | 254 | 27.1 ms | 36.5 fps |
+| `bars_1080p_h264.mp4` after | 60 | 25.9 ms | 40.9 fps |
+| `bars_2160p_h264.mp4` before | 240 | 63.7 ms | 14.5 fps |
+| `bars_2160p_h264.mp4` after | 60 | 52.2 ms | 18.4 fps |
 
-What is left for the 30 fps criterion is therefore not a tuning change. At 4K a
-step has to stop decoding a dozen pictures it does not show — a per-GOP cache of
-what a step already decoded, a keyframe-only decode while the playhead is moving
-with the accurate frame drawn when it stops, or proxies — and the flush has to
-stop costing tens of milliseconds. Those are the follow-ups; this task made the
-two costs visible and cut the wasted seeks.
+The fast path needs a `PtsIndex`, which the viewer builds in the background as
+soon as a clip is imported and the harness builds before it times anything. A
+decoder without one keeps the keyframe seek it always issued: the aim has to
+know where the picture before the target is, and where the file's timestamps sit
+relative to the timeline the container is seeked in, and only an index can say
+either without decoding. The aim is the picture *before* the target rather than
+the target itself because a decoder trims a buffer that straddles the start of
+the segment rather than dropping it, which on a file whose frame durations are
+not its real ones (a variable-rate Matroska carries one default duration for
+every block) would otherwise hand back the previous picture wearing the target's
+timestamp.
+
+What the index removed in the pass before this one: a seek used to aim at the
+target in stream time, which does not carry the offset a reordered stream's
+timestamps start with — 80 ms on these fixtures — so the demuxer could snap to
+the keyframe *after* the one the target needed and a second, blindly aimed seek
+had to recover the frame. That took the pictures decoded over the 20-step 4K
+scrub from 302 to 240 and removed the retry seeks.
+
+**4K scrub is still short of the criterion.** 18.4 fps with software decode on
+this machine, against ">30 fps" on hardware decode, and what is left is the
+flush: 47 ms of the 52 ms step at 4K is the seek and the reference chain it has
+to decode before the first picture of the new position exists. Cutting that
+needs a step to stop decoding that chain at all — a per-GOP cache of the
+pictures a step already decoded, so a step inside the GOP the last one landed in
+is a cache hit rather than a flush; keyframe-only decode while the playhead is
+moving, with the accurate frame drawn when it stops; or proxies. Those are the
+follow-ups.
 
 ## Baseline: NVIDIA T4, hardware decode (nvdec)
 

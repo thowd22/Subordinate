@@ -1,10 +1,11 @@
 ---
 id: TASK-133
 title: '4K H.264 scrub is seek-bound: 8.3 fps with NVDEC versus a 30 fps target'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@opus-task-133'
 created_date: '2026-09-11 14:48'
-updated_date: '2026-09-11 17:25'
+updated_date: '2026-09-11 18:42'
 labels:
   - media
   - performance
@@ -33,12 +34,14 @@ The first hardware baseline (TASK-116, run 34611438521 on a T4 with GStreamer 1.
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Instrument the seek path: Decoder::seek_to records a SeekTiming (seek_nanos = flushing seek plus the first frame after it, decode_forward_nanos = the frames decoded from there to the target, frames_decoded, seeks_issued), exposed as Decoder::last_seek_timing(). Integer nanoseconds only.
-2. Carry that split into perf.json: the scrub scenario collects seek and decode_forward Samples plus frames-decoded-per-step, new optional Scenario fields, and the summary line prints the split so the hardware workflow log shows where the 112 ms goes.
-3. Measure locally with software decode on the 1080p and 4K fixtures to find out which half dominates.
-4. Cut what the measurement says dominates, within scope: keyframe-aware seek planning driven by the existing PtsIndex (decode forward inside the GOP the decoder is already in instead of re-seeking; re-seek to the exact keyframe PTS so the overshoot backoff never runs), wired through IndexedDecoder. Pure planning logic unit-tested without hardware.
-5. Verify: fmt, clippy pedantic, sub-media and subordinate-bench tests, plus a frame-accuracy run of the existing seek suite.
-6. AC #2 needs the NVIDIA hardware runner, which this environment does not have; if it cannot be proven here it stays unchecked with the local software numbers recorded in notes.
+1. Second pass on the requeued task. The merged first pass instrumented the split and made the index drive seek planning; the hardware re-run (34626676058) showed decode-forward dominates (72.4 ms p50 at 4K, 14.2 pictures decoded per step), so the cut has to be the pictures a step decodes but never shows.
+2. Root cause: every picture between the keyframe and the target is pushed through videoconvert, downloaded out of the decoder's memory and copied into a VideoFrame (12 MB per 4K picture) only to be thrown away, because the seek uses KEY_UNIT|SNAP_BEFORE, which moves the segment start back to the keyframe so nothing downstream is out of segment.
+3. Fix: seek accurately at the target itself (FLUSH|ACCURATE, no KEY_UNIT). The demuxer still starts at the preceding keyframe, but the segment starts at the target, so GstVideoDecoder clips the reference-chain pictures and they never reach videoconvert, the appsink or a VideoFrame copy. Frame accuracy is unchanged: the step still returns the first frame at or after the target.
+4. Adjust the overshoot retry so it cannot misfire on an accurate seek: with a PtsIndex, an overshoot means the delivered picture is later than the frame the index says the target needs; without one, keep the legacy rule.
+5. Keep the index-driven DecodeForward decision (no seek at all when the target is ahead inside the GOP the decoder is already in).
+6. Measure locally with software decode on the 1080p and 4K fixtures before and after; record the split, pictures decoded and fps in the notes.
+7. Verify: cargo fmt --all --check, cargo clippy --workspace --all-targets -D warnings, cargo test -p sub-media -p subordinate-bench including the frame-accurate seek fixture suite (AC #3 evidence).
+8. AC #2's hardware half still needs the NVIDIA runner this environment does not have; check it only if the software half proves out and the hardware half can be argued, otherwise leave it unchecked with the numbers in notes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -76,10 +79,45 @@ It is two claims and neither is provable here. The hardware half needs the NVIDI
 cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean; cargo test -p sub-media -p subordinate-bench all green (111 lib + 61 bench unit tests and every fixture suite), including seek_fixtures, which judges a seek by the burnt-in timecode and by the whole picture -- that is the AC #3 evidence, and it is unchanged. New tests: five planner cases in decode.rs (keyframe aim, in-GOP forward step, next-GOP step, index that cannot answer, backward target) plus a SeekTiming billing test, and two fixture tests in index_fixtures.rs that prove the seek is removed on the long-GOP clip and the overshoot retry on the colour bars.
 
 2026-09-11 supervisor measurement after the merge (hardware run 34626676058): 4K scrub 9.161 fps on the T4 (seek p50 31.7 ms, decode-forward p50 72.4 ms, 14.2 pictures decoded per seek) and 9.945 fps on the box APU (seek p50 11.3 ms, decode-forward p50 61.5 ms, 14.2 pictures per seek). The instrumentation (criterion 1) is in; the speed-up is not. The split shows decode-forward dominates: every scrub step re-decodes about half a GOP from the keyframe. Direction for the next pass: when consecutive scrub targets fall inside the same GOP and move forward, continue decoding from the last decoded picture instead of seeking to the keyframe again (the decoder already holds the reference state), and keep the decoded pictures of the current GOP in the frame cache so backward steps within the GOP are cache hits. A forward sweep should then cost one decode per step, which is the 30 fps target. Requeued.
+
+## Second pass (requeued): the pictures a step delivers but never shows
+
+The re-run after the first pass (34626676058) showed decode-forward dominating: 72.4 ms p50 at 4K for 14.2 pictures a step. Those pictures are the target frame's reference chain -- they have to be *decoded*, which is the codec's business, but nothing needed them *delivered*. They were, because a KEY_UNIT seek asks the demuxer to move the segment back to the keyframe, which puts every picture from there inside the segment: colour converted, downloaded out of the decoder's memory and copied into a VideoFrame (12 MB apiece at 4K) on the way to a caller that throws them away.
+
+A seek is now a flushing accurate seek (FLUSH|ACCURATE, no KEY_UNIT) whose segment opens just before the target. The demuxer still starts the decoder at the keyframe before it -- it cannot decode from anywhere else -- and the decoder clips the chain instead of pushing it.
+
+Two details the fixtures forced, both in Decoder::seek_aim / accurate_aim:
+* The aim is the picture *before* the target, not the target. A decoder trims a buffer that straddles the start of the segment rather than dropping it, so on the VFR Matroska fixture (whose blocks all carry the same default duration, which is not their real one) aiming at the target handed back the previous picture wearing the target's timestamp -- right PTS, wrong picture. Opening a picture early makes any trimmed buffer one the step discards anyway. index_fixtures caught this.
+* The aim is moved into the timeline the container is seeked in, which is the presentation timestamps shifted by the first picture's own (80 ms on these fixtures). Without that the segment opens *after* the frame asked for and the decoder clips the very picture the caller wants -- at the end of a file that means no frame at all.
+
+Both need to know where pictures are without decoding, so the accurate seek is only used when a PtsIndex is set; a decoder without one keeps exactly the keyframe seek it always issued (SeekMode::Keyframe). The viewer and the benchmark both index, so both get the fast path.
+
+Also fixed on the way: a seek that ends the stream without ever delivering a picture used to surface as media.no_video_stream rather than as end-of-stream, and a seek whose segment opened past the last picture now gets one attempt further back (bounded to one, and skipped entirely when the index says the target really is past the end).
+
+## Measured, same machine, release, --no-gpu --seeks 20, avdec_h264
+
+| fixture | pictures delivered over 20 steps | step p50 | sustained |
+| --- | --- | --- | --- |
+| bars_1080p before | 254 | 27.1 ms | 36.477 fps |
+| bars_1080p after | 60 | 25.9 ms | 40.896 fps (40.244 on a repeat) |
+| bars_2160p before | 240 | 63.7 ms | 14.523 fps |
+| bars_2160p after | 60 | 52.2 ms | 18.367 fps (18.709 on a repeat) |
+
+decode_forward p50 at 4K went 32.9 ms -> 3.6 ms; the reference chain now sits in the seek half (34.2 -> 47.2 ms) because it is decoded before the first delivered picture exists. Three pictures a step instead of thirteen, on both fixtures. The rate change is well outside this machine's run-to-run spread this time, and the picture counts are exact.
+
+## AC #2 stays unchecked
+
+The hardware half needs the NVIDIA runner this environment does not have. The software half improved by 26% at 4K and 12% at 1080p, which is real but is not 30 fps: 47 of the 52 ms of a 4K step is now the flush plus the decode of the reference chain, and 30 fps is a 33 ms budget. Closing that needs a step to stop decoding the chain at all -- a per-GOP cache so a step inside the GOP the last one landed in is a cache hit, keyframe-only decode while the playhead moves with the accurate frame drawn on release, or proxies -- rather than another tuning of this path. docs/PERFORMANCE.md records the numbers and names those follow-ups.
+
+## Validation
+
+cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean; cargo test -p sub-media -p subordinate-bench all green, including seek_fixtures (which judges a seek by the burnt-in timecode and by the whole picture, the AC #3 evidence) and index_fixtures. New unit tests: the accurate aim opens a picture early, names its instant in the container's timeline and declines when the index cannot answer; the seek flags say which kind of seek was asked for; only an index can say whether a target is inside the file.
+
+Validation (second pass): cargo fmt --all --check clean, cargo clippy --workspace --all-targets -- -D warnings clean, cargo test -p sub-media -p subordinate-bench green, and cargo test --workspace --exclude sub-ui green (sub-ui's snapshot suite was not run here; it does not exercise the seek path directly). cargo doc -p sub-media --no-deps raises nothing new. AC #1 and AC #3 stay checked: AC #1's split is still reported per scrub scenario (its halves now bill the reference chain to the seek, which the harness prints), and AC #3's evidence is seek_fixtures, which judges every seek by the burnt-in timecode and by the whole picture and still passes -- the VFR regression this pass found and fixed is exactly that gate doing its job. AC #2 remains unchecked.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Split the scrub step into its two costs and cut the wasted seeks, but did not reach the 30 fps criterion. Decoder::seek_to now reports a SeekTiming (flushing seek versus decode-forward, pictures decoded, seeks issued) and perf.json plus the hardware job summary carry it per scrub scenario, which is AC #1; measuring with it showed a 4K step spends ~40 ms flushing and ~47 ms decoding about twelve pictures it never shows. The PtsIndex now drives seek planning (Decoder::set_index, used by IndexedDecoder and by the benchmark's scrub scenario), so a forward target inside the current GOP never flushes, a seek aims at the exact keyframe and the overshoot retry stops firing: 302 -> 240 pictures decoded over the 20-step 4K software scrub, with frame accuracy unchanged (seek_fixtures' timecode and whole-picture assertions still pass, AC #3). AC #2 is unchecked: the hardware half needs the NVIDIA runner this environment does not have, and the software half did not improve proportionally -- 11.331 -> 11.712 fps, inside the machine's noise -- because closing the rest of the gap needs a step to stop decoding pictures it does not show rather than a tuning of this path. Verified with cargo fmt --check, cargo clippy --workspace --all-targets -D warnings, and cargo test -p sub-media -p subordinate-bench.
+Cut the pictures a scrub step delivers but never shows, from thirteen to three, without reaching the 30 fps criterion. A seek issued by a decoder that has a PtsIndex is now a flushing accurate seek whose segment opens one picture before the target (and in the timeline the container is seeked in, which the fixtures' timestamps sit 80 ms above), so the target's reference chain is decoded and clipped by the decoder instead of being colour converted, downloaded and copied into a VideoFrame on its way to a caller that discards it; a decoder without an index keeps the keyframe seek it always issued, because neither adjustment can be made without knowing where pictures are. Measured on the 20-step software scrub: pictures delivered 240 -> 60 at 4K and 254 -> 60 at 1080p, step p50 63.7 -> 52.2 ms and 27.1 -> 25.9 ms, sustained 14.523 -> 18.367 fps and 36.477 -> 40.896 fps, repeatable across runs; decode-forward p50 at 4K fell 32.9 -> 3.6 ms with the chain now billed to the seek half. Frame accuracy is unchanged and was the constraint that shaped the fix -- index_fixtures caught an aim-at-the-target version handing back the previous picture of the VFR Matroska wearing the target's timestamp, and seek_fixtures' burnt-in timecode and whole-picture assertions pass (AC #3). AC #2 stays unchecked: its hardware half needs the NVIDIA runner this environment does not have, and its software half is 26% better rather than proportional to 30 fps, because 47 of the 52 ms of a 4K step is now the flush plus the decode of the reference chain -- closing that needs a per-GOP cache, keyframe-only decode while the playhead moves, or proxies, which docs/PERFORMANCE.md records as the follow-ups. Verified with cargo fmt --check, cargo clippy --workspace --all-targets -D warnings, cargo test -p sub-media -p subordinate-bench and cargo test --workspace --exclude sub-ui.
 <!-- SECTION:FINAL_SUMMARY:END -->
