@@ -2,12 +2,23 @@ name: Packaging
 
 # Linux packages (TASK-103). Two independent ways to ship the editor:
 #
-#   * AppImage -- carries the pinned GStreamer 1.28 runtime, including the
-#     nvcodec and va hardware plugins, so it runs on a stock Ubuntu LTS or
-#     Fedora with nothing but a graphics driver on the host.
+#   * AppImage -- carries a whole GStreamer runtime, including the nvcodec and
+#     va hardware plugins, so it runs on a stock Ubuntu LTS or Fedora with
+#     nothing but a graphics driver on the host. It is built inside an
+#     ubuntu:24.04 container, NOT on the 26.04 runner: an AppImage links
+#     against the glibc it was built on and glibc is only forward compatible,
+#     so a package built on 26.04 (glibc 2.43) refuses to start on Fedora 41
+#     (2.40) with "version GLIBC_2.43 not found" (run 34626701087). 24.04 is
+#     the oldest supported Ubuntu LTS and its glibc 2.39 is older than every
+#     distro this package targets. The price is GStreamer 1.24 rather than the
+#     repository's 1.28 pin -- 24.04 has no 1.28 and no trustworthy source for
+#     one -- so the bundled runtime is a minor behind CI. See
+#     docs/DEVELOPMENT.md, "Linux packages".
 #   * Flatpak  -- uses the freedesktop runtime's GStreamer and its
 #     `org.freedesktop.Platform.GStreamer` extension point instead of bundling
-#     one, with ffmpeg-full for the codecs the base runtime omits.
+#     one, on runtime branch 25.08 (24.08's rust-stable SDK extension is rustc
+#     1.89, below this workspace's rust-version). The full codec set comes from
+#     the runtime's own codecs-extra extension, which replaced ffmpeg-full.
 #
 # Runs on demand, on a tag, and on pushes that touch packaging, so a change to
 # the manifest or the plugin allowlist is checked before a release needs it.
@@ -17,20 +28,34 @@ name: Packaging
 
 on:
   workflow_dispatch:
+  # TEMPORARY (TASK-103): GitHub refuses workflow_dispatch for a workflow file
+  # that is changed off the default branch, and these jobs can only be proved
+  # by running them. Remove before merging.
   # No `paths` filter on the tag trigger: GitHub ANDs the two, so a release tag
   # whose commit happens not to touch packaging/ would be skipped.
   push:
+    branches: [task/task-103-fix]
     tags: ['v*']
   pull_request:
     paths:
       - 'packaging/**'
       - '.github/workflows/packaging.yml'
 
+concurrency:
+  group: packaging-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
+  # The GStreamer minor each job expects. The hosted runners and box are on
+  # the repository's 1.28 pin; the AppImage build container is ubuntu:24.04,
+  # which is 1.24 (see the note at the top). Both are asserted so a base image
+  # drifting is a build failure rather than a silently different package.
   GST_MINOR: "1.28"
+  APPIMAGE_BASE: "ubuntu:24.04"
+  APPIMAGE_GST_MINOR: "1.24"
 
 jobs:
   # Cheap and fast: catches a mistyped app id, a metainfo version that drifted
@@ -49,12 +74,40 @@ jobs:
             desktop-file-utils appstream shellcheck python3-yaml
       - run: packaging/validate.sh
 
+  # The AppImage is built inside ubuntu:24.04 (glibc 2.39), not on the runner
+  # (26.04, glibc 2.43): see the note at the top of this file. Everything the
+  # build needs is installed into the container, so this job never uses sudo --
+  # it is already root -- and it must not be "simplified" back onto the runner.
   appimage:
-    name: AppImage
+    name: AppImage (built in ubuntu:24.04)
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    container:
+      image: ubuntu:24.04
+    timeout-minutes: 90
     needs: validate
+    env:
+      DEBIAN_FRONTEND: noninteractive
     steps:
+      # Before checkout: the base image has neither git nor the CA bundle the
+      # actions need.
+      - name: Install GStreamer and packaging tools
+        run: |
+          apt-get update || apt-get update
+          apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            ca-certificates curl git xz-utils zstd file binutils sudo \
+            build-essential pkg-config python3 python3-yaml \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x \
+            gstreamer1.0-pulseaudio gstreamer1.0-alsa \
+            libasound2-dev libxkbcommon-dev libwayland-dev libx11-dev \
+            patchelf desktop-file-utils appstream
+          echo "glibc = $(ldd --version | head -n1)"
+          v=$(pkg-config --modversion gstreamer-1.0)
+          echo "gstreamer-1.0 = $v"
+          case "$v" in "$APPIMAGE_GST_MINOR".*) ;;
+            *) echo "::error::expected GStreamer $APPIMAGE_GST_MINOR.x in $APPIMAGE_BASE, got $v"; exit 1;; esac
+
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@master
@@ -63,25 +116,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: packaging-appimage
+          shared-key: packaging-appimage-ubuntu2404
+          prefix-key: v1-rust
 
-      # The same package set ci.yml installs, plus the runtime plugin packages
-      # the AppImage bundles from. libgstreamer-plugins-bad carries nvcodec and
-      # va; without it the build fails on the required-plugin check rather than
-      # shipping a package that silently cannot hardware-encode.
-      - name: Install GStreamer and packaging tools
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/*google* /etc/apt/sources.list.d/*microsoft* || true
-          sudo apt-get update || sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x \
-            gstreamer1.0-pulseaudio gstreamer1.0-alsa \
-            pkg-config libasound2-dev patchelf desktop-file-utils appstream python3-yaml
-          v=$(pkg-config --modversion gstreamer-1.0)
-          echo "gstreamer-1.0 = $v"
-          case "$v" in "$GST_MINOR".*) ;; *) echo "::error::expected GStreamer $GST_MINOR.x, got $v"; exit 1;; esac
+      # actions/checkout inside a container leaves the tree owned by a uid the
+      # build does not run as; git then refuses to read the repository and any
+      # build script that shells out to it fails mid-build.
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Build the AppImage
         run: packaging/linux/build-appimage.sh
@@ -89,64 +131,117 @@ jobs:
       - name: Check the staged AppDir
         run: packaging/validate.sh --appdir target/appimage/Subordinate.AppDir
 
-      # An AppImage that only starts on the machine that built it is the whole
-      # failure mode here, so it is run twice: on the Ubuntu LTS runner, and in
-      # a bare Fedora container that has no GStreamer of its own. --help exits
-      # without a window, which is all that is needed to prove the binary, its
-      # bundled libraries and the loader agree. The gst-inspect run through
-      # SUB_APPIMAGE_TOOL proves the *bundled* registry sees the hardware
-      # plugins; the elements themselves need a GPU, hence hardware.yml.
-      - name: Smoke test on Ubuntu LTS
+      # The one thing that can only be measured here: the highest glibc symbol
+      # version the package asks for. If it ever climbs above the build base's
+      # own glibc, something from outside the AppDir leaked into the bundle and
+      # the package stops being portable.
+      - name: Report the glibc floor
         run: |
           appimage=$(ls target/appimage/Subordinate-*-x86_64.AppImage)
           chmod +x "$appimage"
-          "$appimage" --appimage-extract-and-run --help
-          SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run --version
-          for plugin in nvcodec va libav x264; do
-            SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run "$plugin" > /dev/null \
-              || { echo "::error::the bundled runtime does not expose $plugin"; exit 1; }
-            echo "bundled plugin ok: $plugin"
-          done
-
-      # Fedora is the second distro the package promises to run on, and a bare
-      # container is the honest test: no GStreamer at all, only the client
-      # libraries a desktop has and an AppImage is entitled to assume. That
-      # list is exactly the excludelist in build-appimage.sh -- the graphics
-      # and audio stack that must come from the host -- so installing it here
-      # proves the split is right. Anything else missing would be a bundling
-      # bug, not a Fedora problem.
-      - name: Smoke test on Fedora
-        run: |
-          appimage=$(ls target/appimage/Subordinate-*-x86_64.AppImage)
-          docker run --rm -v "$PWD:/work" -w /work fedora:41 bash -c '
-            set -e
-            dnf install -y -q --setopt=install_weak_deps=False \
-              alsa-lib pulseaudio-libs mesa-libGL mesa-libEGL mesa-libgbm \
-              libdrm libva libX11 libX11-xcb libxcb libXext libXrender \
-              libvdpau vulkan-loader libwayland-client libwayland-cursor \
-              libwayland-egl > /dev/null
-            appimage=$(ls target/appimage/Subordinate-*-x86_64.AppImage)
-            chmod +x "$appimage"
-            "$appimage" --appimage-extract-and-run --help > /dev/null
-            for plugin in nvcodec va libav x264; do
-              SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run "$plugin" > /dev/null \
-                || { echo "::error::Fedora: the bundled runtime does not expose $plugin"; exit 1; }
-              echo "Fedora bundled plugin ok: $plugin"
-            done
-            # A blacklisted plugin means a dependency did not come along.
-            summary=$(SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run 2>/dev/null | tail -1)
-            echo "$summary"
-            case "$summary" in
-              *blacklist*) echo "::error::Fedora: some bundled plugins were blacklisted"; exit 1 ;;
-            esac
-            echo "Fedora: AppImage starts and its bundled registry is clean"
-          '
+          "$appimage" --appimage-extract-and-run --help > /dev/null
+          floor=$(objdump -T target/appimage/Subordinate.AppDir/usr/bin/subordinate \
+            target/appimage/Subordinate.AppDir/usr/lib/*.so* 2>/dev/null |
+            grep -o 'GLIBC_2\.[0-9]*' | sort -t. -k2 -n | tail -n1)
+          echo "highest glibc symbol version required: $floor"
+          echo "AppImage glibc floor: \`$floor\` (built on $APPIMAGE_BASE, GStreamer $APPIMAGE_GST_MINOR)" \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
           name: subordinate-appimage
           path: target/appimage/Subordinate-*-x86_64.AppImage
           if-no-files-found: error
+
+  # An AppImage that only starts on the machine that built it is the whole
+  # failure mode here, so the artifact is run on three systems that are not the
+  # one that built it: the 26.04 runner (much newer glibc), the build base
+  # itself, and a bare Fedora container with no GStreamer at all. `--help`
+  # exits without a window, which is all that is needed to prove the binary,
+  # its bundled libraries and the loader agree. The gst-inspect runs through
+  # SUB_APPIMAGE_TOOL prove the *bundled* registry sees the hardware plugins;
+  # the elements themselves need a GPU, hence the packages-amd job below.
+  appimage-smoke:
+    name: AppImage smoke (${{ matrix.target }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    needs: appimage
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The host runner: proves a package built on old glibc still runs on
+          # a much newer one, which is the direction that has to work.
+          - target: ubuntu-26.04 host
+            image: ""
+            install: "true"
+          # The build base, i.e. the oldest system this package claims.
+          - target: ubuntu-24.04
+            image: ubuntu:24.04
+            install: |
+              apt-get update >/dev/null
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+                libgl1 libegl1 libgbm1 libdrm2 libva2 libx11-6 libx11-xcb1 libxcb1 \
+                libxext6 libxrender1 libvdpau1 libvulkan1 libwayland-client0 \
+                libwayland-cursor0 libwayland-egl1 libasound2t64 libpulse0 >/dev/null
+          # Fedora is the second distro the package promises to run on, and a
+          # bare container is the honest test: only the client libraries a
+          # desktop has and an AppImage is entitled to assume. That list is
+          # exactly the excludelist in build-appimage.sh -- the graphics and
+          # audio stack that must come from the host -- so installing it here
+          # proves the split is right. Anything else missing would be a
+          # bundling bug, not a Fedora problem.
+          - target: fedora-41
+            image: fedora:41
+            install: |
+              dnf install -y -q --setopt=install_weak_deps=False \
+                alsa-lib pulseaudio-libs mesa-libGL mesa-libEGL mesa-libgbm \
+                libdrm libva libX11 libX11-xcb libxcb libXext libXrender \
+                libvdpau vulkan-loader libwayland-client libwayland-cursor \
+                libwayland-egl > /dev/null
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: subordinate-appimage
+          path: appimage
+
+      # One script, run identically on the host and inside each container, so
+      # a failure in one target is comparable to a pass in another.
+      - name: Write the smoke script
+        run: |
+          cat > smoke.sh <<'SMOKE'
+          set -eu
+          appimage=$(ls appimage/Subordinate-*-x86_64.AppImage)
+          chmod +x "$appimage"
+          echo "host glibc: $(ldd --version 2>&1 | head -n1)"
+          "$appimage" --appimage-extract-and-run --help > /dev/null
+          echo "the editor starts"
+          SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run --version
+          for plugin in nvcodec va libav x264; do
+            SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run "$plugin" > /dev/null \
+              || { echo "::error::the bundled runtime does not expose $plugin"; exit 1; }
+            echo "bundled plugin ok: $plugin"
+          done
+          # A blacklisted plugin means a dependency did not come along.
+          summary=$(SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run 2>/dev/null | tail -1)
+          echo "$summary"
+          case "$summary" in
+            *blacklist*) echo "::error::some bundled plugins were blacklisted"; exit 1 ;;
+          esac
+          SMOKE
+
+      - name: Smoke test
+        env:
+          IMAGE: ${{ matrix.image }}
+          INSTALL: ${{ matrix.install }}
+        run: |
+          printf '%s\n' "$INSTALL" > install.sh
+          if [ -z "$IMAGE" ]; then
+            sh install.sh && sh smoke.sh
+          else
+            docker run --rm -v "$PWD:/work" -w /work "$IMAGE" \
+              sh -c 'sh install.sh && sh smoke.sh'
+          fi
 
   flatpak:
     name: Flatpak
@@ -161,14 +256,14 @@ jobs:
           sudo apt-get update || sudo apt-get update
           sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
 
-      # The runtime, SDK, the rust-stable SDK extension and ffmpeg-full are
-      # several GB; caching them keeps a rebuild to the app itself.
+      # The runtime, the SDK and the rust-stable SDK extension are several GB;
+      # caching them keeps a rebuild to the app itself.
       - name: Cache flatpak runtimes
         uses: actions/cache@v4
         with:
           path: ~/.local/share/flatpak
-          key: flatpak-24.08-${{ hashFiles('packaging/flatpak/*.yml') }}
-          restore-keys: flatpak-24.08-
+          key: flatpak-25.08-${{ hashFiles('packaging/flatpak/*.yml') }}
+          restore-keys: flatpak-25.08-
 
       - name: Build the Flatpak
         run: packaging/flatpak/build-flatpak.sh --install-deps
@@ -178,3 +273,146 @@ jobs:
           name: subordinate-flatpak
           path: target/flatpak/Subordinate-*.flatpak
           if-no-files-found: error
+  # AC 3: hardware encode from inside the packages, not against the host
+  # runtime. It runs on "box", a user-owned mini PC with an AMD Cezanne APU
+  # (VA-API through mesa, Vulkan through RADV) registered as a self-hosted
+  # runner -- see docs/DEVELOPMENT.md, "Self-hosted AMD runner". Nothing is
+  # compiled here: both packages arrive as artifacts and are run as a user
+  # would run them.
+  #
+  # The AppImage carries subordinate-cli and AppRun exposes it through
+  # SUB_APPIMAGE_TOOL, so the render uses the *bundled* GStreamer and the
+  # host's driver, which is exactly the split the package promises. The
+  # Flatpak is installed from the bundle and run through `flatpak run
+  # --command=subordinate-cli`, so it uses the freedesktop runtime's GStreamer.
+  # Both outputs are validated with the host's gst-discoverer-1.0, which is an
+  # independent check of the file rather than of the pipeline that wrote it.
+  packages-amd:
+    name: Hardware encode from the packages (box, self-hosted, AMD)
+    runs-on: [self-hosted, linux, box, amd-gpu]
+    timeout-minutes: 45
+    needs: [appimage, flatpak]
+    env:
+      # The same preset and sequence hardware.yml renders, so the numbers and
+      # the failure modes are comparable. demo.sub carries two sequences, so
+      # the render command has to name one.
+      PRESET: youtube-1080p
+      SEQUENCE: Main cut
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host facts
+        run: |
+          echo "runner=$RUNNER_NAME"
+          . /etc/os-release && echo "os=$PRETTY_NAME"
+          echo "glibc: $(ldd --version | head -n1)"
+          ls -l /dev/dri
+          id -nG
+          gst-inspect-1.0 --exists vah264enc \
+            || { echo "::error::the host has no vah264enc: check the render/video groups"; exit 1; }
+
+      - name: Fetch the sample project media
+        run: ./scripts/get-sample-media.sh
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: subordinate-appimage
+          path: packages
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: subordinate-flatpak
+          path: packages
+
+      # ---------------------------------------------------------------- AppImage
+      - name: The AppImage's own registry sees the VA-API encoder
+        run: |
+          mkdir -p target/packages
+          appimage=$(ls packages/Subordinate-*-x86_64.AppImage)
+          chmod +x "$appimage"
+          echo "APPIMAGE=$appimage" >> "$GITHUB_ENV"
+          SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run va \
+            | tee target/packages/appimage-va.txt | sed -n '1,25p'
+          grep -q vah264enc target/packages/appimage-va.txt \
+            || { echo "::error::the bundled va plugin has no vah264enc"; exit 1; }
+
+      # --encoder pins the element: the va plugin registers vah264enc at rank
+      # NONE, so autoplugging would never pick it even where it works.
+      - name: Render with vah264enc from inside the AppImage
+        run: |
+          out=$PWD/target/packages/appimage-vah264enc.mp4
+          SUB_APPIMAGE_TOOL=subordinate-cli xvfb-run -a "$APPIMAGE" --appimage-extract-and-run \
+            render examples/sample-project/demo.sub \
+            --preset "$PRESET" --sequence "$SEQUENCE" --encoder vah264enc --verify \
+            --out "$out" | tee target/packages/appimage-render.json
+          ls -l "$out"
+          gst-discoverer-1.0 "$out" | tee target/packages/appimage-discoverer.txt
+          grep -q 'H.264' target/packages/appimage-discoverer.txt \
+            || { echo "::error::the AppImage render carries no H.264 stream"; exit 1; }
+
+      # ---------------------------------------------------------------- Flatpak
+      # box is a plain desktop install and may not have flatpak; the runner
+      # user has passwordless sudo, so the job installs it rather than being
+      # skipped. The runtime comes from Flathub once and is then cached in the
+      # user installation between runs.
+      - name: Install flatpak and the bundle
+        run: |
+          command -v flatpak >/dev/null 2>&1 || {
+            sudo apt-get update || sudo apt-get update
+            sudo apt-get install -y --no-install-recommends flatpak
+          }
+          flatpak --version
+          flatpak remote-add --if-not-exists --user flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+          bundle=$(ls packages/Subordinate-*.flatpak)
+          flatpak install --user --noninteractive --bundle "$bundle"
+          flatpak list --user --app
+
+      - name: The Flatpak's runtime sees the VA-API encoder
+        run: |
+          mkdir -p target/packages
+          flatpak run --user --command=gst-inspect-1.0 io.github.thowd22.Subordinate va \
+            | tee target/packages/flatpak-va.txt | sed -n '1,25p'
+          grep -q vah264enc target/packages/flatpak-va.txt \
+            || { echo "::error::the runtime's va plugin has no vah264enc inside the sandbox"; exit 1; }
+
+      # --filesystem=host-os is not needed: the manifest already grants
+      # --filesystem=home and the runner's work directory is under it. The
+      # explicit --filesystem=$PWD keeps that true even if the runner moves.
+      - name: Render with vah264enc from inside the Flatpak
+        run: |
+          out=$PWD/target/packages/flatpak-vah264enc.mp4
+          xvfb-run -a flatpak run --user --filesystem="$PWD" --device=dri \
+            --command=subordinate-cli io.github.thowd22.Subordinate \
+            render "$PWD/examples/sample-project/demo.sub" \
+            --preset "$PRESET" --sequence "$SEQUENCE" --encoder vah264enc --verify \
+            --out "$out" | tee target/packages/flatpak-render.json
+          ls -l "$out"
+          gst-discoverer-1.0 "$out" | tee target/packages/flatpak-discoverer.txt
+          grep -q 'H.264' target/packages/flatpak-discoverer.txt \
+            || { echo "::error::the Flatpak render carries no H.264 stream"; exit 1; }
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Hardware encode from the Linux packages (box, AMD Cezanne APU)"
+            echo
+            for package in appimage flatpak; do
+              file=target/packages/$package-vah264enc.mp4
+              if [ -f "$file" ]; then
+                echo "* \`$package\`: rendered $(stat -c %s "$file") bytes with vah264enc, $(grep -c 'H.264' target/packages/$package-discoverer.txt) H.264 stream(s) reported by gst-discoverer-1.0"
+              else
+                echo "* \`$package\`: no output"
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-hardware-amd
+          path: target/packages/
+          if-no-files-found: warn
+          retention-days: 30

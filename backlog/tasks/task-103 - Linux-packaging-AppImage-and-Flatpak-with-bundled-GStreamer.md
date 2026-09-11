@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-task-103'
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-11 15:28'
+updated_date: '2026-09-11 17:34'
 labels:
   - release
 milestone: m-7
@@ -41,6 +41,12 @@ Linux is the primary target; users must not hunt for GStreamer plugins.
 4. packaging/validate.sh as the test: metadata well-formedness (appstreamcli, desktop entry keys), app-id/version consistency with Cargo.toml, plugin allowlist covers nvcodec+va, AppRun exports GST_PLUGIN_SYSTEM_PATH_1_0/GST_PLUGIN_SCANNER, flatpak manifest parses and declares the GStreamer extension + required finish-args. Run it locally.
 5. .github/workflows/packaging.yml: appimage job (Ubuntu 26.04, build + stage + appimagetool, smoke-run --version under Ubuntu LTS and a Fedora container) and flatpak job running flatpak-builder; upload artifacts.
 6. docs/DEVELOPMENT.md packaging section; leave AC#3 (hardware encode from the packages) unchecked, it needs the TASK-116 hardware runners.
+
+7. CI fix round (run 34626701087 failed both jobs).
+   a. Flatpak: the rust-stable SDK extension on freedesktop 24.08 is rustc 1.89, below the workspace rust-version 1.95. Move the manifest to runtime-version 25.08, whose rust-stable branch tracks current stable (its ostree commit was rebuilt 2026-09-07). 25.08 also drops org.freedesktop.Platform.ffmpeg-full: the runtime now declares org.freedesktop.Platform.codecs-extra (version 25.08-extra, already on GST_PLUGIN_SYSTEM_PATH and auto-downloaded), so the add-extensions block, the mkdir /app/lib/ffmpeg and the --env=LD_LIBRARY_PATH=...ffmpeg finish-arg all go away and the manifest stays Flathub-shaped (no toolchain installed over the network). Update build-flatpak.sh and validate.sh to match.
+   b. AppImage: it was built on the ubuntu-26.04 runner (glibc 2.43) so it could not start on Fedora 41 (2.40). Build it inside an ubuntu:24.04 container (glibc 2.39, the oldest supported Ubuntu LTS) as its own job, smoke-test the artifact in a matrix over the ubuntu-26.04 host, an ubuntu:24.04 container and a fedora:41 container. Ubuntu 24.04 carries GStreamer 1.24, not the 1.28 pin: record that deviation in the task notes and docs/DEVELOPMENT.md, and keep the version assertion in the job so the base drifting is a build failure.
+   c. AC 3: add a packages job on the self-hosted box (self-hosted, linux, box, amd-gpu) that downloads the AppImage artifact and renders the sample project with subordinate-cli --encoder vah264enc from inside the package, validating with gst-discoverer-1.0; install flatpak there and do the same from the Flatpak bundle.
+   d. Verify with real runs of packaging.yml on the branch (temporary push trigger, removed before finishing), then check only the criteria the runs prove.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes

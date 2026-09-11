@@ -10,21 +10,23 @@
 #   --out DIR        build tree and bundle location (default target/flatpak)
 #   -h, --help       this text
 #
-# Needs flatpak and flatpak-builder on PATH. Everything else -- runtime, SDK,
-# the rust-stable SDK extension and ffmpeg-full -- comes from Flathub with
-# --install-deps.
+# Needs flatpak and flatpak-builder on PATH. Everything else -- the runtime,
+# the SDK and the rust-stable SDK extension -- comes from Flathub with
+# --install-deps. There is no ffmpeg-full to install: since branch 25.08 the
+# full codec set is org.freedesktop.Platform.codecs-extra, which the runtime
+# declares and pulls in itself.
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 manifest=$repo_root/packaging/flatpak/io.github.thowd22.Subordinate.yml
 app_id=io.github.thowd22.Subordinate
-runtime_version=24.08
+runtime_version=25.08
 
 install_deps=0
 bundle=1
 out_dir=$repo_root/target/flatpak
 
-usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -46,8 +48,13 @@ if [ "$install_deps" -eq 1 ]; then
     flatpak install --user --noninteractive flathub \
         "org.freedesktop.Platform//$runtime_version" \
         "org.freedesktop.Sdk//$runtime_version" \
-        "org.freedesktop.Sdk.Extension.rust-stable//$runtime_version" \
-        "org.freedesktop.Platform.ffmpeg-full//$runtime_version"
+        "org.freedesktop.Sdk.Extension.rust-stable//$runtime_version"
+    # The toolchain the SDK extension carries has to satisfy the workspace's
+    # rust-version, or cargo stops with "rustc X is not supported by the
+    # following packages" after several minutes of flatpak-builder setup.
+    flatpak run --user --command=/usr/lib/sdk/rust-stable/bin/rustc \
+        --devel "org.freedesktop.Sdk//$runtime_version" --version ||
+        echo "build-flatpak.sh: could not query the SDK extension's rustc" >&2
 fi
 
 mkdir -p "$out_dir"
