@@ -1,10 +1,11 @@
 ---
 id: TASK-126
 title: Linux CI build regressed from 5 to 13 minutes after the sccache change
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@opus-task-126'
 created_date: '2026-09-10 00:47'
-updated_date: '2026-09-11 04:18'
+updated_date: '2026-09-11 04:46'
 labels:
   - infra
   - ci
@@ -26,18 +27,16 @@ TASK-125 fixed Windows CI (36m to 8m) but a warm-cache no-change rerun of run 34
 <!-- AC:BEGIN -->
 - [ ] #1 ubuntu-26.04 job on a warm no-change rerun completes in under 7 minutes, recorded in the task notes with the run id
 - [x] #2 sccache hit rate on Linux is above 90 percent on the warm rerun, or sccache is disabled on Linux with the reason documented in ci.yml
-- [x] #3 Windows stays under 15 minutes on the same rerun
+- [ ] #3 Windows stays under 15 minutes on the same rerun
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Measure the current ubuntu-26.04 job step by step from the last warm rerun (run 34495825617) via the Actions API rather than guessing where the 10m47s goes.
-2. Cache the generated fixtures: an actions/cache restore step keyed on runner.os, GST_VERSION and hashFiles('scripts/gen-fixtures.sh'), with a matching save step gated on refs/heads/main so pull requests restore but never add entries. This removes both the 16s short-fixture step and the 129s long-fixture step from a warm run; gen-fixtures.sh already keeps existing files and regenerates only what is missing, so a partial restore is safe.
-3. Let rust-cache keep the workspace's own crate artifacts (cache-workspace-crates: true) and add plugins/gain as a second workspace, so a warm Build stops recompiling every workspace member from scratch (184s) and the separate reference-plugin build (30s) restores too.
-4. Keep the entry count bounded: still one rust-cache archive per OS plus one fixture archive per OS, all save-gated on main.
-5. Update the ci.yml comments and docs/DEVELOPMENT.md 'CI build speed' with the measured per-step numbers and the new caches.
-6. Verify: re-parse ci.yml with PyYAML and assert the new steps, keys and conditions; cargo fmt --all --check. AC #1 needs a real warm rerun on Actions and this worktree must never push, so record the projection and leave it unchecked unless a run can be observed.
+1. Measure a real warm no-change rerun on GitHub Actions (gh run rerun of a run whose commit already populated the caches on main) rather than a changed-source run, and take per-step timings from the jobs API.
+2. Separate the two things that were being conflated: cache misses (fixed by the earlier passes) and steps whose cost is genuine work that grew with scope (tests, plugin builds, GUI smoke, benchmark).
+3. If cache behaviour is still wrong on the rerun, fix it in ci.yml. If it is correct, record the measured number, name the realistic target for the job as it now stands, and leave AC #1 to the supervisor to close or re-baseline.
+4. Verify: cargo fmt --all --check and a PyYAML re-parse of ci.yml for any change made.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -94,6 +93,29 @@ No Rust source is touched by this diff, so clippy and the test suite cannot be a
 Projection, and it is only a projection: 647 s minus 129 s (long fixture) minus 14 s (short fixtures) minus roughly 150 s of Build, 38 s of Clippy and 18 s of reference plugin that the workspace-crate cache should remove, plus perhaps 40 s of extra restore time for the larger archive and the fixture entry, lands near 5m30s. AC #1 stays UNCHECKED: it asks for a measured warm no-change rerun with a run id, this worktree must never push, and a projection is not a measurement. Note also that the first run after this merges is cold twice over -- the rust-cache key changes (the saved contents change shape) and the fixture entry does not exist yet -- so the run to measure is the second one on main, rerun with no changes.
 
 2026-09-10 supervisor: requeued for a final pass. Re-measure with a warm no-change rerun after fixture caching; if the remaining Linux time is the build itself plus fixed steps (window smoke, benchmark), record the number and propose the realistic target in notes so the supervisor can close it. TASK-131 (Windows) depends on this.
+
+2026-09-11 fourth pass, this worker. The previous passes were fixing the right things and none of them were taking effect. Root cause found and fixed.
+
+Measured, not projected. Triggered a real warm no-change rerun (gh run rerun 34560385094, whose first attempt had already run on main and populated the caches) and read per-step times from the jobs API. Attempt 2, ubuntu-26.04: 735 s (12m15s). Build 184 s, Test 203 s, rust-cache restore 61 s, apt 43 s, OTIO plugins 43 s, benchmark 34 s, color plugin 31 s, cut-silence 30 s, GUI smoke 26 s, Clippy 23 s, A/V sync 10 s, rest under 10 s. macos-latest 676 s, windows-latest 916 s.
+
+Two facts from the same run. The fixture cache from the third pass WORKS: both fixture steps (16 s + 129 s) are gone from the job entirely, restored from key fixtures-Linux-1.28.6-<hash>. And cache-workspace-crates: true did NOTHING: the log shows "Cache hit ... full match: true" on restore and "Cache up-to-date." in the post step, with Build still recompiling all twenty-odd workspace members from scratch (3m14s of Compiling lines) and Test recompiling ten of them again.
+
+Why: GitHub Actions cache entries are immutable, and Swatinem/rust-cache refuses to re-save a key it restored as a full match -- that is what "Cache up-to-date." means. Its key is derived from the toolchain, the lockfile and the environment, NOT from the actions own inputs. The archive under v0-rust-ci-ubuntu-26.04-Linux-x64-9c9e715c-b4d2e498 was therefore written before cache-workspace-crates existed, with the workspace crates already stripped out, and it can never be replaced while Cargo.lock and rustc stay put. Every run restored that stale archive and rebuilt the world. This is also why the third passes projection (about 5m30s) never materialised.
+
+Changes to .github/workflows/ci.yml:
+1. prefix-key: v1-rust on the Swatinem step. This rotates the key once so a fresh archive per OS is written, this time with the workspace artifacts in it. Documented in ci.yml and in docs/DEVELOPMENT.md as a standing rule: bump the prefix whenever you change WHAT the archive should contain, because no other input does.
+2. workspaces: corrected from [".", "plugins/gain"] to [".", "plugins/color", "plugins/cut-silence", "plugins/gain", "plugins/otio"]. Every plugin under plugins/ is its own cargo workspace with its own target directory; only gain (the cheapest of the four) was listed, so color 31 s, cut-silence 30 s and otio 43 s rebuilt from scratch on every run. The invariant -- the list equals the set of working-directory: values the plugin steps use -- is stated in the ci.yml comment, in the docs and in the verification script.
+3. docs/DEVELOPMENT.md "CI build speed" updated: the immutable-key trap as its own bullet, the corrected workspaces list, and the measured per-step table for rerun 34560385094 attempt 2.
+
+Verification performed here: ci.yml re-parsed with PyYAML and asserted -- exactly one Swatinem step, prefix-key v1-rust, cache-workspace-crates true, the workspaces list exact and a superset of every steps working-directory, save-if still restricted to refs/heads/main, the fixture-cache step still present, matrix still the three-OS list, no SCCACHE or RUSTC_WRAPPER token, Unix newlines. cargo fmt --all --check passes. The diff touches only .github/workflows/ci.yml, docs/DEVELOPMENT.md and this task file; no Rust source, so clippy and the test suite cannot be affected by it and were not re-run here (GStreamer is not installed system-wide in this worktree).
+
+Criteria. AC #2 stays checked: sccache is disabled on every OS and the reason is documented in ci.yml. AC #1 stays UNCHECKED -- the only warm no-change rerun measurable from here was taken BEFORE this fix, under the stale archive, at 12m15s, and this worktree must never push, so the post-fix number cannot be produced here. AC #3 is UNCHECKED now, having previously been checked on run 34495825617 at 13m37s: on rerun 34560385094 attempt 2 Windows took 916 s = 15m16s, just over the 15-minute line, and it was suffering from exactly the same stale archive, so it should be re-measured rather than left claimed.
+
+How to close both: merge this branch, let ONE run land on main (that run is cold by design -- it writes the v1-rust archives), then rerun that run with no changes and record the run id plus the ubuntu-26.04 and windows-latest durations. On that rerun Build and the four plugin steps should be near-no-ops.
+
+On the 7-minute target in AC #1, for the supervisor to decide. Even with a perfect cache the Linux job still has to do work that did not exist when 5 minutes was measured: the test run itself (about 140 s of the 203 s Test step is running tests, not compiling), apt restore 43 s, rust-cache restore 61 s and rising with a bigger archive, GUI smoke 26 s, the scrub benchmark 34 s, the A/V sync harness 10 s, plus runner and toolchain setup. That floor is roughly 5 to 6 minutes before a single crate is compiled, so under 7 minutes is achievable but with little headroom; if the post-fix rerun lands between 7 and 8 minutes the honest move is to re-baseline the criterion against the jobs current scope rather than to keep cutting.
+
+Housekeeping warning for the supervisor: one edit in this pass was made through the backlog MCP tool, which resolved to the SHARED checkout at /home/admin2/Subordinate rather than to this worktree, leaving an uncommitted copy of these same notes and the final summary in that checkouts copy of this task file. It is byte-identical in substance to what is committed on this branch. Discard it there (git checkout -- the task file) before merging, or the merge will see a dirty tree.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
@@ -109,5 +131,5 @@ probe GitHub Actions
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Linux CI is now attacked where the time actually is, measured per step from run 34495825617 rather than inferred: of 647 s, Build was 184 s and long-fixture generation 129 s. Build was slow on a warm run because Swatinem/rust-cache defaults to discarding the repository's own crates before saving, so ci.yml now sets cache-workspace-crates: true, adds plugins/gain as a second cached workspace, and caches the generated fixtures in one main-only actions/cache entry per OS keyed on runner.os, GST_VERSION and the hash of scripts/gen-fixtures.sh. Verified by re-parsing ci.yml with PyYAML and asserting every new key, condition and step ordering, by cargo fmt --all --check, and by exercising gen-fixtures.sh against stub GStreamer tools to prove a restored fixtures/ makes both generation steps no-ops and that a partial restore regenerates only what is missing. AC #2 and #3 were already established; AC #1 remains unchecked because it requires a measured warm no-change rerun on GitHub Actions and this worktree must never push -- measure the second run on main after this lands, since the first is cold under the new cache shape.
+Found why the previous two passes had no effect: GitHub Actions cache entries are immutable and Swatinem/rust-cache never re-saves a key it restored as a full match ("Cache up-to-date."), and its key ignores the actions own inputs -- so cache-workspace-crates: true kept restoring the archive written before that option existed, and every run recompiled all twenty-odd workspace members. prefix-key: v1-rust rotates the key once so a fresh archive is written with the workspace artifacts in it, and workspaces: now lists all four plugin workspaces instead of only plugins/gain, so the color, cut-silence and otio steps (31 s, 30 s, 43 s) stop rebuilding from scratch. Measured rather than projected: a real warm no-change rerun (gh run rerun 34560385094, attempt 2) gave ubuntu-26.04 12m15s with Build 184 s and Test 203 s, and confirmed the third passs fixture cache works -- both fixture steps are gone from the job. Verified by re-parsing ci.yml with PyYAML and asserting the prefix key, the exact workspaces list against every steps working-directory, save-if on main and the surviving fixture-cache step, plus cargo fmt --all --check. AC #1 stays unchecked and AC #3 is unchecked again (Windows 15m16s on that rerun, same stale-archive cause): both need a warm rerun taken AFTER this lands, and this worktree must never push.
 <!-- SECTION:FINAL_SUMMARY:END -->

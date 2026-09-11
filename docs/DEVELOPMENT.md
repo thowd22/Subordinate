@@ -733,8 +733,12 @@ crates, `3` for dependencies, full debuginfo).
   no-change run still recompiled every workspace member and every test binary:
   184 s of Build and 48 s of Clippy inside a 10m47s Linux job on rerun
   34495825617. `cache-workspace-crates: true` keeps them, and `workspaces:`
-  adds `plugins/gain` — the reference plugin is its own one-package workspace,
-  so the root entry never covered its target directory. Cargo's fingerprints
+  lists every cargo workspace in the repository. Each plugin under `plugins/`
+  is a self-contained workspace with its own target directory, which the root
+  entry never covered, so their CI steps rebuilt from scratch every run
+  (cut-silence 30 s, color 31 s, otio 43 s on rerun 34560385094); only
+  `plugins/gain` used to be listed. Keep that list equal to the set of
+  `working-directory:` values the plugin steps use. Cargo's fingerprints
   still decide what is stale, so this only ever saves work; the cost is a
   larger archive per OS, which removing sccache made room for. Watch it: the
   three archives were 1.5 GB (Linux) and 1.25 GB (Windows) without the
@@ -744,6 +748,21 @@ crates, `3` for dependencies, full debuginfo).
   entry and Actions evicts it first. Check
   `gh api repos/thowd22/Subordinate/actions/cache/usage` if jobs start coming
   up cold.
+- **Bump `prefix-key` whenever you change *what* the archive should contain
+  (TASK-126).** This is the trap that made the previous bullet a no-op for
+  several days. Actions cache entries are immutable, and `Swatinem/rust-cache`
+  refuses to re-save a key it restored as a full match — its post step prints
+  `Cache up-to-date.` — while its key is derived from the toolchain, the
+  lockfile and the environment and **not** from the action's own inputs. So
+  after `cache-workspace-crates: true` was added, every run went on restoring
+  the archive written before the option existed, with the workspace crates
+  already stripped out, and went on recompiling all twenty-odd members: the
+  warm no-change rerun of run 34560385094 (attempt 2) still showed Build 184 s
+  and Test 203 s on ubuntu-26.04, 12m15s for the job. The key is now prefixed
+  `v1-rust`. Any future change to the shape of the cached contents — another
+  `workspaces` entry, a different `cache-*` toggle — needs the same bump, and
+  the run to measure is the *second* one after it lands: the first writes the
+  new archive.
 - **Generated fixtures are cached (TASK-126).** `scripts/gen-fixtures.sh` is
   pure x264 encode time — 16 s for the short set, another 129 s for the
   10-minute long-GOP clip the A/V sync harness needs — and its output depends
@@ -775,6 +794,19 @@ rest under 10 s each. Read those numbers off any run with
 `gh api repos/thowd22/Subordinate/actions/runs/<id>/jobs` and the per-step
 `started_at`/`completed_at` pairs before optimising anything — the two steps
 worth attacking were not the ones the job's shape suggested.
+
+Where it went on the warm no-change rerun of run 34560385094 (attempt 2), the
+last measurement taken with the stale archive still in place (12m15s): Test
+203 s, Build 184 s, rust-cache restore 61 s, apt install 43 s, the OTIO plugins
+43 s, the scrub benchmark 34 s, the color plugin 31 s, cut-silence 30 s, GUI
+smoke 26 s, Clippy 23 s, A/V sync 10 s, the rest under 10 s each. Both fixture
+steps had disappeared entirely, which is the fixture cache working. Measure it
+again once a run has written the `v1-rust` archives; a no-change rerun after
+that should leave Build and the three plugin steps as near-no-ops, and the
+floor for the job is then roughly the runner and toolchain setup, the apt
+restore, the test run itself, and the GUI smoke plus benchmark, which is why
+the original 7-minute target predates the A/V sync harness, the benchmark and
+the three plugin workspaces the job has since grown.
 
 ## GPU CI (RunsOn)
 
