@@ -19,8 +19,12 @@
 //! subordinate-sdk = "0.1"           # the `command` world, the default
 //! ```
 //!
+//! That one dependency is the whole list. A plugin's answers and arguments are
+//! JSON, and the SDK re-exports [`serde_json`] and its [`json!`](json) macro, so
+//! nothing has to be added to build one.
+//!
 //! ```ignore
-//! use subordinate_sdk::{Guest, ProjectId, Result, export};
+//! use subordinate_sdk::{Guest, ProjectId, Result, export, json};
 //!
 //! struct Plugin;
 //!
@@ -28,7 +32,7 @@
 //!     fn run(project: ProjectId, args: String) -> Result<String> {
 //!         let project = subordinate_sdk::Project::new(project);
 //!         let revision = project.query(&subordinate_sdk::params::ProjectRevision {})?;
-//!         Ok(format!(r#"{{"revision":{}}}"#, revision.revision))
+//!         Ok(json!({ "revision": revision.revision }).to_string())
 //!     }
 //! }
 //!
@@ -75,14 +79,16 @@
 //!
 //! ```ignore
 //! // subordinate-sdk = "0.1"
-//! use subordinate_sdk::{Guest, Project, ProjectId, Result, export, params};
+//! use subordinate_sdk::{Guest, Project, ProjectId, Result, export, json, params};
 //!
 //! struct Plugin;
 //! impl Guest for Plugin {
 //!     fn run(project: ProjectId, args: String) -> Result<String> {
 //!         let project = Project::new(project);
 //!         let history = project.query(&params::HistoryGet {})?;
-//!         Ok(format!(r#"{{"can_undo":{}}}"#, history.can_undo))
+//!         // `json!` and `serde_json` are re-exported by the SDK, so a plugin's
+//!         // `Cargo.toml` never grows a JSON dependency of its own.
+//!         Ok(json!({ "can_undo": history.can_undo }).to_string())
 //!     }
 //! }
 //! export!(Plugin);
@@ -165,8 +171,9 @@
 //!         }]
 //!     }
 //!     fn call(name: String, args_json: String) -> Result<String> {
+//!         use subordinate_sdk::{json, serde_json};
 //!         let args: serde_json::Value = serde_json::from_str(&args_json).unwrap_or_default();
-//!         Ok(format!(r#"{{"tool":{name:?}}}"#))
+//!         Ok(json!({ "tool": name }).to_string())
 //!     }
 //! }
 //! ```
@@ -263,6 +270,15 @@ pub use host::{
 pub use ids::Id;
 pub use params::CommandParams;
 
+// Every world's answer is a JSON document, and `run_json`/`query_json` take and
+// return `serde_json` types, so JSON is part of this SDK's public surface.
+// Re-exporting the crate — and its `json!` macro — is what keeps a plugin's
+// `Cargo.toml` at one dependency: build an answer with
+// `subordinate_sdk::json!({ … }).to_string()` rather than with `format!` over
+// hand-written braces, and parse `args` with `subordinate_sdk::serde_json`.
+pub use serde_json;
+pub use serde_json::json;
+
 // The importer and exporter worlds export an interface rather than bare
 // functions, so their guest trait lives under `bindings::exports::…` and there
 // is no `Guest` at the bindings root to re-export.
@@ -295,6 +311,18 @@ mod tests {
             Plugin::run(ProjectId::parse("p"), "{}".to_owned()).unwrap(),
             "p {}"
         );
+    }
+
+    /// A plugin builds its JSON answer out of what the SDK re-exports, so its
+    /// `Cargo.toml` stays at one dependency however involved the answer gets.
+    #[test]
+    fn json_is_reachable_through_the_sdk_without_a_dependency_of_its_own() {
+        let answer = crate::json!({ "sequences": 2, "args_bytes": 0 }).to_string();
+        assert_eq!(answer, r#"{"args_bytes":0,"sequences":2}"#);
+
+        let parsed: crate::serde_json::Value =
+            crate::serde_json::from_str(&answer).expect("the answer is JSON");
+        assert_eq!(parsed["sequences"], 2);
     }
 
     #[test]
