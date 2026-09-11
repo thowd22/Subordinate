@@ -117,9 +117,14 @@ tool's own description in `tools/list` is the doc comment on the command itself.
 | Tracks | `track_add`, `track_insert`, `track_remove`, `track_rename`, `track_reorder`, `track_set_gain`, `track_set_locked`, `track_set_muted`, `track_set_solo` |
 | Sequences | `sequence_create`, `sequence_delete`, `sequence_insert`, `sequence_rename`, `sequence_set_settings` |
 | Transitions | `transition_add`, `transition_remove` |
+| Effects | `clip_add_effect`, `clip_insert_effect`, `clip_move_effect`, `clip_remove_effect`, `clip_set_effect_param` |
 | Markers | `marker_add`, `marker_move`, `marker_remove`, `marker_rename`, `marker_replace_on_clip`, `marker_from_analysis` |
 
 `clip_set_params` is where per-clip opacity, transform, gain and fades live.
+The effect tools edit a clip's effect stack: `clip_add_effect` names the plugin
+declaring the effect, the stack runs in list order, and `clip_set_effect_param`
+binds one declared parameter — omit its `value` to put the parameter back to
+the plugin's declared default.
 `marker_from_analysis` turns an analyzer plugin's findings into timeline markers
 as an ordinary undoable command.
 

@@ -20,17 +20,62 @@
 //! is applied to every selected clip on an unlocked track. Fades are clamped
 //! per clip, so dragging a two second fade across a selection holding a one
 //! second clip shortens it there rather than failing the whole gesture.
+//!
+//! # Effects
+//!
+//! Under the sliders is the anchor clip's effect stack: what runs on it, in
+//! the order the compositor runs it. The rows are built from two sources, as
+//! [`crate::effects`] describes — the project says which plugins are applied
+//! and what is bound, the catalogue says what each plugin declared — so a
+//! control is generated from the plugin's own `param-desc` and nothing about
+//! an effect is stored twice.
+//!
+//! Effect edits are the one thing here that is not applied across the
+//! selection: an effect is identified by the instance on one clip, so adding,
+//! reordering, removing and binding all act on the anchor. They are raised the
+//! same way the sliders are, as commands in [`InspectorResponse::effects`] the
+//! caller applies, and grouped the same way: a click is one undo step, a drag
+//! on a parameter is one undo step for the whole gesture.
 
-use eframe::egui::{Slider, Ui};
+use eframe::egui::{Button, ComboBox, Response, Slider, Ui};
 use sub_core::SubResult;
 use sub_edit::History;
-use sub_edit::commands::SetClipParams;
+use sub_edit::commands::{
+    AddClipEffect, MoveClipEffect, RemoveClipEffect, SetClipEffectParam, SetClipParams,
+};
+use sub_model::effect::{ClipEffect, EffectValue};
 use sub_model::params::{Fixed6, GainDb, Opacity, Point2, Scale2, Transform};
-use sub_model::{Clip, Project, Sequence, Track};
+use sub_model::{Clip, ClipId, EffectId, Project, Sequence, SequenceId, Track, TrackId};
+use sub_render::{EffectParam, ParamKind};
 use sub_time::{Rational, RationalTime};
 
+use crate::effects::EffectCatalog;
 use crate::selection::{ClipRef, Selection};
 use crate::timeline_panel::clip_edits_allowed;
+
+/// The heading the effect stack sits under.
+pub const EFFECTS_HEADING: &str = "Effects";
+
+/// What the effect list shows when the clip carries none.
+pub const NO_EFFECTS_LABEL: &str = "No effects on this clip.";
+
+/// The heading the add-effect picker sits under.
+pub const ADD_EFFECT_LABEL: &str = "Add effect";
+
+/// What the picker shows when no effect plugin is installed.
+pub const NO_EFFECT_PLUGINS_LABEL: &str = "No effect plugins installed.";
+
+/// The button that moves an effect one place earlier in the stack.
+pub const MOVE_UP_LABEL: &str = "Move up";
+
+/// The button that moves an effect one place later in the stack.
+pub const MOVE_DOWN_LABEL: &str = "Move down";
+
+/// The button that takes an effect off the clip.
+pub const REMOVE_EFFECT_LABEL: &str = "Remove";
+
+/// What an effect with no declaration to read shows instead of controls.
+pub const UNDECLARED_LABEL: &str = "Parameters appear once the plugin loads.";
 
 /// The furthest a clip may be pushed from the canvas centre, in pixels.
 ///
@@ -163,6 +208,11 @@ pub struct InspectorResponse {
     /// Applying them is what makes the edit live: the project changes under
     /// the pointer and the viewer recomposites from it.
     pub commands: Vec<SetClipParams>,
+    /// The effect-stack commands to apply now, in the order they were raised.
+    ///
+    /// They always name the anchor clip, because an effect is an instance on
+    /// one clip rather than a value every selected clip can share.
+    pub effects: Vec<EffectEdit>,
     /// The gesture ended this frame; commit the open group as one undo step.
     pub commit: bool,
 }
@@ -171,8 +221,68 @@ impl InspectorResponse {
     /// Whether the frame asked for nothing at all, which is the usual case.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.begin.is_none() && self.commands.is_empty() && !self.commit
+        self.begin.is_none() && self.commands.is_empty() && self.effects.is_empty() && !self.commit
     }
+}
+
+/// One edit to the anchor clip's effect stack, as the command that performs it.
+///
+/// The panel raises these rather than applying them, exactly as it does with
+/// [`SetClipParams`], so the same edit can be applied through the engine, a
+/// bare [`History`] or nothing at all in a test that only asserts on what was
+/// asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectEdit {
+    /// Apply a plugin's effect to the clip, at the end of the stack.
+    Add(AddClipEffect),
+    /// Move an effect to another place in the stack.
+    Move(MoveClipEffect),
+    /// Take an effect off the clip.
+    Remove(RemoveClipEffect),
+    /// Bind one parameter of one applied effect.
+    SetParam(SetClipEffectParam),
+}
+
+impl EffectEdit {
+    /// The label the one history entry this edit produces gets.
+    #[must_use]
+    pub const fn undo_label(&self) -> &'static str {
+        match self {
+            Self::Add(_) => "Add effect",
+            Self::Move(_) => "Reorder effect",
+            Self::Remove(_) => "Remove effect",
+            Self::SetParam(_) => "Change effect parameter",
+        }
+    }
+
+    /// Applies the edit through `history`, as one command.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the command returns: an effect the clip no longer holds, a
+    /// locked track, a plugin id the model refuses.
+    pub fn apply(&self, history: &mut History, project: &mut Project) -> SubResult<()> {
+        match self {
+            Self::Add(command) => history.apply(project, command.clone()),
+            Self::Move(command) => history.apply(project, *command),
+            Self::Remove(command) => history.apply(project, *command),
+            Self::SetParam(command) => history.apply(project, command.clone()),
+        }
+    }
+}
+
+/// The widget a parameter gesture is open on.
+///
+/// A colour is four sliders, so the channel is part of the identity: letting
+/// go of the red slider must not commit a gesture opened on the green one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParamKey {
+    /// The applied effect the parameter belongs to.
+    effect: EffectId,
+    /// The parameter id, as the plugin declared it.
+    param: String,
+    /// Which channel of a colour, when the parameter is one.
+    channel: Option<usize>,
 }
 
 /// The inspector panel.
@@ -184,19 +294,30 @@ impl InspectorResponse {
 pub struct InspectorPanel {
     /// The field a drag or a text edit is currently open on, if any.
     gesture: Option<InspectorField>,
+    /// The effect parameter a drag is currently open on, if any.
+    param_gesture: Option<ParamKey>,
 }
 
 impl InspectorPanel {
     /// A panel with no gesture open.
     #[must_use]
     pub const fn new() -> Self {
-        Self { gesture: None }
+        Self {
+            gesture: None,
+            param_gesture: None,
+        }
     }
 
     /// The field a gesture is open on, if one is.
     #[must_use]
     pub const fn gesture(&self) -> Option<InspectorField> {
         self.gesture
+    }
+
+    /// Whether a gesture is open on an effect parameter.
+    #[must_use]
+    pub const fn editing_effect_param(&self) -> bool {
+        self.param_gesture.is_some()
     }
 
     /// Paints the parameters of `selection` and returns what it asks for.
@@ -209,15 +330,19 @@ impl InspectorPanel {
         ui: &mut Ui,
         sequence: &Sequence,
         selection: &Selection,
+        catalog: &EffectCatalog,
     ) -> InspectorResponse {
         let mut response = InspectorResponse::default();
-        let Some(anchor) = anchor_clip(sequence, selection) else {
+        let anchor_ref = anchor_ref(sequence, selection);
+        let Some(anchor) = anchor_ref.and_then(|item| track_of(sequence, item)?.clip(item.clip))
+        else {
             ui.label(if selection.is_empty() {
                 "Select a clip to edit its parameters."
             } else {
                 "The selected clips are no longer in this sequence."
             });
             self.gesture = None;
+            self.param_gesture = None;
             return response;
         };
 
@@ -241,8 +366,256 @@ impl InspectorPanel {
             for field in InspectorField::ALL {
                 self.field_ui(ui, field, sequence, anchor, &editable, rate, &mut response);
             }
+            ui.separator();
+            ui.heading(EFFECTS_HEADING);
+            // The anchor is the clip whose stack is shown, so its own track is
+            // what decides whether the stack can be edited.
+            let target = anchor_ref.filter(|item| editable.contains(item));
+            if let Some(target) = target {
+                self.effects_ui(ui, sequence.id, target, anchor, catalog, &mut response);
+            }
         });
         response
+    }
+
+    /// Paints the anchor clip's effect stack and the add-effect picker.
+    fn effects_ui(
+        &mut self,
+        ui: &mut Ui,
+        sequence: SequenceId,
+        target: ClipRef,
+        anchor: &Clip,
+        catalog: &EffectCatalog,
+        response: &mut InspectorResponse,
+    ) {
+        if anchor.effects.is_empty() {
+            ui.label(NO_EFFECTS_LABEL);
+        }
+        let last = anchor.effects.len().saturating_sub(1);
+        for (index, effect) in anchor.effects.iter().enumerate() {
+            ui.push_id(effect.id, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "{}. {}",
+                        index + 1,
+                        catalog.name_of(&effect.plugin)
+                    ));
+                    if ui
+                        .add_enabled(index > 0, Button::new(MOVE_UP_LABEL))
+                        .clicked()
+                    {
+                        raise(
+                            response,
+                            EffectEdit::Move(MoveClipEffect::new(
+                                sequence,
+                                target.track,
+                                target.clip,
+                                effect.id,
+                                index - 1,
+                            )),
+                        );
+                    }
+                    if ui
+                        .add_enabled(index < last, Button::new(MOVE_DOWN_LABEL))
+                        .clicked()
+                    {
+                        raise(
+                            response,
+                            EffectEdit::Move(MoveClipEffect::new(
+                                sequence,
+                                target.track,
+                                target.clip,
+                                effect.id,
+                                index + 1,
+                            )),
+                        );
+                    }
+                    if ui.button(REMOVE_EFFECT_LABEL).clicked() {
+                        raise(
+                            response,
+                            EffectEdit::Remove(RemoveClipEffect::new(
+                                sequence,
+                                target.track,
+                                target.clip,
+                                effect.id,
+                            )),
+                        );
+                    }
+                });
+                let params = catalog.params_of(&effect.plugin);
+                if params.is_empty() {
+                    ui.label(UNDECLARED_LABEL);
+                }
+                for param in params {
+                    self.param_ui(ui, sequence, target, effect, param, response);
+                }
+            });
+        }
+
+        ui.separator();
+        ui.label(ADD_EFFECT_LABEL);
+        if catalog.is_empty() {
+            ui.label(NO_EFFECT_PLUGINS_LABEL);
+        }
+        for listing in catalog.entries() {
+            if ui.button(&listing.name).clicked() {
+                raise(
+                    response,
+                    EffectEdit::Add(AddClipEffect::new(
+                        sequence,
+                        target.track,
+                        target.clip,
+                        listing.plugin.clone(),
+                    )),
+                );
+            }
+        }
+    }
+
+    /// Paints one declared parameter of one applied effect.
+    ///
+    /// The widget comes from the declaration: a range is a slider, a flag is a
+    /// checkbox, a closed set is a combo box and a colour is four channel
+    /// sliders. The value comes from the project when the effect binds one and
+    /// from the declaration's default when it does not, which is exactly what
+    /// the compositor binds.
+    fn param_ui(
+        &mut self,
+        ui: &mut Ui,
+        sequence: SequenceId,
+        target: ClipRef,
+        effect: &ClipEffect,
+        param: &EffectParam,
+        response: &mut InspectorResponse,
+    ) {
+        let bind = |value: EffectValue| {
+            SetClipEffectParam::new(
+                sequence,
+                target.track,
+                target.clip,
+                effect.id,
+                param.id.clone(),
+                value,
+            )
+        };
+        let key = |channel| ParamKey {
+            effect: effect.id,
+            param: param.id.clone(),
+            channel,
+        };
+
+        match param.kind {
+            ParamKind::Float {
+                min,
+                max,
+                default,
+                step,
+            } => {
+                let mut value = float_of(effect, &param.id, default);
+                let mut slider =
+                    Slider::new(&mut value, f64::from(min)..=f64::from(max)).text(&param.label);
+                if let Some(step) = step {
+                    slider = slider.step_by(f64::from(step));
+                }
+                let painted = ui.add(slider);
+                let command = Fixed6::from_f64(value)
+                    .ok()
+                    .map(|fixed| bind(EffectValue::Float(fixed)));
+                self.param_gesture_ui(&painted, &key(None), command, response);
+            }
+            ParamKind::Int { min, max, default } => {
+                let mut value = int_of(effect, &param.id, default);
+                let painted = ui.add(Slider::new(&mut value, min..=max).text(&param.label));
+                self.param_gesture_ui(
+                    &painted,
+                    &key(None),
+                    Some(bind(EffectValue::Int(value))),
+                    response,
+                );
+            }
+            ParamKind::Bool { default } => {
+                let mut value = bool_of(effect, &param.id, default);
+                let painted = ui.checkbox(&mut value, &param.label);
+                self.param_gesture_ui(
+                    &painted,
+                    &key(None),
+                    Some(bind(EffectValue::Bool(value))),
+                    response,
+                );
+            }
+            ParamKind::Choice {
+                ref variants,
+                default,
+            } => {
+                let mut chosen = choice_of(effect, &param.id, default, variants.len());
+                let selected = variants
+                    .get(usize::try_from(chosen).unwrap_or(0))
+                    .map_or("", String::as_str);
+                let painted = ComboBox::from_label(&param.label)
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        let mut changed = false;
+                        for (index, variant) in variants.iter().enumerate() {
+                            let index = u32::try_from(index).unwrap_or(u32::MAX);
+                            changed |= ui.selectable_value(&mut chosen, index, variant).changed();
+                        }
+                        changed
+                    });
+                if painted.inner == Some(true) {
+                    raise(
+                        response,
+                        EffectEdit::SetParam(bind(EffectValue::Choice(chosen))),
+                    );
+                }
+            }
+            ParamKind::Color { default } => {
+                let mut channels = color_of(effect, &param.id, default);
+                for (channel, name) in ["R", "G", "B", "A"].into_iter().enumerate() {
+                    let mut value = channels[channel].as_f64();
+                    let painted = ui.add(
+                        Slider::new(&mut value, 0.0..=1.0)
+                            .fixed_decimals(3)
+                            .text(format!("{} {name}", param.label)),
+                    );
+                    let command = Fixed6::from_f64(value).ok().map(|fixed| {
+                        channels[channel] = fixed;
+                        bind(EffectValue::Color(channels))
+                    });
+                    self.param_gesture_ui(&painted, &key(Some(channel)), command, response);
+                }
+            }
+        }
+    }
+
+    /// Folds one parameter widget's response into the frame's gesture.
+    ///
+    /// The same three moments the sliders above have: the first change opens a
+    /// group, every change raises a command so the edit is live, and letting
+    /// go commits the group as one undo step.
+    fn param_gesture_ui(
+        &mut self,
+        painted: &Response,
+        key: &ParamKey,
+        command: Option<SetClipEffectParam>,
+        response: &mut InspectorResponse,
+    ) {
+        if painted.changed() {
+            if self.param_gesture.is_none() && self.gesture.is_none() {
+                self.param_gesture = Some(key.clone());
+                response.begin = Some("Change effect parameter".to_owned());
+            }
+            if let Some(command) = command {
+                response.effects.push(EffectEdit::SetParam(command));
+            }
+        }
+        let still_dragging = painted.dragged() || painted.drag_started();
+        let released = painted.drag_stopped()
+            || painted.lost_focus()
+            || (painted.changed() && !still_dragging);
+        if self.param_gesture.as_ref() == Some(key) && released {
+            self.param_gesture = None;
+            response.commit = true;
+        }
     }
 
     /// Paints one field and folds what it raised into `response`.
@@ -313,12 +686,78 @@ fn fade_limit(rate: Rational) -> f64 {
         .value() as f64
 }
 
-/// The clip the fields show: the first selected one still in `sequence`.
-fn anchor_clip<'a>(sequence: &'a Sequence, selection: &Selection) -> Option<&'a Clip> {
+/// Raises one whole effect edit: its own history group, opened and committed
+/// on the frame the button was clicked.
+///
+/// A click cannot arrive while a drag is open — the pointer is doing one thing
+/// at a time — so there is never a group to interleave with.
+fn raise(response: &mut InspectorResponse, edit: EffectEdit) {
+    if response.begin.is_none() {
+        response.begin = Some(edit.undo_label().to_owned());
+    }
+    response.effects.push(edit);
+    response.commit = true;
+}
+
+/// The clip the fields show and whose effect stack is listed: the first
+/// selected clip still in `sequence`.
+fn anchor_ref(sequence: &Sequence, selection: &Selection) -> Option<ClipRef> {
     selection
         .items()
         .iter()
-        .find_map(|item| track_of(sequence, *item)?.clip(item.clip))
+        .copied()
+        .find(|item| track_of(sequence, *item).is_some())
+}
+
+/// The value bound to `param`, or the plugin's declared default.
+fn float_of(effect: &ClipEffect, param: &str, default: f32) -> f64 {
+    match effect.param(param) {
+        Some(EffectValue::Float(value)) => value.as_f64(),
+        _ => f64::from(default),
+    }
+}
+
+/// The whole number bound to `param`, or the plugin's declared default.
+fn int_of(effect: &ClipEffect, param: &str, default: i32) -> i32 {
+    match effect.param(param) {
+        Some(EffectValue::Int(value)) => value,
+        _ => default,
+    }
+}
+
+/// The flag bound to `param`, or the plugin's declared default.
+fn bool_of(effect: &ClipEffect, param: &str, default: bool) -> bool {
+    match effect.param(param) {
+        Some(EffectValue::Bool(value)) => value,
+        _ => default,
+    }
+}
+
+/// The chosen variant of `param`, or the declared default.
+///
+/// A bound index the declaration no longer holds — a plugin that dropped a
+/// variant — falls back to the default rather than painting an empty combo.
+fn choice_of(effect: &ClipEffect, param: &str, default: u32, variants: usize) -> u32 {
+    let in_range = |index: u32| usize::try_from(index).is_ok_and(|index| index < variants);
+    match effect.param(param) {
+        Some(EffectValue::Choice(index)) if in_range(index) => index,
+        _ => default,
+    }
+}
+
+/// The colour bound to `param`, or the plugin's declared default.
+///
+/// A declared channel outside `0..=1` cannot be held exactly, so the fallback
+/// is the nearest value [`Fixed6`] can carry rather than a refusal: the
+/// declaration is a plugin's input and the panel always has something to
+/// paint.
+fn color_of(effect: &ClipEffect, param: &str, default: [f32; 4]) -> [Fixed6; 4] {
+    match effect.param(param) {
+        Some(EffectValue::Color(channels)) => channels,
+        _ => default.map(|channel| {
+            Fixed6::from_f64(f64::from(channel.clamp(0.0, 1.0))).unwrap_or(Fixed6::ZERO)
+        }),
+    }
 }
 
 /// The track `item` names, if `sequence` still holds it.
@@ -430,6 +869,9 @@ pub fn apply_edit(
     }
     for command in &response.commands {
         history.apply(project, *command)?;
+    }
+    for edit in &response.effects {
+        edit.apply(history, project)?;
     }
     if response.commit {
         history.commit_group()?;
@@ -557,7 +999,7 @@ mod tests {
         selection.toggle(ClipRef::new(track.id, second));
         selection.toggle(ClipRef::new(track.id, first));
         assert_eq!(
-            anchor_clip(&sequence, &selection).expect("an anchor").id,
+            anchor_ref(&sequence, &selection).expect("an anchor").clip,
             second
         );
     }
@@ -565,5 +1007,105 @@ mod tests {
     #[test]
     fn an_empty_response_asks_for_nothing() {
         assert!(InspectorResponse::default().is_empty());
+    }
+
+    #[test]
+    fn a_response_carrying_only_an_effect_edit_is_not_empty() {
+        let response = InspectorResponse {
+            effects: vec![EffectEdit::Add(AddClipEffect::new(
+                SequenceId::new(),
+                TrackId::new(),
+                ClipId::new(),
+                "com.example.grade",
+            ))],
+            ..InspectorResponse::default()
+        };
+        assert!(!response.is_empty());
+    }
+
+    #[test]
+    fn a_parameter_takes_the_plugins_default_until_the_effect_binds_one() {
+        let effect = ClipEffect::new("com.example.grade").expect("a valid plugin id");
+        assert!((float_of(&effect, "exposure", 0.25) - 0.25).abs() < f64::EPSILON);
+        assert_eq!(int_of(&effect, "radius", 4), 4);
+        assert!(bool_of(&effect, "invert", true));
+
+        let bound = effect
+            .clone()
+            .with_param("exposure", EffectValue::Float(Fixed6::ONE))
+            .with_param("radius", EffectValue::Int(9))
+            .with_param("invert", EffectValue::Bool(false));
+        assert!((float_of(&bound, "exposure", 0.25) - 1.0).abs() < f64::EPSILON);
+        assert_eq!(int_of(&bound, "radius", 4), 9);
+        assert!(!bool_of(&bound, "invert", true));
+    }
+
+    #[test]
+    fn a_bound_value_of_the_wrong_shape_falls_back_to_the_declaration() {
+        // A plugin that changed a parameter from a choice to a float leaves an
+        // old project binding a choice; the panel paints the new declaration.
+        let effect = ClipEffect::new("com.example.grade")
+            .expect("a valid plugin id")
+            .with_param("mode", EffectValue::Choice(7));
+        assert_eq!(
+            choice_of(&effect, "mode", 1, 3),
+            1,
+            "an index the declaration no longer holds falls back"
+        );
+        assert!((float_of(&effect, "mode", 0.5) - 0.5).abs() < f64::EPSILON);
+        assert_eq!(choice_of(&effect, "mode", 1, 8), 7, "one it holds is kept");
+    }
+
+    #[test]
+    fn a_declared_colour_crosses_into_exact_channels() {
+        let effect = ClipEffect::new("com.example.grade").expect("a valid plugin id");
+        assert_eq!(
+            color_of(&effect, "tint", [1.0, 0.5, 0.0, 2.0]),
+            [
+                Fixed6::ONE,
+                Fixed6::from_micros(500_000),
+                Fixed6::ZERO,
+                Fixed6::ONE
+            ],
+            "a channel outside the range is clamped rather than refused"
+        );
+    }
+
+    #[test]
+    fn every_effect_edit_names_the_history_entry_it_makes() {
+        let sequence = SequenceId::new();
+        let track = TrackId::new();
+        let clip = ClipId::new();
+        let effect = EffectId::new();
+        assert_eq!(
+            EffectEdit::Add(AddClipEffect::new(
+                sequence,
+                track,
+                clip,
+                "com.example.grade"
+            ))
+            .undo_label(),
+            "Add effect"
+        );
+        assert_eq!(
+            EffectEdit::Move(MoveClipEffect::new(sequence, track, clip, effect, 0)).undo_label(),
+            "Reorder effect"
+        );
+        assert_eq!(
+            EffectEdit::Remove(RemoveClipEffect::new(sequence, track, clip, effect)).undo_label(),
+            "Remove effect"
+        );
+        assert_eq!(
+            EffectEdit::SetParam(SetClipEffectParam::new(
+                sequence,
+                track,
+                clip,
+                effect,
+                "exposure",
+                EffectValue::Int(1),
+            ))
+            .undo_label(),
+            "Change effect parameter"
+        );
     }
 }

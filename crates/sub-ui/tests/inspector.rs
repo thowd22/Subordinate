@@ -16,13 +16,17 @@ use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use sub_edit::History;
+use sub_edit::commands::{AddClipEffect, MoveClipEffect, RemoveClipEffect, SetClipEffectParam};
+use sub_model::effect::{ClipEffect, EffectValue};
 use sub_model::params::{Fixed6, Opacity};
 use sub_model::sequence::SequenceSettings;
 use sub_model::{
     Clip, ClipId, MediaItem, MediaPath, Project, Sequence, Track, TrackItem, TrackKind,
 };
+use sub_render::{EffectParam, ParamKind};
 use sub_time::{Rational, RationalTime, TimeRange};
-use sub_ui::inspector::{InspectorField, InspectorPanel, apply_edit};
+use sub_ui::effects::{EffectCatalog, EffectListing};
+use sub_ui::inspector::{EffectEdit, InspectorField, InspectorPanel, apply_edit};
 use sub_ui::selection::{ClipRef, Selection};
 
 /// The timebase every scene here uses.
@@ -34,6 +38,7 @@ struct Scene {
     project: Project,
     history: History,
     selection: Selection,
+    catalog: EffectCatalog,
 }
 
 impl Scene {
@@ -81,6 +86,7 @@ fn scene(count: usize, selected: usize) -> Scene {
         project,
         history: History::new(),
         selection,
+        catalog: catalog(),
     }
 }
 
@@ -90,7 +96,9 @@ fn harness(scene: Scene) -> Harness<'static, Scene> {
         // The panel reads the sequence and the commands write to the project,
         // so the sequence is taken first and the edit applied afterwards.
         let sequence = scene.project.sequences[0].clone();
-        let response = scene.panel.ui(ui, &sequence, &scene.selection);
+        let response = scene
+            .panel
+            .ui(ui, &sequence, &scene.selection, &scene.catalog);
         apply_edit(&mut scene.history, &mut scene.project, &response)
             .expect("the inspector's edit applies");
     })
@@ -309,7 +317,9 @@ fn the_command_the_panel_issues_names_the_selected_clip_and_only_the_edited_fiel
         (&mut scene, &mut raised, &mut begins, &mut commits),
         |ui, (scene, raised, begins, commits)| {
             let sequence = scene.project.sequences[0].clone();
-            let response = scene.panel.ui(ui, &sequence, &scene.selection);
+            let response = scene
+                .panel
+                .ui(ui, &sequence, &scene.selection, &scene.catalog);
             raised.extend(response.commands.iter().copied());
             if let Some(label) = response.begin.clone() {
                 begins.push(label);
@@ -391,10 +401,357 @@ fn the_inspector_matches_its_snapshot_over_the_sample_project() {
     let mut selection = Selection::new();
     selection.toggle(ClipRef::new(track.id, clip));
 
+    let catalog = catalog();
     let mut panel = InspectorPanel::new();
     let mut harness = support::panel_harness(|ui| {
-        panel.ui(ui, &sequence, &selection);
+        panel.ui(ui, &sequence, &selection, &catalog);
     });
     harness.run();
     support::snapshot(&mut harness, "inspector_clip_parameters");
+}
+
+/// The plugin ids the catalogue offers.
+const GRADE: &str = "com.example.grade";
+const BLUR: &str = "com.example.blur";
+
+/// A catalogue of two installed effect plugins.
+///
+/// This is what the plugin host hands the inspector once it has loaded the
+/// installed `effect`-world plugins: an id, a name and the parameters the
+/// plugin declared, which is all the panel needs to build controls.
+fn catalog() -> EffectCatalog {
+    let mut catalog = EffectCatalog::new();
+    catalog.push(EffectListing::new(GRADE, "Grade").with_params(vec![
+        EffectParam::new(
+            "exposure",
+            "Exposure",
+            ParamKind::Float {
+                min: -4.0,
+                max: 4.0,
+                default: 0.0,
+                step: None,
+            },
+        ),
+        EffectParam::new("invert", "Invert", ParamKind::Bool { default: false }),
+    ]));
+    catalog.push(
+        EffectListing::new(BLUR, "Blur").with_params(vec![EffectParam::new(
+            "radius",
+            "Radius",
+            ParamKind::Int {
+                min: 0,
+                max: 32,
+                default: 4,
+            },
+        )]),
+    );
+    catalog
+}
+
+/// One clip, selected, with `plugins` applied to it and an empty undo stack.
+fn scene_with_effects(plugins: &[&str]) -> Scene {
+    let mut scene = scene(1, 1);
+    let sequence = scene.project.sequences[0].id;
+    let track = scene.project.sequences[0].tracks[0].id;
+    let clip = scene.clips()[0].id;
+    for plugin in plugins {
+        scene
+            .history
+            .apply(
+                &mut scene.project,
+                AddClipEffect::new(sequence, track, clip, *plugin),
+            )
+            .expect("the effect applies");
+    }
+    scene.history.clear();
+    scene
+}
+
+/// The plugin ids on the clip's effect stack, in order.
+fn stack(scene: &Scene) -> Vec<String> {
+    scene.clips()[0]
+        .effects
+        .iter()
+        .map(|effect| effect.plugin.clone())
+        .collect()
+}
+
+/// The clip's effect stack after the harness has finished with it.
+fn effects_of(project: &Project) -> Vec<ClipEffect> {
+    project.sequences[0].tracks[0]
+        .clips()
+        .next()
+        .expect("a clip")
+        .effects
+        .clone()
+}
+
+#[test]
+fn the_effect_list_shows_every_applied_effect_with_its_declared_controls() {
+    let mut harness = harness(scene_with_effects(&[GRADE, BLUR]));
+    harness.run();
+
+    assert!(shows(&harness, "Effects"), "the stack has a heading");
+    assert!(shows(&harness, "1. Grade"), "in the order it runs in");
+    assert!(shows(&harness, "2. Blur"));
+    assert!(
+        shows(&harness, "Exposure") && shows(&harness, "Invert"),
+        "with a control per parameter the plugin declared"
+    );
+    assert!(shows(&harness, "Radius"));
+    assert!(
+        shows(&harness, "Grade") && shows(&harness, "Blur"),
+        "and the picker offers every installed effect plugin"
+    );
+}
+
+#[test]
+fn a_clip_with_no_effects_says_so_and_still_offers_the_picker() {
+    let mut harness = harness(scene_with_effects(&[]));
+    harness.run();
+    assert!(shows(&harness, "No effects on this clip."));
+    assert!(shows(&harness, "Add effect"));
+    assert!(shows(&harness, "Grade"));
+}
+
+#[test]
+fn adding_an_effect_from_the_picker_is_one_undoable_command() {
+    let mut harness = harness(scene_with_effects(&[]));
+    harness.run();
+    harness.get_by_label("Blur").click();
+    harness.run();
+
+    assert_eq!(stack(harness.state()), vec![BLUR.to_owned()]);
+    assert_eq!(
+        harness.state().history.undo_entries().count(),
+        1,
+        "the click is one entry in the undo stack"
+    );
+
+    let Scene {
+        project, history, ..
+    } = harness.state_mut();
+    history.undo(project).expect("the add undoes");
+    assert!(
+        effects_of(project).is_empty(),
+        "and undo takes the effect off again"
+    );
+}
+
+#[test]
+fn moving_an_effect_down_reorders_the_stack_and_undoes() {
+    let mut harness = harness(scene_with_effects(&[GRADE, BLUR]));
+    harness.run();
+    // Both rows paint the button; the last row's is disabled, so the first
+    // one is the one that moves Grade under Blur.
+    harness
+        .get_all_by_label("Move down")
+        .next()
+        .expect("the first effect can move down")
+        .click();
+    harness.run();
+
+    assert_eq!(
+        stack(harness.state()),
+        vec![BLUR.to_owned(), GRADE.to_owned()]
+    );
+    assert_eq!(harness.state().history.undo_entries().count(), 1);
+
+    let Scene {
+        project, history, ..
+    } = harness.state_mut();
+    history.undo(project).expect("the move undoes");
+    assert_eq!(
+        effects_of(project)
+            .into_iter()
+            .map(|effect| effect.plugin)
+            .collect::<Vec<_>>(),
+        vec![GRADE.to_owned(), BLUR.to_owned()]
+    );
+}
+
+#[test]
+fn removing_an_effect_takes_it_off_and_undoes_with_its_values() {
+    let mut scene = scene_with_effects(&[GRADE, BLUR]);
+    let sequence = scene.project.sequences[0].id;
+    let track = scene.project.sequences[0].tracks[0].id;
+    let clip = scene.clips()[0].id;
+    let grade = scene.clips()[0].effects[0].id;
+    scene
+        .history
+        .apply(
+            &mut scene.project,
+            SetClipEffectParam::new(
+                sequence,
+                track,
+                clip,
+                grade,
+                "exposure",
+                EffectValue::Float(Fixed6::ONE),
+            ),
+        )
+        .expect("the parameter binds");
+    scene.history.clear();
+
+    let mut harness = harness(scene);
+    harness.run();
+    harness
+        .get_all_by_label("Remove")
+        .next()
+        .expect("the first effect has a remove button")
+        .click();
+    harness.run();
+
+    assert_eq!(stack(harness.state()), vec![BLUR.to_owned()]);
+    assert_eq!(harness.state().history.undo_entries().count(), 1);
+
+    let Scene {
+        project, history, ..
+    } = harness.state_mut();
+    history.undo(project).expect("the removal undoes");
+    let effects = effects_of(project);
+    assert_eq!(
+        effects[0].id, grade,
+        "the effect goes back with its identity"
+    );
+    assert_eq!(
+        effects[0].param("exposure"),
+        Some(EffectValue::Float(Fixed6::ONE)),
+        "and everything bound on it"
+    );
+}
+
+#[test]
+fn the_effect_commands_the_panel_issues_name_the_clip_and_the_effect() {
+    let mut scene = scene_with_effects(&[GRADE, BLUR]);
+    let sequence = scene.project.sequences[0].id;
+    let track = scene.project.sequences[0].tracks[0].id;
+    let clip = scene.clips()[0].id;
+    let grade = scene.clips()[0].effects[0].id;
+    let blur = scene.clips()[0].effects[1].id;
+
+    let mut raised: Vec<EffectEdit> = Vec::new();
+    let catalog = catalog();
+    let mut harness =
+        support::panel_harness_state((&mut scene, &mut raised), |ui, (scene, raised)| {
+            let sequence = scene.project.sequences[0].clone();
+            let response = scene.panel.ui(ui, &sequence, &scene.selection, &catalog);
+            raised.extend(response.effects.iter().cloned());
+            apply_edit(&mut scene.history, &mut scene.project, &response)
+                .expect("the inspector's edit applies");
+        });
+    harness.run();
+    // Grade moves under Blur, Blur (now the first row) comes off, and Grade is
+    // applied a second time from the picker.
+    harness
+        .get_all_by_label("Move down")
+        .next()
+        .expect("the first effect can move down")
+        .click();
+    harness.run();
+    harness
+        .get_all_by_label("Remove")
+        .next()
+        .expect("a remove button")
+        .click();
+    harness.run();
+    harness.get_by_label("Grade").click();
+    harness.run();
+    drop(harness);
+
+    assert_eq!(
+        raised,
+        vec![
+            EffectEdit::Move(MoveClipEffect::new(sequence, track, clip, grade, 1)),
+            EffectEdit::Remove(RemoveClipEffect::new(sequence, track, clip, blur)),
+            EffectEdit::Add(AddClipEffect::new(sequence, track, clip, GRADE)),
+        ],
+        "each click raised exactly the command it names"
+    );
+    assert_eq!(
+        scene.history.undo_entries().count(),
+        3,
+        "and each is one entry in the undo stack"
+    );
+}
+
+#[test]
+fn dragging_an_effect_parameter_edits_live_and_commits_one_undo_step() {
+    let mut harness = harness(scene_with_effects(&[GRADE]));
+    harness.run();
+
+    let rect = slider_rect(&harness, "Exposure");
+    let target = egui::pos2(rect.left() + rect.width() * 0.25, rect.center().y);
+    harness.hover_at(target);
+    harness.run();
+    harness.drag_at(target);
+    harness.run();
+
+    let live = harness.state().clips()[0].effects[0].param("exposure");
+    assert!(
+        live.is_some(),
+        "the drag bound the parameter while the pointer is still down"
+    );
+    assert_eq!(
+        harness.state().history.undo_entries().count(),
+        0,
+        "and has not pushed an undo entry yet"
+    );
+
+    harness.drop_at(target);
+    harness.run();
+    assert_eq!(
+        harness.state().history.undo_entries().count(),
+        1,
+        "the whole drag is one entry in the undo stack"
+    );
+
+    let Scene {
+        project, history, ..
+    } = harness.state_mut();
+    history.undo(project).expect("the drag undoes");
+    assert_eq!(
+        effects_of(project)[0].param("exposure"),
+        None,
+        "one undo puts the parameter back to the plugin's declared default"
+    );
+}
+
+#[test]
+fn the_effect_list_matches_its_snapshot_over_the_sample_project() {
+    if !support::can_render() {
+        return;
+    }
+    let mut project = support::fixture_project();
+    let sequence_id = support::fixture_sequence(&project).id;
+    let track = support::fixture_sequence(&project)
+        .tracks
+        .iter()
+        .find(|track| track.clips().next().is_some())
+        .expect("the sample project has a clip");
+    let track_id = track.id;
+    let clip = track.clips().next().expect("a clip").id;
+
+    let mut history = History::new();
+    for plugin in [GRADE, BLUR] {
+        history
+            .apply(
+                &mut project,
+                AddClipEffect::new(sequence_id, track_id, clip, plugin),
+            )
+            .expect("the effect applies");
+    }
+
+    let sequence = support::fixture_sequence(&project).clone();
+    let mut selection = Selection::new();
+    selection.toggle(ClipRef::new(track_id, clip));
+    let catalog = catalog();
+    let mut panel = InspectorPanel::new();
+    let mut harness = support::panel_harness(|ui| {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            panel.ui(ui, &sequence, &selection, &catalog);
+        });
+    });
+    harness.run();
+    support::snapshot(&mut harness, "inspector_clip_effects");
 }

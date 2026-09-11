@@ -42,6 +42,35 @@
       ],
       "type": "object"
     },
+    "AddClipEffect": {
+      "additionalProperties": false,
+      "description": "Applies a plugin effect to a clip, at the end of its stack.\n\nThe effect is created here rather than by the caller, so the identifier is\nthe command's own: undoing gives back [`RemoveClipEffect`], whose inverse\ncarries the whole effect, which is what makes a redo restore the same\nidentity and the same bound values.\n\n```\nuse sub_edit::History;\nuse sub_edit::commands::AddClipEffect;\nuse sub_model::{\n    Clip, MediaItem, MediaPath, Project, Sequence, SequenceSettings, Track, TrackKind,\n};\nuse sub_time::{Rational, RationalTime, TimeRange};\n\nlet mut project = Project::new(\"Doc cut\");\nlet media = MediaItem::new(MediaPath::new(\"a.mp4\").unwrap());\nlet media_id = media.id;\nproject.media.push(media);\n\nlet rate = Rational::FPS_24;\nlet source = TimeRange::new(RationalTime::zero(rate), RationalTime::new(48, rate)).unwrap();\nlet clip = Clip::new(\"shot 1\", media_id, source);\nlet clip_id = clip.id;\nlet mut track = Track::new(\"V1\", TrackKind::Video);\ntrack.items.push(clip.into());\nlet track_id = track.id;\nlet mut sequence = Sequence::new(\"Main\", SequenceSettings::default());\nsequence.tracks.push(track);\nlet sequence_id = sequence.id;\nproject.sequences.push(sequence);\n\nlet mut history = History::new();\nhistory\n    .apply(\n        &mut project,\n        AddClipEffect::new(sequence_id, track_id, clip_id, \"com.example.grade\"),\n    )\n    .unwrap();\nlet effects = |project: &Project| {\n    project.sequences[0].tracks[0].clip(clip_id).unwrap().effects.clone()\n};\nassert_eq!(effects(&project)[0].plugin, \"com.example.grade\");\n\nhistory.undo(&mut project).unwrap();\nassert!(effects(&project).is_empty());\n```",
+      "properties": {
+        "clip": {
+          "$ref": "#/$defs/ClipId",
+          "description": "The clip the effect is applied to."
+        },
+        "plugin": {
+          "description": "Reverse-DNS id of the plugin declaring the effect.",
+          "type": "string"
+        },
+        "sequence": {
+          "$ref": "#/$defs/SequenceId",
+          "description": "The sequence holding the track."
+        },
+        "track": {
+          "$ref": "#/$defs/TrackId",
+          "description": "The track holding the clip."
+        }
+      },
+      "required": [
+        "sequence",
+        "track",
+        "clip",
+        "plugin"
+      ],
+      "type": "object"
+    },
     "AddMarker": {
       "additionalProperties": false,
       "description": "Adds a marker to a sequence or a clip.\n\nThe marker arrives whole, with its own identifier, so replaying the command\nfrom a log or a plugin reproduces the same project byte for byte. It is\nappended unless `index` names a position.\n\n```\nuse sub_edit::History;\nuse sub_edit::commands::{AddMarker, MarkerTarget};\nuse sub_model::{Marker, Project, Sequence, SequenceSettings};\nuse sub_time::{Rational, RationalTime, TimeRange};\n\nlet mut project = Project::new(\"Doc cut\");\nlet sequence = Sequence::new(\"Main\", SequenceSettings::default());\nlet sequence_id = sequence.id;\nproject.sequences.push(sequence);\n\nlet at = RationalTime::new(48, Rational::FPS_24);\nlet marker = Marker::new(\"cut here\", TimeRange::empty_at(at));\nlet mut history = History::new();\nhistory\n    .apply(\n        &mut project,\n        AddMarker::new(MarkerTarget::sequence(sequence_id), marker),\n    )\n    .unwrap();\nassert_eq!(project.sequences[0].markers.len(), 1);\n\nhistory.undo(&mut project).unwrap();\nassert!(project.sequences[0].markers.is_empty());\n```",
@@ -941,6 +970,42 @@
       ],
       "type": "object"
     },
+    "InsertClipEffect": {
+      "additionalProperties": false,
+      "description": "Puts an existing effect back into a clip's stack at a given index.\n\nThis is the inverse of [`RemoveClipEffect`], and therefore what redo runs\nafter an [`AddClipEffect`] is undone. It carries the whole effect —\nidentifier, enabled flag and bound values — so undo is exact.",
+      "properties": {
+        "clip": {
+          "$ref": "#/$defs/ClipId",
+          "description": "The clip the effect joins."
+        },
+        "effect": {
+          "$ref": "#/$defs/ClipEffect",
+          "description": "The effect itself, exactly as it was."
+        },
+        "index": {
+          "description": "Where in the stack it goes.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sequence": {
+          "$ref": "#/$defs/SequenceId",
+          "description": "The sequence holding the track."
+        },
+        "track": {
+          "$ref": "#/$defs/TrackId",
+          "description": "The track holding the clip."
+        }
+      },
+      "required": [
+        "sequence",
+        "track",
+        "clip",
+        "index",
+        "effect"
+      ],
+      "type": "object"
+    },
     "InsertMedia": {
       "additionalProperties": false,
       "description": "Puts a whole media item back where it was.\n\nThis is the inverse of [`RemoveMedia`], and therefore what redo runs after\nan [`ImportMedia`] is undone. Unlike [`ImportMedia`] it restores the item's\nposition in [`Project::media`] and in its bin, so the project file comes\nback byte for byte.",
@@ -1322,6 +1387,42 @@
       ],
       "type": "object"
     },
+    "MoveClipEffect": {
+      "additionalProperties": false,
+      "description": "Moves an effect to another position in a clip's stack.\n\nThe index is the one the effect ends up at, counted in the stack *without*\nthe effect in it — the same counting [`super::ReorderTrack`] uses — so\nmoving the first of three effects to the end is `to_index` 2.",
+      "properties": {
+        "clip": {
+          "$ref": "#/$defs/ClipId",
+          "description": "The clip the effect is applied to."
+        },
+        "effect": {
+          "$ref": "#/$defs/EffectId",
+          "description": "The effect to move."
+        },
+        "sequence": {
+          "$ref": "#/$defs/SequenceId",
+          "description": "The sequence holding the track."
+        },
+        "to_index": {
+          "description": "The position it ends up at.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "track": {
+          "$ref": "#/$defs/TrackId",
+          "description": "The track holding the clip."
+        }
+      },
+      "required": [
+        "sequence",
+        "track",
+        "clip",
+        "effect",
+        "to_index"
+      ],
+      "type": "object"
+    },
     "MoveMarker": {
       "additionalProperties": false,
       "description": "Moves a marker to another span, in the time of whatever holds it.\n\nDragging a point marker along the ruler is this command with an empty range\nat the new instant.",
@@ -1626,6 +1727,35 @@
         "sequence",
         "track",
         "clip"
+      ],
+      "type": "object"
+    },
+    "RemoveClipEffect": {
+      "additionalProperties": false,
+      "description": "Takes an effect off a clip's stack.",
+      "properties": {
+        "clip": {
+          "$ref": "#/$defs/ClipId",
+          "description": "The clip the effect is applied to."
+        },
+        "effect": {
+          "$ref": "#/$defs/EffectId",
+          "description": "The effect to remove."
+        },
+        "sequence": {
+          "$ref": "#/$defs/SequenceId",
+          "description": "The sequence holding the track."
+        },
+        "track": {
+          "$ref": "#/$defs/TrackId",
+          "description": "The track holding the clip."
+        }
+      },
+      "required": [
+        "sequence",
+        "track",
+        "clip",
+        "effect"
       ],
       "type": "object"
     },
@@ -2076,6 +2206,51 @@
         "frame_rate",
         "sample_rate",
         "color"
+      ],
+      "type": "object"
+    },
+    "SetClipEffectParam": {
+      "additionalProperties": false,
+      "description": "Binds one parameter of one applied effect, or puts it back to the plugin's\ndeclared default.\n\nA `value` of `None` unbinds the parameter, which is how a control is reset:\nthe project stores only what differs from the declaration, so an unbound\nparameter takes whatever the installed plugin declares. The inverse names\nthe same parameter carrying whatever was bound before — `None` included —\nso undoing a slider drag leaves the other parameters of the effect alone.",
+      "properties": {
+        "clip": {
+          "$ref": "#/$defs/ClipId",
+          "description": "The clip the effect is applied to."
+        },
+        "effect": {
+          "$ref": "#/$defs/EffectId",
+          "description": "The effect whose parameter is bound."
+        },
+        "param": {
+          "description": "The parameter id, as the plugin declared it.",
+          "type": "string"
+        },
+        "sequence": {
+          "$ref": "#/$defs/SequenceId",
+          "description": "The sequence holding the track."
+        },
+        "track": {
+          "$ref": "#/$defs/TrackId",
+          "description": "The track holding the clip."
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The value to bind, or `None` to take the plugin's declared default."
+        }
+      },
+      "required": [
+        "sequence",
+        "track",
+        "clip",
+        "effect",
+        "param"
       ],
       "type": "object"
     },
@@ -2850,11 +3025,33 @@
       }
     },
     {
+      "description": "Apply a plugin effect to a clip, at the end of its effect stack.",
+      "kind": "command",
+      "name": "clip.add_effect",
+      "params": {
+        "$ref": "#/$defs/AddClipEffect"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
       "description": "Place a clip on a track at a timeline position, rippling what follows later.",
       "kind": "command",
       "name": "clip.insert",
       "params": {
         "$ref": "#/$defs/InsertClip"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Insert an existing effect into a clip's effect stack at a given index.",
+      "kind": "command",
+      "name": "clip.insert_effect",
+      "params": {
+        "$ref": "#/$defs/InsertClipEffect"
       },
       "result": {
         "$ref": "#/$defs/AppliedResult"
@@ -2872,6 +3069,17 @@
       }
     },
     {
+      "description": "Move an effect to a different position in a clip's effect stack.",
+      "kind": "command",
+      "name": "clip.move_effect",
+      "params": {
+        "$ref": "#/$defs/MoveClipEffect"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
       "description": "Lift a clip off its track, leaving the hole behind.",
       "kind": "command",
       "name": "clip.remove",
@@ -2883,11 +3091,33 @@
       }
     },
     {
+      "description": "Remove an effect from a clip's effect stack.",
+      "kind": "command",
+      "name": "clip.remove_effect",
+      "params": {
+        "$ref": "#/$defs/RemoveClipEffect"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
       "description": "Remove a clip and close the hole by pulling later clips back.",
       "kind": "command",
       "name": "clip.ripple_delete",
       "params": {
         "$ref": "#/$defs/RippleDelete"
+      },
+      "result": {
+        "$ref": "#/$defs/AppliedResult"
+      }
+    },
+    {
+      "description": "Bind one parameter of an effect applied to a clip, or clear it back to the plugin's declared default.",
+      "kind": "command",
+      "name": "clip.set_effect_param",
+      "params": {
+        "$ref": "#/$defs/SetClipEffectParam"
       },
       "result": {
         "$ref": "#/$defs/AppliedResult"
