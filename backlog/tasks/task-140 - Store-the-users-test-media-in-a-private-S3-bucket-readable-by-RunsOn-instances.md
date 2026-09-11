@@ -3,9 +3,11 @@ id: TASK-140
 title: >-
   Store the user's test media in a private S3 bucket readable by RunsOn
   instances
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-09-11 22:18'
+updated_date: '2026-09-11 22:22'
 labels:
   - infra
   - manual
@@ -23,6 +25,12 @@ The repository is public, so personal test clips must not become release assets.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Bucket exists with block-public-access on, versioning off, and a policy allowing only the RunsOn instance role and the account to read
+- [x] #1 Bucket exists with block-public-access on, versioning off, and a policy allowing only the RunsOn instance role and the account to read
 - [ ] #2 The test MP4 is uploaded and its s3 path and checksum are recorded in the task notes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-09-11 supervisor: created s3://subordinate-test-media-731537225673 in us-east-1: all four public-access blocks on, AES256 default encryption, lifecycle aborts incomplete multipart uploads after 2 days, policy allows only the RunsOn instance role (runs-on-EC2InstanceRole-KGQrU1NH7McV) GetObject/ListBucket plus a deny on non-TLS; tagged stack=runs-on, project=subordinate. Awaiting the user's MP4 (expected at box:~/test-media/) for criterion 2.
+<!-- SECTION:NOTES:END -->
