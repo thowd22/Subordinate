@@ -10,6 +10,7 @@ pub mod app;
 pub mod audio_settings;
 pub mod diagnostics;
 pub mod dock;
+pub mod effects;
 pub mod fade;
 pub mod fullscreen;
 pub mod history_panel;

@@ -3,7 +3,8 @@
 //! Every mutation the Command API, the MCP bridge and plugins can perform is
 //! one of these types. They are grouped by what they touch: [`track`] for the
 //! lanes of a sequence, [`sequence`] for the sequences of a project,
-//! [`params`] for a clip's inspector parameters, [`marker`] for annotations on
+//! [`params`] for a clip's inspector parameters, [`effect`] for the plugin
+//! effects applied to a clip, [`marker`] for annotations on
 //! sequences and clips, [`analysis`] for what analyzer plugins found in a media
 //! item, [`media`] for the sources a project references and [`bin`] for the
 //! folders they are filed in. The clip edits themselves live
@@ -24,6 +25,7 @@
 
 pub mod analysis;
 pub mod bin;
+pub mod effect;
 pub mod marker;
 pub mod media;
 pub mod params;
@@ -42,6 +44,9 @@ pub use analysis::{
     SetMediaAnalysis,
 };
 pub use bin::{CreateBin, InsertBin, MoveBin, MoveToBin, RemoveBin, RenameBin};
+pub use effect::{
+    AddClipEffect, InsertClipEffect, MoveClipEffect, RemoveClipEffect, SetClipEffectParam,
+};
 pub use marker::{AddMarker, MarkerTarget, MoveMarker, RemoveMarker, RenameMarker};
 pub use media::{Filing, ImportMedia, InsertMedia, RelinkMedia, RemoveMedia};
 pub use params::SetClipParams;
@@ -111,6 +116,11 @@ pub fn register_builtin(registry: &mut CommandRegistry) -> SubResult<()> {
     registry.register::<RenameBin>()?;
     registry.register::<MoveToBin>()?;
     registry.register::<MoveBin>()?;
+    registry.register::<AddClipEffect>()?;
+    registry.register::<InsertClipEffect>()?;
+    registry.register::<RemoveClipEffect>()?;
+    registry.register::<MoveClipEffect>()?;
+    registry.register::<SetClipEffectParam>()?;
     registry.register::<AddTransition>()?;
     registry.register::<RemoveTransition>()?;
     Ok(())
@@ -366,10 +376,15 @@ mod tests {
                 "bin.remove",
                 "bin.rename",
                 "clip.add",
+                "clip.add_effect",
                 "clip.insert",
+                "clip.insert_effect",
                 "clip.move",
+                "clip.move_effect",
                 "clip.remove",
+                "clip.remove_effect",
                 "clip.ripple_delete",
+                "clip.set_effect_param",
                 "clip.set_params",
                 "clip.split",
                 "clip.trim_in",

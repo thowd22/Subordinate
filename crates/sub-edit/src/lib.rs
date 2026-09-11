@@ -158,6 +158,11 @@ pub mod codes {
     /// A sequence would be inserted with an identifier the project already
     /// uses.
     pub const DUPLICATE_SEQUENCE: ErrorCode = ErrorCode::from_static("edit.duplicate_sequence");
+    /// A command names an effect the clip does not hold.
+    pub const EFFECT_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.effect_not_found");
+    /// An effect would be added to a clip that already holds one with that
+    /// identifier.
+    pub const DUPLICATE_EFFECT: ErrorCode = ErrorCode::from_static("edit.duplicate_effect");
     /// A command names a marker the sequence or clip does not hold.
     pub const MARKER_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.marker_not_found");
     /// A media item holds no findings from the analyzer a command named.
@@ -333,6 +338,8 @@ mod tests {
             codes::TRACK_NOT_EMPTY,
             codes::INVALID_INDEX,
             codes::DUPLICATE_TRACK,
+            codes::EFFECT_NOT_FOUND,
+            codes::DUPLICATE_EFFECT,
             codes::DUPLICATE_SEQUENCE,
             codes::ENGINE_STOPPED,
         ] {

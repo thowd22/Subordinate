@@ -43,9 +43,10 @@ use sub_audio::{AudioOutput, CpalBackend, MeterBank, OutputOptions};
 use crate::audio_settings::{AudioSettingsAction, AudioSettingsPanel};
 use crate::diagnostics::DiagnosticsPanel;
 use crate::dock::{DockLayout, Panel, layout_menu_ui};
+use crate::effects::EffectCatalog;
 use crate::fullscreen::{FullscreenAction, FullscreenState, monitor_picker_ui};
 use crate::history_panel::{HistoryAction, HistoryList, edit_menu_ui};
-use crate::inspector::{InspectorPanel, InspectorResponse};
+use crate::inspector::{EffectEdit, InspectorPanel, InspectorResponse};
 use crate::keymap::LoadedKeymap;
 use crate::media_bin::{BinSelection, MediaBinAction, MediaBinPanel};
 use crate::popout::{PopoutViewer, popout_menu_ui};
@@ -250,6 +251,14 @@ pub struct SubordinateApp {
     /// The inspector panel: the parameters of whatever the timeline has
     /// selected.
     inspector: InspectorPanel,
+
+    /// The effect plugins the inspector offers, and what each of them
+    /// declared.
+    ///
+    /// Empty until this window hosts a plugin runtime: the editor scans and
+    /// loads plugins through `sub-plugin`, which the app does not own yet, so
+    /// the picker lists what the host has told it about and nothing else.
+    effect_catalog: EffectCatalog,
     /// Where the panels are docked, as read from the user's `layout.json`.
     layout: DockLayout,
     /// Which display the pop-out goes fullscreen on, as read from the user's
@@ -358,6 +367,7 @@ impl SubordinateApp {
             media_bin: MediaBinPanel::new(),
             timeline,
             inspector: InspectorPanel::new(),
+            effect_catalog: EffectCatalog::new(),
             layout: layout.layout,
             fullscreen: fullscreen.state,
             preview: None,
@@ -1053,6 +1063,7 @@ impl SubordinateApp {
             media_bin,
             timeline,
             inspector,
+            effect_catalog,
             sequence,
             ..
         } = self;
@@ -1078,7 +1089,7 @@ impl SubordinateApp {
                 frame.timeline = Some(response);
             }
             Panel::Inspector => {
-                let response = inspector.ui(ui, sequence, timeline.selection());
+                let response = inspector.ui(ui, sequence, timeline.selection(), effect_catalog);
                 if !response.is_empty() {
                     frame.inspector = Some(response);
                 }
@@ -1212,6 +1223,14 @@ impl SubordinateApp {
         }
         for command in response.commands {
             let _ = self.session.apply(command);
+        }
+        for edit in response.effects {
+            let _ = match edit {
+                EffectEdit::Add(command) => self.session.apply(command),
+                EffectEdit::Move(command) => self.session.apply(command),
+                EffectEdit::Remove(command) => self.session.apply(command),
+                EffectEdit::SetParam(command) => self.session.apply(command),
+            };
         }
         if response.commit {
             let _ = self.session.commit_group();
