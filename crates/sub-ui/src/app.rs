@@ -862,6 +862,11 @@ impl SubordinateApp {
     /// the window without a pointer — reads the pending rows and the failures
     /// the panel is showing rather than a log.
     pub fn media_bin(&mut self) -> &mut MediaBinPanel {
+        // The panel is normally told what the jobs are doing once a frame,
+        // just before it paints. A caller reaching for it between frames
+        // wants that answer as it stands now rather than as it stood when the
+        // last frame started, so the status is refreshed on the way out.
+        self.media_bin.set_status(self.media.status());
         &mut self.media_bin
     }
 
@@ -1358,8 +1363,12 @@ impl SubordinateApp {
         let file = self.session.project_file()?;
         let folder = file.parent().unwrap_or(Path::new("."));
         // Absolute, because the decoders open a URI and GStreamer takes no
-        // relative path.
-        std::fs::canonicalize(folder).ok()
+        // relative path. Plain, because on Windows `canonicalize` answers with
+        // a verbatim `\\?\C:\...` path, which GLib will not turn into a
+        // `file://` URI and which matches nothing a file dialog hands back.
+        std::fs::canonicalize(folder)
+            .ok()
+            .map(sub_model::plain_path)
     }
 
     /// Drains the running export's events into the panel. Once a frame.

@@ -165,10 +165,15 @@ fn importing_from_the_bin_probes_off_the_ui_thread_and_lands_as_one_undo_step() 
 
     // The probe has not happened yet, and the bin says so rather than freezing
     // the window: the pending rows are the files that were asked for.
-    harness.step();
+    //
+    // Read before the next frame rather than after one, because the frame
+    // that collects a finished import is the same frame that clears its
+    // pending row: a machine quick enough to probe both fixtures inside one
+    // frame would otherwise look like a window that never showed them.
     let pending = harness.state_mut().media_bin().status().importing.clone();
-    assert!(
-        !pending.is_empty(),
+    assert_eq!(
+        pending.len(),
+        files.len(),
         "the bin shows the files as pending while they are probed"
     );
 

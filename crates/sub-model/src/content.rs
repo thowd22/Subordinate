@@ -111,20 +111,40 @@ impl MediaPath {
 
     /// Expresses `file` relative to `project_dir`.
     ///
+    /// The comparison is textual first, and only asks the filesystem when that
+    /// fails, because on a real machine one folder has more than one spelling:
+    /// Windows hands out 8.3 short names (`RUNNER~1`) and, from
+    /// [`std::fs::canonicalize`], verbatim `\\?\C:\...` paths, and on macOS the
+    /// temp folder is a symlink (`/var` to `/private/var`). A host that
+    /// canonicalised the project folder while the file dialog did not would
+    /// otherwise refuse every import of a file sitting right beside the
+    /// project file.
+    ///
     /// # Errors
     ///
     /// Returns `model.invalid_path` when `file` is not inside `project_dir`, or
     /// when the resulting relative path is not representable as UTF-8.
     pub fn relative_to(project_dir: &Path, file: &Path) -> SubResult<Self> {
-        let relative = file.strip_prefix(project_dir).map_err(|err| {
-            SubError::wrap(
+        let outside = || {
+            SubError::new(
                 codes::INVALID_PATH,
                 "media file is not inside the project folder",
-                &err,
             )
             .with_detail("path", file.display().to_string())
             .with_detail("project_dir", project_dir.display().to_string())
-        })?;
+        };
+
+        let relative = if let Ok(relative) = file.strip_prefix(project_dir) {
+            relative.to_path_buf()
+        } else {
+            let (Some(dir), Some(real)) = (real_path(project_dir), real_path(file)) else {
+                return Err(outside());
+            };
+            let Ok(stripped) = real.strip_prefix(&dir) else {
+                return Err(outside());
+            };
+            stripped.to_path_buf()
+        };
 
         let mut segments = Vec::new();
         for component in relative.components() {
@@ -176,6 +196,50 @@ impl fmt::Display for MediaPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// `path` as the filesystem spells it, or `None` when it cannot say.
+///
+/// [`std::fs::canonicalize`] resolves symlinks, `.` and `..`, Windows 8.3 short
+/// names and the letter case the volume actually stores, which is what makes
+/// two spellings of one folder comparable. It needs the path to exist, so a
+/// file that has not been written yet is resolved through its folder and the
+/// name is put back on: a relink target that has moved away still has a real
+/// parent to resolve against.
+#[must_use]
+pub fn real_path(path: &Path) -> Option<PathBuf> {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return Some(plain_path(real));
+    }
+    let parent = path.parent()?;
+    let name = path.file_name()?;
+    let real = std::fs::canonicalize(parent).ok()?;
+    Some(plain_path(real).join(name))
+}
+
+/// The same path without Windows' verbatim `\\?\` prefix.
+///
+/// `canonicalize` returns one on Windows, and it is contagious: it leaks into
+/// error details the user reads, into the `file://` URI the decoder is handed,
+/// and into every comparison against a path that came from a file dialog. A
+/// UNC path (`\\?\UNC\server\share`) is left alone, because dropping its prefix
+/// would change which file it names.
+#[must_use]
+pub fn plain_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::Prefix;
+        let mut components = path.components();
+        if let Some(Component::Prefix(prefix)) = components.next()
+            && matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+        {
+            // `C:` plus the rest; the root is still in `components`.
+            let text = prefix.as_os_str().to_string_lossy();
+            let disk = text.trim_start_matches(r"\\?\");
+            return Path::new(disk).join(components.as_path());
+        }
+    }
+    path
 }
 
 /// The number of bytes hashed at each end of a file.
@@ -357,6 +421,85 @@ mod tests {
 
         let err = MediaPath::relative_to(dir, Path::new("/elsewhere/a.mp4")).unwrap_err();
         assert_eq!(err.code, codes::INVALID_PATH);
+    }
+
+    /// The bug the Windows CI run found: the host canonicalises the project
+    /// folder and the file dialog does not, so the two spellings of one folder
+    /// have to compare equal or every import is refused.
+    ///
+    /// `canonicalize` is what the host uses, so it is what this asks for: on
+    /// Windows it answers with a verbatim `\\?\C:\...` path and resolves 8.3
+    /// short names, and on macOS it resolves `/var` to `/private/var`. On
+    /// Linux the two spellings usually already agree, and the test still
+    /// proves the fallback does not break that.
+    #[test]
+    fn a_canonicalised_project_folder_still_matches_the_path_a_dialog_hands_back() {
+        let dir = std::env::temp_dir().join("sub-model-canonical-import");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("footage")).expect("a project folder");
+        let file = dir.join("footage").join("take.mov");
+        std::fs::write(&file, b"take").expect("the file writes");
+
+        let canonical = std::fs::canonicalize(&dir).expect("the folder resolves");
+        let path = MediaPath::relative_to(&canonical, &file).expect("the file is inside");
+        assert_eq!(path.as_str(), "footage/take.mov");
+
+        // A file that is not there yet resolves through its folder, which is
+        // what a relink target that has moved away needs.
+        let gone = dir.join("footage").join("gone.mov");
+        let path = MediaPath::relative_to(&canonical, &gone).expect("the folder is inside");
+        assert_eq!(path.as_str(), "footage/gone.mov");
+
+        // Resolving both sides never turns an outsider into an insider.
+        let outside = std::env::temp_dir().join("sub-model-canonical-elsewhere.mov");
+        let err = MediaPath::relative_to(&canonical, &outside).unwrap_err();
+        assert_eq!(err.code, codes::INVALID_PATH);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same mismatch the Windows runner hits, reproduced where it can be:
+    /// one folder reached by two spellings, the project folder resolved and
+    /// the chosen file not. A symlink is how a Unix machine spells that, and
+    /// it is literally what macOS' temp folder is.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_reached_through_a_symlinked_folder_is_still_inside_the_project() {
+        let base = std::env::temp_dir().join("sub-model-symlinked-import");
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        std::fs::create_dir_all(real.join("footage")).expect("a project folder");
+        std::fs::write(real.join("footage").join("take.mov"), b"take").expect("the file writes");
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("the link is made");
+
+        // What the host holds: the folder as the filesystem spells it.
+        let project_dir = std::fs::canonicalize(&real).expect("the folder resolves");
+        // What a file dialog hands back: the folder as the user reached it.
+        let chosen = link.join("footage").join("take.mov");
+        assert!(
+            chosen.strip_prefix(&project_dir).is_err(),
+            "the two spellings must differ for this to be testing anything"
+        );
+
+        let path = MediaPath::relative_to(&project_dir, &chosen).expect("the file is inside");
+        assert_eq!(path.as_str(), "footage/take.mov");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_plain_path_survives_unchanged() {
+        let dir = std::env::temp_dir();
+        let plain = plain_path(std::fs::canonicalize(&dir).expect("temp resolves"));
+        assert!(
+            !plain.to_string_lossy().starts_with(r"\\?\"),
+            "a verbatim prefix reaches GLib and every path comparison: {plain:?}"
+        );
+        assert_eq!(
+            plain_path(PathBuf::from("footage")),
+            PathBuf::from("footage")
+        );
     }
 
     #[test]
