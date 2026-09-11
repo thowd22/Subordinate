@@ -102,13 +102,18 @@ phases:
               Set-Content -Encoding ASCII $file $payload
               # The AWS CLI wants forward slashes after file://.
               $fileUri = 'file://' + ($file -replace '\\', '/')
+              # Windows PowerShell turns *any* native stderr output into a
+              # terminating error while ErrorActionPreference is Stop - even
+              # the "secret not found" that the create path is there to
+              # handle. Exit codes are checked by hand from here down.
+              $ErrorActionPreference = 'Continue'
               & $aws secretsmanager put-secret-value --region $region --secret-id $secretName --secret-string $fileUri 2>&1 | Out-Null
               if ($LASTEXITCODE -ne 0) {
                 'secret not there yet, creating it'
                 & $aws secretsmanager create-secret --region $region --name $secretName --description 'RDP password for the Subordinate Windows desktop runner AMI' --secret-string $fileUri
                 if ($LASTEXITCODE -ne 0) { throw 'could not write the password to Secrets Manager' }
               }
-              Remove-Item $file -Force
+              Remove-Item $file -Force -ErrorAction SilentlyContinue
               Remove-Variable plain, payload
               "password for $user stored in Secrets Manager as $secretName"
 
@@ -117,7 +122,10 @@ phases:
         inputs:
           commands:
             - |
-              $ErrorActionPreference = 'Stop'
+              # Continue, not Stop: reg.exe and powercfg.exe write to stderr
+              # for things that are not errors, and under Stop that is a
+              # terminating NativeCommandError.
+              $ErrorActionPreference = 'Continue'
               # Machine-wide policy: no lock screen, no inactivity lock, no
               # "press ctrl+alt+del", no screensaver. A locked desktop is a
               # black screenshot and an input sink.

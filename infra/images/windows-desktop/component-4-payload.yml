@@ -66,7 +66,10 @@ phases:
         inputs:
           commands:
             - |
-              $ErrorActionPreference = 'Stop'
+              # Continue, not Stop: pip writes notices to stderr, and under
+              # Stop that is a terminating NativeCommandError. Exit codes are
+              # checked by hand instead.
+              $ErrorActionPreference = 'Continue'
               # The image does have a Python, but it is the runner's
               # hostedtoolcache copy, which is only on PATH inside a job.
               # The interactive helper runs as a different user in a different
@@ -94,7 +97,9 @@ phases:
         inputs:
           commands:
             - |
-              $ErrorActionPreference = 'Stop'
+              # Continue, not Stop: the AWS CLI writes to stderr for things
+              # that are not errors. The exit code is checked instead.
+              $ErrorActionPreference = 'Continue'
               $bucket = '{{ MediaBucket }}'
               $key = '{{ MediaKey }}'
               $want = '{{ MediaSha256 }}'
@@ -132,7 +137,7 @@ phases:
         inputs:
           commands:
             - |
-              $ErrorActionPreference = 'Stop'
+              $ErrorActionPreference = 'Continue'
               foreach ($p in @(
                 'C:\Program Files\Subordinate\bin\subordinate.exe',
                 'C:\Program Files\Subordinate\bin\subordinate-mcp.exe',
