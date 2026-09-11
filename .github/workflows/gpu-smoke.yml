@@ -251,13 +251,16 @@ jobs:
       - name: Hardware H.264 encode round-trip (AMF)
         run: |
           $out = "$env:RUNNER_TEMP\amf-test.mp4"
-          $env:GST_DEBUG = "2,amf*:5"
-          gst-launch-1.0 videotestsrc num-buffers=120 ! "video/x-raw,width=1920,height=1080,framerate=30/1" ! amfh264enc ! "video/x-h264" ! h264parse ! mp4mux ! filesink location="$out" 2>&1 | Select-Object -Last 40
+          # Windows PowerShell turns native stderr into a terminating error, so run
+          # the pipeline through cmd with both streams captured to a log file.
+          $log = "$env:RUNNER_TEMP\amf-test.log"
+          $env:GST_DEBUG = "2,amf*:4"
+          cmd /c "gst-launch-1.0 videotestsrc num-buffers=120 ! video/x-raw,width=1920,height=1080,framerate=30/1 ! amfh264enc ! video/x-h264 ! h264parse ! mp4mux ! filesink location=`"$out`" > `"$log`" 2>&1"
           "gst-launch exit $LASTEXITCODE"
           Remove-Item Env:GST_DEBUG
-          if (Test-Path $out) { "size " + (Get-Item $out).Length } else { "no output file" }
-          gst-inspect-1.0 amfh264enc 2>&1 | Select-String -Pattern "device|adapter|Pad Templates" | Select-Object -First 4
-          gst-discoverer-1.0 "$out" 2>&1 | Tee-Object -Variable info
+          Get-Content $log | Select-Object -Last 30
+          if (Test-Path $out) { "size " + (Get-Item $out).Length } else { "no output file"; exit 1 }
+          cmd /c "gst-discoverer-1.0 `"$out`" 2>&1" | Tee-Object -Variable info
           if (-not ($info -match 'H\.264')) { Write-Error "no H.264 stream"; exit 1 }
           (Get-Item $out).Length
           Remove-Item $out -ErrorAction SilentlyContinue
