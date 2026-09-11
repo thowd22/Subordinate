@@ -31,6 +31,7 @@ use sub_command::dispatch::PROJECT_GET;
 use sub_edit::commands::RenameSequence;
 use sub_model::{Project, TrackItem, TrackKind};
 use sub_time::RationalTime;
+use sub_ui::selection::ClipRef;
 use sub_ui::{AppOptions, SubordinateApp};
 
 /// A folder of this test's own, emptied first so a rerun starts clean.
@@ -250,5 +251,134 @@ fn the_window_opens_the_sample_project_through_the_engine() {
         through_api.sequences.first().map(|s| s.id),
         harness.state().project().sequences.first().map(|s| s.id),
         "the window and the Command API are looking at one project"
+    );
+}
+
+/// The opacity of `clip`, in micro-units, wherever it sits in `sequence`.
+fn opacity_micros(sequence: &sub_model::Sequence, clip: sub_model::ClipId) -> i64 {
+    sequence
+        .tracks
+        .iter()
+        .flat_map(sub_model::Track::clips)
+        .find(|candidate| candidate.id == clip)
+        .expect("the clip is still in the sequence")
+        .opacity
+        .factor()
+        .micros()
+}
+
+/// The first clip on an unlocked video track of the sequence the window shows.
+fn first_video_clip(app: &SubordinateApp) -> (sub_model::TrackId, sub_model::ClipId) {
+    let track = app
+        .sequence()
+        .tracks
+        .iter()
+        .find(|track| {
+            track.kind == TrackKind::Video && !track.locked && track.clips().next().is_some()
+        })
+        .expect("the sample project has an editable video track with a clip");
+    (track.id, track.clips().next().expect("a clip").id)
+}
+
+#[test]
+fn an_inspector_drag_edits_the_viewer_live_and_lands_as_one_undo_step() {
+    if !support::can_render() {
+        return;
+    }
+    let path = project_copy("inspector");
+    let mut harness = app_harness(&path);
+    harness.run();
+
+    // The inspector edits whatever the timeline has selected, so the clip is
+    // selected the way a click on the timeline selects it.
+    let (track, clip) = first_video_clip(harness.state());
+    harness
+        .state_mut()
+        .timeline()
+        .selection_mut()
+        .toggle(ClipRef::new(track, clip));
+    harness.run();
+    let before = opacity_micros(harness.state().sequence(), clip);
+
+    // The Opacity slider's track. A slider publishes two nodes under the same
+    // label — the track and the number beside it — and the track is first.
+    let rect = harness
+        .get_all_by_label("Opacity")
+        .next()
+        .expect("the docked inspector paints the opacity field")
+        .rect();
+    let handle = egui::pos2(rect.right() - 4.0, rect.center().y);
+    harness.hover_at(handle);
+    harness.run();
+    harness.drag_at(handle);
+    harness.run();
+
+    // A quarter of the way along the track, with the button still down.
+    let target = egui::pos2(rect.left() + rect.width() * 0.25, rect.center().y);
+    harness.hover_at(target);
+    harness.run();
+
+    // Live: the sequence the compositor draws from carries the new value
+    // already, and so does the project on the engine, because the window
+    // applied the command on the frame the slider moved.
+    let live = opacity_micros(harness.state().sequence(), clip);
+    assert!(
+        live < before,
+        "the drag changed the clip the viewer composites while the pointer is still down: \
+         {before} -> {live}"
+    );
+    let (_, engine_project) = project_through_api(harness.state());
+    assert_eq!(
+        opacity_micros(engine_project.sequences.first().expect("a sequence"), clip),
+        live,
+        "the engine every other client reads is holding the same live value"
+    );
+    let mid_drag = harness
+        .state()
+        .session()
+        .history()
+        .expect("the engine reports a history");
+    assert_eq!(
+        mid_drag.undo_len, 0,
+        "and nothing has landed on the undo stack yet"
+    );
+    assert!(mid_drag.in_group, "the gesture's history group is open");
+
+    harness.drop_at(target);
+    harness.run();
+    harness.run();
+
+    let committed = harness
+        .state()
+        .session()
+        .history()
+        .expect("the engine reports a history");
+    assert_eq!(
+        committed.undo_len, 1,
+        "releasing the slider committed the whole drag as one undoable command"
+    );
+    assert_eq!(committed.undo_label.as_deref(), Some("Change opacity"));
+    assert_eq!(
+        opacity_micros(harness.state().sequence(), clip),
+        live,
+        "and kept the value the drag reached"
+    );
+
+    // One undo from the Edit menu puts the whole gesture back.
+    harness.get_by_label("Edit").click();
+    harness.run();
+    harness.get_by_label_contains("Undo ").click();
+    harness.run();
+    harness.run();
+    assert_eq!(
+        opacity_micros(harness.state().sequence(), clip),
+        before,
+        "one undo reverses the whole drag"
+    );
+    let (_, undone) = project_through_api(harness.state());
+    assert_eq!(
+        opacity_micros(undone.sequences.first().expect("a sequence"), clip),
+        before,
+        "on the engine as well as in the window"
     );
 }
