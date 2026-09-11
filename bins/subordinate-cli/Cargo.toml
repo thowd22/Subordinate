@@ -12,7 +12,7 @@ sub-audio = { version = "0.1.0", path = "../../crates/sub-audio" }
 sub-command = { version = "0.1.0", path = "../../crates/sub-command" }
 sub-core = { version = "0.1.0", path = "../../crates/sub-core" }
 sub-edit = { version = "0.1.0", path = "../../crates/sub-edit" }
-sub-export = { version = "0.1.0", path = "../../crates/sub-export" }
+sub-export = { version = "0.1.0", path = "../../crates/sub-export", features = ["sequence"] }
 sub-media = { version = "0.1.0", path = "../../crates/sub-media" }
 sub-model = { version = "0.1.0", path = "../../crates/sub-model" }
 # The plugin test harness renders a frame for an effect plugin, so the CLI
@@ -36,4 +36,8 @@ workspace = true
 # The render test assembles a project over the generated media fixtures and
 # skips itself when they, a GPU adapter or a usable encoder are missing.
 sub-test-support = { version = "0.1.0", path = "../../crates/sub-test-support" }
+# The GUI/CLI equivalence test runs the editor's own export path — the panel,
+# the runner and the shared sequence adapters — beside `render`, so the two
+# front ends are compared rather than one of them re-implemented.
+sub-ui = { version = "0.1.0", path = "../../crates/sub-ui" }
 

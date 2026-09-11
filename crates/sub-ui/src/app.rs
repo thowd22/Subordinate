@@ -47,7 +47,7 @@ use crate::diagnostics::DiagnosticsPanel;
 use crate::dock::{DockLayout, Panel, layout_menu_ui};
 use crate::effects::EffectCatalog;
 use crate::export_panel::{ExportAction, ExportPanel, ExportRequest};
-use crate::export_runner::{ExportRunner, ExportStreams};
+use crate::export_runner::ExportRunner;
 use crate::fullscreen::{FullscreenAction, FullscreenState, monitor_picker_ui};
 use crate::history_panel::{HistoryAction, HistoryList, edit_menu_ui};
 use crate::inspector::{EffectEdit, InspectorPanel, InspectorResponse};
@@ -112,14 +112,15 @@ struct FrameEdits {
 /// line. Anything after the colon is diagnostics.
 pub const UI_SMOKE_READY: &str = "ui-smoke ready";
 
-/// Why the export panel's Export button is held closed in this build.
+/// Why the export panel's Export button is held closed for an unsaved project.
 ///
-/// Everything the panel needs is here — presets, range, file, encoder
-/// override, progress and cancel — and so is the export job it would drive
-/// (`sub_export::spawn_export_job`). What is missing is the piece between
-/// them: nothing yet turns the compositor's full-resolution readback and the
-/// offline audio mix into the frame sources that job takes.
-pub const NO_RENDERER_REASON: &str = "Rendering to a file is not connected in this build yet";
+/// Everything else an export needs is here: the panel, the job, and the
+/// compositor readback and offline mix behind [`export_sources`]. What a
+/// project that has never been written to a file lacks is a folder for its
+/// media paths to resolve against — clips name their media relative to the
+/// project file — so there is nothing for a decoder to open.
+pub const NO_RENDERER_REASON: &str =
+    "Save the project to a file before exporting: its media is named relative to it";
 
 /// Options for launching the application.
 #[derive(Debug, Clone, Default)]
@@ -1137,11 +1138,29 @@ impl SubordinateApp {
         moved
     }
 
+    /// The export panel: the preset, range and file an export is started
+    /// with, and what the running one is doing.
+    ///
+    /// Public so a host — or a test that exports without a pointer — can set
+    /// up an export and read its progress, the way the panel's own widgets do.
+    pub const fn export_panel(&mut self) -> &mut ExportPanel {
+        &mut self.export.panel
+    }
+
+    /// What the last export asked for is doing, or did.
+    pub const fn export_status(&self) -> &crate::export_panel::ExportStatus {
+        self.export.panel.status()
+    }
+
     /// Carries out what the export panel asked for.
     ///
     /// Nothing here edits the project, so none of it is a command: an export
     /// reads the project and writes a file.
-    fn apply_export(&mut self, action: ExportAction) {
+    ///
+    /// Public because this, not `start_export`, is what a click on Export
+    /// reaches: a caller driving the window without a pointer takes the same
+    /// path a user does.
+    pub fn apply_export(&mut self, action: ExportAction) {
         match action {
             ExportAction::Start(request) => self.start_export(&request),
             ExportAction::Cancel => self.export.runner.cancel(),
@@ -1166,12 +1185,22 @@ impl SubordinateApp {
     /// [`SubordinateApp::poll_export`], and the panel's Cancel button reaches
     /// the job's cancel token.
     fn start_export(&mut self, request: &ExportRequest) {
+        let Some(project_dir) = self.project_dir() else {
+            let error = SubError::new(crate::codes::EXPORT_NOT_READY, NO_RENDERER_REASON)
+                .with_detail("field", "project");
+            log::warn!("[{}] {}", error.code, error.message);
+            self.export.panel.add_problem(error);
+            return;
+        };
+        let project = self.session.project_arc();
+        let render = self.render.clone();
         let export = &mut self.export;
         let started = export.runner.start(
             &export.jobs,
             &export.presets,
+            &project,
             request,
-            &mut export_sources(),
+            &mut crate::export_runner::sequence_sources(&render, Arc::clone(&project), project_dir),
         );
         if let Err(error) = started {
             log::warn!("[{}] {}", error.code, error.message);
@@ -1179,9 +1208,32 @@ impl SubordinateApp {
         }
     }
 
+    /// The folder a clip's relative media path resolves against.
+    ///
+    /// That is the folder the project file itself lives in, so a project that
+    /// has never been saved has none and cannot be exported
+    /// ([`NO_RENDERER_REASON`]).
+    fn project_dir(&self) -> Option<PathBuf> {
+        let file = self.session.project_file()?;
+        let folder = file.parent().unwrap_or(Path::new("."));
+        // Absolute, because the decoders open a URI and GStreamer takes no
+        // relative path.
+        std::fs::canonicalize(folder).ok()
+    }
+
     /// Drains the running export's events into the panel. Once a frame.
+    ///
+    /// The Export button's availability is refreshed here too: a project only
+    /// becomes exportable once it has a file of its own to resolve its media
+    /// against, which saving it gives it.
     fn poll_export(&mut self) -> bool {
+        let unavailable = self
+            .session
+            .project_file()
+            .is_none()
+            .then_some(NO_RENDERER_REASON);
         let export = &mut self.export;
+        export.panel.set_unavailable(unavailable);
         export.runner.poll(&mut export.panel) > 0
     }
 
@@ -1671,23 +1723,6 @@ impl ExportHost {
             runner: ExportRunner::new(),
             jobs: JobService::new(JOB_WORKERS),
         }
-    }
-}
-
-/// Where an export reads its pixels and samples from.
-///
-/// There is nowhere yet: the compositor's full-resolution readback and the
-/// offline audio mix are not adapted into frame sources in this build, which
-/// is what [`NO_RENDERER_REASON`] tells the user and why the panel's Export
-/// button is held closed. The hook is here so that the day those sources
-/// exist, the only change is what this returns — the panel, the runner, the
-/// job and the cancel path are already wired to each other.
-fn export_sources() -> impl crate::export_runner::ExportSources {
-    |_: &ExportRequest, _: &sub_export::ExportSettings| -> SubResult<ExportStreams> {
-        Err(SubError::new(
-            sub_core::codes::UNIMPLEMENTED,
-            NO_RENDERER_REASON,
-        ))
     }
 }
 

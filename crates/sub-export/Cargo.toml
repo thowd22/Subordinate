@@ -16,10 +16,32 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "1", default-features = false, features = ["parse", "display", "serde"] }
 tracing = "0.1"
+# The `sequence` feature turns a project's sequence into the two streams an
+# export reads: the compositor's full-resolution readback and the mixer's
+# offline render. Off by default, so a caller that only encodes — the MCP
+# server, the plugin host — does not pull the GPU and decode stacks in with it.
+sub-audio = { path = "../sub-audio", optional = true }
+sub-media = { path = "../sub-media", optional = true }
+sub-model = { path = "../sub-model", optional = true }
+sub-render = { path = "../sub-render", optional = true }
+wgpu = { version = "30", default-features = false, optional = true }
+
+[features]
+sequence = [
+    "dep:sub-audio",
+    "dep:sub-media",
+    "dep:sub-model",
+    "dep:sub-render",
+    "dep:wgpu",
+]
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+# The crate's own tests exercise the sequence adapters, so the tests build with
+# the feature on while a plain `cargo build -p sub-export` does not.
+sub-export = { path = ".", features = ["sequence"] }
 sub-audio = { path = "../sub-audio" }
 sub-media = { path = "../sub-media" }
+sub-model = { path = "../sub-model" }

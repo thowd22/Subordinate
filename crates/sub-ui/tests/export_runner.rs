@@ -23,7 +23,8 @@ use sub_export::{
     EncoderPreferences, ExportElements, ExportSettings, PresetLibrary, SolidFrames,
     VideoFrameSource, element_is_usable,
 };
-use sub_model::SequenceId;
+use sub_model::sequence::SequenceSettings;
+use sub_model::{ColorTags, Project, Resolution, Sequence};
 use sub_time::{Rational, RationalTime, TimeRange};
 use sub_ui::export_panel::{ExportPanel, ExportRange, ExportRequest, ExportStatus, PresetEntry};
 use sub_ui::export_runner::{ExportRunner, ExportSources, ExportStreams, settings_for};
@@ -52,14 +53,29 @@ fn library() -> PresetLibrary {
     PresetLibrary::from_toml(SMALL_PRESET).expect("the test preset parses")
 }
 
-/// The request a panel showing that preset would build for `frames` frames
-/// written to `output`.
-fn request(output: &Path, frames: i64) -> ExportRequest {
+/// A project whose only sequence is the 64x48 canvas the test preset asks
+/// for, and the request a panel showing that preset would build for `frames`
+/// frames of it written to `output`.
+///
+/// The settings an export resolves come from the sequence's canvas and
+/// timebase, so the request only means anything beside the project it names.
+fn request(output: &Path, frames: i64) -> (Project, ExportRequest) {
     let library = library();
     let preset = library.require("tiny-mkv").expect("the test preset");
-    ExportRequest {
+    let settings = SequenceSettings::new(
+        Resolution::new(64, 48).expect("a valid canvas"),
+        Rational::FPS_24,
+        48_000,
+        ColorTags::default(),
+    )
+    .expect("valid sequence settings");
+    let sequence = Sequence::new("Main", settings);
+    let id = sequence.id;
+    let mut project = Project::new("export-runner");
+    project.sequences.push(sequence);
+    let request = ExportRequest {
         preset: PresetEntry::from_preset(preset),
-        sequence: SequenceId::new(),
+        sequence: id,
         range: ExportRange::WholeSequence,
         span: TimeRange::new(
             RationalTime::from_frames(0, Rational::FPS_24),
@@ -68,7 +84,8 @@ fn request(output: &Path, frames: i64) -> ExportRequest {
         .expect("a non-negative span"),
         output: output.to_path_buf(),
         encoder_override: None,
-    }
+    };
+    (project, request)
 }
 
 /// Whether this machine can encode the test preset at all.
@@ -169,8 +186,8 @@ fn a_running_export_fills_the_panels_progress_bar_and_eta() {
     let library = library();
     let dir = temp_dir("progress");
     let path = dir.join("progress.mkv");
-    let request = request(&path, 24);
-    let settings = settings_for(&library, &request).expect("the preset resolves");
+    let (project, request) = request(&path, 24);
+    let settings = settings_for(&library, &project, &request).expect("the preset resolves");
     if !can_export(&settings) {
         eprintln!("skipping: this machine has no usable H.264 encoder or matroskamux");
         return;
@@ -183,7 +200,7 @@ fn a_running_export_fills_the_panels_progress_bar_and_eta() {
     let (frames, gate) = GatedFrames::new(&settings, 24, 1);
     let mut sources = Once(Some(ExportStreams::video(Box::new(frames))));
     runner
-        .start(&jobs, &library, &request, &mut sources)
+        .start(&jobs, &library, &project, &request, &mut sources)
         .expect("the export starts");
     assert!(runner.is_running(), "the runner owns the job it queued");
 
@@ -272,8 +289,8 @@ fn the_cancel_button_stops_the_running_export_and_removes_the_part_file() {
     let path = dir.join("cancel.mkv");
     // Far more frames than the test will let through: the export is stopped,
     // never finished.
-    let request = request(&path, 10_000);
-    let settings = settings_for(&library, &request).expect("the preset resolves");
+    let (project, request) = request(&path, 10_000);
+    let settings = settings_for(&library, &project, &request).expect("the preset resolves");
     if !can_export(&settings) {
         eprintln!("skipping: this machine has no usable H.264 encoder or matroskamux");
         return;
@@ -286,7 +303,7 @@ fn the_cancel_button_stops_the_running_export_and_removes_the_part_file() {
     let (frames, gate) = GatedFrames::new(&settings, 10_000, 1);
     let mut sources = Once(Some(ExportStreams::video(Box::new(frames))));
     runner
-        .start(&jobs, &library, &request, &mut sources)
+        .start(&jobs, &library, &project, &request, &mut sources)
         .expect("the export starts");
 
     assert!(
@@ -331,11 +348,11 @@ fn the_cancel_button_stops_the_running_export_and_removes_the_part_file() {
 fn an_export_that_cannot_start_reports_the_element_that_refused() {
     let library = library();
     let dir = temp_dir("refused");
-    let mut request = request(&dir.join("refused.mkv"), 4);
+    let (project, mut request) = request(&dir.join("refused.mkv"), 4);
     // An encoder this machine certainly does not have, pinned the way the
     // panel's encoder picker pins one.
     request.encoder_override = Some("nvh264enc".to_owned());
-    let settings = settings_for(&library, &request).expect("the preset resolves");
+    let settings = settings_for(&library, &project, &request).expect("the preset resolves");
     assert_eq!(settings.width, 64);
     // The probe initialises GStreamer, which asking after an element needs.
     if !can_export(&settings) {
@@ -354,7 +371,7 @@ fn an_export_that_cannot_start_reports_the_element_that_refused() {
         4,
     )))));
     let error = runner
-        .start(&jobs, &library, &request, &mut sources)
+        .start(&jobs, &library, &project, &request, &mut sources)
         .expect_err("an unavailable encoder stops the export before it starts");
     assert_eq!(error.code, sub_export::codes::ENCODER_UNAVAILABLE);
     assert!(
