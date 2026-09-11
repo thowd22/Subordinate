@@ -47,6 +47,11 @@ done
 
 command -v flatpak >/dev/null 2>&1 || { echo "build-flatpak.sh: flatpak is not installed" >&2; exit 1; }
 command -v flatpak-builder >/dev/null 2>&1 || { echo "build-flatpak.sh: flatpak-builder is not installed" >&2; exit 1; }
+# flatpak-builder strips debuginfo out of everything it installs and shells out
+# to eu-strip for it. Missing, it fails at the end of the build rather than the
+# start, which on this workspace is a ten-minute release compile wasted.
+command -v eu-strip >/dev/null 2>&1 ||
+    { echo "build-flatpak.sh: eu-strip is missing; install elfutils" >&2; exit 1; }
 
 if [ "$install_deps" -eq 1 ]; then
     flatpak remote-add --if-not-exists --user flathub \

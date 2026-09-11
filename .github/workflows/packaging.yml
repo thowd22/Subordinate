@@ -261,10 +261,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # elfutils is not optional: flatpak-builder strips debuginfo out of every
+      # binary it installs and shells out to eu-strip to do it, so without it
+      # the build fails at the very end, after the whole release compile
+      # (run 34628898376).
       - name: Install flatpak-builder
         run: |
           sudo apt-get update || sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils
+          eu-strip --version | head -n1
 
       # The runtime, the SDK and the rust-stable SDK extension are several GB;
       # caching them keeps a rebuild to the app itself.
