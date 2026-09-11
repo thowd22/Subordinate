@@ -193,7 +193,7 @@ if [ "$head_count" -lt 2 ] || [ "$first_origin" = "$second_origin" ]; then
             sed 's/^/ui-smoke: xrandr: /' "$out_dir/setmonitor.log" || true
             [ "$(monitor_count)" -ge 2 ] 2>/dev/null
         }
-        xrandr --version 2>&1 | sed 's/^/ui-smoke: /' || true
+        xrandr -display "$display" --version 2>&1 | sed 's/^/ui-smoke: /' || true
         # 1. one process, both monitors, the real output on the left head.
         # 2. the same in two processes.
         # 3. only the right-hand head, leaving the server's automatic monitor
@@ -211,13 +211,20 @@ fi
 # What the server itself says its outputs are, kept as evidence beside the
 # screenshots: a job that claims a two-output desktop should be able to show
 # the monitor list that proves it (TASK-118).
-: >"$out_dir/monitors.txt"
-if command -v xrandr >/dev/null 2>&1; then
-    xrandr -display "$display" --listmonitors >"$out_dir/monitors.txt" 2>&1 || true
-    cat "$out_dir/monitors.txt"
-else
-    echo "xrandr is not installed; no monitor list" >"$out_dir/monitors.txt"
-fi
+{
+    if command -v xrandr >/dev/null 2>&1; then
+        xrandr -display "$display" --version 2>&1
+        xrandr -display "$display" --listmonitors 2>&1
+    else
+        echo "xrandr is not installed; no monitor list"
+    fi
+    echo "--- XINERAMA ---"
+    xdpyinfo -display "$display" -ext XINERAMA 2>&1 |
+        sed -n '/XINERAMA/,$p' | head -20
+    echo "--- heads this run uses ---"
+    printf '%s\n' "$heads" | awk '{printf "head %d: %sx%s @ %s,%s\n", NR - 1, $1, $2, $3, $4}'
+} >"$out_dir/monitors.txt" 2>&1
+cat "$out_dir/monitors.txt"
 
 echo "ui-smoke: heads (WxH @ x,y)"
 printf '%s\n' "$heads" | awk '{printf "  head %d: %sx%s @ %s,%s\n", NR - 1, $1, $2, $3, $4}'

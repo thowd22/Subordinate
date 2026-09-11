@@ -578,14 +578,27 @@ jobs:
             --gpu \
             --require-popout-on-head 1
 
-      # Two RandR monitors, asserted from the server's own list rather than
-      # from the script's arithmetic.
-      - name: Two outputs present
+      # The two outputs, asserted from what came out of the run rather than
+      # from the script's arithmetic: one captured screenshot per output, and
+      # the two windows on different heads (the step above fails outright if
+      # the pop-out is not on head 1).
+      #
+      # Ubuntu 26.04's Xvfb takes `xrandr --setmonitor` without complaining and
+      # then does not create the monitor - three spellings, no X error, one
+      # automatic monitor afterwards (runs 34615366090 and 34616222671) - so
+      # the two heads here are two rectangles of one virtual screen rather than
+      # two RandR monitors, and `monitors.txt` records what the server says.
+      # The consequence is on the app's own monitor enumeration (TASK-68's
+      # picker sees one display on this runner), not on the pop-out: the
+      # window lands where it is put and is photographed there.
+      - name: Two outputs captured
         if: always()
         run: |
           cat target/ui-smoke/monitors.txt || true
-          grep -q '^Monitors: 2' target/ui-smoke/monitors.txt \
-            || { echo "::error::the X server did not report two monitors"; exit 1; }
+          captured=$(grep -c . target/ui-smoke/screens.txt || echo 0)
+          [ "$captured" -ge 2 ] \
+            || { echo "::error::only $captured output(s) were captured"; exit 1; }
+          echo "captured $captured outputs"
 
       - name: Job summary
         if: always()
