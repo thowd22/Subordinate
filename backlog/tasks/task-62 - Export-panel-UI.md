@@ -1,19 +1,17 @@
 ---
 id: TASK-62
 title: Export panel UI
-status: In Progress
-assignee:
-  - '@opus-task-62'
+status: To Do
+assignee: []
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-11 12:14'
+updated_date: '2026-09-11 12:51'
 labels:
   - ui
   - export
 milestone: m-4
 dependencies:
-  - TASK-60
+  - TASK-59
   - TASK-61
-  - TASK-43
 references:
   - docs/PLAN.md
 priority: medium
@@ -54,6 +52,8 @@ Implemented crates/sub-ui/src/export_panel.rs: ExportPanel with preset picker (l
 AC 2 left unchecked. The panel side is done and tested: apply_event folds a real sub_export::ExportEvent stream (Started/Progress/Finished/Cancelled/Failed) into a status with a percentage bar, an integer-arithmetic ETA line and a Cancel button that raises ExportAction::Cancel, and the recent list is appended on Finished. What is missing is below the panel: nothing yet turns the full-resolution compositor readback (TASK-58) and the offline audio mix (TASK-55) into the VideoFrameSource/AudioFrameSource that sub_export::spawn_export_job takes, so the app has no job to hand a request to and no handle to cancel. Rather than ship a button that always fails, ExportPanel::set_unavailable explains the disabled Export button and app.rs sets it (app::NO_RENDERER_REASON). That bridge needs a GPU and GStreamer encoders to verify, which this environment has neither of, and it is outside this task's criteria; it wants a task of its own.
 
 Verification: cargo fmt --all --check clean; cargo clippy --workspace --all-targets clean under -D warnings (no new warnings at all); cargo test -p sub-ui green — 355 lib tests (15 new in export_panel) plus tests/export_panel.rs (4 tests: committed snapshot export_panel_settings.png, the in-to-out interaction asserting the ExportRequest, the plugin preset in the list, and Open folder), and 15 doc tests. The snapshot really rendered here: this machine enumerates a wgpu adapter.
+
+2026-09-11 supervisor: requeued. The export pipeline (TASK-59) and export job with progress, ETA and cancel (TASK-61) are now Done, so criterion 2 (progress bar, ETA and cancel wired to the export job) can be completed by driving the real job from the panel.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

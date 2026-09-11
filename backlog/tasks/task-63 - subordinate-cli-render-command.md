@@ -1,11 +1,11 @@
 ---
 id: TASK-63
 title: subordinate-cli render command
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-63'
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-11 12:09'
+updated_date: '2026-09-11 12:51'
 labels:
   - cli
   - export
@@ -30,7 +30,7 @@ Headless render is the CI smoke test and what agents call (§5.5).
 <!-- AC:BEGIN -->
 - [x] #1 subordinate-cli render project.sub --sequence NAME --preset NAME --out PATH renders with progress on stderr and exit code 0 on success
 - [x] #2 --encoder overrides selection; --range trims
-- [ ] #3 CI renders the sample project with x264 on all three OSes and validates the output with the discoverer
+- [x] #3 CI renders the sample project with x264 on all three OSes and validates the output with the discoverer
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -70,10 +70,12 @@ Verification run here:
 - The exact CI command was run against the real sample project after scripts/get-sample-media.sh: 25 frames of 'Main cut' at 1280x720 25 fps, x264enc + FLAC in Matroska, one second of audio (48000 audio frames), discoverer reporting video/x-h264 1280x720 and audio/x-flac 48 kHz stereo, exit 0, about one second of wall clock.
 
 AC #3 is left unchecked: the CI step is written and proven on Linux here, but this environment cannot run GitHub Actions on Windows and macOS, so 'CI renders the sample project on all three OSes' is unproven until the branch is pushed and the matrix goes green.
+
+2026-09-11 supervisor verification: CI run 34599179897 (main at 1b7dba3) shows the 'Headless render smoke test' step succeeding on ubuntu-26.04, windows-latest and macos-latest.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-subordinate-cli grew a 'render' subcommand that draws a sequence through the GPU compositor, mixes its audio offline and encodes both through the export job: progress on stderr, a JSON report on stdout, exit 0 on success, --encoder pinning the encoder element, --range trimming an exact frame span and --verify probing the written file with the discoverer. Verified with cargo fmt/clippy (clean), cargo test -p subordinate-cli (all pass, including three new end-to-end tests that render real fixture media with x264 and read the file back), and by running the CI command itself against examples/sample-project/demo.sub: 25 frames of h264 plus FLAC in Matroska, confirmed by the discoverer. AC #3 stays unchecked because the three-OS CI matrix cannot be run from this environment; the workflow step is in place and proven on Linux.
+subordinate-cli render with preset, encoder override and range options, progress on stderr and exit codes; CI renders the sample project with x264 on all three OSes and validates the output with the discoverer.
 <!-- SECTION:FINAL_SUMMARY:END -->

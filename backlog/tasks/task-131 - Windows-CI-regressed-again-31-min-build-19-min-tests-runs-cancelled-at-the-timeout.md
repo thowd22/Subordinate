@@ -3,11 +3,11 @@ id: TASK-131
 title: >-
   Windows CI regressed again: 31 min build, 19 min tests, runs cancelled at the
   timeout
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-131'
 created_date: '2026-09-11 00:06'
-updated_date: '2026-09-11 08:33'
+updated_date: '2026-09-11 12:51'
 labels:
   - infra
   - ci
@@ -30,7 +30,7 @@ After TASK-125 the Windows job briefly ran in 8 minutes, but run 34539791304 sho
 <!-- AC:BEGIN -->
 - [x] #1 Windows job on a warm no-change rerun completes in under 20 minutes, recorded with the run id in the notes
 - [x] #2 The top five slowest Windows test binaries are listed in the notes with their durations, and any test moved or gated is justified in ci.yml comments
-- [ ] #3 Windows timeout lowered back to 40 minutes and no run in the following three merges is cancelled at the limit
+- [x] #3 Windows timeout lowered back to 40 minutes and no run in the following three merges is cancelled at the limit
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -66,10 +66,12 @@ Local verification in this worktree, with the CI environment variables (CARGO_IN
 Not verifiable here: this agent must not push, so no CI run exercises the change yet. Criterion 3's second half -- three merges with no cancellation -- needs the branch merged and is left unchecked.
 
 Acceptance criteria. #1 checked: the windows-latest job of run 34564826872 took 19m26s and of run 34574256857 19m38s, both warm and both under 20 minutes, confirmed today against the Actions jobs API; run 34574614657 was 20m24s, which is why the change below matters even though the criterion was already met. #2 checked: the five slowest Windows binaries are listed above and in the ci.yml comment, and nothing was moved, skipped or gated -- the comment says so explicitly. #3 left unchecked: the timeout is lowered to 40 in this branch, but the three merges without a cancellation can only be observed after it lands on main.
+
+2026-09-11 supervisor verification: ci.yml timeout-minutes is 40 on main, and the three merge runs after this task landed (34593365919, 34598666357, 34599179897) all completed successfully with no cancellation at the limit.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-The Windows job was never hanging and its tests were never slow: the whole suite executes in 89 seconds. It was cargo recompiling the workspace twice more after the Build step, because 'cargo build --workspace --all-targets', 'cargo test --workspace --exclude sub-ui', 'cargo test -p sub-ui' and 'cargo run -p subordinate' are four different package selections and cargo unifies features per selection, so each one invalidated the last -- 353 s of a 462 s Test step and 55 s of a 57 s smoke step in run 34574614657, with the same shape on Linux and macOS. ci.yml now runs one 'cargo test --workspace -- --test-threads=1' with the Build step's selection (the serial run is also what sub-ui needed on lavapipe, so its separate invocation disappears), invokes the already-built target/debug/subordinate for the GUI smoke tests, and drops the Windows timeout from 90 back to a flat 40; docs/DEVELOPMENT.md records the rule. Verified locally: build then test --no-run now compiles a 48 s delta once instead of the workspace twice and the two commands stay stable across repeats, clippy and fmt are clean, the binary survives the Clippy step, and the new test command exits 0 over 132 binaries and 2010 tests. Two of three criteria are proven; the third needs three merges on main to observe, so the task stays In Progress.
+Windows CI diagnosed and trimmed: warm rerun 19m26s (Build 7m, Test 7m), slowest test binaries recorded, timeout back to 40 minutes, and three subsequent merges ran without hitting the limit.
 <!-- SECTION:FINAL_SUMMARY:END -->
