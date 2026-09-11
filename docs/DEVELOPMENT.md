@@ -925,3 +925,52 @@ registered as a GitHub self-hosted runner. Labels:
   contributor's fork run, so pull requests from strangers cannot execute code on
   box. Keep hardware workflows on `workflow_dispatch`, `schedule` and pushes
   to `main`.
+
+## Hardware verification workflow
+
+`.github/workflows/hardware.yml` is where the hardware encode and decode
+criteria are proved (TASK-116). It runs on `workflow_dispatch` and once a night
+at 04:30 UTC, and never on a push or a pull request: the NVIDIA job costs
+money and `box` is a machine in someone's home.
+
+Three jobs:
+
+| Job | Runner | Cost | What it proves |
+| --- | --- | --- | --- |
+| `build-linux` | hosted `ubuntu-24.04` | free | builds `subordinate-bench` (release), `subordinate-cli` (debug) and the `sub-render` readback test binary, and uploads them as `hardware-linux-binaries` |
+| `nvidia-linux` | RunsOn `gpu-nvidia-linux` | about 0.04 USD | NVENC render, 4K hardware-decode scrub, 1080p compositor readback |
+| `amd-linux` | self-hosted `box` | free | the same through VA-API (`vah264enc`, `vah264dec`) |
+
+Nothing is compiled on the GPU instance. A cold `cargo build -p
+subordinate-cli` there took 10m52s on 4 vCPU and burned the whole job budget
+before anything was measured, so the binaries are built on a free hosted runner
+of the same distro release and handed over as an artifact; the GPU job installs
+runtime packages only and measures. That cut the job from 20 minutes (timed
+out) to 2m29s.
+
+Things that bite, all of them learned from a real run:
+
+- **apt on a GPU instance.** `archive.ubuntu.com` served 73 MB at 93 kB/s to
+  us-east-1: 13 minutes. The job rewrites the sources to
+  `us-east-1.ec2.archive.ubuntu.com` and caches the `.deb` archives; the same
+  install is now 25 seconds.
+- **`gst-discoverer-1.0` is in `gstreamer1.0-plugins-base-apps`**, not in
+  `gstreamer1.0-tools`.
+- **Hardware encoders are ranked `NONE`.** GStreamer never autoplugs an
+  encoder, so `vah264enc` (and friends) carry rank `NONE`, and `sub-export`
+  treats a deranked element as unusable. The render steps set
+  `GST_PLUGIN_FEATURE_RANK=vah264enc:primary` for the element they pin.
+- **`subordinate-bench` resolves its fixtures directory from the path it was
+  compiled in.** A binary built elsewhere must be given `--fixtures`.
+- **box has no Vulkan driver.** The VA-API stack is there, but the compositor
+  runs on wgpu: without `mesa-vulkan-drivers` `wgpu` reports "Found no drivers!"
+  and every render fails with `render.no_adapter`. The job checks for an ICD up
+  front and says so.
+
+Artifacts per GPU job (30 days): the rendered file, `perf.json`, the discoverer
+report, the readback log, the `gst-inspect` diagnostics and the rendered job
+summary. The numbers land in docs/PERFORMANCE.md.
+
+There are no Windows jobs: there is no AMD Windows host anywhere this project
+can reach, and the NVIDIA Windows AMI is TASK-115. The workflow carries a
+commented placeholder rather than a job that would quietly pass on software.

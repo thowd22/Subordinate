@@ -31,12 +31,6 @@ name: Hardware verification
 # docs/DEVELOPMENT.md, "Self-hosted AMD runner").
 on:
   workflow_dispatch:
-  # TEMPORARY (TASK-116 verification only, removed before this branch merges):
-  # a workflow that is not yet on the default branch cannot be dispatched -
-  # the API answers 404 - so the only way to run this file at all while it is
-  # being written is a push trigger scoped to its own branch.
-  push:
-    branches: [task/task-116]
   schedule:
     # 04:30 UTC, once a day. One NVIDIA job a night is about 2.50 USD a month.
     - cron: "30 4 * * *"
