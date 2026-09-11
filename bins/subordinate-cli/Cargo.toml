@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+sub-audio = { version = "0.1.0", path = "../../crates/sub-audio" }
 sub-command = { version = "0.1.0", path = "../../crates/sub-command" }
 sub-core = { version = "0.1.0", path = "../../crates/sub-core" }
 sub-edit = { version = "0.1.0", path = "../../crates/sub-edit" }
@@ -17,11 +18,19 @@ sub-model = { version = "0.1.0", path = "../../crates/sub-model" }
 # The plugin test harness renders a frame for an effect plugin, so the CLI
 # takes the plugin host with its compositor conversion switched on.
 sub-plugin = { version = "0.1.0", path = "../../crates/sub-plugin", features = ["render"] }
+# The render command composites through the same GPU graph the viewer uses.
+sub-render = { version = "0.1.0", path = "../../crates/sub-render" }
 sub-time = { version = "0.1.0", path = "../../crates/sub-time" }
 serde = "1"
+wgpu = { version = "30", default-features = false }
 serde_json = "1"
 tracing = "0.1"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The render test assembles a project over the generated media fixtures and
+# skips itself when they, a GPU adapter or a usable encoder are missing.
+sub-test-support = { version = "0.1.0", path = "../../crates/sub-test-support" }
 

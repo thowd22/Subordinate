@@ -5089,6 +5089,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sub-audio",
  "sub-command",
  "sub-core",
  "sub-edit",
@@ -5096,8 +5097,11 @@ dependencies = [
  "sub-media",
  "sub-model",
  "sub-plugin",
+ "sub-render",
+ "sub-test-support",
  "sub-time",
  "tracing",
+ "wgpu",
 ]
 
 [[package]]

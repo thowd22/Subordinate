@@ -12,6 +12,7 @@ use sub_plugin::registry::InstallLocation;
 mod plugin;
 mod plugin_test;
 mod project;
+mod render;
 mod scaffold;
 mod serve;
 
@@ -50,6 +51,13 @@ enum Command {
         path: PathBuf,
         /// Where to write it, defaulting to `path` itself.
         output: Option<PathBuf>,
+        /// Whether the report is indented.
+        pretty: bool,
+    },
+    /// Render a sequence to a file.
+    Render {
+        /// The project, the sequence, the preset and where the file goes.
+        options: Box<render::Options>,
         /// Whether the report is indented.
         pretty: bool,
     },
@@ -101,6 +109,16 @@ Usage:
                                load a project and write it out again
   subordinate-cli inspect <file>
                                print the whole project structure as JSON
+  subordinate-cli render <file> --preset <id> --out <file>
+                        [--sequence <name>] [--encoder <element>]
+                        [--range <in:out>] [--verify]
+                               render a sequence headlessly: progress on
+                               stderr, the report as JSON on stdout. The range
+                               is frames of the sequence timebase, the out
+                               point exclusive and either end optional;
+                               --encoder pins the encoder element for the
+                               preset's video codec, and --verify probes the
+                               written file with the discoverer
   subordinate-cli serve [--project <file>] [--instance <name>]
                         [--directory <dir>] [--plugin-dir <dir>]
                                serve the Command API until stdin closes
@@ -162,6 +180,7 @@ fn parse(args: &[String]) -> Command {
             path,
             pretty,
         }),
+        Some("render") => parse_render(args),
         Some("serve") => parse_serve(args),
         Some("plugin") => parse_plugin(args),
         Some(other) => Command::Unknown(other.to_owned()),
@@ -269,6 +288,76 @@ fn parse_save<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
             pretty,
         },
     )
+}
+
+/// Reads `render <file> --preset <id> --out <file> [--sequence <name>]
+/// [--encoder <element>] [--range <in:out>] [--verify]`.
+fn parse_render<'a>(mut args: impl Iterator<Item = &'a str>) -> Command {
+    let mut path = None;
+    let mut sequence = None;
+    let mut preset = None;
+    let mut output = None;
+    let mut encoder = None;
+    let mut range = None;
+    let mut verify = false;
+    let mut pretty = true;
+    while let Some(arg) = args.next() {
+        match arg {
+            "--compact" => pretty = false,
+            "--pretty" | "--json" => pretty = true,
+            "--verify" => verify = true,
+            "--sequence" => match args.next() {
+                Some(value) => sequence = Some(value.to_owned()),
+                None => return Command::Incomplete("--sequence needs a sequence name".to_owned()),
+            },
+            "--preset" => match args.next() {
+                Some(value) => preset = Some(value.to_owned()),
+                None => return Command::Incomplete("--preset needs a preset id".to_owned()),
+            },
+            "--out" | "--output" | "-o" => match args.next() {
+                Some(value) => output = Some(PathBuf::from(value)),
+                None => return Command::Incomplete("--out needs a path".to_owned()),
+            },
+            "--encoder" => match args.next() {
+                Some(value) => encoder = Some(value.to_owned()),
+                None => {
+                    return Command::Incomplete("--encoder needs an encoder element".to_owned());
+                }
+            },
+            "--range" => match args.next() {
+                Some(value) => match render::FrameRange::parse(value) {
+                    Ok(parsed) => range = Some(parsed),
+                    Err(error) => return Command::Incomplete(error.message),
+                },
+                None => return Command::Incomplete("--range needs IN:OUT in frames".to_owned()),
+            },
+            other if path.is_none() && !other.starts_with('-') => {
+                path = Some(PathBuf::from(other));
+            }
+            other => return Command::Unknown(other.to_owned()),
+        }
+    }
+    let Some(project) = path else {
+        return Command::Incomplete("render needs the path of a project file".to_owned());
+    };
+    let Some(preset) = preset else {
+        return Command::Incomplete("render needs --preset with an export preset id".to_owned());
+    };
+    let Some(output) = output else {
+        return Command::Incomplete("render needs --out with the file to write".to_owned());
+    };
+    Command::Render {
+        options: Box::new(render::Options {
+            project,
+            sequence,
+            preset,
+            output,
+            encoder,
+            range,
+            verify,
+        }),
+        pretty,
+    }
 }
 
 /// Reads `serve [--project <file>] [--instance <name>] [--directory <dir>]`.
@@ -602,6 +691,7 @@ fn main() -> ExitCode {
             pretty,
         } => report(project::save(&path, output.as_deref()), pretty),
         Command::Inspect { path, pretty } => report(project::inspect(&path), pretty),
+        Command::Render { options, pretty } => report(render::run(&options), pretty),
         Command::Serve { options, pretty } => {
             // The readiness line goes out before the wait begins, so whoever
             // launched this knows the endpoint is bound without polling for a
@@ -722,6 +812,86 @@ mod tests {
                 "{incomplete:?} was accepted",
             );
         }
+    }
+
+    #[test]
+    fn render_takes_a_project_a_preset_an_output_and_the_overrides() {
+        let Command::Render { options, pretty } = parse(&args(&[
+            "render",
+            "cut.sub",
+            "--sequence",
+            "Main cut",
+            "--preset",
+            "youtube-1080p",
+            "--out",
+            "/tmp/cut.mp4",
+            "--encoder",
+            "x264enc",
+            "--range",
+            "24:48",
+            "--verify",
+            "--compact",
+        ])) else {
+            panic!("render did not parse");
+        };
+        assert_eq!(
+            *options,
+            super::render::Options {
+                project: PathBuf::from("cut.sub"),
+                sequence: Some("Main cut".to_owned()),
+                preset: "youtube-1080p".to_owned(),
+                output: PathBuf::from("/tmp/cut.mp4"),
+                encoder: Some("x264enc".to_owned()),
+                range: Some(super::render::FrameRange {
+                    start: 24,
+                    end: Some(48),
+                }),
+                verify: true,
+            }
+        );
+        assert!(!pretty);
+    }
+
+    #[test]
+    fn render_reports_what_it_is_missing_rather_than_guessing() {
+        for incomplete in [
+            vec!["render"],
+            vec!["render", "cut.sub"],
+            vec!["render", "cut.sub", "--preset", "youtube-1080p"],
+            vec!["render", "cut.sub", "--out", "/tmp/cut.mp4"],
+            vec!["render", "cut.sub", "--preset"],
+            vec!["render", "cut.sub", "--out"],
+            vec!["render", "cut.sub", "--sequence"],
+            vec!["render", "cut.sub", "--encoder"],
+            vec!["render", "cut.sub", "--range"],
+            vec![
+                "render",
+                "cut.sub",
+                "--preset",
+                "youtube-1080p",
+                "--out",
+                "/tmp/cut.mp4",
+                "--range",
+                "nonsense",
+            ],
+        ] {
+            assert!(
+                matches!(parse(&args(&incomplete)), Command::Incomplete(_)),
+                "{incomplete:?} was accepted",
+            );
+        }
+        assert_eq!(
+            parse(&args(&[
+                "render",
+                "cut.sub",
+                "--preset",
+                "youtube-1080p",
+                "--out",
+                "/tmp/cut.mp4",
+                "--fast",
+            ])),
+            Command::Unknown("--fast".to_owned())
+        );
     }
 
     #[test]
@@ -980,8 +1150,8 @@ mod tests {
     #[test]
     fn unknown_arguments_are_reported_rather_than_ignored() {
         assert_eq!(
-            parse(&args(&["render"])),
-            Command::Unknown("render".to_owned())
+            parse(&args(&["transcode"])),
+            Command::Unknown("transcode".to_owned())
         );
         assert_eq!(
             parse(&args(&["diag", "--verbose"])),
@@ -999,7 +1169,7 @@ mod tests {
             assert_eq!(parse(&args(&[spelling])), Command::Help);
         }
         for subcommand in [
-            "diag", "schema", "new", "open", "save", "inspect", "serve", "plugin",
+            "diag", "schema", "new", "open", "save", "inspect", "render", "serve", "plugin",
         ] {
             assert!(
                 super::USAGE.contains(subcommand),
