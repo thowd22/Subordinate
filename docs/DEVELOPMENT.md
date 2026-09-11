@@ -783,6 +783,32 @@ crates, `3` for dependencies, full debuginfo).
   already on disk, regenerates only what is missing and always rewrites
   `manifest.json`. Change the catalogue or a pipeline and the hash changes,
   which regenerates everything once.
+- **Every cargo step selects the same packages (TASK-131).** This is the one
+  that cost the most and is the easiest to reintroduce. Cargo unifies features
+  across the packages a command *selects*, so two commands with different
+  selections compile the shared dependencies differently and each one
+  invalidates the other's artifacts — no cache and no wrapper can help, the
+  fingerprints genuinely differ. The job used to run four selections in a row:
+  `cargo build --workspace --all-targets`, then `cargo test --workspace
+  --exclude sub-ui`, then `cargo test -p sub-ui`, then `cargo run -p
+  subordinate -- --smoke-test`. On windows-latest in run 34574614657 that was
+  156 s of recompiling before the first test ran, 197 s more before the second
+  and 55 s more before the smoke test, against 89 s of tests actually
+  executing: 353 s of a 462 s Test step and 55 s of a 57 s smoke step, with the
+  same shape on Linux and macOS. The job now runs one
+  `cargo test --workspace -- --test-threads=1` — the same selection as the
+  Build step, so it compiles nothing — and the smoke tests invoke
+  `target/debug/subordinate` directly instead of `cargo run`. `--test-threads=1`
+  is what allows sub-ui to stop being a separate invocation: it needed serial
+  execution anyway, because several `egui_kittest` snapshots rendering at once
+  segfault Mesa's lavapipe on the Linux runner. It costs about a minute of lost
+  parallelism in the other crates — the five slowest Windows binaries in that
+  run were sub-media's `seek_fixtures` 9.3 s, sub-test-support's
+  `sample_media_catalogue` 5.4 s and sub-ui's `timeline_selection` 3.8 s,
+  `inspector` 3.6 s and `timeline_transition` 3.1 s, everything else under 3 s
+  — and buys back six minutes. Before adding a cargo invocation to the
+  job, make it select `--workspace`, or budget a full workspace recompile for
+  it and for the step after it.
 - **Windows Defender.** A Windows-only step adds the workspace, `~/.cargo` and
   `~/.rustup` to the Defender exclusion list, plus `rustc.exe` and `link.exe`
   as processes. Hosted runners run as administrator, so this succeeds; it is
@@ -790,10 +816,12 @@ crates, `3` for dependencies, full debuginfo).
 
 With no compiler wrapper anywhere, the signal for a cold run is the wall time
 of the Build step together with the "cache hit"/"cache miss" line that
-`Swatinem/rust-cache` prints in its own step. The job timeout is 40 minutes; it
-had been raised to 60 as a stopgap. If a run ever approaches that again, check
-the cache usage total first — a repository over the 10 GB budget means the
-cache backend, not the code, is the problem.
+`Swatinem/rust-cache` prints in its own step. The job timeout is 40 minutes on
+every OS; Windows had been raised to 60 and then to 90 as stopgaps while the
+repeated recompiles above went undiagnosed. If a run ever approaches the limit
+again, check the cache usage total first — a repository over the 10 GB budget
+means the cache backend, not the code, is the problem — and then check whether
+a new step introduced a package selection of its own.
 
 Where the Linux job's time went on rerun 34495825617, before the two caches
 above (10m47s in total): Build 184 s, long-fixture generation 129 s, Clippy
