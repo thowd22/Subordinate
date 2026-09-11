@@ -4936,10 +4936,14 @@ dependencies = [
  "serde_json",
  "sub-audio",
  "sub-core",
+ "sub-export",
  "sub-media",
+ "sub-model",
+ "sub-render",
  "sub-time",
  "toml",
  "tracing",
+ "wgpu",
 ]
 
 [[package]]
@@ -5102,6 +5106,7 @@ dependencies = [
  "sub-render",
  "sub-test-support",
  "sub-time",
+ "sub-ui",
  "tracing",
  "wgpu",
 ]

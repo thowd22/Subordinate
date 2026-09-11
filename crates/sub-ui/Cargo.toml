@@ -18,7 +18,7 @@ sub-audio = { version = "0.1.0", path = "../sub-audio" }
 sub-command = { version = "0.1.0", path = "../sub-command" }
 sub-core = { version = "0.1.0", path = "../sub-core" }
 sub-edit = { version = "0.1.0", path = "../sub-edit" }
-sub-export = { version = "0.1.0", path = "../sub-export" }
+sub-export = { version = "0.1.0", path = "../sub-export", features = ["sequence"] }
 sub-media = { version = "0.1.0", path = "../sub-media" }
 sub-model = { version = "0.1.0", path = "../sub-model" }
 sub-plugin = { version = "0.1.0", path = "../sub-plugin" }

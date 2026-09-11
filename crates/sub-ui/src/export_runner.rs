@@ -25,12 +25,13 @@
 //! use sub_ui::export_runner::{ExportRunner, ExportStreams};
 //!
 //! # let request = unimplemented!();
+//! # let project = sub_model::Project::new("demo");
 //! let jobs = JobService::new(1);
 //! let library = PresetLibrary::builtin();
 //! let mut panel = ExportPanel::new();
 //! let mut runner = ExportRunner::new();
 //!
-//! runner.start(&jobs, &library, &request, &mut |_: &_, settings: &sub_export::ExportSettings| {
+//! runner.start(&jobs, &library, &project, &request, &mut |_: &_, settings: &sub_export::ExportSettings| {
 //!     Ok(ExportStreams::video(Box::new(SolidFrames::new(
 //!         settings.frame_bytes(),
 //!         240,
@@ -42,11 +43,16 @@
 //! # }
 //! ```
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use sub_core::{JobService, Priority, SubError, SubResult};
 use sub_export::{
     AudioFrameSource, EncoderPreferences, ExportElements, ExportEvent, ExportJob, ExportJobHandle,
     ExportSettings, PresetLibrary, VideoFrameSource, spawn_export_job,
 };
+use sub_model::Project;
+use sub_render::RenderContext;
 use sub_time::Rounding;
 
 use crate::codes;
@@ -132,6 +138,62 @@ where
     }
 }
 
+/// Where an export reads its pixels and samples from (TASK-135).
+///
+/// The picture is the compositor's full-resolution readback (TASK-58) and the
+/// sound is the mixer's offline render (TASK-55), built by
+/// [`sub_export::sequence`] — the same adapters `subordinate-cli render`
+/// writes its file through, so a GUI export and a CLI render of the same
+/// project and preset are the same render.
+///
+/// Both halves are lazy, so this call opens no decoder, composites no frame
+/// and mixes no sample: it hands the worker something that will, and the UI
+/// thread goes straight back to painting. The wgpu device is shared with egui
+/// — `Device` and `Queue` are `Send + Sync` handles to the one device — so the
+/// export's readbacks queue alongside the window's own work rather than
+/// stopping it.
+///
+/// `project_dir` is where a clip's relative media path resolves, which is the
+/// folder the project file lives in; a project that has never been saved has
+/// no such folder and cannot be exported.
+pub fn sequence_sources(
+    render: &RenderContext,
+    project: Arc<Project>,
+    project_dir: PathBuf,
+) -> impl ExportSources {
+    let render = render.clone();
+    move |request: &ExportRequest, settings: &ExportSettings| -> SubResult<ExportStreams> {
+        let sequence = project
+            .sequences
+            .iter()
+            .find(|sequence| sequence.id == request.sequence)
+            .ok_or_else(|| {
+                SubError::new(
+                    sub_core::codes::NOT_FOUND,
+                    "the sequence this export was asked for is no longer open",
+                )
+            })?
+            .clone();
+        let span = sub_export::FrameSpan::new(
+            request.span.start().value(),
+            u64::try_from(request.span.duration().value()).unwrap_or(0),
+        );
+        let (video, audio) = sub_export::open_streams(
+            &render,
+            Arc::clone(&project),
+            Arc::new(sequence),
+            &project_dir,
+            settings,
+            span,
+        );
+        let streams = ExportStreams::video(Box::new(video));
+        Ok(match audio {
+            Some(audio) => streams.with_audio(Box::new(audio)),
+            None => streams,
+        })
+    }
+}
+
 /// The export the window is running, if it is running one.
 ///
 /// At most one export runs at a time: they are long, they saturate an encoder,
@@ -171,13 +233,14 @@ impl ExportRunner {
     ///
     /// [`codes::EXPORT_BUSY`] when an export is already running,
     /// [`codes::EXPORT_PRESET_UNSUPPORTED`] for a plugin preset, which no host
-    /// can resolve to settings yet, the preset errors of
-    /// [`PresetLibrary::require`] and `Preset::to_settings`, the encoder errors
-    /// of [`ExportElements::resolve`], and whatever `sources` raises.
+    /// can resolve to settings yet, the preset and sequence errors of
+    /// [`settings_for`], the encoder errors of [`ExportElements::resolve`],
+    /// and whatever `sources` raises.
     pub fn start(
         &mut self,
         jobs: &JobService,
         library: &PresetLibrary,
+        project: &Project,
         request: &ExportRequest,
         sources: &mut dyn ExportSources,
     ) -> SubResult<()> {
@@ -187,7 +250,7 @@ impl ExportRunner {
                 "an export is already running; cancel it before starting another",
             ));
         }
-        let settings = settings_for(library, request)?;
+        let settings = settings_for(library, project, request)?;
         let elements = elements_for(&settings, request)?;
         let streams = sources.open(request, &settings)?;
         let job = ExportJob::new(&request.output, &settings, &elements)
@@ -248,16 +311,29 @@ fn is_terminal(event: &ExportEvent) -> bool {
     )
 }
 
-/// The settings `request` describes, resolved against `library`.
+/// The settings `request` describes, resolved against `library` over the
+/// sequence it names in `project`.
+///
+/// The preset chooses the container, the codecs and the audio format; the
+/// sequence chooses the canvas and the timebase, because what is encoded is
+/// the compositor's readback at the sequence's own resolution and nothing
+/// rescales a finished frame. That is `sub_export::settings_for_sequence`,
+/// which is also what `subordinate-cli render` resolves through, so a GUI
+/// export and a CLI render of the same project write the same file.
 ///
 /// # Errors
 ///
 /// [`codes::EXPORT_PRESET_UNSUPPORTED`] for a preset an exporter plugin
 /// contributed: the host has no way to turn one into settings yet, and an
 /// export that silently used a different preset would be worse than a refusal.
-/// Otherwise the errors of [`PresetLibrary::require`] and
-/// `Preset::to_settings`.
-pub fn settings_for(library: &PresetLibrary, request: &ExportRequest) -> SubResult<ExportSettings> {
+/// [`sub_core::codes::NOT_FOUND`] when the project has lost the sequence the
+/// request names. Otherwise the errors of [`PresetLibrary::require`] and
+/// [`sub_export::settings_for_sequence`].
+pub fn settings_for(
+    library: &PresetLibrary,
+    project: &Project,
+    request: &ExportRequest,
+) -> SubResult<ExportSettings> {
     if let PresetSource::Plugin { plugin } = &request.preset.source {
         return Err(SubError::new(
             codes::EXPORT_PRESET_UNSUPPORTED,
@@ -269,7 +345,22 @@ pub fn settings_for(library: &PresetLibrary, request: &ExportRequest) -> SubResu
         .with_detail("preset", request.preset.id.clone())
         .with_detail("plugin", plugin.to_string()));
     }
-    library.require(&request.preset.id)?.to_settings()
+    let preset = library.require(&request.preset.id)?;
+    let sequence = project
+        .sequences
+        .iter()
+        .find(|sequence| sequence.id == request.sequence)
+        .ok_or_else(|| {
+            SubError::new(
+                sub_core::codes::NOT_FOUND,
+                "the sequence this export was asked for is no longer open",
+            )
+        })?;
+    let (settings, warnings) = sub_export::settings_for_sequence(preset, sequence)?;
+    for warning in warnings {
+        log::info!("export: {warning}");
+    }
+    Ok(settings)
 }
 
 /// The elements `request` will encode with: the plan's order, or the element
@@ -318,18 +409,34 @@ mod tests {
     use crate::export_panel::{ExportRange, ExportRequest, PresetEntry, PresetSource};
     use std::path::PathBuf;
     use sub_core::JobService;
-    use sub_export::{PresetLibrary, SolidFrames, VideoCodec};
-    use sub_model::SequenceId;
+    use sub_export::{ExportSettings, PresetLibrary, SolidFrames, VideoCodec};
+    use sub_model::sequence::SequenceSettings;
+    use sub_model::{ColorTags, Project, Resolution, Sequence};
     use sub_plugin::manifest::PluginId;
     use sub_time::{Rational, RationalTime, TimeRange};
 
-    /// A request for the first built-in preset over `frames` frames at `rate`.
-    fn request_at(rate: Rational, frames: i64) -> ExportRequest {
+    /// A project holding one sequence at `rate`, and a request for the first
+    /// built-in preset over `frames` of it.
+    ///
+    /// The settings an export resolves come from the sequence's own canvas and
+    /// timebase, so a request is only meaningful next to the project it names.
+    fn project_at(rate: Rational, frames: i64) -> (Project, ExportRequest) {
         let library = PresetLibrary::builtin();
         let preset = library.iter().next().expect("a built-in preset");
-        ExportRequest {
+        let settings = SequenceSettings::new(
+            Resolution::new(640, 480).expect("a valid canvas"),
+            rate,
+            48_000,
+            ColorTags::default(),
+        )
+        .expect("valid sequence settings");
+        let sequence = Sequence::new("Main", settings);
+        let id = sequence.id;
+        let mut project = Project::new("demo");
+        project.sequences.push(sequence);
+        let request = ExportRequest {
             preset: PresetEntry::from_preset(preset),
-            sequence: SequenceId::new(),
+            sequence: id,
             range: ExportRange::WholeSequence,
             span: TimeRange::new(
                 RationalTime::from_frames(0, rate),
@@ -338,30 +445,57 @@ mod tests {
             .expect("a non-negative span"),
             output: PathBuf::from("out.mp4"),
             encoder_override: None,
-        }
+        };
+        (project, request)
     }
 
-    fn request() -> ExportRequest {
-        request_at(Rational::FPS_24, 48)
+    fn project() -> (Project, ExportRequest) {
+        project_at(Rational::FPS_24, 48)
+    }
+
+    /// Settings at `rate`, for the frame-count arithmetic on its own.
+    fn settings_at(rate: Rational) -> ExportSettings {
+        ExportSettings::new(640, 480, rate, sub_export::Container::Mkv)
     }
 
     #[test]
-    fn settings_come_from_the_named_library_preset() {
+    fn the_canvas_and_timebase_come_from_the_sequence_not_the_preset() {
         let library = PresetLibrary::builtin();
-        let request = request();
-        let settings = settings_for(&library, &request).expect("the preset resolves");
+        let (project, request) = project_at(Rational::FPS_24, 48);
+        let settings = settings_for(&library, &project, &request).expect("the preset resolves");
         let preset = library.require(&request.preset.id).expect("the preset");
-        assert_eq!(settings, preset.to_settings().expect("settings"));
+        // The compositor reads back at the sequence canvas and nothing
+        // rescales a finished frame, so that is what is encoded.
+        assert_eq!((settings.width, settings.height), (640, 480));
+        assert_eq!(settings.frame_rate, Rational::FPS_24);
+        assert_eq!(settings.container, preset.container);
+        assert_eq!(
+            settings.video_codec,
+            preset.video.as_ref().expect("a video preset").codec
+        );
+    }
+
+    #[test]
+    fn the_gui_resolves_the_settings_the_cli_render_resolves() {
+        let library = PresetLibrary::builtin();
+        let (project, request) = project();
+        let sequence = &project.sequences[0];
+        let preset = library.require(&request.preset.id).expect("the preset");
+        let (expected, _) =
+            sub_export::settings_for_sequence(preset, sequence).expect("the preset resolves");
+        let settings = settings_for(&library, &project, &request).expect("the preset resolves");
+        assert_eq!(settings, expected);
     }
 
     #[test]
     fn a_plugin_preset_is_refused_rather_than_silently_substituted() {
         let library = PresetLibrary::builtin();
-        let mut request = request();
+        let (project, mut request) = project();
         request.preset.source = PresetSource::Plugin {
             plugin: PluginId::parse("com.example.exporter").expect("a valid plugin id"),
         };
-        let error = settings_for(&library, &request).expect_err("a plugin preset is unsupported");
+        let error =
+            settings_for(&library, &project, &request).expect_err("a plugin preset is unsupported");
         assert_eq!(error.code, codes::EXPORT_PRESET_UNSUPPORTED);
         assert_eq!(
             error
@@ -375,53 +509,54 @@ mod tests {
     #[test]
     fn an_unknown_preset_is_refused() {
         let library = PresetLibrary::builtin();
-        let mut request = request();
+        let (project, mut request) = project();
         request.preset.id = "no-such-preset".to_owned();
-        let error = settings_for(&library, &request).expect_err("an unknown preset");
+        let error = settings_for(&library, &project, &request).expect_err("an unknown preset");
         assert_eq!(error.code, sub_export::codes::PRESET_UNKNOWN);
+    }
+
+    #[test]
+    fn a_sequence_the_project_has_lost_is_refused() {
+        let library = PresetLibrary::builtin();
+        let (mut project, request) = project();
+        project.sequences.clear();
+        let error = settings_for(&library, &project, &request).expect_err("the sequence is gone");
+        assert_eq!(error.code, sub_core::codes::NOT_FOUND);
     }
 
     #[test]
     fn an_uncatalogued_encoder_override_is_refused() {
         let library = PresetLibrary::builtin();
-        let mut request = request();
+        let (project, mut request) = project();
         request.encoder_override = Some("notanencoder".to_owned());
-        let settings = settings_for(&library, &request).expect("the preset resolves");
+        let settings = settings_for(&library, &project, &request).expect("the preset resolves");
         let error = elements_for(&settings, &request).expect_err("an unknown element");
         assert_eq!(error.code, sub_export::codes::UNKNOWN_ENCODER);
     }
 
     #[test]
-    fn frame_count_is_the_span_itself_at_the_presets_own_rate() {
-        let library = PresetLibrary::builtin();
-        let settings = settings_for(&library, &request()).expect("the preset resolves");
-        // A sequence at the rate the preset encodes at: the span is already
-        // counted in the frames the export will write.
-        let request = request_at(settings.frame_rate, 48);
-        assert_eq!(frames_total(&request, &settings), 48);
+    fn frame_count_is_the_span_itself_at_the_settings_own_rate() {
+        let (_, request) = project_at(Rational::FPS_24, 48);
+        assert_eq!(frames_total(&request, &settings_at(Rational::FPS_24)), 48);
     }
 
     #[test]
-    fn frame_count_rescales_to_the_preset_rate_and_rounds_up() {
-        let library = PresetLibrary::builtin();
-        let settings = settings_for(&library, &request()).expect("the preset resolves");
-        assert_eq!(settings.frame_rate, Rational::FPS_30, "the first built-in");
+    fn frame_count_rescales_to_the_settings_rate_and_rounds_up() {
+        let settings = settings_at(Rational::FPS_30);
         // One frame at 25 is a twenty-fifth of a second: 1.2 frames at 30, and
         // an export covers it rather than clipping it.
-        let request = request_at(Rational::FPS_25, 1);
+        let (_, request) = project_at(Rational::FPS_25, 1);
         assert_eq!(frames_total(&request, &settings), 2);
         // Five of them are exactly six frames at 30, with no rounding at all.
-        let request = request_at(Rational::FPS_25, 5);
+        let (_, request) = project_at(Rational::FPS_25, 5);
         assert_eq!(frames_total(&request, &settings), 6);
     }
 
     #[test]
     fn a_negative_frame_count_never_reaches_the_job() {
-        let library = PresetLibrary::builtin();
-        let mut request = request();
+        let (_, mut request) = project();
         request.span = TimeRange::empty_at(RationalTime::from_frames(0, Rational::FPS_24));
-        let settings = settings_for(&library, &request).expect("the preset resolves");
-        assert_eq!(frames_total(&request, &settings), 0);
+        assert_eq!(frames_total(&request, &settings_at(Rational::FPS_24)), 0);
     }
 
     #[test]
@@ -438,7 +573,7 @@ mod tests {
     fn a_second_export_is_refused_while_one_runs() {
         let jobs = JobService::new(1);
         let library = PresetLibrary::builtin();
-        let request = request();
+        let (project, request) = project();
         let mut runner = ExportRunner::new();
         // A job that never starts is still a job: the runner is busy from the
         // moment it is queued, whatever GStreamer makes of it.
@@ -449,7 +584,7 @@ mod tests {
             ))))
         };
         if runner
-            .start(&jobs, &library, &request, &mut sources)
+            .start(&jobs, &library, &project, &request, &mut sources)
             .is_err()
         {
             // No usable encoder on this machine; the refusal below is then
@@ -457,7 +592,7 @@ mod tests {
             return;
         }
         let error = runner
-            .start(&jobs, &library, &request, &mut sources)
+            .start(&jobs, &library, &project, &request, &mut sources)
             .expect_err("a second export is refused");
         assert_eq!(error.code, codes::EXPORT_BUSY);
         runner.cancel();
@@ -468,13 +603,14 @@ mod tests {
     fn a_refused_start_leaves_the_runner_free() {
         let jobs = JobService::new(1);
         let library = PresetLibrary::builtin();
-        let mut request = request();
+        let (project, mut request) = project();
         request.preset.id = "no-such-preset".to_owned();
         let mut runner = ExportRunner::new();
         let error = runner
             .start(
                 &jobs,
                 &library,
+                &project,
                 &request,
                 &mut |_: &ExportRequest, settings: &sub_export::ExportSettings| {
                     Ok(ExportStreams::video(Box::new(SolidFrames::new(
@@ -492,8 +628,8 @@ mod tests {
     fn a_source_that_refuses_stops_the_export_before_it_is_queued() {
         let jobs = JobService::new(1);
         let library = PresetLibrary::builtin();
-        let request = request();
-        let settings = settings_for(&library, &request).expect("the preset resolves");
+        let (project, request) = project();
+        let settings = settings_for(&library, &project, &request).expect("the preset resolves");
         if elements_for(&settings, &request).is_err() {
             // The elements are resolved before the sources are opened, so a
             // machine with no encoder never reaches the refusal under test.
@@ -505,6 +641,7 @@ mod tests {
             .start(
                 &jobs,
                 &library,
+                &project,
                 &request,
                 &mut |_: &ExportRequest, _: &sub_export::ExportSettings| {
                     Err(sub_core::SubError::new(

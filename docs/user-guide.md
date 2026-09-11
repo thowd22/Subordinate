@@ -206,7 +206,20 @@ job offers to open the folder it wrote into. Export always reads the original
 media, never a proxy, and the compositor renders at full resolution and never
 drops a frame, however slow that is.
 
-The same export runs headlessly, which is also how it is scripted:
+The canvas and the frame rate that are written are the **sequence's**, not the
+preset's: the compositor draws at the sequence's own resolution and nothing
+rescales a finished frame, so a preset that asks for another size is honoured in
+everything else — container, codecs, quality, audio format — and the difference
+is noted rather than written into the file.
+
+Save the project before exporting. A clip names its media relative to the
+project file, so a project that has never been written to disk has no folder for
+those paths to resolve against and the **Export** button stays closed until it
+does.
+
+The same export runs headlessly, and it is the same render — the editor and the
+command below share one bridge from a sequence to an encoder, so both write the
+same frames and the same audio:
 
 ```bash
 subordinate-cli render demo.sub --sequence Main --preset youtube-1080p \
