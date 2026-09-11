@@ -1,11 +1,11 @@
 ---
 id: TASK-134
 title: Export honours an explicitly pinned encoder even when GStreamer ranks it NONE
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-134'
 created_date: '2026-09-11 14:48'
-updated_date: '2026-09-11 15:53'
+updated_date: '2026-09-11 17:25'
 labels:
   - export
 milestone: m-4
@@ -23,7 +23,7 @@ sub-export refuses any encoder element whose GStreamer rank is NONE. Every VA-AP
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 subordinate-cli render --encoder vah264enc works on box without GST_PLUGIN_FEATURE_RANK, verified in the hardware workflow's AMD job
+- [x] #1 subordinate-cli render --encoder vah264enc works on box without GST_PLUGIN_FEATURE_RANK, verified in the hardware workflow's AMD job
 - [x] #2 Automatic encoder selection behaviour is unchanged and covered by the existing capability-probe tests
 - [x] #3 The workaround environment variable is removed from hardware.yml
 <!-- AC:END -->
@@ -51,10 +51,12 @@ New tests: encoder::tests::automatic_selection_skips_a_deranked_encoder, ::a_pin
 AC #1 is left unchecked: it names the hardware workflow's AMD job on 'box', which needs the GPU runner and cannot be exercised from this environment. The code path it covers is proven locally by the integration test above (a deranked element, pinned, renders), and the GST_PLUGIN_FEATURE_RANK workaround is gone from both render steps in .github/workflows/hardware.yml, so the next hardware run is the verification.
 
 AC #3 evidence: grep GST_PLUGIN_FEATURE_RANK .github/workflows/hardware.yml returns only a comment line explaining why none is needed. docs/DEVELOPMENT.md's 'Hardware encoders are ranked NONE' note was updated to match.
+
+2026-09-11 supervisor verification: hardware run 34626676058's AMD job on box rendered the sample project with --encoder vah264enc and validated it with the discoverer; hardware.yml on main no longer sets GST_PLUGIN_FEATURE_RANK (only a comment remains explaining it is unnecessary).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-sub-export now separates 'this element runs here' from 'this machine ranks it NONE': the probe drives every catalogued encoder to READY and records the rank as a 'deranked' flag. The automatic selection order still skips a deranked element (is_usable), while an explicitly pinned one - a preset, a settings override, or subordinate-cli render --encoder - is honoured (is_pinnable), which is what every stock VA-API encoder needs. Verified with fmt, clippy -D warnings, cargo test -p sub-export and -p sub-ui, including a new integration test that ranks x264enc NONE and renders a real file with it pinned; AC #1 stays unchecked because it names the AMD GPU job, whose workaround env var this change removes from hardware.yml.
+An explicitly pinned encoder bypasses the rank-NONE filter while automatic selection is unchanged; verified on the box APU with vah264enc through the hardware workflow without any environment override.
 <!-- SECTION:FINAL_SUMMARY:END -->
