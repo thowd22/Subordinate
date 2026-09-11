@@ -95,6 +95,39 @@ scratch directory, and let it launch its own headless server.
 - **Errors are data.** A rejected call comes back as a tool error whose content
   is the usual JSON `SubError`, stable code and all, rather than as a protocol
   error — so read the code and try something else.
+- **Destroying something is confirmed first.** `sequence_delete`, `media_remove`
+  and an `export_render` that would write over a file already on disk answer
+  `input_required` rather than doing anything, and run only when the retry
+  carries the user's yes. See below.
+
+## Confirming a destructive call
+
+Three tools ask before they act, because what they do is not the kind of mistake
+`edit_undo` fixes on its own: `sequence_delete` throws away a whole sequence,
+`media_remove` drops a source the edit may still be using, and `export_render`
+overwrites whatever is already at its `output` path.
+
+The first call answers the protocol's `input_required` result (SEP-2322,
+protocol version `2026-07-28`) instead of a result. It carries an
+`elicitation/create` request naming exactly what is about to go, and an opaque
+`requestState`. A client puts that question to the user — Claude Code shows its
+elicitation dialog — and retries the same call with the answer in
+`inputResponses` and the state echoed back unchanged. An accepted answer runs
+the call; a declined or cancelled one fails it with
+`mcp.confirmation_declined`, and nothing was touched in between.
+
+A client with nobody to ask — a script, a batch job, an older protocol version —
+sets the tool's own `confirm` argument instead:
+
+```json
+{ "name": "sequence_delete", "arguments": { "sequence": "seq_01H...", "confirm": true } }
+```
+
+`confirm` is declared in each of those three tools' input schemas and nowhere
+else; it is the bridge's argument, not the Command API's, and never reaches the
+editor. A client that cannot carry an `input_required` result is answered with
+`mcp.confirmation_required`, which says the same thing: call it again with
+`confirm` set.
 
 ## The tool families
 
@@ -293,6 +326,8 @@ Codes worth recognising:
 | `plugin.capability_denied` | The plugin asked for something its manifest or its approval does not cover |
 | `plugin.fuel_exhausted`, `plugin.deadline_exceeded`, `plugin.trapped` | A plugin call hit a limit or trapped; nothing else was affected |
 | `plugin.not_installed` | No plugin with that id in either plugin directory |
+| `mcp.confirmation_declined` | A destructive call was put to the user and the answer was no |
+| `mcp.confirmation_required` | A destructive call needs `confirm: true`, because this client cannot be asked |
 
 A plugin failure never takes the editor with it: the engine, the project and the
 undo stack are untouched, and the other plugins keep running.

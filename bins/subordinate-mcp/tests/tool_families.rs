@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
+use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock};
 use serde_json::{Value, json};
 use sub_command::Dispatcher;
 use sub_command::endpoint::Endpoint;
@@ -136,6 +136,18 @@ fn call(name: &str, arguments: &Value) -> CallToolRequestParams {
     request
 }
 
+/// One tool call, run to completion.
+///
+/// A destructive tool answers `input_required` before it runs anything (see
+/// `tests/confirmations.rs`); nothing called here is one, so every call
+/// finishes in a single round trip.
+fn run(bridge: &Bridge, request: CallToolRequestParams) -> Result<CallToolResult, rmcp::ErrorData> {
+    bridge.call(request).map(|response| match response {
+        CallToolResponse::Complete(result) => result,
+        other => panic!("the call did not complete: {other:?}"),
+    })
+}
+
 /// The structured JSON a tool answered with.
 fn structured(result: &CallToolResult) -> Value {
     result
@@ -146,8 +158,7 @@ fn structured(result: &CallToolResult) -> Value {
 
 /// Runs one tool and requires it to succeed.
 fn ok(bridge: &Bridge, name: &str, arguments: &Value) -> Value {
-    let result = bridge
-        .call(call(name, arguments))
+    let result = run(bridge, call(name, arguments))
         .unwrap_or_else(|error| panic!("{name} is not routed: {error}"));
     assert!(
         result.is_error != Some(true),
@@ -318,12 +329,14 @@ fn playback_family(bridge: &Bridge, what: &What) {
     ok(bridge, "playback_status", &json!({}));
 
     // A frame comes back as something a model can look at, not only as JSON.
-    let frame = bridge
-        .call(call(
+    let frame = run(
+        bridge,
+        call(
             "playback_render_frame_png",
             &json!({ "time": what.time(12), "width": 320 }),
-        ))
-        .expect("the tool is routed");
+        ),
+    )
+    .expect("the tool is routed");
     assert!(
         frame.is_error != Some(true),
         "{:?}",
@@ -364,12 +377,24 @@ fn export_family(bridge: &Bridge, directory: &Path) {
 /// commands — but it must answer as a tool result carrying a stable error
 /// code, never as a protocol error, which is what a published-but-unroutable
 /// tool would produce.
+///
+/// A destructive tool is confirmed here rather than asked about: what is under
+/// test is that the call is routed, and `tests/confirmations.rs` is where the
+/// asking itself is tested.
 fn every_tool_once(bridge: &Bridge) -> usize {
     let mut called = 0usize;
     for tool in bridge.tools().tools() {
         let name = tool.name.to_string();
-        let result = bridge
-            .call(call(&name, &json!({})))
+        let destructive = bridge
+            .tools()
+            .method(&name)
+            .is_some_and(subordinate_mcp::confirm::is_destructive);
+        let arguments = if destructive {
+            json!({ "confirm": true })
+        } else {
+            json!({})
+        };
+        let result = run(bridge, call(&name, &arguments))
             .unwrap_or_else(|error| panic!("{name} is published but not routed: {error}"));
         called += 1;
         assert!(

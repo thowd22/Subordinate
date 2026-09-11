@@ -119,8 +119,11 @@ impl ToolSet {
                 })?
                 .to_owned();
             let tool_name = tool_name(&name);
-            let schema = input_schema(method.get("params"), defs)
+            let mut schema = input_schema(method.get("params"), defs)
                 .map_err(|error| error.with_detail("method", name.clone()))?;
+            // A destructive method's tool takes one argument its method does
+            // not: the caller's confirmation (see `crate::confirm`).
+            crate::confirm::augment_schema(&name, &mut schema);
 
             let mut tool = Tool::new_with_raw(
                 tool_name.clone(),

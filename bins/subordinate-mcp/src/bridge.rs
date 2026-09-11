@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData,
     Implementation, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
-    PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
+    PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
     ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo, SubscribeRequestParams,
     SubscriptionFilter, UnsubscribeRequestParams,
 };
@@ -39,6 +39,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, warn};
 
 use crate::backend::Backend;
+use crate::confirm::{Confirmations, Gate};
 use crate::resources::{self, Resources, Update};
 use crate::tools::{PLUGIN_CALL_METHOD, PLUGIN_TOOLS_METHOD, PluginTools, ToolSet};
 use crate::watch::Watch;
@@ -53,7 +54,10 @@ denominator and a rate — never floating-point seconds. A failed tool answers \
 with a JSON error carrying a stable `code`. Read the project rather than \
 asking for it: the resources project://current, sequence://{id} and \
 media://{id} are the project's own JSON, and a subscriber is told the moment \
-an edit makes one of them stale.";
+an edit makes one of them stale. The tools that destroy something — \
+sequence_delete, media_remove, and export_render over a file that is already \
+there — ask the user first and answer input_required; a client with nobody to \
+ask passes confirm: true instead.";
 
 /// The MCP server: a tool set, resources, and a connection to the editor.
 #[derive(Debug, Clone)]
@@ -76,6 +80,9 @@ pub struct Bridge {
     /// enabled, so it is refreshed on each `tools/list` and consulted when a
     /// call names a tool the schemas do not describe.
     plugins: Arc<Mutex<Arc<PluginTools>>>,
+    /// The destructive calls this session has put to the user and not yet had
+    /// answered.
+    confirmations: Arc<Confirmations>,
 }
 
 /// `resources/subscribe` state: the URIs one session asked to be told about.
@@ -103,6 +110,7 @@ impl Bridge {
             backend,
             legacy: Arc::new(Legacy::default()),
             plugins: Arc::new(Mutex::new(Arc::new(PluginTools::default()))),
+            confirmations: Arc::new(Confirmations::new()),
         }
     }
 
@@ -174,24 +182,44 @@ impl Bridge {
 
     /// Runs one tool call, blocking on the Command API round trip.
     ///
+    /// A destructive tool called without a confirmation does not reach the
+    /// engine: it answers [`CallToolResponse::InputRequired`], and the same
+    /// call, retried with the user's answer, is what runs (see
+    /// [`crate::confirm`]).
+    ///
     /// # Errors
     ///
     /// Returns an MCP protocol error only when the tool name is not one this
     /// bridge serves; everything the engine itself reports comes back as a
     /// tool-level error result.
-    pub fn call(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
-        let Some(method) = self.tools.method(&request.name) else {
-            return self.call_plugin_tool(request);
+    pub fn call(&self, mut request: CallToolRequestParams) -> Result<CallToolResponse, McpError> {
+        let Some(method) = self.tools.method(&request.name).map(str::to_owned) else {
+            return self
+                .call_plugin_tool(request)
+                .map(CallToolResponse::Complete);
         };
+        match self.confirmations.gate(&method, &mut request) {
+            Gate::Proceed => {}
+            Gate::Ask(asked) => {
+                debug!(tool = %request.name, %method, "asking before a destructive call");
+                return Ok(CallToolResponse::InputRequired(*asked));
+            }
+            Gate::Refused(error) => {
+                debug!(tool = %request.name, %method, "a destructive call was not confirmed");
+                return Ok(CallToolResponse::Complete(failure(&error)));
+            }
+        }
         let params = request.arguments.map(Value::Object);
         debug!(tool = %request.name, %method, "forwarding a tool call");
-        Ok(match self.backend.invoke(method, params) {
-            Ok(value) => with_image(success(&value), &value),
-            Err(error) => {
-                warn!(tool = %request.name, code = error.code.as_str(), "the tool call failed");
-                failure(&error)
-            }
-        })
+        Ok(CallToolResponse::Complete(
+            match self.backend.invoke(&method, params) {
+                Ok(value) => with_image(success(&value), &value),
+                Err(error) => {
+                    warn!(tool = %request.name, code = error.code.as_str(), "the tool call failed");
+                    failure(&error)
+                }
+            },
+        ))
     }
 
     /// Runs a call to a plugin-contributed tool.
@@ -612,25 +640,70 @@ impl ServerHandler for Bridge {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let method = self.tools.method(&request.name).map(str::to_owned);
+        let tool = request.name.to_string();
         let bridge = self.clone();
         // The Command API client is blocking, so the round trip leaves the
         // async runtime rather than holding it up.
-        let result = tokio::task::spawn_blocking(move || bridge.call(request))
+        let response = tokio::task::spawn_blocking(move || bridge.call(request))
             .await
             .map_err(|error| {
                 McpError::internal_error(format!("the tool call did not finish: {error}"), None)
             })??;
-        if method.as_deref().is_some_and(changes_plugin_tools) && result.is_error != Some(true) {
+        let response = downgrade(
+            &self.confirmations,
+            response,
+            &tool,
+            context.protocol_version().as_ref(),
+        );
+        let completed = matches!(&response, CallToolResponse::Complete(result) if result.is_error != Some(true));
+        if method.as_deref().is_some_and(changes_plugin_tools) && completed {
             self.announce_tool_changes(&context.peer).await;
         }
-        Ok(CallToolResponse::Complete(result))
+        Ok(response)
     }
+}
+
+/// Turns a confirmation this client cannot be asked for into an answer it can
+/// read.
+///
+/// `input_required` is a 2026-07-28 result, and the SDK refuses to send one to
+/// a peer that negotiated an earlier version of the protocol. Such a client is
+/// told, in the structured error every tool failure uses, that the call is
+/// destructive and that setting `confirm` is how it proceeds — which is also
+/// what an agent driving an older client needs to hear.
+fn downgrade(
+    confirmations: &Confirmations,
+    response: CallToolResponse,
+    tool: &str,
+    version: Option<&ProtocolVersion>,
+) -> CallToolResponse {
+    let CallToolResponse::InputRequired(asked) = &response else {
+        return response;
+    };
+    if version.is_some_and(|version| *version >= ProtocolVersion::V_2026_07_28) {
+        return response;
+    }
+    if let Some(state) = &asked.request_state {
+        confirmations.forget(state);
+    }
+    debug!(%tool, "this client cannot be asked; requiring an explicit confirmation");
+    CallToolResponse::Complete(failure(
+        &SubError::new(
+            crate::codes::CONFIRMATION_REQUIRED,
+            "this call destroys something and was not confirmed; \
+             call it again with confirm set to true",
+        )
+        .with_detail("tool", tool.to_owned())
+        .with_detail("argument", crate::confirm::CONFIRM_ARGUMENT),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{changes_plugin_tools, failure, success};
+    use super::{changes_plugin_tools, downgrade, failure, success};
+    use crate::confirm::Confirmations;
     use crate::tools::PluginTools;
+    use rmcp::model::{CallToolRequestParams, CallToolResponse, ProtocolVersion};
     use serde_json::json;
     use sub_core::{SubError, codes};
 
@@ -683,6 +756,45 @@ mod tests {
         assert_eq!(result.is_error, Some(false));
         assert_eq!(result.structured_content, Some(json!({ "revision": 3 })));
         assert_eq!(result.content.len(), 1);
+    }
+
+    #[test]
+    fn a_client_that_cannot_be_asked_is_told_to_confirm_itself() {
+        let confirmations = Confirmations::new();
+        let mut request = CallToolRequestParams::new("sequence_delete");
+        request.arguments = json!({ "sequence": "s1" }).as_object().cloned();
+        let crate::confirm::Gate::Ask(asked) = confirmations.gate("sequence.delete", &mut request)
+        else {
+            panic!("an unconfirmed deletion must ask");
+        };
+        let state = asked.request_state.clone().expect("a request state");
+        let ask = CallToolResponse::InputRequired(*asked);
+
+        // A client on the protocol that carries input_required is asked.
+        let asked_again = downgrade(
+            &confirmations,
+            ask.clone(),
+            "sequence_delete",
+            Some(&ProtocolVersion::V_2026_07_28),
+        );
+        assert!(matches!(asked_again, CallToolResponse::InputRequired(_)));
+        assert_eq!(confirmations.pending(), 1);
+
+        // An older one is told how to proceed without being asked, and the
+        // question it was never shown is forgotten.
+        let told = downgrade(&confirmations, ask, "sequence_delete", None);
+        let CallToolResponse::Complete(result) = told else {
+            panic!("an older client cannot be asked");
+        };
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(
+            structured["code"],
+            crate::codes::CONFIRMATION_REQUIRED.as_str(),
+        );
+        assert_eq!(structured["details"]["argument"], "confirm");
+        assert_eq!(confirmations.pending(), 0);
+        assert!(state.parse::<u64>().is_ok(), "the state is a handle");
     }
 
     #[test]

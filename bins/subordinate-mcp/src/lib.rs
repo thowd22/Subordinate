@@ -11,6 +11,9 @@
 //!   schemas cannot drift from the methods they call, plus the tools the
 //!   installed plugins contribute, fetched from the editor and published under
 //!   each plugin's id.
+//! - [`confirm`] — asking the user before a sequence, a media item or a file
+//!   on disk is destroyed, over the protocol's multi round-trip request
+//!   pattern.
 //! - [`backend`] — finding the running editor through its lock file, or
 //!   launching `subordinate-cli serve` when none is running.
 //! - [`resources`] — the project as readable resources: `project://current`,
@@ -40,6 +43,7 @@
 
 pub mod backend;
 pub mod bridge;
+pub mod confirm;
 pub mod resources;
 pub mod tools;
 pub mod watch;
@@ -72,6 +76,13 @@ pub mod codes {
     /// The plugin host's `plugin.tools` answered something that is not a tool
     /// listing.
     pub const PLUGIN_TOOLS_INVALID: ErrorCode = ErrorCode::from_static("mcp.plugin_tools_invalid");
+    /// A destructive call was put to the user and the answer was no.
+    pub const CONFIRMATION_DECLINED: ErrorCode =
+        ErrorCode::from_static("mcp.confirmation_declined");
+    /// A destructive call needs confirming and this client cannot be asked, so
+    /// the caller must set `confirm` itself.
+    pub const CONFIRMATION_REQUIRED: ErrorCode =
+        ErrorCode::from_static("mcp.confirmation_required");
 }
 
 #[cfg(test)]
@@ -88,6 +99,8 @@ mod tests {
             codes::UNKNOWN_RESOURCE,
             codes::WATCH_FAILED,
             codes::PLUGIN_TOOLS_INVALID,
+            codes::CONFIRMATION_DECLINED,
+            codes::CONFIRMATION_REQUIRED,
         ] {
             assert_eq!(code.domain(), "mcp");
             assert_eq!(
