@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@opus-task-115'
 created_date: '2026-09-09 17:29'
-updated_date: '2026-09-11 16:00'
+updated_date: '2026-09-11 17:15'
 labels:
   - infra
   - gpu
@@ -69,6 +69,8 @@ Measured on the successful run:
 - Job wall clock 3m22s; billed instance time ~7m30s at the g4dn.xlarge Windows on-demand rate (~$0.752/h) = ~0.10 USD per run. Total spent across all three attempts ~0.17 USD.
 
 Caveat for the merge: because RunsOn reads .github/runs-on.yml from the default branch only, the verification used the inline label image=windows22-full-x64/family=g4dn.xlarge/spot=false, which is exactly what the committed gpu-nvidia-windows definition resolves to. The by-name form goes live the moment this lands on main; re-dispatch GPU smoke once after merge to confirm name resolution.
+
+2026-09-11 supervisor: named runner gpu-nvidia-windows resolved from main on the third dispatch (run 34625543561, all three GPU smoke jobs green; Windows driver ready in 110 s). The first two dispatches after the merge still hit the deleted placeholder AMI, so RunsOn caches .github/runs-on.yml for roughly an hour after a change on the default branch.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
