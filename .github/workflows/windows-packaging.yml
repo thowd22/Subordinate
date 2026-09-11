@@ -1,0 +1,261 @@
+name: Windows packaging
+
+# The Windows MSI (TASK-104), kept in its own workflow rather than added to
+# packaging.yml: that one is a Linux workflow end to end (its validate job
+# gates the AppImage and Flatpak jobs and runs Linux-only validators), and a
+# single Windows job bolted onto it would share none of that. TASK-106's
+# release workflow calls both.
+#
+# What this proves, on a hosted windows-latest runner and nothing else:
+# the MSI builds, installs silently, the installed editor starts, the
+# installed CLI renders the sample project with the bundled x264 encoder and
+# the bundled discoverer reads the result back, and uninstalling removes
+# everything. Hardware encode from inside the package needs a GPU and belongs
+# to hardware.yml (TASK-116) and TASK-115.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'packaging/windows/**'
+      - '.github/workflows/windows-packaging.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  # Same pinned GStreamer as ci.yml; the MSI ships this exact runtime.
+  GST_VERSION: "1.28.6"
+  GST_MINOR: "1.28"
+
+jobs:
+  msi:
+    name: MSI
+    runs-on: windows-latest
+    # Cold, this is a release build of the editor and the CLI (about 20
+    # minutes) plus the runtime download and the install/render/uninstall
+    # round trip. Warm it is well under half that.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: packaging-msi
+          cache-workspace-crates: true
+
+      # Defender scans every object the MSVC linker writes; see ci.yml for the
+      # measurement. Best effort, never fatal.
+      - name: Exclude build directories from Windows Defender
+        shell: pwsh
+        run: |
+          foreach ($p in @("${{ github.workspace }}", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup")) {
+            try { Add-MpPreference -ExclusionPath $p -ErrorAction Stop; Write-Host "excluded $p" }
+            catch { Write-Host "could not exclude ${p}: $($_.Exception.Message)" }
+          }
+
+      # The devel type, exactly as ci.yml installs it: it is a superset of the
+      # runtime type, so it both builds the Rust crates (pkg-config, import
+      # libraries) and is the tree build-msi.ps1 bundles from.
+      - name: Install GStreamer (official installer)
+        shell: pwsh
+        run: |
+          $ver = $env:GST_VERSION
+          $exe = "gstreamer-1.0-msvc-x86_64-$ver.exe"
+          $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc/$exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          $dir = "C:\gstreamer\1.0\msvc_x86_64"
+          Start-Process -Wait -FilePath ".\$exe" -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/TYPE=devel","/ALLUSERS","/DIR=$dir"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$dir\lib\pkgconfig" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Check the GStreamer version
+        shell: pwsh
+        run: |
+          $v = (& pkg-config --modversion gstreamer-1.0)
+          Write-Host "gstreamer-1.0 = $v"
+          if (-not $v.StartsWith("$env:GST_MINOR.")) {
+            Write-Host "::error::expected GStreamer $env:GST_MINOR.x, got $v"
+            exit 1
+          }
+
+      # Pinned the same way the toolchain is. Installing it here rather than
+      # letting build-msi.ps1 do it keeps the network work in one step and
+      # makes a toolset outage obvious.
+      - name: Install the WiX toolset
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Build the MSI
+        shell: pwsh
+        run: .\packaging\windows\build-msi.ps1
+
+      - name: Install silently
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem target\wix\Subordinate-*-x86_64.msi)[0].FullName
+          Write-Host "installing $msi ($([math]::Round((Get-Item $msi).Length / 1MB, 1)) MiB)"
+          $p = Start-Process msiexec -ArgumentList "/i", "`"$msi`"", "/qn", "/norestart", "/l*v", "install.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Get-Content install.log -Tail 80
+            Write-Host "::error::msiexec /i exited $($p.ExitCode)"
+            exit 1
+          }
+          $root = "$env:ProgramFiles\Subordinate"
+          foreach ($f in "bin\subordinate.exe", "bin\subordinate-cli.exe",
+                         "bin\gst-discoverer-1.0.exe", "bin\gstreamer-1.0-0.dll",
+                         "libexec\gstreamer-1.0\gst-plugin-scanner.exe",
+                         "lib\gstreamer-1.0\gstx264.dll", "lib\gstreamer-1.0\gstnvcodec.dll") {
+            if (-not (Test-Path "$root\$f")) { Write-Host "::error::not installed: $f"; exit 1 }
+          }
+          $shortcut = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Subordinate\Subordinate.lnk"
+          if (-not (Test-Path $shortcut)) { Write-Host "::error::no Start Menu shortcut"; exit 1 }
+          Write-Host "installed to $root, Start Menu entry present"
+          $size = (Get-ChildItem $root -Recurse -File | Measure-Object -Property Length -Sum).Sum
+          Write-Host "installed size: $([math]::Round($size / 1MB, 1)) MiB"
+
+      # From here on the steps run with a PATH that contains the installed
+      # bin\ and Windows itself, and nothing else -- in particular not
+      # C:\gstreamer\1.0\msvc_x86_64\bin. A package that only works because
+      # the build machine's GStreamer is on PATH is the failure this job
+      # exists to catch, and the same applies to the registry cache the
+      # earlier GStreamer may have written under the user profile. No GST_*
+      # variable is set: finding the bundled plugins with none is the point of
+      # the install layout.
+      - name: Report on the installed runtime
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\gstreamer-1.0" -ErrorAction SilentlyContinue
+          $bin = "$env:ProgramFiles\Subordinate\bin"
+          $env:PATH = "$bin;$env:SystemRoot\system32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
+          Remove-Item Env:GSTREAMER_1_0_ROOT_MSVC_X86_64, Env:PKG_CONFIG_PATH -ErrorAction SilentlyContinue
+          & "$bin\gst-inspect-1.0.exe" --version
+          # Plugin modules: `gst-inspect-1.0 <name>` fails when the module is
+          # not in the registry, which is what packaging.yml asks the AppImage.
+          foreach ($plugin in "coreelements", "app", "playback", "x264", "libav",
+                              "isomp4", "matroska", "nvcodec", "amfcodec",
+                              "mediafoundation", "d3d11") {
+            & "$bin\gst-inspect-1.0.exe" $plugin *> $null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::the installed runtime does not expose the $plugin plugin"
+              exit 1
+            }
+            Write-Host "bundled plugin ok: $plugin"
+          }
+          # The elements the encoder selection order actually asks for,
+          # reported rather than required. nvcodec and amfcodec register their
+          # encoders only after talking to a driver, so on a GPU-less runner
+          # the plugin loads and contributes no elements -- measured in run
+          # 34635008969: both plugins present, nvh264enc and amfh264enc
+          # absent, mfh264enc present because the Media Foundation transform
+          # is part of Windows. Which of them can actually encode is
+          # hardware.yml's question; the plugin checks above are what this job
+          # can honestly assert.
+          foreach ($element in "x264enc", "avdec_h264", "nvh264enc", "amfh264enc", "mfh264enc") {
+            & "$bin\gst-inspect-1.0.exe" --exists $element
+            if ($LASTEXITCODE -eq 0) { Write-Host "present  $element" }
+            else { Write-Host "absent   $element" }
+          }
+          & "$bin\gst-inspect-1.0.exe" --exists x264enc
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::the installed runtime has no x264enc"
+            exit 1
+          }
+          # A blacklisted plugin is a DLL whose dependencies did not come along.
+          $summary = (& "$bin\gst-inspect-1.0.exe" 2>$null | Select-Object -Last 1)
+          Write-Host $summary
+          if ($summary -match 'blacklist') {
+            Write-Host "::error::some bundled plugins were blacklisted"
+            exit 1
+          }
+
+      - name: Launch the installed editor
+        shell: pwsh
+        env:
+          RUST_LOG: info
+        run: |
+          $bin = "$env:ProgramFiles\Subordinate\bin"
+          $env:PATH = "$bin;$env:SystemRoot\system32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
+          Remove-Item Env:GSTREAMER_1_0_ROOT_MSVC_X86_64, Env:PKG_CONFIG_PATH -ErrorAction SilentlyContinue
+          & "$bin\subordinate.exe" --smoke-test
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::--smoke-test exited $LASTEXITCODE"; exit 1 }
+
+      - name: Fetch the sample project media
+        shell: pwsh
+        run: .\scripts\get-sample-media.ps1
+
+      # The same render ci.yml runs, from the installed CLI instead of a
+      # target\ binary, with the software encoder pinned because the runner
+      # has no GPU. --verify probes the output with the GStreamer discoverer
+      # in-process; gst-discoverer-1.0.exe then reads it again from outside,
+      # which is also a second, independent use of the bundled runtime.
+      - name: Render the sample project from the installed CLI
+        shell: pwsh
+        env:
+          RUST_LOG: info
+        run: |
+          $bin = "$env:ProgramFiles\Subordinate\bin"
+          $env:PATH = "$bin;$env:SystemRoot\system32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
+          Remove-Item Env:GSTREAMER_1_0_ROOT_MSVC_X86_64, Env:PKG_CONFIG_PATH -ErrorAction SilentlyContinue
+          $out = "$env:RUNNER_TEMP\sample-render.mkv"
+          & "$bin\subordinate-cli.exe" render examples\sample-project\demo.sub `
+            --sequence "Main cut" --preset mezzanine --encoder x264enc `
+            --range 0:25 --out $out --verify
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::render exited $LASTEXITCODE"; exit 1 }
+          $bytes = (Get-Item $out).Length
+          Write-Host "rendered $out ($([math]::Round($bytes / 1KB)) KiB)"
+          if ($bytes -lt 10240) { Write-Host "::error::the rendered file is implausibly small"; exit 1 }
+          $report = (& "$bin\gst-discoverer-1.0.exe" $out 2>&1 | Out-String)
+          Write-Host $report
+          if ($report -notmatch 'video') { Write-Host "::error::gst-discoverer found no video stream"; exit 1 }
+          if ($report -match 'ERROR') { Write-Host "::error::gst-discoverer reported an error"; exit 1 }
+
+      - name: Uninstall silently
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem target\wix\Subordinate-*-x86_64.msi)[0].FullName
+          $p = Start-Process msiexec -ArgumentList "/x", "`"$msi`"", "/qn", "/norestart", "/l*v", "uninstall.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Get-Content uninstall.log -Tail 80
+            Write-Host "::error::msiexec /x exited $($p.ExitCode)"
+            exit 1
+          }
+          $root = "$env:ProgramFiles\Subordinate"
+          if (Test-Path $root) {
+            Write-Host "::error::$root still exists after uninstall:"
+            Get-ChildItem $root -Recurse | Select-Object -First 40 -ExpandProperty FullName
+            exit 1
+          }
+          $menu = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Subordinate"
+          if (Test-Path $menu) { Write-Host "::error::the Start Menu folder survived the uninstall"; exit 1 }
+          if (Get-ItemProperty HKLM:\Software\Subordinate -ErrorAction SilentlyContinue) {
+            Write-Host "::error::HKLM\Software\Subordinate survived the uninstall"
+            exit 1
+          }
+          Write-Host "uninstall removed the install tree, the Start Menu entry and the registry key"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: subordinate-msi
+          path: target/wix/Subordinate-*-x86_64.msi
+          if-no-files-found: error
+
+      - name: Upload the installer logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msi-msiexec-logs
+          path: |
+            install.log
+            uninstall.log
+          if-no-files-found: ignore

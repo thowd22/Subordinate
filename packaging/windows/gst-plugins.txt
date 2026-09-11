@@ -1,0 +1,82 @@
+# GStreamer plugins bundled into the Windows MSI.
+#
+# Same format as packaging/linux/gst-plugins.txt: one plugin module per line,
+# named the way the module is -- `nvcodec` means `gstnvcodec.dll` under
+# lib\gstreamer-1.0 of the official MSVC build (no `lib` prefix on Windows).
+# Blank lines and `#` comments are ignored, and a leading `!` marks a plugin
+# the installer cannot ship without: build-msi.ps1 fails when one of those is
+# missing from the GStreamer prefix instead of producing an MSI whose export
+# silently falls back to software, or does not run at all.
+#
+# The list is an allowlist because the official installer's plugin directory is
+# ~200 modules of things Subordinate never loads. It is the Linux list with the
+# Linux-only entries (va, pulseaudio, alsa, video4linux2) replaced by the
+# Windows equivalents.
+#
+# The DLLs in bin\ are *not* curated this way -- see build-msi.ps1.
+
+# --- core pipeline ---------------------------------------------------------
+!coreelements
+!app
+!playback
+!typefindfunctions
+!audioconvert
+!audioresample
+!videoconvertscale
+audiorate
+videorate
+videofilter
+audiotestsrc
+videotestsrc
+compositor
+audiomixer
+
+# --- containers and parsers ------------------------------------------------
+!isomp4
+!matroska
+audioparsers
+videoparsersbad
+id3demux
+id3tag
+apetag
+wavparse
+wavenc
+ogg
+
+# --- software decode and encode -------------------------------------------
+!libav
+!x264
+x265
+vpx
+opus
+opusparse
+flac
+vorbis
+theora
+jpeg
+png
+openh264
+dsd
+mpg123
+lame
+
+# --- hardware decode and encode -------------------------------------------
+# The three hardware paths a Windows machine can have: NVENC/NVDEC through
+# nvcodec, AMD VCN through amfcodec, and the Media Foundation transforms that
+# cover Intel and anything else with a vendor MFT. All three are required --
+# shipping an installer that cannot hardware-encode on a whole GPU vendor is
+# the failure this allowlist exists to catch. d3d11/d3d12 carry the DXVA
+# decoders and the video-processor conversion the others feed from, and qsv is
+# Intel's own encoder when its runtime is present.
+!nvcodec
+!amfcodec
+!mediafoundation
+!d3d11
+d3d12
+qsv
+
+# --- capture and output ----------------------------------------------------
+wasapi
+wasapi2
+directsound
+autodetect
