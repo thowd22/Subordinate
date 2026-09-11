@@ -11,6 +11,7 @@ pub mod audio_settings;
 pub mod diagnostics;
 pub mod dock;
 pub mod fade;
+pub mod fullscreen;
 pub mod history_panel;
 pub mod inspector;
 pub mod keymap;
@@ -43,6 +44,10 @@ pub use app::{AppOptions, ProjectState, SubordinateApp, UI_SMOKE_READY, edit_mod
 pub use audio_settings::{AudioSettingsAction, AudioSettingsPanel, device_label, status_line};
 pub use diagnostics::DiagnosticsPanel;
 pub use dock::{DockLayout, LAYOUT_FILE_NAME, LAYOUT_VERSION, LoadedLayout, Panel, layout_menu_ui};
+pub use fullscreen::{
+    FULLSCREEN_FILE_NAME, FULLSCREEN_VERSION, FullscreenAction, FullscreenSettings,
+    FullscreenState, LoadedFullscreen, Monitor, MonitorChoice, MonitorList, monitor_picker_ui,
+};
 pub use history_panel::{
     EARLIER_STEP_LABEL, HistoryAction, HistoryList, HistoryPanel, LATER_STEP_LABEL,
     ORIGINAL_STATE_LABEL, edit_menu_ui,
@@ -72,9 +77,9 @@ pub use plugins_panel::{
     LoadStatus, PluginAction, PluginOutcome, PluginRow, PluginsPanel, open_folder,
 };
 pub use popout::{
-    CLOSE_LABEL, OPEN_LABEL, POPOUT_TITLE, PopoutShared, PopoutViewer, is_playback_action,
-    playback_shortcuts, popout_content_ui, popout_menu_ui, popout_viewport_builder,
-    popout_viewport_id, popout_viewport_ui,
+    CLOSE_LABEL, OPEN_LABEL, POPOUT_TITLE, PopoutPlacement, PopoutShared, PopoutViewer,
+    is_playback_action, playback_shortcuts, popout_content_ui, popout_menu_ui,
+    popout_viewport_builder, popout_viewport_id, popout_viewport_ui,
 };
 // `duration_text` and the two label constants keep their module paths: the
 // media bin already exports a `duration_text` (a clip's length, not a wall
@@ -170,6 +175,17 @@ pub mod codes {
 
     /// The panel layout could not be written to the config directory.
     pub const LAYOUT_UNWRITABLE: ErrorCode = ErrorCode::from_static("ui.layout_unwritable");
+
+    /// A `fullscreen.json` is not valid JSON, or was written by a different
+    /// schema version.
+    pub const FULLSCREEN_PARSE: ErrorCode = ErrorCode::from_static("ui.fullscreen_parse");
+
+    /// A `fullscreen.json` exists but could not be read.
+    pub const FULLSCREEN_UNREADABLE: ErrorCode = ErrorCode::from_static("ui.fullscreen_unreadable");
+
+    /// The fullscreen display choice could not be written to the config
+    /// directory.
+    pub const FULLSCREEN_UNWRITABLE: ErrorCode = ErrorCode::from_static("ui.fullscreen_unwritable");
 
     /// A project file exists but could not be read or parsed.
     pub const PROJECT_UNREADABLE: ErrorCode = ErrorCode::from_static("ui.project_unreadable");

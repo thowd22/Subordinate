@@ -104,6 +104,10 @@ pub struct PopoutShared {
     actions: Mutex<Vec<Action>>,
     /// Set when the window manager or the user closed the pop-out.
     close_requested: AtomicBool,
+    /// Whether the pop-out window is fullscreen, as the main pass last said.
+    fullscreen: AtomicBool,
+    /// Set when Escape was pressed in a fullscreen pop-out window.
+    leave_fullscreen_requested: AtomicBool,
     /// How many frames the pop-out has painted, for diagnostics and tests.
     frames_painted: AtomicU64,
 }
@@ -117,6 +121,8 @@ impl PopoutShared {
             shortcuts: Mutex::new(ShortcutMap::empty()),
             actions: Mutex::new(Vec::new()),
             close_requested: AtomicBool::new(false),
+            fullscreen: AtomicBool::new(false),
+            leave_fullscreen_requested: AtomicBool::new(false),
             frames_painted: AtomicU64::new(0),
         }
     }
@@ -192,6 +198,34 @@ impl PopoutShared {
         self.close_requested.swap(false, Ordering::Relaxed)
     }
 
+    /// Tells the pop-out's window whether it is fullscreen.
+    ///
+    /// The window itself is put fullscreen by its viewport builder; this is
+    /// how its paint pass knows that Escape means "leave fullscreen" rather
+    /// than nothing at all.
+    pub fn set_fullscreen(&self, fullscreen: bool) {
+        self.fullscreen.store(fullscreen, Ordering::Relaxed);
+    }
+
+    /// Whether the pop-out window is fullscreen.
+    #[must_use]
+    pub fn is_fullscreen(&self) -> bool {
+        self.fullscreen.load(Ordering::Relaxed)
+    }
+
+    /// Records that Escape was pressed in a fullscreen pop-out window.
+    pub fn request_leave_fullscreen(&self) {
+        self.leave_fullscreen_requested
+            .store(true, Ordering::Relaxed);
+    }
+
+    /// Takes the leave-fullscreen request, if one is pending.
+    #[must_use]
+    pub fn take_leave_fullscreen_request(&self) -> bool {
+        self.leave_fullscreen_requested
+            .swap(false, Ordering::Relaxed)
+    }
+
     /// How many frames the pop-out has painted.
     #[must_use]
     pub fn frames_painted(&self) -> u64 {
@@ -216,8 +250,31 @@ pub struct PopoutViewer {
     /// user gets. A position is how the CI smoke run puts the pop-out on the
     /// second monitor without a human dragging it there.
     position: Option<[f32; 2]>,
+    /// The display fullscreen takes over, in the platform's monitor order.
+    ///
+    /// `None` is the display the window is already on. The index is
+    /// [`crate::fullscreen::FullscreenState::monitor_index`]'s, which is what
+    /// the window system takes.
+    monitor: Option<usize>,
+    /// Whether the pop-out window is fullscreen.
+    fullscreen: bool,
     /// What the pop-out's paint closure reads and writes.
     shared: Arc<PopoutShared>,
+}
+
+/// Where and how the pop-out window is asked to appear.
+///
+/// Split out of [`PopoutViewer`] so the window eframe is asked for can be
+/// asserted without a display attached: a test builds the placement, builds
+/// the viewport from it, and reads the request back.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PopoutPlacement {
+    /// Where the window goes, in points on the virtual desktop.
+    pub position: Option<[f32; 2]>,
+    /// The display it goes fullscreen on, in the platform's monitor order.
+    pub monitor: Option<usize>,
+    /// Whether it is fullscreen.
+    pub fullscreen: bool,
 }
 
 impl Default for PopoutViewer {
@@ -233,6 +290,8 @@ impl PopoutViewer {
         Self {
             open: false,
             position: None,
+            monitor: None,
+            fullscreen: false,
             shared: Arc::new(PopoutShared::new()),
         }
     }
@@ -257,6 +316,52 @@ impl PopoutViewer {
         self.open
     }
 
+    /// The display fullscreen takes over, when one was chosen.
+    #[must_use]
+    pub const fn monitor(&self) -> Option<usize> {
+        self.monitor
+    }
+
+    /// Chooses the display fullscreen takes over, in the platform's monitor
+    /// order, or `None` for the one the window is already on.
+    ///
+    /// Setting it while the pop-out is fullscreen moves the window: the next
+    /// paint hands eframe a viewport builder naming the new display, and egui
+    /// turns the difference into a
+    /// [`egui::ViewportCommand::SetMonitor`].
+    pub const fn set_monitor(&mut self, monitor: Option<usize>) {
+        self.monitor = monitor;
+    }
+
+    /// Whether the pop-out window is fullscreen.
+    #[must_use]
+    pub const fn is_fullscreen(&self) -> bool {
+        self.fullscreen
+    }
+
+    /// Takes the pop-out fullscreen, or brings it back to a window.
+    ///
+    /// Going fullscreen opens the pop-out if it was docked: fullscreen review
+    /// is the pop-out window with the desktop out of the way, so there is
+    /// nothing to make fullscreen until it exists.
+    pub fn set_fullscreen(&mut self, fullscreen: bool) {
+        if fullscreen {
+            self.open();
+        }
+        self.fullscreen = fullscreen;
+        self.shared.set_fullscreen(fullscreen);
+    }
+
+    /// Where and how the window is asked to appear.
+    #[must_use]
+    pub const fn placement(&self) -> PopoutPlacement {
+        PopoutPlacement {
+            position: self.position,
+            monitor: self.monitor,
+            fullscreen: self.fullscreen,
+        }
+    }
+
     /// Opens the pop-out. A pop-out that is already open is left alone.
     pub fn open(&mut self) {
         if !self.open {
@@ -268,7 +373,10 @@ impl PopoutViewer {
     /// Closes the pop-out, returning the viewer to the dock.
     pub fn close(&mut self) {
         self.open = false;
+        self.fullscreen = false;
+        self.shared.set_fullscreen(false);
         let _ = self.shared.take_close_request();
+        let _ = self.shared.take_leave_fullscreen_request();
         self.shared.clear_frame();
     }
 
@@ -318,6 +426,18 @@ impl PopoutViewer {
         self.open
     }
 
+    /// Applies a pending Escape from a fullscreen pop-out window.
+    ///
+    /// Returns whether the pop-out is fullscreen afterwards. Escape leaves
+    /// fullscreen and keeps the window: the review picture goes back to being
+    /// a window on the second display rather than disappearing into the dock.
+    pub fn poll_fullscreen_exit(&mut self) -> bool {
+        if self.shared.take_leave_fullscreen_request() && self.fullscreen {
+            self.set_fullscreen(false);
+        }
+        self.fullscreen
+    }
+
     /// Draws the pop-out window, if it is open.
     ///
     /// `map` is the keyboard map in force; the pop-out answers the playback
@@ -327,11 +447,15 @@ impl PopoutViewer {
         if !self.poll_close() {
             return false;
         }
+        // Escape is picked up before the window is described, so the frame
+        // that leaves fullscreen is the frame that asks for a window again.
+        self.poll_fullscreen_exit();
+        self.shared.set_fullscreen(self.fullscreen);
         self.shared.set_shortcuts(&playback_shortcuts(map));
         let shared = Arc::clone(&self.shared);
         ctx.show_viewport_deferred(
             popout_viewport_id(),
-            popout_viewport_builder(self.position),
+            popout_viewport_builder(self.placement()),
             move |ui, _class| popout_viewport_ui(ui, &shared),
         );
         true
@@ -342,15 +466,24 @@ impl PopoutViewer {
 ///
 /// Split out of [`PopoutViewer::show`] so the placement can be asserted
 /// without a display attached.
+///
+/// A fullscreen placement carries the display it wants: egui turns a builder
+/// that differs from the last one into the viewport commands that move and
+/// resize the window, so changing the display or leaving fullscreen is a
+/// different builder rather than a command sent by hand.
 #[must_use]
-pub fn popout_viewport_builder(position: Option<[f32; 2]>) -> egui::ViewportBuilder {
-    let builder = egui::ViewportBuilder::default()
+pub fn popout_viewport_builder(placement: PopoutPlacement) -> egui::ViewportBuilder {
+    let mut builder = egui::ViewportBuilder::default()
         .with_title(POPOUT_TITLE)
-        .with_inner_size(POPOUT_SIZE);
-    match position {
-        Some(position) => builder.with_position(position),
-        None => builder,
+        .with_inner_size(POPOUT_SIZE)
+        .with_fullscreen(placement.fullscreen);
+    if let Some(position) = placement.position {
+        builder = builder.with_position(position);
     }
+    if let Some(monitor) = placement.monitor {
+        builder = builder.with_monitor(monitor);
+    }
+    builder
 }
 
 /// One paint of the pop-out window.
@@ -374,6 +507,15 @@ pub fn popout_viewport_ui(ui: &mut egui::Ui, shared: &PopoutShared) {
     if fired {
         // The editor window owns the playhead, so it has to run a pass before
         // anything the user just pressed becomes visible.
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+    // Escape is the way out of fullscreen everywhere else, so it is the way
+    // out here. The window stays: the review picture goes back to being a
+    // window on the same display, and the editor window is told to run a pass
+    // so the menu's toggle agrees with what is on screen.
+    if shared.is_fullscreen() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        shared.request_leave_fullscreen();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         ctx.request_repaint_of(egui::ViewportId::ROOT);
     }
     if ctx.input(|input| input.viewport().close_requested()) {
@@ -411,8 +553,8 @@ pub fn popout_menu_ui(ui: &mut egui::Ui, popout: &mut PopoutViewer) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        POPOUT_TITLE, PopoutShared, PopoutViewer, is_playback_action, playback_shortcuts,
-        popout_viewport_builder, popout_viewport_ui,
+        POPOUT_TITLE, PopoutPlacement, PopoutShared, PopoutViewer, is_playback_action,
+        playback_shortcuts, popout_viewport_builder, popout_viewport_ui,
     };
     use crate::shortcuts::{Action, ShortcutMap};
     use crate::viewer::ViewerFrame;
@@ -564,7 +706,7 @@ mod tests {
         popout.set_position([1280.0, 0.0]);
         assert_eq!(popout.position(), Some([1280.0, 0.0]));
 
-        let builder = popout_viewport_builder(popout.position());
+        let builder = popout_viewport_builder(popout.placement());
         assert_eq!(
             builder.position,
             Some(egui::pos2(1280.0, 0.0)),
@@ -572,9 +714,73 @@ mod tests {
         );
         assert_eq!(builder.title.as_deref(), Some(POPOUT_TITLE));
         assert_eq!(
-            popout_viewport_builder(None).position,
+            popout_viewport_builder(PopoutPlacement::default()).position,
             None,
             "an unplaced pop-out should not pin itself to the origin"
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_popout_asks_for_the_chosen_display() {
+        let mut popout = PopoutViewer::new();
+        assert!(!popout.is_fullscreen(), "a pop-out starts as a window");
+        popout.set_monitor(Some(1));
+        popout.set_fullscreen(true);
+        assert!(
+            popout.is_open(),
+            "going fullscreen opens the window there is nothing else to fill"
+        );
+
+        let builder = popout_viewport_builder(popout.placement());
+        assert_eq!(builder.fullscreen, Some(true));
+        assert_eq!(
+            builder.monitor,
+            Some(1),
+            "the window system is told which display to take over"
+        );
+
+        popout.set_fullscreen(false);
+        let builder = popout_viewport_builder(popout.placement());
+        assert_eq!(builder.fullscreen, Some(false), "and back to a window");
+        assert!(popout.is_open(), "which is still a pop-out window");
+    }
+
+    #[test]
+    fn escape_leaves_fullscreen_without_closing_the_window() {
+        let mut popout = PopoutViewer::new();
+        popout.set_fullscreen(true);
+        popout.publish(preview());
+        popout_frame(popout.shared(), vec![press(egui::Key::Escape)]);
+        assert!(
+            !popout.poll_fullscreen_exit(),
+            "Escape in the fullscreen window leaves fullscreen"
+        );
+        assert!(!popout.is_fullscreen());
+        assert!(popout.is_open(), "and the pop-out window stays open");
+        assert!(
+            popout.poll_close(),
+            "Escape is not a close: the viewer is still popped out"
+        );
+    }
+
+    #[test]
+    fn escape_in_a_windowed_popout_does_nothing() {
+        let mut popout = PopoutViewer::new();
+        popout.open();
+        popout_frame(popout.shared(), vec![press(egui::Key::Escape)]);
+        assert!(!popout.poll_fullscreen_exit(), "it was never fullscreen");
+        assert!(popout.is_open(), "and Escape did not close it");
+    }
+
+    #[test]
+    fn returning_to_the_dock_leaves_fullscreen() {
+        let mut popout = PopoutViewer::new();
+        popout.set_fullscreen(true);
+        popout.close();
+        assert!(!popout.is_fullscreen());
+        assert!(
+            !popout.shared().is_fullscreen(),
+            "the window's own pass is told too"
         );
     }
 

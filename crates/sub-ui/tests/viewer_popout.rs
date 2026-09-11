@@ -155,7 +155,7 @@ fn a_placed_pop_out_opens_on_the_second_monitor() {
     let popout = harness.state();
     assert!(popout.is_open(), "the pop-out opened");
     assert_eq!(
-        popout_viewport_builder(popout.position()).position,
+        popout_viewport_builder(popout.placement()).position,
         Some(egui::pos2(1280.0, 0.0)),
         "and it asks for the second monitor rather than wherever the window \
          manager felt like putting it"
