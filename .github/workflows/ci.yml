@@ -90,17 +90,39 @@ jobs:
       # the workspace artifacts is safe; it costs a larger archive per OS, which
       # the sccache removal above freed up room for.
       #
-      # `workspaces` adds plugins/gain, the reference plugin's own one-package
-      # workspace, whose target directory the default (repository root) entry
-      # never covered.
+      # `prefix-key` is bumped whenever the *contents* an archive should hold
+      # change, and it is load-bearing. Actions cache entries are immutable and
+      # rust-cache refuses to re-save a key it restored as a full match ("Cache
+      # up-to-date." in the post step), while its key is derived only from the
+      # toolchain, the lockfile and the environment -- not from this action's
+      # own inputs. So turning `cache-workspace-crates` on did nothing: every
+      # run kept restoring the archive written *before* the option existed, one
+      # with the workspace crates already stripped out, and kept recompiling all
+      # twenty-odd members. Warm no-change rerun of run 34560385094 (attempt 2),
+      # ubuntu-26.04, 12m15s: Build 184 s and Test 203 s, the same numbers as
+      # the changed-source run before it. Bumping the prefix forces one fresh
+      # archive per OS, written with the workspace artifacts in it; the run
+      # after that is the first genuinely warm one.
+      #
+      # `workspaces` lists every cargo workspace in the repository, not just the
+      # root one. The plugins are each self-contained workspaces with their own
+      # target directories, which the root entry never covered, so their CI
+      # steps rebuilt from scratch every run (cut-silence 30 s, color 31 s,
+      # otio 43 s on the rerun above; only plugins/gain was listed here, and it
+      # is the cheapest of the four). Keep this list equal to the set of
+      # `working-directory:` values used by the plugin steps below.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-${{ matrix.os }}
+          prefix-key: v1-rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
           workspaces: |
             .
+            plugins/color
+            plugins/cut-silence
             plugins/gain
+            plugins/otio
 
       # Defender scans every object file cargo and the MSVC linker write under
       # target\, which is the other half of the Windows penalty. The hosted
