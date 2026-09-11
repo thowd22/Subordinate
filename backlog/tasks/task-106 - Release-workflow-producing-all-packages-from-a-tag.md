@@ -4,6 +4,7 @@ title: Release workflow producing all packages from a tag
 status: To Do
 assignee: []
 created_date: '2026-09-08 21:05'
+updated_date: '2026-09-11 13:41'
 labels:
   - release
   - infra
@@ -11,7 +12,6 @@ milestone: m-7
 dependencies:
   - TASK-103
   - TASK-104
-  - TASK-105
 references:
   - docs/PLAN.md
 priority: medium
@@ -30,3 +30,9 @@ Repeatable releases.
 - [ ] #2 Checksums are published
 - [ ] #3 A dry-run mode builds without publishing
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-09-11 supervisor: the macOS dmg (TASK-105) is back-burnered until the user's M1 Mac mini arrives; the release workflow ships AppImage/Flatpak and MSI now and gains the dmg later.
+<!-- SECTION:NOTES:END -->
