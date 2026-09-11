@@ -27,12 +27,15 @@
 use std::path::{Path, PathBuf};
 
 use sub_model::content::{ContentHash, MediaPath};
+use sub_model::effect::{ClipEffect, EffectValue};
 use sub_model::marker::Marker;
 use sub_model::media::{AudioStream, Bin, MediaItem, StreamInfo, VideoStream};
 use sub_model::params::{Fixed6, GainDb, Opacity, Point2, Scale2, Transform};
 use sub_model::sequence::{ColorTags, Resolution, Sequence, SequenceSettings};
 use sub_model::track::{Clip, Gap, Track, TrackKind, Transition};
-use sub_model::{BinId, ClipId, MarkerId, MediaId, Project, ProjectId, SequenceId, TrackId, json};
+use sub_model::{
+    BinId, ClipId, EffectId, MarkerId, MediaId, Project, ProjectId, SequenceId, TrackId, json,
+};
 use sub_time::{Rational, RationalTime, TimeRange};
 
 /// Environment variable that rewrites the committed project instead of
@@ -43,6 +46,10 @@ const UPDATE_ENV: &str = "SUB_UPDATE_GOLDEN";
 const REGENERATE_HINT: &str = "if this change to the sample project is intended, regenerate it \
                                with `SUB_UPDATE_GOLDEN=1 cargo test -p sub-model --test \
                                demo_project` and commit the diff";
+
+/// The plugin whose effect the sample project applies: the first-party colour
+/// grade in `plugins/color`, whose id is the one in its `plugin.toml`.
+const COLOR_PLUGIN: &str = "com.subordinate.color";
 
 /// The committed sample project.
 fn project_path() -> PathBuf {
@@ -196,6 +203,28 @@ fn demo_project() -> Project {
     wide.id = id!(MarkerId, "0193a1b0-0004-7000-8000-000000000001");
     "the two uniforms are both in frame here".clone_into(&mut wide.note);
     porters_shot.markers.push(wide);
+    // The applied effect the sample shows off: the first-party colour plugin,
+    // a stop up with a warm tint. The plugin declares the shader and the
+    // parameter table; the project stores only this reference and the values
+    // that differ from the declared defaults.
+    let mut grade = ClipEffect::new(COLOR_PLUGIN).expect("a reverse-DNS plugin id");
+    grade.id = id!(EffectId, "0193a1b0-0007-7000-8000-000000000001");
+    let grade = grade
+        .with_param(
+            "tint",
+            EffectValue::Color([
+                Fixed6::ONE,
+                Fixed6::from_micros(850_000),
+                Fixed6::from_micros(700_000),
+                Fixed6::ONE,
+            ]),
+        )
+        .with_param(
+            "tint_amount",
+            EffectValue::Float(Fixed6::from_micros(250_000)),
+        )
+        .with_param("exposure", EffectValue::Float(Fixed6::ONE));
+    porters_shot.effects.push(grade);
 
     let mut pigeon_shot = Clip::new("Pigeon, fight", pigeon_id, range(75, 200, main_rate));
     pigeon_shot.id = id!(ClipId, "0193a1b0-0003-7000-8000-000000000002");
@@ -420,4 +449,43 @@ fn the_demo_project_holds_what_the_sample_promises() {
     let titles = &project.sequences[1];
     assert_eq!(titles.name, "Titles");
     assert_eq!(titles.markers.len(), 1);
+}
+
+#[test]
+fn the_graded_clip_carries_the_first_party_colour_effect() {
+    let project = json::from_json(&committed_text()).expect("the sample project loads");
+    let clip = project.sequences[0].tracks[0].items[0]
+        .as_clip()
+        .expect("V1 opens on a clip");
+    assert_eq!(clip.name, "Porters, wide");
+    assert_eq!(clip.effects.len(), 1, "one applied effect");
+
+    let grade = &clip.effects[0];
+    assert_eq!(grade.plugin, COLOR_PLUGIN);
+    assert!(grade.enabled);
+    assert_eq!(
+        grade.param("exposure"),
+        Some(EffectValue::Float(Fixed6::ONE)),
+        "the sample grade lifts the clip a stop"
+    );
+    grade.validate().expect("the stored effect is well formed");
+}
+
+#[test]
+fn a_clip_written_before_effects_existed_still_loads() {
+    // Every clip in the committed project but one carries no effects at all,
+    // so the saved file has no `effects` member on them: that is the shape a
+    // project written before the effect stack existed has, and it must still
+    // load with an empty stack rather than being refused.
+    let committed = committed_text();
+    let effect_members = committed.matches("\"effects\"").count();
+    assert_eq!(
+        effect_members, 1,
+        "only the graded clip saves an effect stack"
+    );
+    let project = json::from_json(&committed).expect("the sample project loads");
+    let ungraded = project.sequences[0].tracks[0].items[2]
+        .as_clip()
+        .expect("the incoming clip of the dissolve");
+    assert!(ungraded.effects.is_empty());
 }

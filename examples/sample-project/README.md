@@ -41,18 +41,26 @@ native path from that at load time. Every media item also records the content
 hash of the pinned download, so media that is *not* the media this project was
 authored against is caught rather than silently rendered.
 
-The colour grade the sample demonstrates is applied by the render test rather
-than stored in `demo.sub`: the project model carries no effect stack yet
-(TASK-88). When it does, the grade moves into the project file.
+*Porters, wide* also carries an **applied effect**: the first-party colour
+plugin `com.subordinate.color` (`plugins/color`), a stop of exposure with a
+warm tint. The project stores only the reference — the plugin id and the values
+that differ from the plugin's declared defaults — because the parameters and
+the WGSL belong to the plugin and are read from it at load time. An effect
+whose plugin is not installed keeps its values in the file and simply does not
+run.
 
 ## Tests over it
 
 - `cargo test -p sub-model --test demo_project` — the project builder, the
-  golden bytes, the round trip and the path rules. No media needed.
+  golden bytes, the round trip, the path rules and the stored effect. No media
+  needed.
 - `cargo test -p sub-ui --test sample_project_render` — the render test: it
   decodes the real media, composites the layers, checks the crossfade blends
-  and runs the first-party `plugins/color` grade over a clip. Skips itself when
-  the media has not been fetched or the machine has no wgpu adapter.
+  and runs the grade the project applies, bound against `plugins/color`'s own
+  declaration. Skips itself when the media has not been fetched or the machine
+  has no wgpu adapter; CI sets `SUB_REQUIRE_SAMPLE_MEDIA=1` on all three OSes,
+  which turns the missing-media skip into a failure, so a green run there is
+  the proof that the project opens with every path resolved and no relink.
 
 To change the project, edit the builder in
 `crates/sub-model/tests/demo_project.rs` and regenerate:

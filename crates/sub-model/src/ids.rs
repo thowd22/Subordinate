@@ -175,6 +175,12 @@ define_id!(
     MarkerId,
     "marker"
 );
+define_id!(
+    /// Identifies a [`ClipEffect`](crate::ClipEffect) in a clip's effect
+    /// stack.
+    EffectId,
+    "effect"
+);
 
 #[cfg(test)]
 mod tests {

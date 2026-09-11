@@ -322,10 +322,18 @@ jobs:
       # binary got there first, with no panic and no failing assertion. Running
       # sub-ui one test at a time keeps a single software device alive at a
       # time; every other crate still runs fully parallel.
+      #
+      # SUB_REQUIRE_SAMPLE_MEDIA turns sub-ui's sample-project render test from
+      # "skip when the media is missing" into "fail": this job is the evidence
+      # that examples/sample-project/demo.sub opens without a relink on Linux,
+      # Windows and macOS alike (TASK-109 criterion 2), and a run that skipped
+      # the test because the fetch step went wrong would prove nothing. The
+      # fetch step above ran on every OS, so the media is there.
       - name: Test
         shell: bash
         env:
           GST_PLUGIN_FEATURE_RANK: ${{ runner.os == 'macOS' && 'vtdec:NONE,vtdec_hw:NONE' || '' }}
+          SUB_REQUIRE_SAMPLE_MEDIA: '1'
         run: |
           cargo test --workspace --exclude sub-ui
           cargo test -p sub-ui -- --test-threads=1

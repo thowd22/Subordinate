@@ -125,6 +125,13 @@
       "additionalProperties": false,
       "description": "A reference to a slice of a [`MediaItem`](crate::MediaItem) placed on a\ntrack.\n\nOTIO counterpart: `Clip`, whose `media_reference` is an\n`ExternalReference` and whose `source_range` selects the used portion of it.\nPlacement on the track is positional, exactly as in OTIO: a clip starts\nwhere the preceding items end.\n\nThe fixed set of per-clip parameters the MVP supports (docs/PLAN.md §5.1)\nlive on the clip itself: [`Clip::opacity`], [`Clip::transform`],\n[`Clip::gain`] and the two fades. Their invariants are checked by\n[`Clip::validate`].",
       "properties": {
+        "effects": {
+          "description": "Plugin effects applied to this clip, first applied first.\n\nEach entry names the plugin that declares the shader and binds the\nparameter values the user changed; the declaration itself comes from\nthe installed plugin at load time (see [`crate::effect`]). Empty by\ndefault, and left out of the saved file when empty, so a project\nwritten before effects existed still loads unchanged.",
+          "items": {
+            "$ref": "#/$defs/ClipEffect"
+          },
+          "type": "array"
+        },
         "fade_in": {
           "$ref": "#/$defs/RationalTime",
           "description": "How long the clip ramps up from nothing at its head. Zero by default."
@@ -180,6 +187,37 @@
         "fade_in",
         "fade_out",
         "markers"
+      ],
+      "type": "object"
+    },
+    "ClipEffect": {
+      "additionalProperties": false,
+      "description": "One plugin effect applied to a clip.\n\nOrder in [`Clip::effects`](crate::Clip::effects) is the order the\ncompositor runs them in, first applied first.\n\nA plugin targeting the `effect` world declares exactly one effect, so the\nplugin id is the whole reference; [`params`](ClipEffect::params) holds only\nthe values that differ from the declared defaults, keyed by the parameter\nids the plugin declared. A value for a parameter the installed plugin no\nlonger declares is kept in the file and ignored when binding, so a project\nthat outlives an edit to a plugin still opens and still renders.",
+      "properties": {
+        "enabled": {
+          "description": "Whether the effect runs. A disabled effect stays in the stack with its\nvalues so it can be switched back on.",
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/EffectId",
+          "description": "Stable identity, preserved across save, load and undo."
+        },
+        "params": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EffectValue"
+          },
+          "description": "Values bound by parameter id; anything absent takes the plugin's\ndeclared default.",
+          "type": "object"
+        },
+        "plugin": {
+          "description": "Reverse-DNS id of the plugin that declares the effect, e.g.\n`com.subordinate.color`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "plugin",
+        "enabled"
       ],
       "type": "object"
     },
@@ -270,6 +308,89 @@
     "ContentHash": {
       "description": "A BLAKE3 content hash as 64 lowercase hex digits.",
       "type": "string"
+    },
+    "EffectId": {
+      "description": "The canonical lowercase hyphenated UUIDv7 of a effect.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "EffectValue": {
+      "description": "A value bound to one declared effect parameter.\n\nThe cases mirror the WIT `param-value` variant one for one, with `Fixed6`\nwherever WIT has an `f32`, so a value survives save, load and undo exactly\nas it was set. `sub-plugin` converts between the two vocabularies.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A continuous value, e.g. an exposure in stops.",
+          "properties": {
+            "float": {
+              "$ref": "#/$defs/Fixed6"
+            }
+          },
+          "required": [
+            "float"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A whole number, e.g. a sample count.",
+          "properties": {
+            "int": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "int"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A flag.",
+          "properties": {
+            "bool": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "bool"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A linear RGBA colour, one channel per element.",
+          "properties": {
+            "color": {
+              "items": {
+                "$ref": "#/$defs/Fixed6"
+              },
+              "maxItems": 4,
+              "minItems": 4,
+              "type": "array"
+            }
+          },
+          "required": [
+            "color"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Index into the variants the plugin declared.",
+          "properties": {
+            "choice": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "choice"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "Fixed6": {
       "description": "An exact number with six decimal places, stored as a count of micro-units.\n\nThis is the one numeric primitive for the non-time clip parameters. It is\n`Ord` and `Hash`, so clips compare and hash exactly, and it saves as an\ninteger.\n\nThe serde form is the raw micro-unit count: an integer, never a float.",

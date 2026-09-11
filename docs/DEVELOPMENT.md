@@ -463,9 +463,15 @@ SUB_UPDATE_GOLDEN=1 cargo test -p sub-model --test golden
 ### The sample project
 
 `examples/sample-project/demo.sub` is the ready-made project: two sequences,
-clips over three tracks, a crossfade, sequence and clip markers, and three real
-CC0 clips. It is what a new user (or an agent) opens to see the editor doing
-something, and what the CI render test renders.
+clips over three tracks, a crossfade, sequence and clip markers, an applied
+effect and three real CC0 clips. It is what a new user (or an agent) opens to
+see the editor doing something, and what the CI render test renders.
+
+The effect is the first-party colour grade `com.subordinate.color`
+(`plugins/color`) on the wide shot. A clip stores an effect as a reference —
+the plugin id plus the values that differ from the plugin's declared defaults
+(`sub_model::effect::ClipEffect`) — never the parameter table or the shader,
+which belong to the plugin and are read from it at load time.
 
 The media is never committed. Fetch it first — three files, about 4.7 MB, each
 pinned by byte size and SHA-256:
@@ -496,12 +502,15 @@ the committed file to the builder that produced it (regenerate with
 it and checks the path rules; no media needed.
 `cargo test -p sub-ui --test sample_project_render` is the render test: it
 decodes the real media with `sub-media`, composites it through `sub-render`,
-and checks that the overlay stacks, that the dissolve blends and that the
-first-party `plugins/color` grade runs over a clip. It skips itself when the
-media has not been fetched or the machine has no wgpu adapter. CI fetches the
-media (cached per OS and keyed on both fetch scripts, as the fixtures are)
-before the test job, so there it really runs; a warm cache downloads nothing at
-all. `examples/sample-project/README.md` carries the media credits.
+and checks that the overlay stacks, that the dissolve blends and that the grade
+the project stores runs over its clip, bound against `plugins/color`'s own
+declaration. It skips itself when the media has not been fetched or the machine
+has no wgpu adapter. CI fetches the media (cached per OS and keyed on both fetch
+scripts, as the fixtures are) before the test job, so there it really runs; a
+warm cache downloads nothing at all. CI also sets `SUB_REQUIRE_SAMPLE_MEDIA=1`,
+which turns the missing-media skip into a failure: a green test job on Linux,
+Windows and macOS is what proves the project opens on each of them with every
+media path resolved and nothing to relink. `examples/sample-project/README.md` carries the media credits.
 
 ## UI tests (egui_kittest)
 
