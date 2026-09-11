@@ -30,6 +30,11 @@ const VFR: &str = "vfr_60_30.mkv";
 /// The constant-rate fixture, used as the control: 125 frames at 25 fps.
 const CFR: &str = "bars_1080p_h264.mp4";
 
+/// The long-GOP fixture: ten minutes at 25 fps with a keyframe every 250
+/// pictures, so one GOP is ten seconds -- five times the decoder's default
+/// forward-decode window.
+const LONGGOP: &str = "longgop_720p_10min.mp4";
+
 /// The frame the VFR fixture changes rate at: 90 frames at 30 fps come before
 /// it, 180 frames at 60 fps from it onwards.
 const VFR_RATE_CHANGE: usize = 90;
@@ -422,4 +427,145 @@ fn an_index_build_is_a_cancellable_background_job() {
     let job = IndexJob::spawn(path.clone(), None);
     let index = job.join().unwrap_or_else(|e| panic!("[{}] {e}", e.code));
     assert_eq!(*index, index_of(&path));
+}
+
+/// Seconds into a clip, as an exact time. Nothing here is a float.
+fn seconds(value: i64) -> sub_time::RationalTime {
+    sub_time::RationalTime::new(
+        value,
+        sub_time::Rational::new(1, 1).expect("1 Hz is a rate"),
+    )
+}
+
+#[test]
+fn an_index_removes_the_seek_a_long_gop_forward_step_would_otherwise_cost() {
+    // The point of TASK-133: a scrub step is a flushing seek plus a
+    // decode-forward, and the flush is the half an index can delete. Stepping
+    // five seconds forward inside a ten-second GOP is a target the decoder is
+    // already inside, but the default two-second window cannot know that, so it
+    // flushes the pipeline and decodes the GOP again from its keyframe. With
+    // the index the same step decodes forward from where it is: no seek, and
+    // fewer pictures decoded to get there.
+    let Some(path) = fixture(LONGGOP) else { return };
+    let index = Arc::new(index_of(&path));
+
+    let start = seconds(1);
+    let target = seconds(6);
+
+    let mut blind = Decoder::open(&path).unwrap_or_else(|e| panic!("[{}] {e}", e.code));
+    blind
+        .seek_to(start)
+        .unwrap_or_else(|e| panic!("[{}] {e}", e.code))
+        .expect("a frame one second in");
+    let blind_frame = blind
+        .seek_to(target)
+        .unwrap_or_else(|e| panic!("[{}] {e}", e.code))
+        .expect("a frame six seconds in");
+    let blind_step = blind.last_seek_timing().expect("a timed step");
+
+    let mut guided = Decoder::open(&path).unwrap_or_else(|e| panic!("[{}] {e}", e.code));
+    guided.set_index(Arc::clone(&index));
+    guided
+        .seek_to(start)
+        .unwrap_or_else(|e| panic!("[{}] {e}", e.code))
+        .expect("a frame one second in");
+    let guided_frame = guided
+        .seek_to(target)
+        .unwrap_or_else(|e| panic!("[{}] {e}", e.code))
+        .expect("a frame six seconds in");
+    let guided_step = guided.last_seek_timing().expect("a timed step");
+
+    // Same picture: the index changes what the step costs, never where it
+    // lands.
+    assert_eq!(
+        guided_frame.pts(),
+        blind_frame.pts(),
+        "both decoders must land on the same frame"
+    );
+    assert_eq!(fingerprint(&guided_frame), fingerprint(&blind_frame));
+
+    assert_eq!(
+        blind_step.seeks_issued, 1,
+        "without an index the step is past the window, so it flushes"
+    );
+    assert_eq!(
+        guided_step.seeks_issued, 0,
+        "with the index the target is in the GOP the decoder is already inside"
+    );
+    assert_eq!(guided_step.seek_nanos, 0, "no flush, so no seek half");
+    assert!(
+        guided_step.decode_forward_nanos > 0,
+        "the decode-forward half is what the step actually spent"
+    );
+    assert!(
+        guided_step.frames_decoded < blind_step.frames_decoded,
+        "the guided step decoded {} pictures against {}",
+        guided_step.frames_decoded,
+        blind_step.frames_decoded
+    );
+}
+
+#[test]
+fn an_indexed_seek_lands_on_the_keyframe_instead_of_overshooting_it() {
+    // The colour-bar fixture's timestamps start 80 ms in, because its first
+    // pictures are reordered. A seek expresses its target in stream time, which
+    // does not carry that offset, so the demuxer can snap to the keyframe
+    // *after* the one the target needs -- and the decoder then has to seek a
+    // second time, aiming blindly further back, to recover the frame. Aiming at
+    // the keyframe the index names cannot overshoot, so that second flush,
+    // worth a whole extra seek and another pass over the GOP, never happens.
+    let Some(path) = fixture(CFR) else { return };
+    let index = Arc::new(index_of(&path));
+    // Three seconds in: the frame there sits just before a keyframe, which is
+    // exactly where the snap goes wrong.
+    let target = sub_time::RationalTime::new(3_000_000_000, sub_media::probe::NANOSECONDS);
+
+    let mut blind = Decoder::open(&path).unwrap_or_else(|e| panic!("[{}] {e}", e.code));
+    let blind_frame = blind
+        .seek_to(target)
+        .unwrap_or_else(|e| panic!("[{}] {e}", e.code))
+        .expect("a frame three seconds in");
+    let blind_step = blind.last_seek_timing().expect("a timed step");
+
+    let mut guided = Decoder::open(&path).unwrap_or_else(|e| panic!("[{}] {e}", e.code));
+    guided.set_index(Arc::clone(&index));
+    let guided_frame = guided
+        .seek_to(target)
+        .unwrap_or_else(|e| panic!("[{}] {e}", e.code))
+        .expect("a frame three seconds in");
+    let guided_step = guided.last_seek_timing().expect("a timed step");
+
+    assert_eq!(
+        guided_frame.pts(),
+        blind_frame.pts(),
+        "the index changes what the seek costs, not where it lands"
+    );
+    assert_eq!(fingerprint(&guided_frame), fingerprint(&blind_frame));
+
+    assert_eq!(
+        guided_step.seeks_issued, 1,
+        "a seek aimed at the keyframe itself cannot overshoot, so it is issued once"
+    );
+    assert!(
+        guided_step.seeks_issued <= blind_step.seeks_issued,
+        "the index must never cost an extra seek"
+    );
+    assert!(
+        guided_step.frames_decoded <= blind_step.frames_decoded,
+        "the guided step decoded {} pictures against {}",
+        guided_step.frames_decoded,
+        blind_step.frames_decoded
+    );
+
+    // And the split is the one the harness reports: the flush and its first
+    // frame on one side, the decode-forward to the target on the other.
+    assert!(guided_step.seek_nanos > 0, "the flush and its first frame");
+    assert!(
+        guided_step.frames_decoded >= 1,
+        "the target frame is decoded at least"
+    );
+    assert_eq!(
+        guided_step.total_nanos(),
+        guided_step.seek_nanos + guided_step.decode_forward_nanos
+    );
 }

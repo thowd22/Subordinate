@@ -132,6 +132,22 @@ def main(argv):
         else:
             fps = (scrub.get("sustained_milli_fps") or 0) / 1000.0
             decoder = scrub.get("decoder") or "unknown"
+            # Where a scrub step's time actually went. A step is a flushing
+            # keyframe seek plus the decode-forward from that keyframe to the
+            # frame asked for, and the two answer to different fixes, so the
+            # summary says which half the gap to the criterion lives in
+            # (TASK-133, docs/PERFORMANCE.md).
+            seek = scrub.get("seek")
+            forward = scrub.get("decode_forward")
+            if seek and forward:
+                seeks = scrub.get("seeks_issued") or 0
+                frames = scrub.get("frames_decoded") or 0
+                per_seek = f"{frames / seeks:.1f}" if seeks else "n/a"
+                lines.append(
+                    f"* 4K scrub step split: seek p50 **{seek.get('p50_nanos', 0) / 1e6:.3f} ms**, "
+                    f"decode-forward p50 **{forward.get('p50_nanos', 0) / 1e6:.3f} ms**, "
+                    f"{per_seek} pictures decoded per seek"
+                )
             if args.min_scrub_fps > 0:
                 verdict = "PASS" if fps > args.min_scrub_fps else "FAIL"
                 lines.append(
