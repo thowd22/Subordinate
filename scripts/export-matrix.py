@@ -183,10 +183,21 @@ def run(argv: list[str], timeout: int = 1800, env: dict[str, str] | None = None)
         )
         return Run(done.returncode, done.stdout, done.stderr, time.monotonic() - started)
     except subprocess.TimeoutExpired as expired:
+        # Whatever it managed to say before it stopped saying anything is the
+        # most useful thing about a timeout: `render` prints a progress line
+        # per frame on stderr, so the tail of it is the frame the encoder
+        # stalled on (box's vah264enc at 4K, run 34674014655).
+        def text(stream: object) -> str:
+            if isinstance(stream, str):
+                return stream
+            if isinstance(stream, (bytes, bytearray)):
+                return stream.decode("utf-8", "replace")
+            return ""
+
         return Run(
             124,
-            expired.stdout or "" if isinstance(expired.stdout, str) else "",
-            f"timed out after {timeout}s",
+            text(expired.stdout),
+            f"timed out after {timeout}s; last output: {text(expired.stderr)[-1500:]}",
             time.monotonic() - started,
         )
     except OSError as error:
