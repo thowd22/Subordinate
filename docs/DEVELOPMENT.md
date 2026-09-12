@@ -1192,6 +1192,104 @@ account's on-demand G-family quota is 8 vCPU, which is exactly two
 `g4dn.xlarge`, so an image build and a GPU job can collide - re-run the
 pipeline, it is not a real failure.
 
+## Desktop flows (the application, end to end)
+
+`egui_kittest` exercises panels in isolation and `scripts/ui-smoke.sh`
+photographs the assembled window under Xvfb. The **desktop flows** are the
+layer above both: the whole application on a machine with a GPU, a window
+manager and a pointer, doing what a person or an agent would do end to end
+(TASK-139). They run on the two desktop images, and they are two jobs each:
+
+| Flow | What acts | What asserts |
+| --- | --- | --- |
+| `scripts/desktop/flow_mcp.py` | `subordinate-mcp` and nothing else, against the window on screen | the timeline read back after each call, and the exported file |
+| `scripts/desktop/flow_clicks.py` | a real pointer and real keystrokes, and nothing else | read-only Command API calls after each gesture |
+
+Both take a screenshot after every step, write `result.json` and `summary.md`,
+and print `::error title=<flow>: <step>::` naming the step that failed and the
+file name of its picture. `scripts/desktop/README.md` documents the harness -
+the seven verbs, the module CLI, how to write a flow and how to run one against
+a local build.
+
+```sh
+gh workflow run desktop-flows.yml --ref main -f only=linux-clicks
+```
+
+`.github/workflows/desktop-flows.yml` holds the four jobs and
+`hardware.yml` calls it, so they run nightly and on release tags. The clicks
+jobs are `needs:` the MCP jobs rather than beside them, because the account's
+G-family quota is exactly two `g4dn.xlarge`. Cost per flow: Linux about
+**0.03 USD** on spot (0.08 USD at the 20-minute cap), Windows about **0.13 USD**
+on demand (0.27 USD at the 22-minute cap).
+
+Three things about the images these flows found, and why the code does what it
+does:
+
+* **The window is on screen before the socket is.** The editor binds the
+  Command API off the UI thread, so a bridge started the moment the window
+  appears is answered `command.not_running`. The flows wait for
+  `the Command API is listening on` in the editor's log (run 34671892159).
+* **An agent's edit does not wake an idle window.** egui paints when something
+  asks it to; an edit arriving over the socket lands in the project the panels
+  draw, but with no pointer, keyboard or animation the window keeps showing the
+  frame it painted before, and a screenshot taken straight afterwards is of a
+  project that has already changed (run 34672010010). Every picture in the MCP
+  flow is therefore taken after `session.nudge()`, a pointer move that changes
+  nothing.
+* **A Windows export of the 4K60 clip stalls after one frame.** The pipeline
+  starts and names its encoder (`nvh264enc`), the decoder is plugged, one frame
+  is written and then nothing moves - with the editor open or closed, through
+  the bridge or through the GUI's own Export button, and with the Direct3D
+  decoders ranked out in favour of NVDEC (runs 34672165182, 34673633121,
+  34674794109 and 34682198476). The same project renders in seconds on the
+  Linux desktop runner. Both Windows flows therefore fail at their export step,
+  with the screenshot and the editor's log attached; everything before it -
+  every edit, every gesture, every assertion - passes.
+* **The editor's endpoint does not serve `export.*`.** Only
+  `subordinate-cli serve` installs the host-backed families
+  (`docs/schema/host-api.json`); the editor serves the engine's own methods and
+  the plugin methods. So the MCP flow saves the project the window is holding
+  and renders through a second bridge on a scratch instance. It also closes the
+  editor first: on Windows, with the window still open on the same 4K60 clip,
+  the export managed one frame in fifteen minutes and finished in seconds once
+  it had the GPU to itself (run 34672165182).
+
+On Linux the clicks flow needs plumbing the image does not carry yet, and the
+job installs it. Three things, and the third is a bug rather than a dependency:
+
+* `xdg-desktop-portal` with a backend, because the editor's file dialog is
+  rfd's XDG portal backend (rfd 0.17 with default features compiles neither
+  `gtk3` nor `ashpd`), plus `zenity`, which is rfd's own fallback;
+* `at-spi2-core` and `python3-pyatspi`, because AccessKit's Unix adapter
+  publishes egui's widget tree on the accessibility bus. Both are D-Bus
+  activated, so the flow runs under `dbus-run-session`. The adapter publishes
+  **nothing** until `org.a11y.Status` says accessibility is enabled - the flag a
+  screen reader sets - so the harness sets it (`enable_accessibility()` in
+  `scripts/desktop/subdesktop/linux.py`); without it the tree is empty rather
+  than absent, which reads as "the button is not there";
+* `libva-drm2`, `libva2`, `libva-x11-2` and `libvdpau1`, because the v0.1.2
+  **AppImage's `libav`, `va`, `qsv` and `msdk` plugins fail to load without
+  them** - the plugin scanner prints "libva-drm.so.2: cannot open shared object
+  file" and nothing else notices until an import of the baked 4K60 clip answers
+  `media.unsupported` / `MissingPlugins`. Run 34684471869 reproduced it through
+  `media.probe`, with no window involved, and run 34685062551 imported the same
+  clip once the libraries were there. **The package should carry them or not
+  link those plugins against them**; the job supplies them until it does.
+
+Two more things about the Linux desktop image that any test driving it has to
+know:
+
+* **The pointer cannot reach the whole screen.** The virtual screen is
+  1920x1080, but `xdotool mousemove` leaves the pointer at x=448 when asked for
+  anything to the left of that, so a click aimed at the media bin lands in the
+  middle of the viewer instead. The harness measures the reachable rectangle
+  (`LinuxSession.pointer_bounds()`) and maximizes the window into it, which is
+  what turned "the editor takes motion but not clicks" into a working flow
+  (runs 34681396173 and 34681751826).
+* **The dock's tabs are painted, not published.** `Export`, `Inspector` and
+  `Timeline` are nowhere in the accessibility tree, so the export panel's tab is
+  found in the band above the Inspector's own text rather than by name.
+
 ## Self-hosted AMD runner ("box")
 
 AWS no longer offers AMD GPU instances, so AMD Linux verification runs on

@@ -1,0 +1,121 @@
+name: Windows desktop flow
+description: >-
+  Run one scripts/desktop flow inside the Windows desktop image's console
+  session and bring its screenshots, logs and verdict back to the job.
+
+inputs:
+  flow:
+    description: The flow script to run, by file name, e.g. flow_mcp.py.
+    required: true
+  name:
+    description: A short name for the run, used in file names.
+    required: true
+  timeout:
+    description: How long the console session may take, in seconds.
+    default: '1500'
+
+runs:
+  using: composite
+  steps:
+    # The whole point of the desktop image: the job itself is SYSTEM in session
+    # 0, which has no desktop, so nothing below could see a window. A fresh
+    # heartbeat from the helper is the proof the auto-logon happened.
+    - name: The desktop session is up
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1
+        $deadline = (Get-Date).AddMinutes(3)
+        do {
+          $beat = Get-InteractiveHelper
+          if ($beat) { break }
+          Start-Sleep 5
+        } while ((Get-Date) -lt $deadline)
+        if (-not $beat) {
+          cmd /c "query session"
+          throw 'no interactive helper: the auto-logon did not happen'
+        }
+        "helper:  session=$($beat.session) user=$($beat.user) desktop=$($beat.desktop)"
+        if ([int]$beat.session -eq 0) { throw 'the helper is in session 0, which has no desktop' }
+        "this job: session=$((Get-Process -Id $PID).SessionId) as $(whoami)"
+        Get-Content C:\SubordinateTest\image.json
+        & "$env:SystemRoot\System32\nvidia-smi.exe" | Select-Object -First 12
+
+    - name: Stage the harness and the bridge
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $dest = 'C:\SubordinateTest\desktop'
+        Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
+        Copy-Item scripts\desktop $dest -Recurse
+        # The MSI has not always carried the bridge; the hosted job built one.
+        $installed = 'C:\Program Files\Subordinate\bin\subordinate-mcp.exe'
+        if (-not (Test-Path $installed)) {
+          New-Item -ItemType Directory -Force -Path C:\SubordinateTest\bin | Out-Null
+          Copy-Item mcp\subordinate-mcp.exe C:\SubordinateTest\bin\subordinate-mcp.exe -Force
+          'staged subordinate-mcp.exe from the hosted build'
+        }
+        Remove-Item C:\SubordinateTest\flow-out -Recurse -Force -ErrorAction SilentlyContinue
+        Get-ChildItem $dest -Recurse -File | Select-Object FullName, Length |
+          Format-Table -AutoSize | Out-String -Width 200
+
+    - name: Run ${{ inputs.flow }} on the desktop
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1
+        $bridge = 'C:\Program Files\Subordinate\bin\subordinate-mcp.exe'
+        if (-not (Test-Path $bridge)) { $bridge = 'C:\SubordinateTest\bin\subordinate-mcp.exe' }
+        $settings = @{
+          FLOW_OUT        = 'C:\SubordinateTest\flow-out'
+          FLOW_WORK       = 'C:\SubordinateTest\flow-project'
+          FLOW_MEDIA      = (Get-ChildItem C:\SubordinateTest\*.mkv, C:\SubordinateTest\test-media\*.mkv -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          FLOW_EDITOR     = 'C:\Program Files\Subordinate\bin\subordinate.exe'
+          FLOW_CLI        = 'C:\Program Files\Subordinate\bin\subordinate-cli.exe'
+          FLOW_MCP        = $bridge
+          FLOW_DISCOVERER = 'C:\Program Files\Subordinate\bin\gst-discoverer-1.0.exe'
+          FLOW_PRESET     = ($env:FLOW_PRESET ? $env:FLOW_PRESET : 'youtube-1080p')
+          FLOW_ENCODER    = ($env:FLOW_ENCODER ? $env:FLOW_ENCODER : 'nvh264enc')
+          # The Direct3D H.264 decoders stall on the baked 4K60 clip: the
+          # export pipeline starts, plugs d3d11h264dec, writes one frame and
+          # then nothing, with the editor running or closed (runs
+          # 34672165182 and 34673633121). Ranking them out leaves NVDEC
+          # (nvh264dec), which is the decoder this instance's GPU is for.
+          # GStreamer's own knob, so nothing in the application knows.
+          GST_PLUGIN_FEATURE_RANK = 'd3d11h264dec:0,d3d12h264dec:0,d3d11h265dec:0,d3d12h265dec:0'
+        }
+        if (-not $settings.FLOW_MEDIA) { throw 'no test clip under C:\SubordinateTest' }
+        $settings.GetEnumerator() | ForEach-Object { "$($_.Key) = $($_.Value)" }
+        $prefix = "`$FlowScript = 'C:\SubordinateTest\desktop\${{ inputs.flow }}'`r`n" +
+                  "`$FlowEnv = '" + ($settings | ConvertTo-Json -Compress).Replace("'", "''") + "'`r`n"
+        $script = $prefix + (Get-Content C:\SubordinateTest\desktop\windows\run-flow.ps1 -Raw)
+        $result = Invoke-InteractiveScript -Name '${{ inputs.name }}' `
+                    -TimeoutSeconds ${{ inputs.timeout }} -Script $script
+        $result.Output
+        "console session exit=$($result.ExitCode)"
+        if ($result.ExitCode -ne 0) { throw "the ${{ inputs.name }} flow failed (exit $($result.ExitCode))" }
+
+    # Always: a failed flow is exactly the run whose pictures are wanted.
+    - name: Collect the screenshots and the verdict
+      if: always()
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Continue'
+        $out = Join-Path $env:RUNNER_TEMP 'flow-out'
+        New-Item -ItemType Directory -Force -Path $out | Out-Null
+        Copy-Item C:\SubordinateTest\flow-out\* $out -Recurse -Force -ErrorAction SilentlyContinue
+        Get-ChildItem $out -Recurse -File | Format-Table Name, Length -AutoSize | Out-String -Width 200
+        $verdict = Join-Path $out 'result.json'
+        if (Test-Path $verdict) {
+          $summary = Join-Path $out 'summary.md'
+          if (Test-Path $summary) { Get-Content $summary | Add-Content $env:GITHUB_STEP_SUMMARY }
+          $parsed = Get-Content $verdict -Raw | ConvertFrom-Json
+          if ($parsed.state -ne 'passed') {
+            $shot = if ($parsed.screenshot) { $parsed.screenshot } else { '(no screenshot)' }
+            Write-Output ("::error title=${{ inputs.name }} flow: " +
+              "$($parsed.failed_step)::step '$($parsed.failed_step)' failed; " +
+              "screenshot $shot in the windows-${{ inputs.name }}-flow artifact")
+          }
+        } else {
+          Write-Output '::warning::the flow wrote no result.json'
+        }

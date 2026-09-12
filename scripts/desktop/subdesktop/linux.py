@@ -1,0 +1,339 @@
+"""The X11 half of the harness: xdotool for input, scrot for pictures.
+
+Everything here assumes the Linux desktop image (infra/images/linux-desktop):
+Xorg on the NVIDIA driver at `:0`, openbox, and xdotool, xwininfo and scrot on
+PATH. `DISPLAY` and `XAUTHORITY` come from the environment, because a GitHub
+Actions step on that image is started by the RunsOn bootstrap and reads no
+login profile.
+
+Names come from AT-SPI when the accessibility bus is up. egui publishes its
+tree through AccessKit, whose Unix adapter registers on the a11y bus, so a
+session with `at-spi2-core` running can ask for `Import...` by name; one
+without it has no tree at all, and :meth:`LinuxSession.controls` says so rather
+than returning an empty list that would read as "the button is not there".
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import time
+from pathlib import Path
+
+from .session import (
+    Control,
+    DesktopError,
+    Launched,
+    Rect,
+    Session,
+    Window,
+    require,
+    run,
+)
+
+
+class LinuxSession(Session):
+    """A session on an X display."""
+
+    def __init__(self, shots: Path | str = "shots") -> None:
+        super().__init__(shots)
+        self.display = os.environ.get("DISPLAY", ":0")
+        os.environ.setdefault("DISPLAY", self.display)
+        self._xdotool = require("xdotool")
+        self._registry = None
+        self._accessibility = enable_accessibility()
+
+    # ------------------------------------------------------------------ launch
+
+    def launch(
+        self,
+        command: list[str],
+        *,
+        log: Path | str | None = None,
+        cwd: Path | str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> Launched:
+        handle = None
+        if log is not None:
+            log = Path(log)
+            log.parent.mkdir(parents=True, exist_ok=True)
+            handle = log.open("wb")
+        environment = dict(os.environ)
+        environment.update(env or {})
+        process = subprocess.Popen(
+            command,
+            stdout=handle or subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if handle else subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            cwd=str(cwd) if cwd else None,
+            env=environment,
+            # A session of its own, so the editor outlives the step that
+            # started it and a later kill takes the whole group.
+            start_new_session=True,
+        )
+        return Launched(pid=process.pid, log=Path(log) if log else None, popen=process)
+
+    def stop(self, launched: Launched) -> None:
+        try:
+            os.killpg(os.getpgid(launched.pid), 15)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    # ------------------------------------------------------------------- waits
+
+    def wait_for_title(self, pattern: str, *, timeout: float = 120.0) -> Window:
+        deadline = time.monotonic() + timeout
+        while True:
+            found = subprocess.run(
+                [self._xdotool, "search", "--name", pattern],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            ids = [line for line in found.stdout.split() if line.strip()]
+            for window_id in ids:
+                geometry = self._geometry(window_id)
+                if geometry is None:
+                    continue
+                title = subprocess.run(
+                    [self._xdotool, "getwindowname", window_id],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                ).stdout.strip()
+                return Window(handle=window_id, title=title, rect=geometry)
+            if time.monotonic() >= deadline:
+                raise DesktopError(
+                    f"no window matching {pattern!r} on {self.display} within {timeout:g}s"
+                )
+            time.sleep(0.5)
+
+    def _geometry(self, window_id: str) -> Rect | None:
+        shell = subprocess.run(
+            [self._xdotool, "getwindowgeometry", "--shell", window_id],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if shell.returncode != 0:
+            return None
+        values: dict[str, int] = {}
+        for line in shell.stdout.splitlines():
+            key, _, value = line.partition("=")
+            if value.strip().lstrip("-").isdigit():
+                values[key.strip()] = int(value)
+        if {"X", "Y", "WIDTH", "HEIGHT"} <= values.keys():
+            return Rect(values["X"], values["Y"], values["WIDTH"], values["HEIGHT"])
+        return None
+
+    def activate(self, window: Window | str) -> None:
+        """Raise a window and give it the keyboard, so input lands in it."""
+        handle = window.handle if isinstance(window, Window) else window
+        subprocess.run(
+            [self._xdotool, "windowactivate", "--sync", handle], check=False
+        )
+        subprocess.run([self._xdotool, "windowraise", handle], check=False)
+
+    # ---------------------------------------------------------------- controls
+
+    def _at_spi(self):
+        """The AT-SPI registry, or an error saying the bus is not there."""
+        if self._registry is None:
+            try:
+                import pyatspi  # type: ignore
+            except ImportError as error:  # pragma: no cover - depends on the image
+                raise DesktopError(
+                    "python3-pyatspi is not installed, so AccessKit names cannot be "
+                    "read on this display; install at-spi2-core and python3-pyatspi, "
+                    "and start the application on a session bus"
+                ) from error
+            self._registry = pyatspi
+        return self._registry
+
+    def controls(self, *, window: str | None = None) -> list[Control]:
+        pyatspi = self._at_spi()
+        found: list[Control] = []
+        desktop = pyatspi.Registry.getDesktop(0)
+        for application in desktop:
+            if application is None:
+                continue
+            try:
+                name = application.name or ""
+            except Exception:  # noqa: BLE001 - a dead application is skipped
+                continue
+            if window is not None and window not in name:
+                continue
+            _collect(application, found, 0)
+        return found
+
+    # ------------------------------------------------------------------- input
+
+    def click(self, target, *, button: int = 1, double: bool = False) -> tuple[int, int]:
+        """Move, then press and release with a human's pause in between.
+
+        Not `xdotool click`, which moves and clicks in the same instant: egui
+        decides what a press did on the frame it arrives, and a press and
+        release in the same millisecond can be swallowed by a window that is
+        still settling. The pointer is moved first, on its own, so the widget
+        under it is hovered before it is pressed.
+        """
+        x, y = self.point_of(target)
+        for _ in range(2 if double else 1):
+            self.click_free_move(x, y)
+            time.sleep(0.15)
+            run([self._xdotool, "mousedown", str(button)])
+            time.sleep(0.12)
+            run([self._xdotool, "mouseup", str(button)])
+            time.sleep(0.1)
+        time.sleep(0.3)
+        return (x, y)
+
+    def pointer_bounds(self) -> Rect:
+        """Where on this display the pointer can actually be put.
+
+        Not always the whole screen. On the Linux desktop image the virtual
+        screen is 1920x1080, but the pointer is confined to the right-hand part
+        of it: asking for x=102 or x=300 leaves it at x=448 (run 34681396173).
+        A click aimed at a control outside that band therefore lands somewhere
+        else entirely, which is exactly what "the editor takes motion but not
+        clicks" looked like. The bounds are measured rather than assumed, so a
+        display without the quirk gives the whole screen and nothing changes.
+        """
+        run([self._xdotool, "mousemove", "--sync", "0", "0"])
+        left, top = self._pointer()
+        run([self._xdotool, "mousemove", "--sync", "10000", "10000"])
+        right, bottom = self._pointer()
+        return Rect(left, top, max(right - left + 1, 1), max(bottom - top + 1, 1))
+
+    def _pointer(self) -> tuple[int, int]:
+        text = run([self._xdotool, "getmouselocation"])
+        values = dict(
+            part.split(":", 1) for part in text.split() if ":" in part
+        )
+        return int(values.get("x", 0)), int(values.get("y", 0))
+
+    def maximize(self, window: Window) -> Window:
+        """Fill the *pointer's* rectangle, which is not always the screen's."""
+        bounds = self.pointer_bounds()
+        subprocess.run(
+            [
+                self._xdotool,
+                "windowmove",
+                "--sync",
+                window.handle,
+                str(bounds.x),
+                str(bounds.y),
+            ],
+            check=False,
+        )
+        subprocess.run(
+            [
+                self._xdotool,
+                "windowsize",
+                "--sync",
+                window.handle,
+                str(bounds.width),
+                str(bounds.height),
+            ],
+            check=False,
+        )
+        time.sleep(1.0)
+        rect = self._geometry(window.handle) or window.rect
+        return Window(handle=window.handle, title=window.title, rect=rect)
+
+    def click_free_move(self, x: int, y: int) -> None:
+        run([self._xdotool, "mousemove", "--sync", str(x), str(y)])
+        time.sleep(0.05)
+
+    def press(self, x: int, y: int, *, button: int = 1) -> None:
+        self.click_free_move(x, y)
+        run([self._xdotool, "mousedown", str(button)])
+
+    def release(self, x: int, y: int, *, button: int = 1) -> None:
+        self.click_free_move(x, y)
+        run([self._xdotool, "mouseup", str(button)])
+
+    def key(self, keys: str) -> None:
+        run([self._xdotool, "key", "--clearmodifiers", keys])
+        time.sleep(0.2)
+
+    def type_text(self, text: str) -> None:
+        run([self._xdotool, "type", "--clearmodifiers", "--delay", "25", text])
+        time.sleep(0.2)
+
+    # -------------------------------------------------------------- screenshot
+
+    def screenshot(self, name: str) -> Path:
+        path = self.shots / name if not Path(name).is_absolute() else Path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        scrot = require("scrot")
+        run([scrot, "--overwrite", str(path)], timeout=60)
+        return path
+
+
+def enable_accessibility() -> dict:
+    """Tell the accessibility bus that an assistive technology is listening.
+
+    AccessKit's Unix adapter does not publish a tree just because the bus is
+    there: it waits until `org.a11y.Status` says accessibility is enabled, the
+    same signal a screen reader sets when it starts. Without this the a11y bus
+    and the AT-SPI registry come up, the application registers nothing, and the
+    tree reads as empty rather than as absent (run 34673633121). Setting the
+    two properties is what a screen reader would do, and it is harmless where
+    there is no bus at all.
+    """
+    outcome: dict = {}
+    for prop in ("IsEnabled", "ScreenReaderEnabled"):
+        finished = subprocess.run(
+            [
+                "gdbus",
+                "call",
+                "--session",
+                "--dest",
+                "org.a11y.Bus",
+                "--object-path",
+                "/org/a11y/bus",
+                "--method",
+                "org.freedesktop.DBus.Properties.Set",
+                "org.a11y.Status",
+                prop,
+                "<true>",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        outcome[prop] = (
+            "set" if finished.returncode == 0 else finished.stderr.strip()[:120]
+        )
+    return outcome
+
+
+def _collect(node, found: list[Control], depth: int) -> None:
+    """Walk one AT-SPI subtree, keeping every node that has a name and a box."""
+    if depth > 24:
+        return
+    try:
+        children = list(node)
+    except Exception:  # noqa: BLE001 - a node that went away mid-walk
+        children = []
+    try:
+        name = node.name or ""
+        role = node.getRoleName()
+        component = node.queryComponent()
+        import pyatspi  # type: ignore
+
+        box = component.getExtents(pyatspi.DESKTOP_COORDS)
+        if name and box.width > 0 and box.height > 0:
+            found.append(
+                Control(
+                    name=name,
+                    role=role,
+                    rect=Rect(box.x, box.y, box.width, box.height),
+                )
+            )
+    except Exception:  # noqa: BLE001 - nodes without a component are skipped
+        pass
+    for child in children:
+        if child is not None:
+            _collect(child, found, depth + 1)

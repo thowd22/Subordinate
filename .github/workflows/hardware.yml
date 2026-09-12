@@ -25,15 +25,20 @@ name: Hardware verification
 # TASK-116 AC 4 states. build-linux is a free hosted runner and amd-linux is
 # the self-hosted box, so the GPU job is the only money in this workflow.
 #
-# Triggers are deliberately narrow for the same reason: on demand, plus one
-# nightly schedule. Never add `push` or `pull_request` here - the AMD job is
-# free but the NVIDIA job is not, and box is a machine in someone's home (see
-# docs/DEVELOPMENT.md, "Self-hosted AMD runner").
+# Triggers are deliberately narrow for the same reason: on demand, one nightly
+# schedule, and release tags - a release is the one push worth GPU minutes,
+# because it is the build users get (TASK-139 AC 2). Never add a branch `push`
+# or a `pull_request` here - the AMD job is free but the NVIDIA jobs are not,
+# and box is a machine in someone's home (see docs/DEVELOPMENT.md,
+# "Self-hosted AMD runner").
 on:
   workflow_dispatch:
   schedule:
     # 04:30 UTC, once a day. One NVIDIA job a night is about 2.50 USD a month.
     - cron: "30 4 * * *"
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -632,6 +637,22 @@ jobs:
             target/ui-smoke/summary.md
           if-no-files-found: warn
           retention-days: 30
+
+  # The two desktop flows (TASK-139): the MCP-only one and the clicks-only one,
+  # on both desktop images. They are a workflow of their own because they are
+  # four jobs with their own runners and their own cost note, and they are
+  # called from here so that "the nightly hardware run" is one thing to look
+  # at and a release tag exercises them too.
+  #
+  # `needs: nvidia-linux` is a quota interlock, not a dependency: the account's
+  # G-family quota is 8 vCPU - exactly two g4dn.xlarge - and desktop-flows
+  # itself already runs two at a time, so it must not start while the hardware
+  # job still holds one. `always()` so it still runs when that job failed.
+  desktop-flows:
+    name: Desktop flows
+    needs: nvidia-linux
+    if: always()
+    uses: ./.github/workflows/desktop-flows.yml
 
   # ----------------------------------------------------------------------
   # Windows jobs: deliberately absent, not forgotten (TASK-116 AC 1).
