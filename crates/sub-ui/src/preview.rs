@@ -344,6 +344,32 @@ impl ClipPreview {
         }
     }
 
+    /// Whether polling this clip again can still bring a better picture.
+    ///
+    /// This, not [`Self::on_target`], is what the window waits on. Off target
+    /// is not the same thing as *pending*: a worker that has hit the end of
+    /// the file, and one that has already stepped past the frame that was
+    /// asked for, will never deliver that frame however many times they are
+    /// polled. Waiting on those is an unbounded repaint loop — a core burnt in
+    /// the real window, and a harness that never stops painting in a test —
+    /// so what is on screen is taken as the best this clip will show until
+    /// the playhead moves and a fresh seek is posted.
+    const fn pending(&self) -> bool {
+        if self.on_target() {
+            return false;
+        }
+        if self.eos {
+            return false;
+        }
+        match (self.wanted, self.current_frame) {
+            // The decoder walks forwards; a picture past the wanted one only
+            // comes back by seeking, which the next `request` does.
+            (Some(wanted), Some(current)) => current < wanted,
+            // Nothing delivered yet: the ring is still filling.
+            _ => true,
+        }
+    }
+
     /// Uploads the current picture if it is not already on the GPU, and hands
     /// back the view to sample.
     ///
@@ -529,14 +555,17 @@ impl PreviewService {
         self.playing = playing;
     }
 
-    /// Whether the last pass had the picture every layer under the playhead
-    /// wanted.
+    /// Whether the last pass left nothing worth waiting for.
     ///
-    /// False while a decoder is opening, while a seek is still in flight, and
-    /// for a layer whose file is offline. A caller with no pointer — a test,
-    /// or a host asked to photograph the window — waits on this rather than on
-    /// a sleep, and a window that is settled is one showing the frame it is
-    /// on.
+    /// False while a decoder is opening for a clip under the playhead and
+    /// while a seek or a ring is still on its way to the frame that was asked
+    /// for. True as soon as every layer is showing the best picture it will
+    /// ever show at this playhead: the frame it was asked for, or — for a
+    /// clip whose file has run out, whose media is offline and for one whose
+    /// decoder would not open — nothing more to come. A caller with no
+    /// pointer — a test, or a host asked to photograph the window — waits on
+    /// this rather than on a sleep, and anything that waited on the strict
+    /// reading instead would wait forever on a file that cannot answer.
     #[must_use]
     pub const fn settled(&self) -> bool {
         self.settled
@@ -648,6 +677,8 @@ impl PreviewService {
             };
             if !preview.on_target() {
                 self.late = self.late.saturating_add(1);
+            }
+            if preview.pending() {
                 self.settled = false;
                 out.busy = true;
             }
@@ -660,10 +691,10 @@ impl PreviewService {
                     }
                     out.frames.insert(clip, frame);
                 }
-                Ok(None) => {
-                    self.settled = false;
-                    out.busy = true;
-                }
+                // No picture to upload yet. Whether that is worth another
+                // frame is `pending`'s answer above, not this one's: a clip
+                // whose file has run out has no picture and never will.
+                Ok(None) => {}
                 Err(error) => {
                     log::warn!(
                         "the preview could not upload a picture: [{}] {}",
@@ -681,10 +712,14 @@ impl PreviewService {
             }
         }
 
+        // Only a decoder this pass asked for is worth repainting on: a slot
+        // still opening for a clip the playhead has left contributes no layer
+        // whenever it lands, so waiting on it would be a repaint loop with
+        // nothing on the other end of it.
         out.busy |= self
             .clips
             .values()
-            .any(|slot| matches!(slot, ClipSlot::Opening { .. }));
+            .any(|slot| matches!(slot, ClipSlot::Opening { last_seen, .. } if *last_seen == pass));
         self.showing = out.frames.len();
         self.evict(pass);
         out

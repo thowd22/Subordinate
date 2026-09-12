@@ -210,7 +210,7 @@ fn the_window_exports_the_sample_project_to_a_playable_file() {
         return;
     };
     let mut harness = app_harness(&path);
-    harness.run();
+    support::run_settled(&mut harness);
     let project = harness.state().project().clone();
     if !can_encode(sequence_of(&project)) {
         return;
@@ -304,7 +304,7 @@ fn an_unsaved_project_says_why_it_cannot_be_exported() {
         .build_eframe(|cc| {
             SubordinateApp::new(cc, AppOptions::default()).expect("the editor starts")
         });
-    harness.run();
+    support::run_settled(&mut harness);
     assert_eq!(
         harness.state_mut().export_panel().unavailable(),
         Some(sub_ui::app::NO_RENDERER_REASON),

@@ -1349,6 +1349,15 @@ impl SubordinateApp {
             // egui, so a preview that is still catching up asks for the next
             // frame itself. This is the only thing that waits on decode, and
             // it waits by painting again rather than by blocking.
+            //
+            // `busy` is decode that can still make progress — a decoder
+            // opening for a clip under the playhead, or a ring that has yet
+            // to deliver the frame asked for. A clip already showing the
+            // frame the playhead is on, one whose file has run out, and one
+            // whose media is offline are all *not* busy, so a settled window
+            // asks for nothing and idles at zero. `request_repaint_after`
+            // rather than `request_repaint` keeps even the catching-up case a
+            // poll on a timer instead of a spin on a core.
             ctx.request_repaint_after(PREVIEW_POLL_INTERVAL);
         }
         if self.needs_composite || pictures.changed() {

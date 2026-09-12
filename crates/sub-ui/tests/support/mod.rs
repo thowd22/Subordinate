@@ -31,10 +31,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui_kittest::{Harness, HarnessBuilder};
 use sub_model::{Project, Sequence};
+use sub_ui::SubordinateApp;
 
 /// The size every panel is painted at, in logical points.
 ///
@@ -141,4 +143,57 @@ pub fn panel_harness_state<'a, State>(
 /// next to it. Re-record with `UPDATE_SNAPSHOTS=1 cargo test -p sub-ui`.
 pub fn snapshot<State>(harness: &mut Harness<'_, State>, name: &str) {
     harness.snapshot(name);
+}
+
+/// How long [`run_settled`] waits for the preview decoders to catch up.
+///
+/// Opening a decoder means building a PTS index and starting a pipeline on a
+/// worker, which is tens of milliseconds on a warm machine and seconds on a
+/// cold CI runner decoding in software.
+pub const PREVIEW_PATIENCE: Duration = Duration::from_secs(45);
+
+/// Paints the assembled editor until its preview has settled, then runs it to
+/// a stop.
+///
+/// `Harness::run` on its own is the wrong tool for the whole window. While a
+/// preview decoder is opening, or a picture for the frame the playhead is on
+/// is still on its way, the window asks for the next frame itself (see
+/// `PREVIEW_POLL_INTERVAL` in `sub_ui::app`) — and `run` refuses to paint more
+/// than a handful of frames of a UI that keeps asking, which is the
+/// `exceeded max_steps` panic.
+///
+/// So this waits the way `viewer_decode` and `media_import_app` wait: a
+/// bounded loop of real painted frames until
+/// [`sub_ui::preview::PreviewService::settled`] says every layer under the
+/// playhead is showing the frame it is on, and only then lets the layout come
+/// to rest. A window over a project with no media settles on its first frame,
+/// so this is `run` with a wait in front of it.
+///
+/// # Panics
+///
+/// Panics when the preview has not settled within [`PREVIEW_PATIENCE`],
+/// reporting what it was still waiting for.
+pub fn run_settled(harness: &mut Harness<'_, SubordinateApp>) {
+    let deadline = Instant::now() + PREVIEW_PATIENCE;
+    loop {
+        harness.step();
+        if harness.state().previews().settled() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the preview did not settle within {PREVIEW_PATIENCE:?}: {:?}, failures {:?}",
+            harness.state().previews().stats(),
+            harness.state().previews().failures(),
+        );
+        // A painted frame costs the harness no wall time and the decoders are
+        // on workers of their own, so without this the loop would spend its
+        // whole budget before a worker had been scheduled once. The window
+        // itself never sleeps: it asks for a repaint and returns.
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Settled, so nothing here is asking for another frame on the preview's
+    // account; `run_ok` lets whatever else is animating finish without turning
+    // a slow runner into a failure.
+    let _ = harness.run_ok();
 }
