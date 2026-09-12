@@ -97,6 +97,11 @@ Options:
   --fixtures DIR    read the fixtures from DIR instead of the usual location
   --software        keep hardware decoders out of the measurement
   --no-gpu          measure decode alone, with no texture upload
+  --legacy-scrub    measure the seek path as it was before TASK-133: no cache
+                    of the pictures a step decoded, and no allowance for what
+                    a flush costs when a step chooses between decoding on and
+                    seeking. This is how a before-and-after is taken on a
+                    machine without rebuilding anything.
   --sync            measure A/V sync and drift over the long fixture instead
                     (default report: target/bench/av-sync.json); exits
                     non-zero when the picture drifts a whole frame or more
@@ -222,6 +227,7 @@ fn scan(args: &[String]) -> SubResult<Parsed> {
             }
             "--software" => parsed.options.hardware = HardwarePreference::Software,
             "--no-gpu" => parsed.options.use_gpu = false,
+            "--legacy-scrub" => parsed.options.legacy_scrub = true,
             "--sync" => parsed.mode = one_mode(parsed.mode, Mode::Sync)?,
             "--proxy" => parsed.mode = one_mode(parsed.mode, Mode::Proxy)?,
             "--seconds" => parsed.seconds = Some(count(args, &mut index, arg)?),

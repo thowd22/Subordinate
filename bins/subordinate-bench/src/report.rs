@@ -19,8 +19,15 @@ pub const REPORT_VERSION: u32 = 1;
 pub enum ScenarioKind {
     /// Sequential decode of consecutive frames, as playback does.
     Playback,
-    /// Repeated seeks across the whole file, as dragging the scrub bar does.
+    /// Repeated seeks across the whole file: the worst case for the seek
+    /// path, where every step lands in a GOP the decoder is not in and a
+    /// flushing seek is unavoidable.
     Scrub,
+    /// The playhead dragged across the clip a picture at a time, with the
+    /// small back-and-forth a hand makes. This is what scrubbing actually
+    /// costs once the decoder stops flushing for a step it could decode
+    /// forward to and keeps what it has already decoded (TASK-133).
+    ScrubDrag,
 }
 
 impl ScenarioKind {
@@ -29,6 +36,7 @@ impl ScenarioKind {
         match self {
             Self::Playback => "playback",
             Self::Scrub => "scrub",
+            Self::ScrubDrag => "scrub_drag",
         }
     }
 }
@@ -116,6 +124,11 @@ pub struct Scenario {
     /// `frames` means some steps were reached by decoding forward.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seeks_issued: Option<u64>,
+    /// Scrub only: steps answered out of the decoder's picture cache, which
+    /// neither seeked nor decoded. This is the backward half of a drag
+    /// (TASK-133).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hits: Option<u64>,
     /// Frames per second sustained across the whole run, in milli-fps.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sustained_milli_fps: Option<u64>,
@@ -150,6 +163,7 @@ impl Scenario {
             decode_forward: None,
             frames_decoded: None,
             seeks_issued: None,
+            cache_hits: None,
             sustained_milli_fps: None,
             stall_threshold_nanos: None,
             stalls: None,
@@ -207,16 +221,28 @@ impl Scenario {
         let (Some(seek), Some(forward)) = (self.seek, self.decode_forward) else {
             return String::new();
         };
+        let steps = self.frames.max(1);
         format!(
-            "  seek p50 {}  fwd p50 {}  {} frames/seek",
+            "  seek p50 {}  fwd p50 {}  {} pics/step  {} seeks/step  {} cached",
             format_millis(seek.p50_nanos),
             format_millis(forward.p50_nanos),
-            match (self.frames_decoded, self.seeks_issued) {
-                (Some(frames), Some(seeks)) if seeks > 0 => (frames / seeks).to_string(),
-                _ => "n/a".to_owned(),
-            }
+            per_step(self.frames_decoded, steps),
+            per_step(self.seeks_issued, steps),
+            self.cache_hits.unwrap_or(0),
         )
     }
+}
+
+/// A per-step count with two decimals, as the summary prints it: the whole
+/// point of the scrub numbers is how many pictures and how many seeks one step
+/// costs, and that is rarely a whole number. The hundredths are integer
+/// arithmetic; nothing here is a float.
+fn per_step(total: Option<u64>, steps: u64) -> String {
+    let Some(total) = total else {
+        return "n/a".to_owned();
+    };
+    let hundredths = total.saturating_mul(100) / steps.max(1);
+    format!("{}.{:02}", hundredths / 100, hundredths % 100)
 }
 
 /// What the A/V sync and drift harness measured (or why it could not run).

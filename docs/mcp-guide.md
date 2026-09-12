@@ -100,7 +100,8 @@ cargo build --release -p subordinate-mcp
 ```
 
 Point `command` at an installed binary if the editor is not being built from
-this checkout. The environment the bridge reads:
+this checkout — every package ships the bridge, and the next section gives the
+entry for each. The environment the bridge reads:
 
 | Variable | What it does |
 | --- | --- |
@@ -118,6 +119,74 @@ To drive a project that is not the one a running editor has open, or to keep a
 run off a user's own instance, give the bridge an instance of its own: set
 `SUBORDINATE_INSTANCE` to a scratch name and `SUBORDINATE_ENDPOINT_DIR` to a
 scratch directory, and let it launch its own headless server.
+
+### Pointing `.mcp.json` at an installed package
+
+Nobody should have to build the bridge to use the editor they installed, so
+every package carries it, beside the editor and the CLI. Which matters twice:
+the bridge is what an agent talks to, and — when no editor is running — the
+`subordinate-cli` it finds next to itself is the engine it then drives. So the
+three entries below need nothing configured but a path.
+
+**Windows (MSI).** Installed as `subordinate-mcp.exe` in the install tree's
+`bin`, beside `subordinate.exe`:
+
+```json
+{
+  "mcpServers": {
+    "subordinate": {
+      "type": "stdio",
+      "command": "C:\\Program Files\\Subordinate\\bin\\subordinate-mcp.exe",
+      "args": []
+    }
+  }
+}
+```
+
+**Linux (AppImage).** There is no installed path to name — the bundle mounts
+somewhere different every run — so the AppImage itself is the command, and
+`--mcp` runs the bridge inside it instead of the editor. That is also what
+gives the bridge the bundle's GStreamer environment, which the engine it
+launches needs:
+
+```json
+{
+  "mcpServers": {
+    "subordinate": {
+      "type": "stdio",
+      "command": "/home/you/Applications/Subordinate-0.1.2-x86_64.AppImage",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+**Linux (Flatpak).** The bridge is `/app/bin/subordinate-mcp` inside the
+sandbox, reached the way any non-default binary in a Flatpak is. Give it
+`--filesystem` for wherever the projects and media live, since the sandbox sees
+nothing else:
+
+```json
+{
+  "mcpServers": {
+    "subordinate": {
+      "type": "stdio",
+      "command": "flatpak",
+      "args": [
+        "run",
+        "--command=subordinate-mcp",
+        "--filesystem=home",
+        "io.github.thowd22.Subordinate"
+      ]
+    }
+  }
+}
+```
+
+Each of these is exercised on a machine that has never built the project by the
+MCP stage of `scripts/fresh-install-check.sh` and its PowerShell twin, which
+`.github/workflows/fresh-install.yml` runs against the packages a release
+publishes.
 
 ## Conventions an agent must follow
 

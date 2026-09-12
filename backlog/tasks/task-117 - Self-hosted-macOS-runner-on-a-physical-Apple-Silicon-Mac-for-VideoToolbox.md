@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-09 17:29'
-updated_date: '2026-09-11 20:31'
+updated_date: '2026-09-12 04:07'
 labels:
   - infra
   - gpu
@@ -14,7 +14,7 @@ labels:
 milestone: m-8
 dependencies:
   - TASK-116
-priority: low
+priority: medium
 ordinal: 137000
 ---
 
@@ -39,4 +39,6 @@ Every hosted macOS VM (GitHub arm64 runners, Tart-based providers) exposes Metal
 2026-09-09: user ruled out cloud Macs on cost. Blocked until a personal Apple Silicon Mac is available; agents must not provision EC2 mac instances.
 
 2026-09-10: user has bid on an M1 Mac mini (eBay). Back-burnered until it arrives; when it does, register it as a self-hosted runner the same way as box (see docs/DEVELOPMENT.md), label macos-vt, then wire the VideoToolbox job. M1 supports VideoToolbox H.264 and HEVC hardware encode.
+
+2026-09-12: the user bought the M1 Mac mini (about 400 USD). When it arrives: install Homebrew, GStreamer 1.28 (brew), Rust 1.93.1, register a self-hosted runner labelled self-hosted,macos,arm64,macmini,videotoolbox as a launchd agent in the user's session (same shape as box and yodaddy), verify vtenc_h264_hw with a hardware encode round-trip, then add the VideoToolbox job to hardware.yml and the macOS jobs to export-matrix.yml and the desktop flows; TASK-105 (dmg) and TASK-66's VideoToolbox half unblock after that.
 <!-- SECTION:NOTES:END -->

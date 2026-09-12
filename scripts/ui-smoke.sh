@@ -33,7 +33,14 @@ set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 out_dir="$repo_root/target/ui-smoke"
 binary=""
-project="$repo_root/crates/sub-model/tests/fixtures/sample-project.sub"
+# The demo project when its media has been fetched, and the committed fixture
+# otherwise. The fixture names footage nothing generates, so a window opened on
+# it has nothing to decode and photographs a black viewer; the demo project's
+# three CC0 clips are what make the screenshot show a picture (TASK-144).
+# `scripts/get-sample-media.sh` puts them there, which CI runs before this.
+project=""
+demo_project="$repo_root/examples/sample-project/demo.sub"
+fixture_project="$repo_root/crates/sub-model/tests/fixtures/sample-project.sub"
 display_number=99
 # Wide enough that halving one screen still leaves each monitor bigger than
 # the editor's minimum window, which is what the fallback below does when the
@@ -49,6 +56,10 @@ force_software=1
 # Empty means "photograph it and say where it landed"; a head index means
 # "fail the run if the pop-out is not on that head".
 require_popout_head=""
+# Whether a black viewer is a failure. Off by default, because a run pointed at
+# a project whose media is not on this machine has nothing to show; CI turns it
+# on for the run that fetched the media.
+require_picture=0
 
 
 usage() {
@@ -56,7 +67,9 @@ usage() {
 Usage: scripts/ui-smoke.sh [options]
 
   --binary PATH       the subordinate executable (default: cargo run)
-  --project PATH      project to open (default: the committed sample project)
+  --project PATH      project to open (default: the demo project when its
+                      media has been fetched, else the committed fixture)
+  --require-picture   fail unless the viewer composited a decoded picture
   --out DIR           where to write screenshots and the log
   --display N         X display number for Xvfb (default: 99)
   --screen WxHxD      geometry of each of the two screens
@@ -79,6 +92,7 @@ while [ $# -gt 0 ]; do
     --hold) hold_seconds=${2:?--hold needs seconds}; shift 2 ;;
     --timeout) ready_timeout=${2:?--timeout needs seconds}; shift 2 ;;
     --gpu) force_software=0; shift ;;
+    --require-picture) require_picture=1; shift ;;
     --require-popout-on-head)
         require_popout_head=${2:?--require-popout-on-head needs a head index}; shift 2 ;;
     -h | --help) usage; exit 0 ;;
@@ -104,6 +118,15 @@ else
     exit 1
 fi
 
+if [ -z "$project" ]; then
+    if [ -f "$demo_project" ] && [ -d "$repo_root/examples/sample-project/media" ]; then
+        project=$demo_project
+        echo "ui-smoke: opening the demo project; its media is on this machine"
+    else
+        project=$fixture_project
+        echo "ui-smoke: the demo project's media is not here (run scripts/get-sample-media.sh); opening the committed fixture, whose viewer has nothing to decode"
+    fi
+fi
 [ -f "$project" ] || {
     echo "ui-smoke: no project at $project" >&2
     exit 1
@@ -346,6 +369,25 @@ case "$ready_line" in
     exit 1
     ;;
 esac
+# What the viewer is actually showing. `picture=N` is how many layers the
+# compositor had a decoded picture for and `canvas=lit` says the canvas it drew
+# is not black. The window holds its ready line until its decoders have landed,
+# so this reads the picture that was photographed rather than one that arrived
+# afterwards (TASK-144).
+picture_count=$(printf '%s\n' "$ready_line" | sed -n 's/.*picture=\([0-9]*\).*/\1/p')
+canvas_state=$(printf '%s\n' "$ready_line" | sed -n 's/.*canvas=\([a-z]*\).*/\1/p')
+echo "ui-smoke: viewer showing ${picture_count:-?} decoded layer(s), canvas ${canvas_state:-?}"
+if [ "$require_picture" -eq 1 ]; then
+    if ! [ "${picture_count:-0}" -ge 1 ] 2>/dev/null; then
+        echo "ui-smoke: the viewer composited no decoded picture; the screenshot would be a black canvas" >&2
+        exit 1
+    fi
+    if [ "${canvas_state:-black}" != "lit" ]; then
+        echo "ui-smoke: the compositor's canvas is black" >&2
+        exit 1
+    fi
+    echo "ui-smoke: the viewer is showing real decoded picture"
+fi
 
 # Where the two windows actually are, read back off the server rather than
 # inferred from the position the app was asked for. Without a window manager
@@ -481,6 +523,10 @@ app_pid=""
     echo "| Subordinate viewer (pop-out) | ${popout_geom:-not found} | ${popout_head:-unknown} |"
     echo
     echo "Head 0 is the editor window, head 1 the pop-out viewer."
+    echo
+    echo "Project: \`$project\`"
+    echo
+    echo "The viewer composited ${picture_count:-?} decoded layer(s); its canvas is ${canvas_state:-unknown}."
     if [ -s "$out_dir/monitors.txt" ]; then
         echo
         echo "Outputs the X server reports:"

@@ -152,7 +152,10 @@ for var in GST_PLUGIN_SYSTEM_PATH_1_0 GST_PLUGIN_SCANNER GST_REGISTRY LD_LIBRARY
     grep -q "export .*$var" "$apprun" || fail "AppRun does not export $var"
 done
 grep -q 'exec "\$here/usr/bin/subordinate"' "$apprun" || fail "AppRun does not exec the editor"
-pass "AppRun exports the GStreamer environment"
+# `--mcp` is the command an agent's .mcp.json names for this package (TASK-142);
+# without it the bundled bridge is unreachable from outside the bundle.
+grep -q 'usr/bin/subordinate-mcp' "$apprun" || fail "AppRun has no --mcp entry point"
+pass "AppRun exports the GStreamer environment and runs the MCP bridge"
 
 # --- flatpak manifest -------------------------------------------------------
 if python3 -c 'import yaml' 2>/dev/null; then
@@ -210,6 +213,14 @@ else:
     for needed in ("subordinate.desktop", f"{app_id}.metainfo.xml", "subordinate.svg"):
         if needed not in commands:
             problems.append(f"build-commands never install {needed}")
+    # The CLI and the MCP bridge are part of the package, not extras: an agent
+    # reaches the bridge with `flatpak run --command=subordinate-mcp`, and with
+    # no editor running the bridge launches the CLI beside it (TASK-142).
+    for binary in ("subordinate-cli", "subordinate-mcp"):
+        if f"/app/bin/{binary}" not in commands:
+            problems.append(f"build-commands never install /app/bin/{binary}")
+        if f"-p {binary}" not in commands:
+            problems.append(f"build-commands never build {binary}")
     # Every file the manifest installs has to exist in the tree it copies.
     for token in commands.split():
         if token.startswith("packaging/") and not os.path.exists(
@@ -235,6 +246,10 @@ fi
 if [ -n "$appdir" ]; then
     [ -x "$appdir/AppRun" ] || fail "staged AppDir has no executable AppRun"
     [ -x "$appdir/usr/bin/subordinate" ] || fail "staged AppDir has no subordinate binary"
+    [ -x "$appdir/usr/bin/subordinate-mcp" ] ||
+        fail "staged AppDir has no subordinate-mcp binary (the package must carry the MCP bridge)"
+    [ -x "$appdir/usr/bin/subordinate-cli" ] ||
+        fail "staged AppDir has no subordinate-cli binary (the MCP bridge falls back to it)"
     [ -f "$appdir/usr/share/applications/$app_id.desktop" ] ||
         fail "staged AppDir has no desktop entry"
     [ -f "$appdir/usr/share/metainfo/$app_id.metainfo.xml" ] ||

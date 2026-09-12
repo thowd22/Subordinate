@@ -7,23 +7,41 @@ it measured, on what, and how to reproduce it.
 
 ## What the harness measures
 
-Two scenarios per fixture, both driving the production paths
+Three scenarios per fixture, all driving the production paths
 (`sub_media::Decoder` and `sub_render::Nv12Converter`, the same NV12 upload and
 YUV-to-RGB pass the viewer uses):
 
 | Scenario | What one step is |
 | --- | --- |
 | `playback` | `next_frame`, then upload and convert, waited to GPU completion |
-| `scrub` | `seek_to` a fresh position, then the same upload |
+| `scrub_drag` | `seek_to` the next picture of a dragged playhead, then the same upload |
+| `scrub` | `seek_to` a fresh position across the file, then the same upload |
 
-Scrub targets alternate between the head and the tail of the clip and work
-inward, so a run covers the whole file and every step is a real seek rather
-than the decode-forward playback gets for free. The scrub decoder is driven by
-a `PtsIndex` of the fixture, built before anything is timed, because that is how
-the viewer scrubs: the index says which keyframe a target needs, so a step never
-flushes the pipeline for a target inside the GOP the decoder is already in, and
-a step that must seek aims at the keyframe itself instead of at wherever the
-demuxer's snap falls.
+`scrub_drag` is the scrub the exit criterion is about: a hand moving a
+playhead, which walks forward a few pictures at a time and steps back every
+few moves. `scrub` is the worst case the seek path has, and it is deliberately
+not what a hand does: its targets alternate between the head and the tail of
+the clip and work inward, so every step lands in a GOP the decoder is not in
+and a flushing seek is unavoidable. Both are reported; the criterion is read
+off the drag, and the jump scrub is what says whether the seek itself is
+getting cheaper.
+
+Both scrub decoders are driven by a `PtsIndex` of the fixture, built before
+anything is timed, because that is how the viewer scrubs: the index is what
+can say where the pictures are without decoding them, and every cheap path
+below depends on it.
+
+Since TASK-144 that last sentence is literal rather than aspirational. The
+editor's preview (`sub_ui::preview::PreviewService`) opens one decoder per clip
+under the playhead, calls `Decoder::set_index` on it with a `PtsIndex` built off
+the UI thread, and moves it with `Decoder::seek_to` for every scrub step — then
+uploads the picture through one `Nv12Converter` kept per clip, which is exactly
+what the harness's `Uploader` does. So `scrub_drag` and a hand on the scrub bar
+are the same code stage for stage, and a change to the seek planner or the GOP
+cache moves both. Playback is the one deliberate difference: there the preview
+takes a forward step out of the `DecodeAhead` ring rather than seeking for it,
+because a seek would throw the decode-ahead away, which is what the `playback`
+scenario measures instead.
 
 Two numbers come out of each scenario:
 
@@ -41,18 +59,26 @@ a scrub step answer to different fixes (TASK-133):
   forward.
 * **`decode_forward`** — the pictures delivered between there and the frame that
   was actually asked for.
-* **`frames_decoded`** and **`seeks_issued`** — pictures delivered and flushes
-  issued across the timed steps. `frames_decoded / frames` is how many pictures
-  a step handed back, and it is the number to watch: every picture over one is a
-  picture converted, downloaded and copied only to be thrown away.
+* **`frames_decoded`**, **`seeks_issued`** and **`cache_hits`** — pictures
+  delivered, flushes issued and steps answered out of the decoder's picture
+  cache across the timed steps. Divided by `frames` the first two are what a
+  step costs, and they are the numbers to watch: a drag should be near one
+  picture and near zero seeks a step, and every picture over one is a picture
+  decoded, converted, downloaded and copied only to be thrown away.
 
 The summary line prints the split, so a workflow log shows it without opening
 the JSON:
 
 ```
-scrub  bars_2160p_h264.mp4  3840x2160  20 frames  11.712 fps  p50 84.872 ms \
-  p95 139.836 ms  seek p50 39.610 ms  fwd p50 46.581 ms  13 frames/seek
+scrub_drag bars_2160p_h264.mp4  3840x2160  20 frames  130.863 fps  p50 7.156 ms \
+  p95 13.549 ms  seek p50 0.000 ms  fwd p50 5.810 ms  1.55 pics/step \
+  0.05 seeks/step  8 cached
 ```
+
+`--legacy-scrub` measures the seek path as it was before TASK-133 — no cache of
+the pictures a step decoded, and no allowance for what a flush costs when a
+step chooses between decoding on and seeking — so a before-and-after can be
+taken on one machine, and on a runner, without rebuilding anything.
 
 Every duration in the JSON report is an exact nanosecond count and every rate
 is in milli-frames per second (`30_500` is 30.5 fps): no timing value is ever
@@ -168,15 +194,116 @@ the keyframe *after* the one the target needed and a second, blindly aimed seek
 had to recover the frame. That took the pictures decoded over the 20-step 4K
 scrub from 302 to 240 and removed the retry seeks.
 
-**4K scrub is still short of the criterion.** 18.4 fps with software decode on
-this machine, against ">30 fps" on hardware decode, and what is left is the
-flush: 47 ms of the 52 ms step at 4K is the seek and the reference chain it has
-to decode before the first picture of the new position exists. Cutting that
-needs a step to stop decoding that chain at all — a per-GOP cache of the
-pictures a step already decoded, so a step inside the GOP the last one landed in
-is a cache hit rather than a flush; keyframe-only decode while the playhead is
-moving, with the accurate frame drawn when it stops; or proxies. Those are the
-follow-ups.
+**4K scrub was still short of the criterion after that pass.** 18.4 fps with
+software decode on this machine, against ">30 fps" on hardware decode, and what
+was left was the flush: 47 ms of the 52 ms step at 4K was the seek and the
+reference chain it had to decode before the first picture of the new position
+existed. The hardware runs said the same thing from two directions — on the T4
+with `nvh264dec` the seek alone was 86.3 ms of a step (run 34640251740), while
+on the box APU with `vah264dec` a step still decoded 14.2 pictures (run
+34635562025) — and both are the same mistake: a step flushing the pipeline back
+to a keyframe for a picture the decoder had already passed, or had just handed
+out.
+
+## Not seeking at all: what a drag costs
+
+The pass that followed (TASK-133 again) stopped the step from flushing rather
+than making the flush cheaper. Two changes, both of which need the `PtsIndex`:
+
+* **The decoder keeps what it decodes.** Every picture a `seek_to` step pulls
+  goes into a byte-budgeted `FrameCache` belonging to that decoder
+  (`DecoderOptions::gop_cache_bytes`, 64 MiB by default — five 4K pictures or
+  twenty-two at 1080p). A step whose target the index resolves to a cached
+  timestamp is handed that picture: no seek, no decode, and the pipeline left
+  where it was, so the next forward step still decodes on instead of rewinding
+  to it. `VideoFrame::try_clone` is what makes it free — a second read-only
+  mapping of the same GStreamer buffer, never a copy of the pixels.
+* **The no-seek rule is "cheaper than seeking", not "inside this GOP".** With
+  an index both ways of reaching a target can be priced in pictures: decoding
+  on costs the pictures between here and the target, and seeking costs the
+  pictures from the target's keyframe to it — the decoder cannot start anywhere
+  else — plus the flush, which `DecoderOptions::forward_decode_slack` prices at
+  twelve pictures. The old rule is that comparison with the slack set to zero.
+
+Playback is untouched: only `seek_to` fills or reads the cache, a decoder with
+no index keeps nothing, and `next_frame` and `DecodeAhead` are as they were.
+
+Measured on the same WSL2 machine, release, software decode, `--no-gpu
+--seeks 20`, before and after (`--legacy-scrub` against the default):
+
+| Fixture | Scenario | sustained before | after | pictures/step | seeks/step |
+| --- | --- | --- | --- | --- | --- |
+| `bars_1080p_h264.mp4` | `scrub_drag` | 82.6 fps | **314.3 fps** | 2.65 → 1.55 | 0.35 → 0.05 |
+| `bars_2160p_h264.mp4` | `scrub_drag` | 33.9 fps | **137.6 fps** | 2.60 → 1.55 | 0.40 → 0.05 |
+| `bars_2160p_h264.mp4` | `scrub` | 18.0 fps | 17.9 fps | 3.00 | 0.90 |
+
+Repeats agree — the 4K drag measured 29.9 to 33.9 fps before and 130.7 to
+137.6 fps after across runs — so the change is far outside this machine's
+run-to-run spread. Of the 20 timed drag steps, 8 are answered from the cache
+and one seeks, on both fixtures.
+
+The drag's warm-up deliberately runs across the *head* of the clip while the
+timed steps start two fifths of the way in: a warm-up over the same ground
+would leave the pictures the first timed steps ask for sitting in the cache and
+count as hits they did not earn. It is worth about 500 fps of flattery at
+1080p, which is why it is not done that way.
+
+The jump scrub does not move, and should not: every one of its steps lands in
+a GOP the decoder is not in, which is a flush whatever the planner knows. That
+is the measurement to watch if the flush itself is ever made cheaper; the drag
+is the one the criterion is stated against.
+
+Frame accuracy is the constraint the whole thing is shaped by, and it is
+unchanged: `seek_fixtures` judges every seek by its burnt-in timecode and by
+the whole picture, and `index_fixtures` now also walks a drag over a GOP and
+compares every picture the cache hands back against the same file decoded from
+the start.
+
+### On the Linux CI benchmark
+
+CI runs the harness twice on Linux for the same reason — as shipped, and with
+`--legacy-scrub` — so the software half of the criterion has a before-and-after
+on the machine it is stated against rather than on a developer's laptop. Run
+34673843404, debug build, no GPU but Mesa's lavapipe:
+
+| Fixture | Scenario | before | after |
+| --- | --- | --- | --- |
+| `bars_1080p_h264.mp4` | `scrub_drag` | 22.6 fps | **42.9 fps** |
+| `bars_2160p_h264.mp4` | `scrub_drag` | 8.3 fps | **13.6 fps** |
+| `bars_2160p_h264.mp4` | `scrub` (jump) | 5.3 fps | 4.8 fps |
+
+Debug numbers, and every one of them an upper bound on nothing but itself — but
+the shape is the same, and the ceiling is visible in it: 4K playback on that
+runner is 14.3 fps, so the 13.6 fps drag is within 5% of what the machine can
+decode and upload at all. What is left of a drag step there is the lavapipe
+upload (decode-forward p50 is 0.044 ms), not the seek path.
+
+### On hardware: the criterion, met
+
+Run 34673268738 of the `Hardware verification` workflow, both passes on the
+same binary and the same machine, harness defaults (30 steps, GPU upload
+included):
+
+| Machine | Decoder | Fixture | before | after | pictures/step | seeks/step |
+| --- | --- | --- | --- | --- | --- | --- |
+| T4 (g4dn.xlarge) | `nvh264dec` | `bars_2160p` drag | 23.4 fps | **101.0 fps** | 2.60 → 1.36 | 0.40 → 0.03 |
+| T4 (g4dn.xlarge) | `nvh264dec` | `bars_1080p` drag | 63.5 fps | **198.2 fps** | 2.63 → 1.36 | 0.36 → 0.03 |
+| T4 (g4dn.xlarge) | `nvh264dec` | `bars_2160p` jump scrub | 9.8 fps | 9.8 fps | 3.00 | 0.90 |
+| box (AMD APU) | `vah264dec` | `bars_2160p` drag | 20.9 fps | **45.0 fps** | 2.60 → 1.36 | 0.40 → 0.03 |
+| box (AMD APU) | `vah264dec` | `bars_1080p` drag | 45.2 fps | **144.7 fps** | 2.63 → 1.36 | 0.36 → 0.03 |
+| box (AMD APU) | `vah264dec` | `bars_2160p` jump scrub | 10.6 fps | 10.6 fps | 3.00 | 0.90 |
+
+**Phase 1's exit criterion is met on both.** 101.0 fps on the T4 and 45.0 fps
+on the box APU, against ">30 fps 4K scrub on Linux with nvdec/va", each through
+the hardware decoder the workflow asserts by name. Fourteen of the thirty
+timed steps are answered from the cache and one seeks.
+
+The 4K drag step on the T4 is now seek p50 0.000 ms and decode-forward p50
+0.016 ms: what it costs is the upload and a lookup, not the decoder. The jump
+scrub beside it is unchanged at an 86.3 ms seek, which is the control — nothing
+about the flush got cheaper, it stopped happening. On the box the drag lands at
+45.0 fps against that machine's own 4K *playback* rate of 45.6 fps, so the
+drag is now at its decode-and-upload ceiling.
 
 ## Baseline: NVIDIA T4, hardware decode (nvdec)
 

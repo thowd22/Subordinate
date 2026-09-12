@@ -214,22 +214,6 @@ fn run_until_settled(harness: &mut Harness<'_, SubordinateApp>) -> u32 {
     }
 }
 
-/// Paints until the window has settled, for a bounded number of frames.
-///
-/// `Harness::run` gives up after four frames with "exceeded `max_steps`", and a
-/// cold start now asks for more than four: the export panel's encoder probe
-/// instantiates every catalogued encoder and drives it to READY, and that
-/// catalogue grew by six elements when the exporter learned about AV1 and
-/// about Media Foundation's HEVC encoder (TASK-143). Stepping a fixed number
-/// of frames is what `run_until_settled` below already does, for the same
-/// reason: this window legitimately asks to be repainted while work it started
-/// is still running.
-fn settle(harness: &mut Harness<'_, SubordinateApp>) {
-    for _ in 0..30 {
-        harness.step();
-    }
-}
-
 #[test]
 fn the_window_exports_the_sample_project_to_a_playable_file() {
     if !support::can_render() {
@@ -239,7 +223,7 @@ fn the_window_exports_the_sample_project_to_a_playable_file() {
         return;
     };
     let mut harness = app_harness(&path);
-    settle(&mut harness);
+    support::run_settled(&mut harness);
     let project = harness.state().project().clone();
     if !can_encode(sequence_of(&project)) {
         return;
@@ -333,7 +317,7 @@ fn an_unsaved_project_says_why_it_cannot_be_exported() {
         .build_eframe(|cc| {
             SubordinateApp::new(cc, AppOptions::default()).expect("the editor starts")
         });
-    harness.run();
+    support::run_settled(&mut harness);
     assert_eq!(
         harness.state_mut().export_panel().unavailable(),
         Some(sub_ui::app::NO_RENDERER_REASON),
@@ -441,7 +425,7 @@ fn compare_window_and_cli(path: &Path, cli: &Path, element: &str) {
 /// `element` pinned in the export panel exactly as the encoder picker pins one.
 fn window_export(project: &Path, output: &Path, element: &str) -> sub_export::ExportReport {
     let mut harness = app_harness(project);
-    settle(&mut harness);
+    support::run_settled(&mut harness);
     let project = harness.state().project().clone();
     let id = sequence_of(&project).id;
     {

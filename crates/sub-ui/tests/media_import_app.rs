@@ -147,7 +147,7 @@ fn importing_from_the_bin_probes_off_the_ui_thread_and_lands_as_one_undo_step() 
         return;
     };
     let mut harness = app_harness(&project_file);
-    harness.run();
+    support::run_settled(&mut harness);
 
     let root = project_of(harness.state()).root_bin.id;
     let before = project_of(harness.state()).media.len();
@@ -254,7 +254,7 @@ fn a_file_that_cannot_be_read_surfaces_a_sub_error_in_the_bin() {
     };
     let dir = project_file.parent().expect("a folder").to_path_buf();
     let mut harness = app_harness(&project_file);
-    harness.run();
+    support::run_settled(&mut harness);
 
     let root = project_of(harness.state()).root_bin.id;
     // Inside the project folder, so the relative-path rule is satisfied and
@@ -354,7 +354,7 @@ fn relinking_from_the_bin_searches_as_a_job_and_clears_the_offline_badge() {
     };
     let dir = project_file.parent().expect("a folder").to_path_buf();
     let mut harness = app_harness(&project_file);
-    harness.run();
+    support::run_settled(&mut harness);
 
     assert!(
         project_of(harness.state())

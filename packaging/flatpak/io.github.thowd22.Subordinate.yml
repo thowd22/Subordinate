@@ -85,9 +85,15 @@ modules:
         # on shared CI hardware.
         CARGO_BUILD_JOBS: '2'
     build-commands:
-      - cargo build --release -p subordinate -p subordinate-cli
+      - cargo build --release -p subordinate -p subordinate-cli -p subordinate-mcp
       - install -Dm755 target/release/subordinate /app/bin/subordinate
       - install -Dm755 target/release/subordinate-cli /app/bin/subordinate-cli
+      # The MCP bridge, reached with
+      # `flatpak run --command=subordinate-mcp io.github.thowd22.Subordinate`.
+      # It has to be in /app/bin beside subordinate-cli: with no editor running
+      # the bridge launches the CLI it finds next to itself, and inside the
+      # sandbox that is the only one there is.
+      - install -Dm755 target/release/subordinate-mcp /app/bin/subordinate-mcp
       - install -Dm644 packaging/linux/subordinate.desktop
         /app/share/applications/io.github.thowd22.Subordinate.desktop
       - install -Dm644 packaging/linux/io.github.thowd22.Subordinate.metainfo.xml

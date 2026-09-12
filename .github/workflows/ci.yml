@@ -530,7 +530,11 @@ jobs:
         env:
           RUST_LOG: info
         run: |
-          ./scripts/ui-smoke.sh --binary target/debug/subordinate
+          # The sample media was fetched earlier in this job, so the demo
+          # project the script picks up has real footage and the viewer has
+          # something to decode. --require-picture turns that from a
+          # screenshot someone has to look at into an assertion (TASK-144).
+          ./scripts/ui-smoke.sh --binary target/debug/subordinate --require-picture
           cat target/ui-smoke/summary.md >> "$GITHUB_STEP_SUMMARY"
 
       # Uploaded even when the step failed: a screenshot of a broken window is
@@ -574,12 +578,35 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The before half of TASK-133's before-and-after, on the machine the exit
+      # criterion's software half is stated against: the same harness with the
+      # seek path as it was, so the drag scenario's improvement is measured per
+      # commit rather than argued from a developer's laptop. Reported in the
+      # job summary, never gated, and it costs one more pass over two
+      # five-second clips.
+      - name: Scrub benchmark with the pre-TASK-133 seek path (Linux)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        shell: bash
+        run: |
+          xvfb-run -a cargo run -p subordinate-bench -- --legacy-scrub \
+            --out target/bench/perf-legacy.json | tee target/bench-summary-legacy.txt
+          {
+            echo '### The same scrub with the pre-TASK-133 seek path'
+            echo
+            echo '```'
+            cat target/bench-summary-legacy.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload benchmark report
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: perf-report
-          path: target/bench/perf.json
+          path: |
+            target/bench/perf.json
+            target/bench/perf-legacy.json
           if-no-files-found: warn
           retention-days: 30
 

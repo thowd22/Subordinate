@@ -52,4 +52,20 @@ if [ -n "${SUB_APPIMAGE_TOOL:-}" ]; then
     exec "$here/usr/bin/$SUB_APPIMAGE_TOOL" "$@"
 fi
 
+# `Subordinate.AppImage --mcp` runs the MCP bridge instead of the editor, so an
+# agent's .mcp.json can name the AppImage itself as its `command` -- there is
+# no installed path to point at, and the bridge has to start with the bundle's
+# environment anyway (it launches subordinate-cli, which needs the same
+# GStreamer variables set above). Everything after --mcp goes to the bridge.
+# See docs/mcp-guide.md, "Pointing .mcp.json at an installed package".
+if [ "${1:-}" = "--mcp" ]; then
+    shift
+    bridge=$here/usr/bin/subordinate-mcp
+    [ -x "$bridge" ] || {
+        echo "this AppImage was built without subordinate-mcp" >&2
+        exit 127
+    }
+    exec "$bridge" "$@"
+fi
+
 exec "$here/usr/bin/subordinate" "$@"

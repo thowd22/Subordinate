@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-task-143'
 created_date: '2026-09-12 03:58'
-updated_date: '2026-09-12 06:17'
+updated_date: '2026-09-12 08:11'
 labels:
   - export
   - gpu
@@ -66,4 +66,6 @@ hosted ubuntu-24.04: 6 of 6 pass, including both software AV1 encoders against t
 GUI versus CLI on box (TASK-143 AC 3), run 34675906145: "vah264enc: window 12 frames, CLI 12 frames, audio on both" and "x264enc: window 12 frames, CLI 12 frames, audio on both".
 
 BLOCKED on the NVIDIA rows, and not by anything in this branch: every RunsOn GPU job in the repository is failing at runner resolution with "failed to resolve runner spec: gpu-nvidia-linux not found", including hardware.yml on main, which has not changed (run 34676554315, 06:02 UTC) and the TASK-139 dispatches. .github/runs-on.yml on main is valid and unchanged since TASK-138 merged, and GPU jobs worked at 03:32 UTC, so something in the RunsOn stack or its repository config resolution broke between 05:00 and 06:00 UTC. The nvidia-linux, nvidia-windows and (through them) the NVENC half of the GUI comparison are waiting on that.
+
+Merged origin/main (release 0.1.3, the live preview work). Two collisions to record: main had taken TASK-144 for the viewer/playback decode work, so the preset-quality bug filed here was recreated as TASK-149 and the reference in docs/DEVELOPMENT.md follows it; and main added support::run_settled for exactly the cold-start repaint problem this branch had hit with its own settle helper, so the helper is gone and both window tests use main version.
 <!-- SECTION:NOTES:END -->

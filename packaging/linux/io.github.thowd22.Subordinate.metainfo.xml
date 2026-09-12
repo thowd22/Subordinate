@@ -33,6 +33,9 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.3" date="2026-09-12">
+      <description><p>Live preview: the viewer shows decoded video while scrubbing and playing, with 4K scrub above 45 fps on hardware decoders; the MCP bridge ships inside every package.</p></description>
+    </release>
     <release version="0.1.2" date="2026-09-12">
       <description><p>The editor now serves the Command API on its local socket, so the MCP bridge and other agents drive the running window and their edits appear live.</p></description>
     </release>

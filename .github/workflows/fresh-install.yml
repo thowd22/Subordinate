@@ -290,6 +290,10 @@ jobs:
           sub_gui() { "$apprun" "$@"; }
           sub_cli() { SUB_APPIMAGE_TOOL=subordinate-cli "$apprun" "$@"; }
           sub_tool() { tool=$1; shift; SUB_APPIMAGE_TOOL=$tool "$apprun" "$@"; }
+          # The documented way an agent reaches the bundled bridge: the same
+          # argument a user's .mcp.json names (docs/mcp-guide.md), not an
+          # environment variable only this workflow knows about.
+          sub_mcp() { "$apprun" --mcp "$@"; }
           ADAPTER
 
           docker run --rm \
@@ -410,6 +414,14 @@ jobs:
               tool=\$1
               shift
               flatpak run --user --filesystem="\$work" --command="\$tool" "\$app" "\$@"
+          }
+          # The documented way an agent reaches the bridge in this package
+          # (docs/mcp-guide.md). --env carries the scratch instance name in
+          # rather than relying on what flatpak forwards.
+          sub_mcp() {
+              flatpak run --user --filesystem="\$work" --command=subordinate-mcp \\
+                  --env=SUBORDINATE_INSTANCE="\$SUBORDINATE_INSTANCE" \\
+                  --env=SUBORDINATE_LOG="\$SUBORDINATE_LOG" "\$app" "\$@"
           }
           ADAPTER
           cat adapter.sh
@@ -671,6 +683,10 @@ jobs:
           sub_gui() { "$apprun" "$@"; }
           sub_cli() { SUB_APPIMAGE_TOOL=subordinate-cli "$apprun" "$@"; }
           sub_tool() { tool=$1; shift; SUB_APPIMAGE_TOOL=$tool "$apprun" "$@"; }
+          # The documented way an agent reaches the bundled bridge: the same
+          # argument a user's .mcp.json names (docs/mcp-guide.md), not an
+          # environment variable only this workflow knows about.
+          sub_mcp() { "$apprun" --mcp "$@"; }
           ADAPTER
           sh fresh-install-check.sh --adapter "$WORK/adapter.sh" \
             --project "$WORK/demo.sub" --out "$WORK/out" \
