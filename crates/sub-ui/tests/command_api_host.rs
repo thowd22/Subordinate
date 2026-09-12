@@ -189,8 +189,10 @@ fn socket_exports_appear_in_the_panel_and_keep_the_window_painting() {
                 .invoke("media.probe", Some(json!({"media": media_id})))
                 .unwrap();
             assert_eq!(
-                probe["path"],
-                other_dir.join("only-here.mkv").display().to_string()
+                std::path::Path::new(probe["path"].as_str().unwrap())
+                    .canonicalize()
+                    .unwrap(),
+                other_dir.join("only-here.mkv").canonicalize().unwrap()
             );
         }
     }
