@@ -68,6 +68,16 @@ Earlier run 34688259287 failed at validate on shellcheck SC3067 ('test -O' is no
 Locally (podman, before pushing): staged the AppDir in ubuntu:24.04, ran check-plugins.sh in clean ubuntu:24.04 and fedora:41 containers against both the AppDir and a packed AppImage, and confirmed on fedora:41 with libva installed that the host's libva/libva-drm/libva-x11 are used and only libvdpau.so.1 comes from the bundle.
 <!-- SECTION:NOTES:END -->
 
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: @opus-task-145
+created: 2026-09-12 10:51
+---
+Left In Progress rather than Done: AC3's second half (the Linux clicks flow still passes) cannot be proven from here. The apt workaround is removed, but linux-clicks runs the AppImage baked into the desktop AMI from the newest v* release, so it needs a release carrying this fix and a rebuilt infra/images/linux-desktop before it can go green. Handing that verification to the supervisor on the GPU runner.
+---
+<!-- COMMENTS:END -->
+
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
