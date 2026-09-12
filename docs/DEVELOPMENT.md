@@ -1472,11 +1472,15 @@ deleted, because a 4K60 matrix writes gigabytes of them.
   `ExportSettings` carries the video quality and the audio bitrate, and
   `sub_export::rate_control` maps them onto each catalogued element's own
   properties - `bitrate`/`pass` on `x264enc`, `qp` on `x265enc`, `crf` on
-  `svtav1enc`, `rc-mode` plus `qp-const` on NVENC, `rate-control` plus the
-  per-frame quantisers on VA-API and AMF, and bitrate only on VideoToolbox and
-  Media Foundation, which have no constant-quality mode. A knob an element does
+  `svtav1enc`, `rc-mode` plus `qp-const-{i,p,b}` on NVENC,
+  `quality = 1 - CRF/51` on VideoToolbox, and `rate-control` plus the
+  per-frame quantisers on VA-API and AMF. Media Foundation has no mapped CRF
+  equivalent; it supports bitrate requests. A knob an element does
   not carry is a `tracing::warn!`, not a failed export, so a cell whose file
   looks default-sized should be checked against the run's warnings.
+  The vendor mappings follow the [NVENC property reference](https://gstreamer.freedesktop.org/documentation/nvcodec/nvav1enc.html)
+  and [VideoToolbox implementation](https://github.com/GStreamer/gstreamer/blob/main/subprojects/gst-plugins-bad/sys/applemedia/vtenc.c).
+  Quantizer scaling preserves direction, not equal perceptual quality between codecs.
 - **`audio-only` is not in the matrix.** It has no video stream, and `render`
   refuses it before an encoder is chosen.
 - **Hardware encoders are ranked `NONE`,** so the driver treats "present and
