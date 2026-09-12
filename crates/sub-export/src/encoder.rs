@@ -760,10 +760,9 @@ fn starts_to_ready(name: &str) -> bool {
         return false;
     };
     let started = match element.set_state(gst::State::Ready) {
-        Ok(gst::StateChangeSuccess::Async) => element
-            .state(gst::ClockTime::from_seconds(2))
-            .0
-            .is_ok(),
+        Ok(gst::StateChangeSuccess::Async) => {
+            element.state(gst::ClockTime::from_seconds(2)).0.is_ok()
+        }
         Ok(_) => true,
         Err(err) => {
             tracing::debug!(element = name, error = %err, "element would not start");
