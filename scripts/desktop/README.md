@@ -110,6 +110,13 @@ Output lands in `$FLOW_OUT` (default `flow-out/`):
 | `summary.md` | the same as a table, also appended to the job summary |
 | `editor.log`, `mcp-*.log` | what the application and the bridge said |
 
+`run.before_shot` is called just before each screenshot. A flow whose edits
+arrive over a socket sets it to `session.nudge(window)`: egui paints only when
+something asks it to, so on an idle desktop the window keeps showing the frame
+it painted before the agent's edit, and the picture would be of a project that
+has already changed (run 34672010010). A pointer move wakes it and mutates
+nothing.
+
 A failing step prints
 `::error title=<flow>: <step>::step '<step>' failed; screenshot NN-step.png`,
 so the job's annotation names the step and the artifact holds its picture.

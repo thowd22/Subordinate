@@ -184,6 +184,10 @@ class LinuxSession(Session):
         time.sleep(0.3)
         return (x, y)
 
+    def click_free_move(self, x: int, y: int) -> None:
+        run([self._xdotool, "mousemove", "--sync", str(x), str(y)])
+        time.sleep(0.4)
+
     def key(self, keys: str) -> None:
         run([self._xdotool, "key", "--clearmodifiers", keys])
         time.sleep(0.2)

@@ -204,6 +204,10 @@ class Run:
     out: Path
     steps: list[dict] = field(default_factory=list)
     started: float = field(default_factory=time.monotonic)
+    #: Called just before each step's screenshot. A flow whose edits arrive
+    #: over a socket sets this to `session.nudge(window)`, because an idle
+    #: window paints nothing and would be photographed as it was.
+    before_shot: object | None = None
 
     def step(self, label: str) -> "Step":
         return Step(self, label)
@@ -265,6 +269,11 @@ class Step:
                 traceback.format_exception_only(kind, value)
             ).strip()
         try:
+            if callable(self.run.before_shot):
+                try:
+                    self.run.before_shot()
+                except Exception as error:  # noqa: BLE001 - never mask the step
+                    self.record["wake_error"] = str(error)
             shot = self.run.session.numbered_screenshot(self.label)
             self.record["screenshot"] = shot.name
         except Exception as error:  # noqa: BLE001 - a lost picture is not the failure

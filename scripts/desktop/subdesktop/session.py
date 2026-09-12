@@ -229,6 +229,23 @@ class Session(abc.ABC):
 
     # -------------------------------------------------------------- screenshot
 
+    def nudge(self, window: "Window") -> None:
+        """Move the pointer inside `window`, changing nothing, to wake it.
+
+        egui only paints when something asks it to. An edit that arrives over
+        the Command API socket lands in the project the panels draw, but on an
+        idle desktop - no pointer, no keyboard, no animation - the window can
+        keep showing the frame it painted before, so a screenshot taken
+        straight after an agent's edit photographs a stale picture of a project
+        that has already changed (run 34672010010). A pointer move is the
+        cheapest thing that wakes the event loop and mutates nothing.
+        """
+        self.click_free_move(*window.rect.point(0.5, 0.45))
+
+    @abc.abstractmethod
+    def click_free_move(self, x: int, y: int) -> None:
+        """Move the pointer to a point without pressing anything."""
+
     @abc.abstractmethod
     def screenshot(self, name: str) -> Path:
         """Capture the whole desktop into `self.shots`, and return the file."""

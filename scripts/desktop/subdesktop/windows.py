@@ -179,6 +179,10 @@ class WindowsSession(Session):
         time.sleep(0.3)
         return (x, y)
 
+    def click_free_move(self, x: int, y: int) -> None:
+        self._mouse.move(coords=(int(x), int(y)))
+        time.sleep(0.4)
+
     def key(self, keys: str) -> None:
         self._keyboard.send_keys(_chord(keys))
         time.sleep(0.2)

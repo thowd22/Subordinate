@@ -84,6 +84,11 @@ def run(run: flowlib.Run) -> None:
         window = run.session.wait_for_title(WINDOW, timeout=180)
         endpoint = flowlib.wait_for_command_api(run.session, app_log)
         step.note(pid=started.pid, window=window.as_dict(), endpoint=endpoint)
+        # Every screenshot from here on wakes the window first: the edits below
+        # arrive over a socket, and an idle egui window paints nothing, so the
+        # picture would show the project as it was rather than as the agent
+        # has just made it (run 34672010010).
+        run.before_shot = lambda: run.session.nudge(window)
 
     rate = staged.frame_rate
     fps = rate["numerator"] / rate["denominator"]
