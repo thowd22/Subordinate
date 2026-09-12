@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-task-138'
 created_date: '2026-09-11 22:18'
-updated_date: '2026-09-12 03:41'
+updated_date: '2026-09-12 15:32'
 labels:
   - infra
   - gpu
@@ -69,6 +69,8 @@ Verification run 34670630488 (branch task/task-138, inline label ami=ami-0b3c82c
 Cost. Seven Image Builder runs on on-demand g4dn.xlarge Windows totalled about 3.4 hours, roughly 2.55 USD - most of it the two runs that hung in Sysprep. The successful build was 29 minutes, about 0.36 USD. Recon and four desktop smoke runs added about 0.48 USD. Total for the task about 3.0 USD against the 4 USD cap. Ongoing: the AMI snapshot is about 1.50 USD a month, so superseded AMIs and their snapshots should be deleted (one already was).
 
 Two things for the supervisor. (1) The released MSI does not carry subordinate-mcp.exe: packaging/windows/build-msi.ps1 stages subordinate.exe and subordinate-cli.exe only, so acceptance criterion 4's 'installed on the image' is not met literally. The image records mcp_in_msi=false in C:/SubordinateTest/image.json, and a free hosted-runner job in gpu-smoke.yml builds the bridge and stages it, which is what proved the round trip. Adding subordinate-mcp to the MSI is a one-line change to build-msi.ps1 plus a release, and belongs to the packaging task. (2) RunsOn reads .github/runs-on.yml from the default branch only, so runner=gpu-nvidia-desktop-windows resolves only once this lands on main; re-dispatch GPU smoke afterwards to confirm (TASK-115 saw RunsOn cache the old config for about an hour).
+
+2026-09-12 supervisor handoff: image 1.1.6 rebuilt from v0.1.3 on 2026-09-12 (see runs-on.yml for the id once updated); criterion 4 (mcp_in_msi true) flips after a release carrying TASK-142 (0.1.4) and another rebuild. Rebuild at least every 30 days; build with SKIP_IAM=1 infra/images/windows-desktop/build.sh <new semver> and poll imagebuilder get-image.
 <!-- SECTION:NOTES:END -->
 
 ## Comments

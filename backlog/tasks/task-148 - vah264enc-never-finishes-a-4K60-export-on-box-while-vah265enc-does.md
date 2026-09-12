@@ -6,12 +6,13 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-12 05:32'
-updated_date: '2026-09-12 14:58'
+updated_date: '2026-09-12 15:32'
 labels:
   - export
   - gpu
   - bug
-dependencies: []
+dependencies:
+  - TASK-146
 ordinal: 168000
 ---
 
@@ -57,4 +58,6 @@ Run 34688535274 adds a third encoder with the identical signature: mfh264enc, Me
 And a fourth, on a fourth vendor: nvh264enc on the Tesla T4 (Ubuntu 24.04, GStreamer 1.24, run 34689001087) stalls on the same sixty 4K60 frames at frame 27, 23 and 9 of 60 for the three H.264 presets, while nvh265enc writes all sixty and validates clean. NVENC, AMF, Media Foundation and VA-API - every hardware H.264 encoder this project can reach, on three operating systems - and x264enc at the same canvas on the same machines is fine. Whatever this is, it is not a driver.
 
 A parallel investigation on another branch has found what turns this into a hang: the export pushes into appsrc with a blocking push and never reads the bus, so an element that stops taking buffers leaves the render waiting on a condition variable that only a flush wakes - no error, no file, no end. Their fix waits for room in slices and reads the bus between them. That changes the symptom this task describes from a hang into an error; whether a 4K H.264 export then *succeeds* on any of these four encoders is the part that remains, and their own note that mfh264enc "takes about twenty frames of a 4K canvas and then stops taking buffers" matches the frame 19 to 27 this matrix measured on all four.
+
+2026-09-12 supervisor: same mechanism as TASK-146 (blocking appsrc push, bus not read). After TASK-146 merges, re-run export-matrix.yml on box and the T4 and close this if vah264enc/nvh264enc finish the 4K60 export.
 <!-- SECTION:NOTES:END -->

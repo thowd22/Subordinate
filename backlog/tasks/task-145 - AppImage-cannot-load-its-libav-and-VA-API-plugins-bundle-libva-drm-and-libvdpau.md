@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-task-145'
 created_date: '2026-09-12 10:02'
-updated_date: '2026-09-12 10:51'
+updated_date: '2026-09-12 15:32'
 labels:
   - release
   - bug
@@ -66,6 +66,8 @@ fresh-install.yml run 34689459175 against those packages: AppImage on a clean ub
 Earlier run 34688259287 failed at validate on shellcheck SC3067 ('test -O' is not POSIX sh); fixed in ec402c6, which also makes validate.sh print shellcheck's findings.
 
 Locally (podman, before pushing): staged the AppDir in ubuntu:24.04, ran check-plugins.sh in clean ubuntu:24.04 and fedora:41 containers against both the AppDir and a packed AppImage, and confirmed on fedora:41 with libva installed that the host's libva/libva-drm/libva-x11 are used and only libvdpau.so.1 comes from the bundle.
+
+2026-09-12 supervisor handoff: merged to main; criterion 3 needs release 0.1.4, a Linux desktop AMI rebuild (infra/images/linux-desktop/deploy.sh --run --wait), then desktop-flows.yml with only=linux-clicks.
 <!-- SECTION:NOTES:END -->
 
 ## Comments

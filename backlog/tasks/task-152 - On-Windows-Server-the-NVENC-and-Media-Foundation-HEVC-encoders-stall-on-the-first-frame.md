@@ -6,12 +6,13 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-12 13:53'
-updated_date: '2026-09-12 14:58'
+updated_date: '2026-09-12 15:32'
 labels:
   - export
   - gpu
   - bug
-dependencies: []
+dependencies:
+  - TASK-146
 ordinal: 172000
 ---
 
@@ -38,4 +39,6 @@ Whatever the cause, the export should not hang: an encoder that cannot open its 
 Runs 34695092575 and 34697692471 confirm it and narrow it. On the Windows Server T4: nvh264enc, nvh265enc and mfh265enc stop at frame 1 of 50 of the 720p sample for every preset, while mfh264enc (5s), x264enc (5s), x265enc (7s), svtav1enc (3s) and rav1enc (10s) write all fifty in the same job. On the 4K60 source everything hardware stalls - nvh264enc and nvh265enc at frame 3, mfh264enc at frame 19 - which is TASK-148 rather than this.
 
 A parallel investigation on another branch has since found the mechanism behind the hang and fixed it: the export pushed into appsrc with a blocking push and never read the bus, so an element that failed to negotiate left the render waiting on a condition variable only a flush would wake. With that fixed these become the errors the elements actually posted, which is what this task second criterion asks for - re-run the nvidia-windows job once that lands and see what NVENC says for itself.
+
+2026-09-12 supervisor: verify after TASK-146 on runs-on gpu-nvidia-windows via export-matrix.yml.
 <!-- SECTION:NOTES:END -->
