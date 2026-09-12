@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-task-143'
 created_date: '2026-09-12 03:58'
-updated_date: '2026-09-12 04:35'
+updated_date: '2026-09-12 04:50'
 labels:
   - export
   - gpu
@@ -50,4 +50,10 @@ Export has been verified one encoder at a time (hardware workflow: nvh264enc on 
 
 <!-- SECTION:NOTES:BEGIN -->
 Run 34672568992 (branch push, free jobs only): build-linux passed; box failed at the matrix step because the --source list was built as a shell string and the sample sequence is called "Main cut" - word splitting handed argparse "cut::50". Fixed with bash arrays. box also has no ffmpeg, so no 4K60 excerpt reached the Windows jobs; a synthetic 4K60 three-track clip is now the stated fallback. The project builder itself worked: it read the user 32 GB meld-4k60-full.mkv as 3840x2160 at 60/1 with three 48 kHz stereo AAC streams and wrote a two-track project around it. CI run 34672571538 failed only on the user guide troubleshooting section, which is asserted against sub_export::encoder_names - fixed by naming the new catalogue entries there.
+
+Run 34673584123: the hosted software job is green - 6 of 6 cells pass with exact frame counts (x264enc over three presets, x265enc, svtav1enc and av1enc), 2-4 seconds a cell except libaom av1enc at 82 seconds for eight frames, which is why software AV1 now renders a short range. Two driver faults it found and fixed: the frame counter decoded the whole file, so a runner with no AAC, FLAC or Opus decoder failed to preroll on the audio track and counted nothing - it reads the muxed video track off qtdemux or matroskademux now - and a multi-line GStreamer failure dropped into a Markdown cell ended the table where it stood.
+
+Findings filed as bug tasks: TASK-144 (presets carry a bitrate and a CRF that reach no encoder - ExportSettings has no quality field at all), TASK-145 (a source with three audio streams exports only its first), TASK-146 (every software export comes out in High 4:4:4 profile because nothing pins 4:2:0 between the compositor RGBA and the encoder), TASK-147 (the running editor Command API serves no export, probe or frame methods, so export.render reaches no window).
+
+TASK-147 changed the plan for AC 3: the GUI export cannot be driven over the socket on the desktop image at all. The comparison is now a sub-ui test - the_window_and_the_cli_write_the_same_file_for_each_encoder - that opens the assembled SubordinateApp, pins an encoder in the export panel, exports the way a click on Export does, then renders the same frames through subordinate-cli with the same encoder and compares frame count and audio. It runs on box (vah264enc, x264enc) and on the T4 (nvh264enc, x264enc). The paid desktop-image job is gone with it.
 <!-- SECTION:NOTES:END -->
