@@ -597,6 +597,8 @@ jobs:
           $dir = "C:\gstreamer\1.0\msvc_x86_64"
           Start-Process -Wait -FilePath ".\$exe" -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/TYPE=devel","/ALLUSERS","/DIR=$dir"
           "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          "GST_DIR=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          & "$dir\bin\gst-inspect-1.0.exe" --version
 
       - name: Fetch the sample project media
         run: ./scripts/get-sample-media.ps1
@@ -604,6 +606,7 @@ jobs:
       - name: Fetch the 4K60 excerpt from S3
         id: uhd
         run: |
+          $env:PATH = "$env:GST_DIR\bin;$env:PATH"
           New-Item -ItemType Directory -Force target\media | Out-Null
           $have = "no"
           # try/catch as well as $LASTEXITCODE: an image without the AWS CLI
@@ -627,6 +630,7 @@ jobs:
 
       - name: The matrix
         run: |
+          $env:PATH = "$env:GST_DIR\bin;$env:PATH"
           $sources = @(
             "--source", "sample::examples/sample-project/demo.sub::$env:SAMPLE_SEQUENCE::$env:SAMPLE_FRAMES"
           )
@@ -702,6 +706,8 @@ jobs:
             Remove-Item $exe -ErrorAction SilentlyContinue
           } else { "already installed" }
           "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          "GST_DIR=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          & "$dir\bin\gst-inspect-1.0.exe" --version
 
       # yodaddy has no Python, and what `python` resolves to there is the
       # Microsoft Store alias stub, which prints an advertisement and exits.
@@ -739,6 +745,7 @@ jobs:
       - name: The 4K60 source
         id: uhd
         run: |
+          $env:PATH = "$env:GST_DIR\bin;$env:PATH"
           # A real copy on this machine wins over anything shipped in: if the
           # user drops the excerpt in C:\SubordinateTest\, that is the 4K60
           # source this job measures.
@@ -758,6 +765,7 @@ jobs:
 
       - name: The matrix
         run: |
+          $env:PATH = "$env:GST_DIR\bin;$env:PATH"
           $sources = @(
             "--source", "sample::examples/sample-project/demo.sub::$env:SAMPLE_SEQUENCE::$env:SAMPLE_FRAMES"
           )
