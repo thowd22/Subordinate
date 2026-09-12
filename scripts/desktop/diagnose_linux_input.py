@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -56,7 +57,20 @@ def main() -> int:
     print("active window:", xdo("getactivewindow"))
     print("focused window:", xdo("getwindowfocus"))
     print("pointer:", xdo("getmouselocation"))
-    print("xinput:", subprocess.run(["xinput", "list"], capture_output=True, text=True).stdout[:600])
+    for tool in (["xinput", "list"], ["xdpyinfo", "-queryExtensions"]):
+        if shutil.which(tool[0]) is None:
+            print(f"{tool[0]}: not installed")
+            continue
+        text = subprocess.run(tool, capture_output=True, text=True).stdout
+        if tool[0] == "xdpyinfo":
+            text = "\n".join(
+                line for line in text.splitlines() if "XTEST" in line or "XInput" in line
+            )
+        print(f"{tool[0]}:", text[:600])
+    # Does the pointer move at all? The window repaints when it does, so this
+    # is the half that is known to work - it is printed to be sure.
+    xdo("mousemove", "--sync", "300", "300")
+    print("pointer after a move:", xdo("getmouselocation"))
 
     bridge = Bridge(
         mcp,

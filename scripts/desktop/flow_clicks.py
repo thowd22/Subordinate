@@ -389,11 +389,20 @@ def run(run: flowlib.Run) -> None:
             # rather than chosen in a save dialog. The field itself has no name
             # of its own; the label does, and the field is immediately right of
             # it.
-            # By role: `File` is also the menu at the top of the window, and
-            # typing the path into *that* leaves the export writing wherever
-            # the panel last pointed (run 34678850753).
-            label = _by_role(session, "File", TEXT_ROLES, timeout=60)
-            session.click((label.rect.x + label.rect.width + 60, label.rect.center[1]))
+            # The field itself, by the hint text it shows while it is empty
+            # (`choose a file to write`, export_panel.rs): clicking beside the
+            # `File` label was landing next to it, and `File` is the window's
+            # menu as well (runs 34678850753 and 34679600299).
+            try:
+                field = session.find("choose a file to write", timeout=20)
+                point, label = field.rect.center, field.as_dict()
+            except DesktopError:
+                # A field that already holds a path shows it instead of the
+                # hint, so fall back to the band right of the `File` label.
+                text = _by_role(session, "File", TEXT_ROLES, timeout=60)
+                point = (text.rect.x + text.rect.width + 60, text.rect.center[1])
+                label = text.as_dict()
+            session.click(point)
             session.key("ctrl+a")
             session.type_text(str(output))
             step.note(field_took_the_path=_shows(session, output.name))
@@ -407,7 +416,7 @@ def run(run: flowlib.Run) -> None:
             session.click(picker)
             choice = session.find(encoder, timeout=30)
             session.click(choice)
-            step.note(encoder=encoder, picker=picker.as_dict(), file_label=label.as_dict())
+            step.note(encoder=encoder, picker=picker.as_dict(), file_label=label)
 
         with run.step("click Export and wait for the file") as step:
             session.click(_by_role(session, "Export", BUTTON_ROLES, timeout=30))
