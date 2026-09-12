@@ -43,6 +43,16 @@ images:
     arch: x64
     ami: ami-08dbaf8367717a9a3
 
+  # Built by infra/images/windows-desktop/build.sh (TASK-138). The id is
+  # pinned rather than matched by name so that a rebuild has to be adopted
+  # deliberately; `name: subordinate-windows-desktop-*` would pick the newest
+  # build automatically, including a broken one.
+  subordinate-windows-desktop:
+    platform: windows
+    arch: x64
+    owner: "731537225673"
+    ami: ami-0b3c82cb19d31ac1d
+
 runners:
   # NVIDIA T4 (16 GB), 4 vCPU / 16 GB RAM.
   # us-east-1 on-demand $0.526/h, spot typically $0.16-0.25/h.
@@ -155,16 +165,7 @@ runners:
   # in this account at all. AMD Linux (VA-API) runs on the self-hosted `box`
   # runner; AMD Windows stays manual until an AMD Windows machine exists.
 
-# Custom AMIs. RunsOn needs the platform and architecture spelled out for an
-# image it did not build, and either an exact `ami` or a `name` wildcard.
-# Schema: https://runs-on.com/docs/runners/custom/
-images:
-  # Built by infra/images/windows-desktop/build.sh (TASK-138). The id is
-  # pinned rather than matched by name so that a rebuild has to be adopted
-  # deliberately; `name: subordinate-windows-desktop-*` would pick the newest
-  # build automatically, including a broken one.
-  subordinate-windows-desktop:
-    platform: windows
-    arch: x64
-    owner: "731537225673"
-    ami: ami-0b3c82cb19d31ac1d
+# Custom AMIs are all declared in the single `images:` block near the top of
+# this file. There must be exactly one such key: YAML keeps the last mapping
+# with a given name, so a second `images:` here would silently throw the Linux
+# desktop image away and `gpu-nvidia-desktop-linux` would stop resolving.

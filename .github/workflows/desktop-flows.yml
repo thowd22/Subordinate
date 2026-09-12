@@ -1,0 +1,279 @@
+name: Desktop flows
+
+# The two end-to-end flows on the desktop images (TASK-139).
+#
+# `mcp` drives `subordinate-mcp` and nothing else while the real window stands
+# on screen; `clicks` uses input only - a real pointer and real keystrokes -
+# and asserts what the project became through read-only Command API calls.
+# Both photograph the desktop after every step, and a failing step is named in
+# an `::error::` annotation with the file name of its screenshot, which is
+# uploaded with the rest of the run.
+#
+# Everything either flow needs is already on the images
+# (infra/images/linux-desktop, infra/images/windows-desktop): the editor, the
+# CLI, the MCP bridge, GStreamer and the 4K60 test clip. The one thing a job
+# installs is the Linux desktop portal stack that the editor's **native file
+# dialog** needs, and only the clicks flow needs that.
+#
+# ---------------------------------------------------------------- cost ------
+# Each flow is one `g4dn.xlarge`:
+#
+#   Linux   spot, typically 0.16-0.25 USD/h, capped at 20 minutes -> 0.08 USD
+#           worst case, and a passing run is 6-8 minutes -> about 0.03 USD
+#   Windows on-demand 0.746 USD/h (Windows spot is rarely discounted and a
+#           reclaimed instance mid-gesture is only noise), capped at 22
+#           minutes -> 0.27 USD worst case, 0.10-0.13 USD for a passing run
+#
+# so every flow is under the 0.30 USD per run TASK-139 asks for, and all four
+# together are about 0.30 USD a night. The account's G-family quota is 8 vCPU -
+# exactly two g4dn.xlarge - so the clicks jobs wait on the MCP jobs rather than
+# running beside them: never more than two GPU instances at a time.
+on:
+  workflow_call:
+    inputs:
+      linux_runner:
+        description: RunsOn selector for the Linux desktop runner.
+        type: string
+        default: runner=gpu-nvidia-desktop-linux
+      windows_runner:
+        description: RunsOn selector for the Windows desktop runner.
+        type: string
+        default: runner=gpu-nvidia-desktop-windows
+      only:
+        description: Run a single job id instead of all four.
+        type: string
+        default: ''
+  workflow_dispatch:
+    inputs:
+      linux_runner:
+        description: >-
+          RunsOn selector for the Linux desktop runner. RunsOn reads
+          .github/runs-on.yml from the default branch only, so from a branch
+          name the AMI inline:
+          ami=ami-08dbaf8367717a9a3/family=g4dn.xlarge/spot=false
+        type: string
+        default: runner=gpu-nvidia-desktop-linux
+      windows_runner:
+        description: >-
+          RunsOn selector for the Windows desktop runner, inline from a branch:
+          ami=ami-0b3c82cb19d31ac1d/family=g4dn.xlarge/spot=false
+        type: string
+        default: runner=gpu-nvidia-desktop-windows
+      only:
+        description: Run a single job (job id) instead of all four.
+        type: choice
+        default: ''
+        options:
+          - ''
+          - linux-mcp
+          - linux-clicks
+          - windows-mcp
+          - windows-clicks
+
+permissions:
+  contents: read
+
+env:
+  # The flows take their binaries, media and encoder from the environment, so
+  # the same scripts run on a developer's machine against a local build.
+  FLOW_PRESET: youtube-1080p
+  FLOW_ENCODER: nvh264enc
+
+jobs:
+  # --------------------------------------------------------------- Linux ----
+  linux-mcp:
+    name: Linux desktop, MCP-only flow
+    if: inputs.only == '' || inputs.only == 'linux-mcp'
+    runs-on: runs-on=${{ github.run_id }}/${{ inputs.linux_runner || 'runner=gpu-nvidia-desktop-linux' }}
+    timeout-minutes: 20
+    env:
+      DISPLAY: ':0'
+      XAUTHORITY: /run/subordinate/Xauthority
+      SUBORDINATE_ENDPOINT_DIR: /tmp/subordinate-endpoint
+      SUBORDINATE_CLI: /usr/local/bin/subordinate-cli
+      FLOW_OUT: ${{ github.workspace }}/flow-out
+      FLOW_WORK: /tmp/desktop-flow
+      FLOW_MEDIA: /opt/subordinate/test-media/meld-4k60-excerpt-2min.mkv
+      FLOW_EDITOR: /usr/local/bin/subordinate
+      FLOW_CLI: /usr/local/bin/subordinate-cli
+      FLOW_MCP: /usr/local/bin/subordinate-mcp
+      FLOW_DISCOVERER: /usr/local/bin/subordinate-gst-discoverer
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instance, image and display facts
+        run: |
+          echo "runner=$RUNNER_NAME ami=${RUNS_ON_AMI_ID:-unknown}"
+          . /etc/os-release && echo "os=$PRETTY_NAME"
+          echo "release baked in: $(cat /opt/subordinate/RELEASE_TAG)"
+          nvidia-smi
+          systemctl is-active subordinate-xorg.service
+          systemctl is-active subordinate-wm.service
+          /usr/local/bin/subordinate-wait-for-display
+
+      - name: The MCP-only flow
+        run: python3 -u scripts/desktop/flow_mcp.py
+
+      - name: Screenshots, logs and the verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-mcp-flow-${{ github.run_id }}
+          path: ${{ env.FLOW_OUT }}
+          if-no-files-found: warn
+
+  linux-clicks:
+    name: Linux desktop, clicks-only flow
+    # Deliberately after linux-mcp rather than beside it: the account's
+    # G-family quota is two g4dn.xlarge, and windows-mcp holds the other one.
+    needs: linux-mcp
+    if: always() && (inputs.only == '' || inputs.only == 'linux-clicks')
+    runs-on: runs-on=${{ github.run_id }}/${{ inputs.linux_runner || 'runner=gpu-nvidia-desktop-linux' }}
+    timeout-minutes: 20
+    env:
+      DISPLAY: ':0'
+      XAUTHORITY: /run/subordinate/Xauthority
+      SUBORDINATE_ENDPOINT_DIR: /tmp/subordinate-endpoint
+      SUBORDINATE_CLI: /usr/local/bin/subordinate-cli
+      FLOW_OUT: ${{ github.workspace }}/flow-out
+      FLOW_WORK: /tmp/desktop-flow
+      FLOW_MEDIA: /opt/subordinate/test-media/meld-4k60-excerpt-2min.mkv
+      FLOW_EDITOR: /usr/local/bin/subordinate
+      FLOW_CLI: /usr/local/bin/subordinate-cli
+      FLOW_MCP: /usr/local/bin/subordinate-mcp
+      FLOW_DISCOVERER: /usr/local/bin/subordinate-gst-discoverer
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instance, image and display facts
+        run: |
+          echo "runner=$RUNNER_NAME ami=${RUNS_ON_AMI_ID:-unknown}"
+          echo "release baked in: $(cat /opt/subordinate/RELEASE_TAG)"
+          nvidia-smi
+          /usr/local/bin/subordinate-wait-for-display
+
+      # The two pieces of desktop plumbing a *clicking* test needs and an
+      # offscreen one does not:
+      #
+      #   * the editor's file dialog is rfd's XDG desktop portal backend
+      #     (rfd 0.17 with default features, and neither the gtk3 backend nor
+      #     ashpd is compiled in), so choosing a file needs
+      #     xdg-desktop-portal with a backend implementation behind it;
+      #   * AccessKit's Unix adapter publishes egui's widget tree on the
+      #     accessibility bus, so finding `Import...` by name needs
+      #     at-spi2-core and a client library to read it with.
+      #
+      # Both are D-Bus activated, which is why the flow runs under
+      # `dbus-run-session`. They belong in the image the moment this is
+      # settled; they are installed here so the flow can be iterated on
+      # without a 40-minute AMI rebuild per attempt.
+      - name: Desktop portal and accessibility bus (apt)
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            dbus-x11 at-spi2-core python3-pyatspi \
+            xdg-desktop-portal xdg-desktop-portal-gtk
+          dpkg -l | grep -E 'xdg-desktop-portal|at-spi2-core|pyatspi' || true
+
+      - name: The clicks-only flow
+        env:
+          # The portal picks its backend from the desktop it is told it is on;
+          # with only the GTK backend installed, anything GNOME-shaped selects
+          # it. XDG_RUNTIME_DIR has to exist for the portal and the a11y bus.
+          XDG_CURRENT_DESKTOP: GNOME
+          XDG_SESSION_TYPE: x11
+          GTK_A11Y: atspi
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR=/tmp/xdg-runtime-$(id -u)
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          dbus-run-session -- python3 -u scripts/desktop/flow_clicks.py
+
+      - name: Screenshots, logs and the verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-clicks-flow-${{ github.run_id }}
+          path: ${{ env.FLOW_OUT }}
+          if-no-files-found: warn
+
+  # -------------------------------------------------------------- Windows ----
+  build-mcp-windows:
+    # The released MSI has not always carried the bridge (v0.1.1 and v0.1.2
+    # staged subordinate.exe and subordinate-cli.exe only), and it has no
+    # GStreamer or wgpu dependency, so a free hosted runner builds it in a
+    # couple of minutes and the paid instance stays short.
+    name: Build subordinate-mcp (hosted, free)
+    if: inputs.only == '' || startsWith(inputs.only, 'windows')
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mcp-windows
+      - run: cargo build --release -p subordinate-mcp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: subordinate-mcp-windows-${{ github.run_id }}
+          path: target/release/subordinate-mcp.exe
+          if-no-files-found: error
+
+  windows-mcp:
+    name: Windows desktop, MCP-only flow
+    needs: build-mcp-windows
+    if: inputs.only == '' || inputs.only == 'windows-mcp'
+    runs-on: runs-on=${{ github.run_id }}/${{ inputs.windows_runner || 'runner=gpu-nvidia-desktop-windows' }}
+    timeout-minutes: 22
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: subordinate-mcp-windows-${{ github.run_id }}
+          path: mcp
+      - name: Run the MCP-only flow in the console session
+        uses: ./.github/actions/windows-desktop-flow
+        with:
+          flow: flow_mcp.py
+          name: mcp
+      - name: Screenshots, logs and the verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-mcp-flow-${{ github.run_id }}
+          path: ${{ runner.temp }}/flow-out
+          if-no-files-found: warn
+
+  windows-clicks:
+    name: Windows desktop, clicks-only flow
+    needs: [build-mcp-windows, windows-mcp]
+    if: always() && (inputs.only == '' || inputs.only == 'windows-clicks')
+    runs-on: runs-on=${{ github.run_id }}/${{ inputs.windows_runner || 'runner=gpu-nvidia-desktop-windows' }}
+    timeout-minutes: 22
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: subordinate-mcp-windows-${{ github.run_id }}
+          path: mcp
+      - name: Run the clicks-only flow in the console session
+        uses: ./.github/actions/windows-desktop-flow
+        with:
+          flow: flow_clicks.py
+          name: clicks
+      - name: Screenshots, logs and the verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-clicks-flow-${{ github.run_id }}
+          path: ${{ runner.temp }}/flow-out
+          if-no-files-found: warn
