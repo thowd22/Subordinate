@@ -10,13 +10,14 @@
 # found them lying around.
 #
 # The package is reached through an *adapter*: a tiny shell file that defines
-# three functions, so the sequence below is written once and an AppImage, a
+# four functions, so the sequence below is written once and an AppImage, a
 # Flatpak, a deb or a tarball can each be checked by it.
 #
 #   sub_cli  <args...>          run subordinate-cli from the package
 #   sub_tool <tool> <args...>   run a bundled GStreamer tool (gst-inspect-1.0,
 #                               gst-discoverer-1.0)
 #   sub_gui  <args...>          run the editor itself
+#   sub_mcp  <args...>          run the package's MCP bridge on stdin/stdout
 #
 # .github/workflows/fresh-install.yml writes one adapter per package; the
 # runbook in docs/DEVELOPMENT.md ("Fresh-machine install verification") shows
@@ -111,7 +112,7 @@ fail() {
 
 # shellcheck source=/dev/null
 . "$adapter"
-for required in sub_cli sub_tool sub_gui; do
+for required in sub_cli sub_tool sub_gui sub_mcp; do
     command -v "$required" >/dev/null 2>&1 ||
         fail "the adapter $adapter does not define $required" adapter
 done
@@ -303,6 +304,115 @@ if [ "$has_discoverer" -eq 1 ]; then
     grep -qi 'audio' "$out_dir/discoverer.txt" || fail "the export carries no audio stream" validate
     echo "and the bundled gst-discoverer-1.0 reads it back from outside: video and audio"
 fi
+
+# ------------------------------------------------------------------- MCP ----
+# The bridge is part of the product (docs/PLAN.md section 7), so a user who
+# installed the package has it, and this proves it with nothing but the
+# package: no Rust toolchain to build it with, no MCP client library, and no
+# jq or python to read the answers -- one JSON-RPC message per line in and one
+# per line out, which is the whole of the stdio transport.
+#
+# No editor is running here, so the bridge starts the `subordinate-cli serve`
+# it finds beside itself; that is the fallback the guide documents, and it is
+# also what proves the package ships a bridge and a CLI that can find each
+# other. A scratch SUBORDINATE_INSTANCE keeps the endpoint off the default one
+# a user's editor would own.
+banner "drive the package from an agent (MCP)"
+mcp_in=$out_dir/mcp-in.jsonl
+mcp_out=$out_dir/mcp-out.jsonl
+mcp_err=$out_dir/mcp-err.txt
+
+# project.new leaves a project with no sequences, and timeline.get_state
+# answers a domain error on one of those, so the round trip creates a sequence
+# in between: a mutation goes in and the timeline that comes back is the one it
+# produced.
+settings='{"resolution":{"width":1920,"height":1080},"frame_rate":{"numerator":30,"denominator":1},"sample_rate":48000,"color":{"space":"rec709","transfer":"bt709","primaries":"bt709"}}'
+req_initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fresh-install-check","version":"1"}}}'
+req_initialized='{"jsonrpc":"2.0","method":"notifications/initialized"}'
+req_new='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_new","arguments":{"name":"Fresh install"}}}'
+req_sequence='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sequence_create","arguments":{"name":"Installed by MCP","settings":'$settings'}}}'
+req_timeline='{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"timeline_get_state","arguments":{}}}'
+printf '%s\n' "$req_initialize" "$req_initialized" "$req_new" "$req_sequence" \
+    "$req_timeline" >"$mcp_in"
+
+SUBORDINATE_INSTANCE=fresh-install-check
+SUBORDINATE_LOG=info
+export SUBORDINATE_INSTANCE SUBORDINATE_LOG
+
+: >"$mcp_out"
+: >"$mcp_err"
+
+# Wait for the reply to request $1 before sending the request that depends on
+# it, the way any MCP client does. The server dispatches each request as a task
+# of its own, so a client that pipes a whole session in at once can have
+# timeline.get_state answered before the sequence.create it depends on -- which
+# is exactly what happened on fedora in run 34672425215 and passed on ubuntu in
+# the same run. The answers land in $mcp_out, so that is where the wait looks.
+mcp_await() {
+    waited=0
+    while [ "$waited" -lt 120 ]; do
+        if grep -qE "\"id\":[[:space:]]*$1[,}]" "$mcp_out" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    # Not a failure here: this runs in the pipeline's subshell, where exiting
+    # would say nothing useful. Closing stdin ends the session and the checks
+    # below report the reply that never came.
+    echo "no answer to request $1 after ${waited}s; ending the session" >&2
+    return 1
+}
+
+mcp_session() {
+    printf '%s\n' "$req_initialize"
+    mcp_await 1 || return 0
+    printf '%s\n' "$req_initialized"
+    printf '%s\n' "$req_new"
+    mcp_await 2 || return 0
+    printf '%s\n' "$req_sequence"
+    mcp_await 3 || return 0
+    printf '%s\n' "$req_timeline"
+    mcp_await 4 || return 0
+}
+
+mcp_status=0
+mcp_session 2>>"$mcp_err" | sub_mcp >"$mcp_out" 2>>"$mcp_err" || mcp_status=$?
+echo "--- subordinate-mcp stderr (last 20 lines)"
+tail -n20 "$mcp_err" 2>/dev/null || true
+echo "--- subordinate-mcp stdout"
+cut -c1-400 "$mcp_out" 2>/dev/null || true
+[ "$mcp_status" -eq 0 ] || fail "the package's MCP bridge exited $mcp_status" mcp
+
+# One reply per request id, each a result rather than an error. `isError` is
+# how MCP reports a tool that ran and refused, which a bare exit status does
+# not show.
+check_mcp() {
+    id=$1
+    name=$2
+    line=$(grep -E "\"id\":[[:space:]]*$id[,}]" "$mcp_out" | head -n1)
+    [ -n "$line" ] || fail "the bridge never answered $name (request $id)" mcp
+    case "$line" in
+    *'"error"'*) fail "$name failed: $(echo "$line" | cut -c1-300)" mcp ;;
+    esac
+    case "$line" in
+    *'"isError":true'* | *'"isError": true'*)
+        fail "$name answered a tool error: $(echo "$line" | cut -c1-300)" mcp
+        ;;
+    esac
+    echo "$name round-tripped"
+}
+check_mcp 1 initialize
+check_mcp 2 project.new
+check_mcp 3 sequence.create
+check_mcp 4 timeline.get_state
+
+# The timeline that came back has to be the one the mutation made, not an empty
+# answer that happens not to be an error.
+grep -q 'Installed by MCP' "$mcp_out" ||
+    fail "timeline.get_state did not return the sequence sequence.create had just made" mcp
+fact mcp "round-trip ok (project.new, sequence.create, timeline.get_state)"
+echo "the installed package's own MCP bridge drove the installed package's own engine"
 
 # ------------------------------------------------------------------ the UI --
 if [ "$want_gui" -eq 1 ]; then

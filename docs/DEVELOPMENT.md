@@ -1945,7 +1945,15 @@ runs exactly what CI runs:
 6. validate what was written: `--verify` makes the package read its own output
    back in process, and where the package ships `gst-discoverer-1.0` as a
    command it is read again from outside;
-7. open the project in the real editor window under Xvfb
+7. drive the package from an agent: the bridge the package ships is spoken to
+   over its stdin and stdout, one JSON-RPC line at a time (`initialize`,
+   `project.new`, `sequence.create`, `timeline.get_state`), and the timeline
+   that comes back has to carry the sequence the mutation just made. Nothing
+   is running for it to attach to, so the bridge starts the `subordinate-cli`
+   it finds beside itself — which is what proves the package ships a bridge
+   and an engine that can find each other (TASK-142). No jq, no python and no
+   MCP client library: the stdio transport is one message per line;
+8. open the project in the real editor window under Xvfb
    (`subordinate --ui-smoke`), which paints, pops the viewer out and prints a
    ready line. On these machines wgpu lands on Mesa's lavapipe.
 
@@ -1981,7 +1989,10 @@ than failing on it.
 This is the version to run when a real laptop is available -- a friend's
 Ubuntu install, a newly imaged Windows box, or the user's Mac once TASK-105
 lands a dmg. Download the package and the sample project, write a two-line
-adapter saying how the package is reached, and run the same script:
+adapter saying how the package is reached, and run the same script. The
+adapter defines four functions -- `sub_gui`, `sub_cli`, `sub_tool` and
+`sub_mcp` -- because the check drives the package's MCP bridge as well as its
+editor and its CLI (TASK-142):
 
 ```bash
 # the package, the project and its media
@@ -1999,6 +2010,7 @@ appimage=$(ls "$PWD"/Subordinate-*-x86_64.AppImage)
 sub_gui() { "$appimage" "$@"; }
 sub_cli() { SUB_APPIMAGE_TOOL=subordinate-cli "$appimage" "$@"; }
 sub_tool() { tool=$1; shift; SUB_APPIMAGE_TOOL=$tool "$appimage" "$@"; }
+sub_mcp() { "$appimage" --mcp "$@"; }
 EOF
 
 sh fresh-install-check.sh --adapter "$PWD/adapter.sh" --project "$PWD/demo.sub"

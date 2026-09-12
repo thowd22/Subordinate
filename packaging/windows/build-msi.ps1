@@ -7,7 +7,7 @@
     Windows counterpart of packaging/linux/build-appimage.sh. The MSI installs
     a self-contained tree under %ProgramFiles%\Subordinate:
 
-        bin\subordinate.exe, subordinate-cli.exe
+        bin\subordinate.exe, subordinate-cli.exe, subordinate-mcp.exe
         bin\*.dll                      the GStreamer 1.28 MSVC runtime
         bin\gst-inspect-1.0.exe, gst-discoverer-1.0.exe, gst-launch-1.0.exe
         bin\vcruntime140.dll, msvcp140.dll, ...   the MSVC CRT, app-local
@@ -105,10 +105,17 @@ if ($msiVersion -notmatch '^\d+\.\d+(\.\d+)?$') { Fail "version '$version' is no
 
 # ------------------------------------------------------------------- binaries
 $targetDir = Join-Path $repoRoot "target\$CargoProfile"
-$exeNames = @('subordinate.exe', 'subordinate-cli.exe')
+# The MCP bridge ships with the editor rather than being something a user has
+# to build: it is part of the product (docs/PLAN.md section 7), and an agent on
+# a machine that only ever ran the installer has no other way to get one. It
+# goes in bin\ beside subordinate-cli.exe on purpose -- that is where the
+# bridge looks for the headless CLI it falls back to when no editor is running
+# (bins/subordinate-mcp/src/backend.rs, cli_path), so the installed bridge
+# works with nothing configured but its own path.
+$exeNames = @('subordinate.exe', 'subordinate-cli.exe', 'subordinate-mcp.exe')
 if (-not $SkipBuild) {
-    Write-Host "build-msi: cargo build --profile $CargoProfile -p subordinate -p subordinate-cli"
-    & cargo build --profile $CargoProfile -p subordinate -p subordinate-cli
+    Write-Host "build-msi: cargo build --profile $CargoProfile -p subordinate -p subordinate-cli -p subordinate-mcp"
+    & cargo build --profile $CargoProfile -p subordinate -p subordinate-cli -p subordinate-mcp
     if ($LASTEXITCODE -ne 0) { Fail "cargo build failed with exit code $LASTEXITCODE" }
 }
 foreach ($exe in $exeNames) {
