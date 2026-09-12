@@ -4933,6 +4933,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-app",
  "gstreamer-pbutils",
+ "png",
  "serde",
  "serde_json",
  "sub-audio",

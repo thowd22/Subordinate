@@ -118,6 +118,8 @@ enum Method {
         /// One sentence written for the alias rather than for the command.
         description: &'static str,
     },
+    /// Discover the current table, including methods registered after startup.
+    ListMethods,
     /// A query or history operation.
     Query(Handler),
     /// A method acting on the connection that called it.
@@ -129,7 +131,7 @@ impl Method {
     fn kind(&self) -> &'static str {
         match self {
             Self::Command | Self::Alias { .. } => "command",
-            Self::Query(_) => "query",
+            Self::Query(_) | Self::ListMethods => "query",
             Self::Session(_) => "session",
         }
     }
@@ -312,6 +314,8 @@ pub struct Dispatcher {
     engine: EngineHandle,
     registry: CommandRegistry,
     methods: BTreeMap<String, Entry>,
+    pub(crate) host_services:
+        std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<dyn crate::host::Services>>>>,
 }
 
 impl std::fmt::Debug for Dispatcher {
@@ -322,7 +326,7 @@ impl std::fmt::Debug for Dispatcher {
             .field("engine", &self.engine)
             .field("registry", &self.registry)
             .field("methods", &self.methods.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -360,6 +364,7 @@ impl Dispatcher {
             engine,
             registry: registry.clone(),
             methods,
+            host_services: std::sync::Arc::default(),
         };
         dispatcher.install_events();
         dispatcher.install_queries();
@@ -680,6 +685,12 @@ impl Dispatcher {
                     .apply_envelope(CommandEnvelope::new(kind, params))?;
                 to_value(&AppliedResult::from(&applied))
             }
+            Method::ListMethods => {
+                typed::<NoParams>(params)?;
+                to_value(&ListMethodsResult {
+                    methods: self.methods(),
+                })
+            }
             Method::Query(handler) => handler(&self.engine, params),
             Method::Session(handler) => {
                 let session = session.ok_or_else(|| {
@@ -801,19 +812,15 @@ impl Dispatcher {
             },
         );
 
-        let methods = self.methods();
-        self.add::<NoParams, ListMethodsResult, _>(
-            SYSTEM_LIST_METHODS,
-            "List every method this build serves, with its kind.",
-            move |_, params| {
-                typed::<NoParams>(params)?;
-                let mut methods = methods.clone();
-                methods.push(MethodInfo {
-                    name: SYSTEM_LIST_METHODS.to_owned(),
-                    kind: "query".to_owned(),
-                });
-                methods.sort_by(|left, right| left.name.cmp(&right.name));
-                to_value(&serde_json::json!({ "methods": methods }))
+        self.methods.insert(
+            SYSTEM_LIST_METHODS.to_owned(),
+            Entry {
+                method: Method::ListMethods,
+                described: Some(Described {
+                    description: "List every method this build serves, with its kind.",
+                    params: schema_of::<NoParams>,
+                    result: schema_of::<ListMethodsResult>,
+                }),
             },
         );
     }
@@ -1144,6 +1151,26 @@ mod tests {
                 .iter()
                 .any(|method| method["name"] == SYSTEM_LIST_METHODS)
         );
+    }
+
+    #[test]
+    fn list_methods_includes_late_registered_methods_and_agent_families() {
+        let (_engine, mut dispatcher) = fixture();
+        dispatcher
+            .register::<NoParams, String, _>("plugin.late", "A late method.", |_, _| {
+                Ok(json!("ok"))
+            })
+            .unwrap();
+        let listed = dispatcher.invoke(SYSTEM_LIST_METHODS, None).unwrap();
+        let names: Vec<_> = listed["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|method| method["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"plugin.late"));
+        assert!(names.contains(&"project.open"));
+        assert_eq!(names, dispatcher.method_names().collect::<Vec<_>>());
     }
 
     #[test]

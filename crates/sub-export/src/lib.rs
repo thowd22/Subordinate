@@ -37,8 +37,8 @@ pub mod sequence;
 
 #[cfg(feature = "sequence")]
 pub use sequence::{
-    FrameSpan, SequenceAudio, SequenceFrames, clips_with_effects, has_audio, lift_render_error,
-    open_streams, sequence_frames, settings_for_sequence,
+    FramePng, FrameSpan, SequenceAudio, SequenceFrames, clips_with_effects, frame_png, has_audio,
+    lift_render_error, open_streams, sequence_frames, settings_for_sequence,
 };
 
 pub use chroma::{CHROMA_FORMATS, ChromaFormat};
@@ -56,7 +56,8 @@ pub use pipeline::{
     MAX_CRF, PcmAudioSource, SolidFrames, VideoFrameSource, VideoQuality, export, export_with,
 };
 pub use presets::{
-    AudioPreset, PRESETS_FILE_NAME, Preset, PresetLibrary, VideoPreset, config_dir, presets_path,
+    AudioPreset, PRESETS_FILE_NAME, Preset, PresetLibrary, VideoPreset, config_dir, preset_json,
+    presets_path,
 };
 pub use rate_control::{apply_audio_bitrate, apply_video_quality};
 

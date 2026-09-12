@@ -142,30 +142,59 @@ pub(crate) fn install(dispatcher: &mut Dispatcher) {
 
 /// The `project.*` family.
 fn install_project(dispatcher: &mut Dispatcher) {
+    let host = dispatcher.host_services.clone();
     dispatcher.add::<NewProjectParams, AppliedResult, _>(
         PROJECT_NEW,
         "Replace the open project with a new, empty one, undoably.",
-        |engine, params| {
+        move |engine, params| {
             let params: NewProjectParams = typed(params)?;
-            apply_project(engine, Project::new(params.name))
+            let project = Project::new(params.name);
+            let result = apply_project(engine, project.clone())?;
+            if let Some(host) = host
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                host.project_file_changed(&project, None);
+            }
+            Ok(result)
         },
     );
+    let host = dispatcher.host_services.clone();
     dispatcher.add::<OpenProjectParams, AppliedResult, _>(
         PROJECT_OPEN,
         "Open a project file, replacing the open project undoably.",
-        |engine, params| {
+        move |engine, params| {
             let params: OpenProjectParams = typed(params)?;
-            apply_project(engine, read_project(&params.path)?)
+            let project = read_project(&params.path)?;
+            let result = apply_project(engine, project.clone())?;
+            if let Some(host) = host
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                host.project_file_changed(&project, Some(&params.path));
+            }
+            Ok(result)
         },
     );
+    let host = dispatcher.host_services.clone();
     dispatcher.add::<SaveProjectParams, SaveResult, _>(
         PROJECT_SAVE,
         "Write the open project to a file as JSON.",
-        |engine, params| {
+        move |engine, params| {
             let params: SaveProjectParams = typed(params)?;
             let revision = engine.revision();
-            let text = json::to_json(&engine.snapshot())?;
+            let project = engine.snapshot();
+            let text = json::to_json(&project)?;
             write_project(&params.path, &text)?;
+            if let Some(host) = host
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                host.project_file_changed(&project, Some(&params.path));
+            }
             to_value(&SaveResult {
                 path: params.path.display().to_string(),
                 bytes: text.len() as u64,

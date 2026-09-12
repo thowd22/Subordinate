@@ -775,6 +775,37 @@ impl From<&Preset> for RawPreset {
     }
 }
 
+/// One preset as the Command API reports it (`export.list_presets`).
+///
+/// [`Preset`] is the file's own shape; this is the wire shape, written once so
+/// the editor and `subordinate-cli serve` answer the method with the same
+/// document. Every rate in it is an exact rational.
+#[must_use]
+pub fn preset_json(preset: &Preset) -> serde_json::Value {
+    use serde_json::json;
+    json!({
+        "id": preset.id,
+        "name": preset.name,
+        "container": preset.container,
+        "video": preset.video.as_ref().map(|video| json!({
+            "codec": video.codec.as_str(),
+            "width": video.width,
+            "height": video.height,
+            "frame_rate": {
+                "numerator": video.frame_rate.numerator(),
+                "denominator": video.frame_rate.denominator(),
+            },
+            "quality": video.quality.to_string(),
+        })),
+        "audio": preset.audio.as_ref().map(|audio| json!({
+            "codec": audio.codec.as_str(),
+            "channels": audio.channels,
+            "sample_rate": audio.sample_rate,
+            "bitrate_kbps": audio.bitrate_kbps,
+        })),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
