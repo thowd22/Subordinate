@@ -172,8 +172,20 @@ read, so a mutation smuggled into this flow fails the run.
 On Linux the file dialog is rfd's XDG desktop portal backend (rfd 0.17 with
 default features: neither `gtk3` nor `ashpd` is compiled in), so the session
 needs `xdg-desktop-portal` with a backend behind it — the job installs
-`xdg-desktop-portal-gtk` and sets `XDG_CURRENT_DESKTOP`. On Windows it is the
-common item dialog, whose window class is `#32770`.
+`xdg-desktop-portal-gtk` and sets `XDG_CURRENT_DESKTOP`. The chooser is a
+window of its own: it is given the keyboard and moved into the pointer's reach
+before anything is typed at it, and the clip is picked by double-clicking the
+row carrying its name. On Windows it is the common item dialog, whose window
+class is `#32770`, and the path is typed into the File name box it opens with.
+
+Three things about these machines the harness has to work around, each of them
+found the hard way and each of them a comment in the code:
+
+| | |
+| --- | --- |
+| The pointer cannot reach the whole Linux screen | `xdotool mousemove` stops at x=448 on a 1920-wide screen, so `maximize()` measures `pointer_bounds()` and puts the window inside it |
+| AccessKit publishes nothing until an AT asks | `enable_accessibility()` sets `org.a11y.Status`, which is what a screen reader does |
+| The dock's tabs are painted, not published | the export panel's tab is found in the band above the Inspector's own text |
 
 ## Running them
 

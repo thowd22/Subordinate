@@ -1236,6 +1236,15 @@ does:
   project that has already changed (run 34672010010). Every picture in the MCP
   flow is therefore taken after `session.nudge()`, a pointer move that changes
   nothing.
+* **A Windows export of the 4K60 clip stalls after one frame.** The pipeline
+  starts and names its encoder (`nvh264enc`), the decoder is plugged, one frame
+  is written and then nothing moves - with the editor open or closed, through
+  the bridge or through the GUI's own Export button, and with the Direct3D
+  decoders ranked out in favour of NVDEC (runs 34672165182, 34673633121,
+  34674794109 and 34682198476). The same project renders in seconds on the
+  Linux desktop runner. Both Windows flows therefore fail at their export step,
+  with the screenshot and the editor's log attached; everything before it -
+  every edit, every gesture, every assertion - passes.
 * **The editor's endpoint does not serve `export.*`.** Only
   `subordinate-cli serve` installs the host-backed families
   (`docs/schema/host-api.json`); the editor serves the engine's own methods and
@@ -1245,14 +1254,41 @@ does:
   the export managed one frame in fifteen minutes and finished in seconds once
   it had the GPU to itself (run 34672165182).
 
-On Linux the clicks flow needs two pieces of desktop plumbing that the image
-does not carry yet, and the job installs them: `xdg-desktop-portal` with a
-backend, because the editor's file dialog is rfd's XDG portal backend (rfd 0.17
-with default features compiles neither `gtk3` nor `ashpd`), and `at-spi2-core`
-with `python3-pyatspi`, because AccessKit's Unix adapter publishes egui's widget
-tree on the accessibility bus. Both are D-Bus activated, so the flow runs under
-`dbus-run-session`. They belong in `infra/images/linux-desktop/component.yaml`
-once they have settled.
+On Linux the clicks flow needs plumbing the image does not carry yet, and the
+job installs it. Three things, and the third is a bug rather than a dependency:
+
+* `xdg-desktop-portal` with a backend, because the editor's file dialog is
+  rfd's XDG portal backend (rfd 0.17 with default features compiles neither
+  `gtk3` nor `ashpd`), plus `zenity`, which is rfd's own fallback;
+* `at-spi2-core` and `python3-pyatspi`, because AccessKit's Unix adapter
+  publishes egui's widget tree on the accessibility bus. Both are D-Bus
+  activated, so the flow runs under `dbus-run-session`. The adapter publishes
+  **nothing** until `org.a11y.Status` says accessibility is enabled - the flag a
+  screen reader sets - so the harness sets it (`enable_accessibility()` in
+  `scripts/desktop/subdesktop/linux.py`); without it the tree is empty rather
+  than absent, which reads as "the button is not there";
+* `libva-drm2`, `libva2`, `libva-x11-2` and `libvdpau1`, because the v0.1.2
+  **AppImage's `libav`, `va`, `qsv` and `msdk` plugins fail to load without
+  them** - the plugin scanner prints "libva-drm.so.2: cannot open shared object
+  file" and nothing else notices until an import of the baked 4K60 clip answers
+  `media.unsupported` / `MissingPlugins`. Run 34684471869 reproduced it through
+  `media.probe`, with no window involved, and run 34685062551 imported the same
+  clip once the libraries were there. **The package should carry them or not
+  link those plugins against them**; the job supplies them until it does.
+
+Two more things about the Linux desktop image that any test driving it has to
+know:
+
+* **The pointer cannot reach the whole screen.** The virtual screen is
+  1920x1080, but `xdotool mousemove` leaves the pointer at x=448 when asked for
+  anything to the left of that, so a click aimed at the media bin lands in the
+  middle of the viewer instead. The harness measures the reachable rectangle
+  (`LinuxSession.pointer_bounds()`) and maximizes the window into it, which is
+  what turned "the editor takes motion but not clicks" into a working flow
+  (runs 34681396173 and 34681751826).
+* **The dock's tabs are painted, not published.** `Export`, `Inspector` and
+  `Timeline` are nowhere in the accessibility tree, so the export panel's tab is
+  found in the band above the Inspector's own text rather than by name.
 
 ## Self-hosted AMD runner ("box")
 
