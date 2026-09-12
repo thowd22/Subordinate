@@ -1,0 +1,175 @@
+name: SubordinateWindowsDesktopSession
+description: Auto-logon desktop session - a local test administrator, AutoAdminLogon, no lock screen or screensaver, RDP (TASK-138, component 2 of 4).
+schemaVersion: 1.0
+
+parameters:
+  - TestUser:
+      type: string
+      default: subtest
+      description: Local administrator that Windows logs on automatically.
+  - SecretName:
+      type: string
+      default: subordinate/windows-desktop-ami/rdp
+      description: Secrets Manager secret that receives the generated password.
+
+phases:
+  - name: build
+    steps:
+      - name: TestUserAndAutologon
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $ErrorActionPreference = 'Stop'
+              $user = '{{ TestUser }}'
+              $secretName = '{{ SecretName }}'
+
+              # A long random password. It is written to Secrets Manager and to
+              # the Winlogon DefaultPassword value, and nowhere else. The
+              # alphabet deliberately excludes quotes and backslashes: this
+              # string is interpolated into a generated PowerShell file below
+              # and passed through JSON, and an escape there would be a
+              # locked-out image nobody could debug.
+              $alphabet = ('ABCDEFGHJKLMNPQRSTUVWXYZ' + 'abcdefghijkmnopqrstuvwxyz' + '23456789' + '-_.!#%+=@').ToCharArray()
+              $bytes = New-Object byte[] 32
+              [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+              $plain = -join ($bytes | ForEach-Object { $alphabet[$_ % $alphabet.Length] })
+              $secure = ConvertTo-SecureString $plain -AsPlainText -Force
+
+              if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) {
+                Set-LocalUser -Name $user -Password $secure -PasswordNeverExpires $true
+              } else {
+                New-LocalUser -Name $user -Password $secure -PasswordNeverExpires -AccountNeverExpires -FullName 'Subordinate desktop test user' | Out-Null
+              }
+              # Administrator so the helper can install, kill and screenshot
+              # anything the job asks for; Remote Desktop Users so a human can
+              # RDP in to watch a failing run (docs/DEVELOPMENT.md).
+              foreach ($g in 'Administrators', 'Remote Desktop Users') {
+                try { Add-LocalGroupMember -Group $g -Member $user -ErrorAction Stop } catch { "already in $g" }
+              }
+
+              # Auto-logon, baked straight into the image. This works because
+              # the image is captured without Sysprep (see
+              # workflow-build-no-sysprep.yml): nothing clears these values
+              # between here and the runner's first boot.
+              #
+              # DefaultDomainName is '.' - the local machine - and not this
+              # build instance's name, which EC2Launch replaces on the runtime
+              # instance anyway.
+              $wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+              Set-ItemProperty $wl AutoAdminLogon '1' -Type String
+              Set-ItemProperty $wl DefaultUserName $user -Type String
+              Set-ItemProperty $wl DefaultDomainName '.' -Type String
+              Set-ItemProperty $wl DefaultPassword $plain -Type String
+              Remove-ItemProperty $wl AutoLogonCount -ErrorAction SilentlyContinue
+              Remove-ItemProperty $wl AutoLogonSID -ErrorAction SilentlyContinue
+
+              # The same values in a script SetupComplete.cmd runs, which is
+              # the belt to that braces: it costs nothing and covers a rebuild
+              # that does put Sysprep back.
+              $dir = 'C:\SubordinateTest\bin'
+              New-Item -ItemType Directory -Force -Path $dir | Out-Null
+              @"
+              `$wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+              Set-ItemProperty `$wl AutoAdminLogon '1' -Type String
+              Set-ItemProperty `$wl DefaultUserName '$user' -Type String
+              Set-ItemProperty `$wl DefaultDomainName '.' -Type String
+              Set-ItemProperty `$wl DefaultPassword '$plain' -Type String
+              Remove-ItemProperty `$wl AutoLogonCount -ErrorAction SilentlyContinue
+              "@ | Set-Content -Encoding ASCII "$dir\apply-autologon.ps1"
+
+              # Only SYSTEM and the local administrators may read that file or
+              # the media directory it sits in.
+              icacls 'C:\SubordinateTest\bin' /inheritance:r /grant 'SYSTEM:(OI)(CI)F' /grant 'Administrators:(OI)(CI)F' | Out-Null
+
+              $scripts = 'C:\Windows\Setup\Scripts'
+              New-Item -ItemType Directory -Force -Path $scripts | Out-Null
+              $line = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\SubordinateTest\bin\apply-autologon.ps1"'
+              $sc = "$scripts\SetupComplete.cmd"
+              if (Test-Path $sc) {
+                if (-not (Select-String -Path $sc -SimpleMatch 'apply-autologon.ps1' -Quiet)) { Add-Content $sc $line }
+              } else {
+                Set-Content -Encoding ASCII $sc "@echo off`r`n$line`r`n"
+              }
+
+              # Store the password where a human can get at it, and only there.
+              $region = $env:AWS_REGION
+              if (-not $region) {
+                $t = Invoke-RestMethod -Method Put -Uri http://169.254.169.254/latest/api/token -Headers @{'X-aws-ec2-metadata-token-ttl-seconds'='120'} -TimeoutSec 5
+                $region = (Invoke-RestMethod -Uri http://169.254.169.254/latest/meta-data/placement/region -Headers @{'X-aws-ec2-metadata-token'=$t} -TimeoutSec 5)
+              }
+              $aws = 'C:\Program Files\Amazon\AWSCLIV2\aws.exe'
+              if (-not (Test-Path $aws)) { $aws = (Get-Command aws.exe).Source }
+              $payload = @{ username = $user; password = $plain; computer = $env:COMPUTERNAME; created = (Get-Date).ToUniversalTime().ToString('s') } | ConvertTo-Json -Compress
+              $file = Join-Path $env:TEMP 'secret.json'
+              Set-Content -Encoding ASCII $file $payload
+              # The AWS CLI wants forward slashes after file://.
+              $fileUri = 'file://' + ($file -replace '\\', '/')
+              # Windows PowerShell turns *any* native stderr output into a
+              # terminating error while ErrorActionPreference is Stop - even
+              # the "secret not found" that the create path is there to
+              # handle. Exit codes are checked by hand from here down.
+              $ErrorActionPreference = 'Continue'
+              & $aws secretsmanager put-secret-value --region $region --secret-id $secretName --secret-string $fileUri 2>&1 | Out-Null
+              if ($LASTEXITCODE -ne 0) {
+                'secret not there yet, creating it'
+                & $aws secretsmanager create-secret --region $region --name $secretName --description 'RDP password for the Subordinate Windows desktop runner AMI' --secret-string $fileUri
+                if ($LASTEXITCODE -ne 0) { throw 'could not write the password to Secrets Manager' }
+              }
+              Remove-Item $file -Force -ErrorAction SilentlyContinue
+              Remove-Variable plain, payload
+              "password for $user stored in Secrets Manager as $secretName"
+
+      - name: NoLockNoScreensaverNoSleep
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              # Continue, not Stop: reg.exe and powercfg.exe write to stderr
+              # for things that are not errors, and under Stop that is a
+              # terminating NativeCommandError.
+              $ErrorActionPreference = 'Continue'
+              # Machine-wide policy: no lock screen, no inactivity lock, no
+              # "press ctrl+alt+del", no screensaver. A locked desktop is a
+              # black screenshot and an input sink.
+              $sys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+              New-Item -Path $sys -Force | Out-Null
+              Set-ItemProperty $sys DisableLockWorkstation 1 -Type DWord
+              Set-ItemProperty $sys InactivityTimeoutSecs 0 -Type DWord
+              $pers = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization'
+              New-Item -Path $pers -Force | Out-Null
+              Set-ItemProperty $pers NoLockScreen 1 -Type DWord
+
+              # The screensaver is a per-user setting, but the policy branch
+              # under HKLM applies it to every user without touching a profile.
+              # Loading C:\Users\Default\NTUSER.DAT to edit it directly is the
+              # other way, and a default hive that fails to unload is a classic
+              # sysprep hang - not worth the risk for a screensaver.
+              $desktop = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop'
+              New-Item -Path $desktop -Force | Out-Null
+              Set-ItemProperty $desktop ScreenSaveActive '0' -Type String
+              Set-ItemProperty $desktop ScreenSaverIsSecure '0' -Type String
+              Set-ItemProperty $desktop ScreenSaveTimeOut '0' -Type String
+
+              # Never sleep, never turn the display off. "Display off" on a
+              # headless EC2 instance does not blank the virtual framebuffer,
+              # but it does stop some compositors repainting.
+              powercfg /setactive SCHEME_MIN
+              powercfg /change monitor-timeout-ac 0
+              powercfg /change standby-timeout-ac 0
+              powercfg /change hibernate-timeout-ac 0
+
+      - name: EnableRdp
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $ErrorActionPreference = 'Stop'
+              Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' fDenyTSConnections 0 -Type DWord
+              # Network Level Authentication off is *not* wanted: NLA stays on,
+              # the user has a strong generated password.
+              Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+              Set-Service TermService -StartupType Automatic
+              'RDP enabled (the security group still has to allow 3389 from the operator)'
+
+      # ------------------------------------------------------------- payload

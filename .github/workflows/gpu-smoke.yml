@@ -492,3 +492,178 @@ jobs:
           if (-not ($info -match 'H\.264')) { Write-Error "no H.264 stream"; exit 1 }
           (Get-Item $out).Length
           Remove-Item $out -ErrorAction SilentlyContinue
+
+  # ---------------------------------------------------------------------------
+  # The desktop runner (TASK-138). Everything above proves the GPU is there;
+  # this pair proves the application runs on a real desktop and answers a
+  # person's input.
+  #
+  # It needs `gpu-nvidia-desktop-windows`, whose custom AMI logs a test user on
+  # to the console session at boot. The GitHub Actions runner still runs where
+  # RunsOn puts it - as SYSTEM in session 0, which has no desktop and cannot
+  # even create a swapchain - so every step that touches the application sends
+  # a script into the console session through the image's interactive helper
+  # (`C:\SubordinateTest\bin\InteractiveSession.psm1`). See
+  # infra/images/windows-desktop/README.md.
+  #
+  # Verified on task/task-138 (run 34670630488) with the inline equivalent of
+  # this runner, `ami=ami-0b3c82cb19d31ac1d/family=g4dn.xlarge/spot=false`,
+  # because RunsOn reads .github/runs-on.yml from the default branch only. The
+  # by-name form below goes live when this lands on main; re-dispatch GPU smoke
+  # once afterwards to confirm the name resolves (TASK-115 saw RunsOn cache the
+  # old config for about an hour).
+  # ---------------------------------------------------------------------------
+  build-mcp-windows:
+    # The released MSI does not carry the MCP bridge: packaging's
+    # build-msi.ps1 stages subordinate.exe and subordinate-cli.exe only
+    # (v0.1.1, and v0.1.0 before it). subordinate-mcp has no GStreamer
+    # dependency, so a free hosted runner can build it in a couple of minutes
+    # and hand it to the GPU job, which keeps the paid instance short.
+    name: Build subordinate-mcp (hosted, free)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mcp-windows
+      - run: cargo build --release -p subordinate-mcp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: subordinate-mcp-windows
+          path: target/release/subordinate-mcp.exe
+          if-no-files-found: error
+
+  nvidia-desktop-windows:
+    name: NVIDIA T4 desktop (g4dn.xlarge, Windows Server 2022, console session)
+    needs: build-mcp-windows
+    runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-desktop-windows
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      SCRIPTS: infra/images/windows-desktop/jobscripts
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instance, GPU and image facts
+        run: |
+          "runner=$env:RUNNER_NAME ami=$env:RUNS_ON_AMI_ID instance=$env:RUNS_ON_INSTANCE_TYPE"
+          (Get-CimInstance Win32_OperatingSystem).Caption
+          Get-Content C:\SubordinateTest\image.json
+          & "$env:SystemRoot\System32\nvidia-smi.exe"
+          if ($LASTEXITCODE -ne 0) { throw "nvidia-smi failed ($LASTEXITCODE)" }
+          Get-CimInstance Win32_VideoController | Format-List Name, DriverVersion, VideoModeDescription | Out-String
+
+      - name: The desktop session is up
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1
+          # The helper only runs in a logged-on console session, so a fresh
+          # heartbeat is the proof that the auto-logon happened.
+          $deadline = (Get-Date).AddMinutes(3)
+          do {
+            $beat = Get-InteractiveHelper
+            if ($beat) { break }
+            Start-Sleep 5
+          } while ((Get-Date) -lt $deadline)
+          if (-not $beat) {
+            cmd /c "query session"
+            throw 'no interactive helper: the auto-logon did not happen'
+          }
+          "helper:  session=$($beat.session) user=$($beat.user) desktop=$($beat.desktop) pid=$($beat.pid)"
+          if ([int]$beat.session -eq 0) { throw 'the helper is in session 0, which has no desktop' }
+          "this job: session=$((Get-Process -Id $PID).SessionId) user=$(whoami)"
+          $r = Invoke-InteractiveScript -Name 'hello' -Script 'Add-Type -AssemblyName System.Windows.Forms; "session " + (Get-Process -Id $PID).SessionId + " as " + $env:USERNAME + " on " + [System.Windows.Forms.SystemInformation]::VirtualScreen'
+          $r.Output
+          if ($r.ExitCode -ne 0) { throw 'the interactive helper could not run a script' }
+
+      - name: Fetch the MCP bridge built on the hosted runner
+        uses: actions/download-artifact@v4
+        with:
+          name: subordinate-mcp-windows
+          path: mcp
+
+      - name: Stage the sample project and the automation scripts
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\scripts\get-sample-media.ps1
+          $dest = 'C:\SubordinateTest\sample-project'
+          Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item examples\sample-project $dest -Recurse
+          Copy-Item "$env:SCRIPTS\import-click.py" C:\SubordinateTest\import-click.py -Force
+          # The image says whether the MSI carried the bridge; when it did not,
+          # stage the one the hosted job just built.
+          Get-Content C:\SubordinateTest\image.json
+          if (-not (Test-Path 'C:\Program Files\Subordinate\bin\subordinate-mcp.exe')) {
+            Copy-Item mcp\subordinate-mcp.exe C:\SubordinateTest\bin\subordinate-mcp.exe -Force
+            'staged subordinate-mcp.exe from the hosted build'
+          }
+          New-Item -ItemType Directory -Force -Path C:\SubordinateTest\shots | Out-Null
+          Get-ChildItem $dest -Recurse -File | Select-Object FullName, Length | Format-Table -AutoSize | Out-String -Width 200
+
+      - name: Launch Subordinate from the Start Menu shortcut
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1
+          $r = Invoke-InteractiveScript -Name 'launch' -TimeoutSeconds 240 `
+                 -Script (Get-Content "$env:SCRIPTS\launch.ps1" -Raw)
+          $r.Output
+          if ($r.ExitCode -ne 0) { throw 'the editor did not come up on the desktop' }
+
+      - name: Screenshot the desktop
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1
+          # The helper runs a queued script with no arguments, so the file name
+          # arrives as a prepended assignment.
+          $script = "`$ShotName = '01-editor'`r`n" + (Get-Content "$env:SCRIPTS\screenshot.ps1" -Raw)
+          $r = Invoke-InteractiveScript -Name 'shot1' -Script $script
+          $r.Output
+          if ($r.ExitCode -ne 0) { throw 'the desktop screenshot failed' }
+
+      - name: Click the media bin Import button through UI Automation
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1
+          $r = Invoke-InteractiveScript -Name 'import' -TimeoutSeconds 300 `
+                 -Script (Get-Content "$env:SCRIPTS\import-click.ps1" -Raw)
+          $r.Output
+          if ($r.ExitCode -ne 0) { throw "the Import click did not open the file dialog (exit $($r.ExitCode))" }
+
+      - name: MCP round-trip against the editor on screen
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1
+          $r = Invoke-InteractiveScript -Name 'mcp' -TimeoutSeconds 240 `
+                 -Script (Get-Content "$env:SCRIPTS\mcp-roundtrip.ps1" -Raw)
+          $r.Output
+          if ($r.ExitCode -ne 0) { throw 'the MCP round-trip failed' }
+
+      - name: Final screenshot, then collect everything
+        if: always()
+        continue-on-error: true
+        run: |
+          Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1 -ErrorAction SilentlyContinue
+          try {
+            $r = Invoke-InteractiveScript -Name 'finish' -Script (Get-Content "$env:SCRIPTS\finish.ps1" -Raw)
+            $r.Output
+          } catch { "could not take the final screenshot: $_" }
+          Copy-Item C:\SubordinateTest\shots\*.png $env:RUNNER_TEMP -ErrorAction SilentlyContinue
+          Copy-Item C:\SubordinateTest\mcp-out.jsonl, C:\SubordinateTest\mcp-err.txt, C:\SubordinateTest\app.err $env:RUNNER_TEMP -ErrorAction SilentlyContinue
+          Get-ChildItem C:\SubordinateTest\out -ErrorAction SilentlyContinue | Format-Table Name, Length -AutoSize | Out-String
+          Get-ChildItem $env:RUNNER_TEMP -File | Where-Object { $_.Name -match 'png|jsonl|err' } | Format-Table Name, Length -AutoSize | Out-String
+
+      - name: Upload the desktop screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-desktop-screenshots
+          path: |
+            ${{ runner.temp }}/*.png
+            ${{ runner.temp }}/mcp-*.jsonl
+            ${{ runner.temp }}/*.err
+            ${{ runner.temp }}/mcp-err.txt
+          if-no-files-found: warn

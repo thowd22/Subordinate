@@ -929,12 +929,13 @@ on EC2 instances in the project's AWS account through
   | `gpu-nvidia-desktop-linux` | `g4dn.xlarge` (T4) | custom (Xorg desktop) | 0.526 | ready |
   | `gpu-amd-linux` | `g4ad.xlarge` (Radeon Pro V520) | `ubuntu26-full-x64` | 0.379 | ready |
   | `gpu-nvidia-windows` | `g4dn.xlarge` (T4) | `windows22-full-x64` | 0.752 | ready |
+  | `gpu-nvidia-desktop-windows` | `g4dn.xlarge` (T4) | custom AMI (TASK-138) | 0.752 | ready |
 
   There is no `gpu-amd-windows` runner and there cannot be one: AWS retired
   g4ad and offers no other AMD GPU instance type, so AMF (`amfh264enc`) has no
   cloud host at all.
 
-  All three need the EC2 G-family vCPU quotas (`L-DB2E81BA` on-demand,
+  All four need the EC2 G-family vCPU quotas (`L-DB2E81BA` on-demand,
   `L-3819A6DF` spot) above zero in us-east-1.
 - **The config is read from `main`, not from your branch.** For public repos
   RunsOn only reads `.github/runs-on.yml` from the default branch, so a runner
@@ -962,6 +963,50 @@ on EC2 instances in the project's AWS account through
     are present afterwards.
   - Copy the `nvidia-windows` job in `.github/workflows/gpu-smoke.yml`
     verbatim for any new Windows GPU job.
+- **Driving the real application on Windows needs the other runner**,
+  `gpu-nvidia-desktop-windows` (TASK-138). RunsOn starts its agent from the
+  instance's user data - `bootstrap-<tag>-agent-windows.exe` → `cmd.exe` →
+  `Runner.Listener.exe` → `Runner.Worker.exe`, all in session 0 as
+  `NT AUTHORITY\SYSTEM` - and session 0 has no desktop. The editor does not
+  just look wrong there, it dies: `SwapChain creation error ... Invalid
+  surface` (run 34656029109). The agent cannot be moved, because the user data
+  is the control plane's and carries that job's JIT registration, so the
+  desktop AMI keeps RunsOn's arrangement and adds a bridge:
+  - It logs a local administrator `subtest` on to the console session at boot
+    and starts an **interactive helper** there from a logon scheduled task.
+  - A job in session 0 drops a PowerShell script in
+    `C:\SubordinateTest\queue` and reads back the log and exit code, through
+    `Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1` and
+    `Invoke-InteractiveScript`. It refuses to run when the helper's heartbeat
+    is missing, stale, or in session 0, so "the auto-logon did not happen" is
+    an error and not a mystery timeout.
+  - The image also carries the NVIDIA driver (no 100 s per job), the newest
+    `v*` release MSI with its bundled GStreamer 1.28, Python with pywinauto,
+    and the 4K clip at `C:\SubordinateTest\meld-4k60-excerpt-2min.mkv`.
+  - It is built by EC2 Image Builder from `infra/images/windows-desktop/`;
+    that directory's `README.md` is the runbook, and `build.sh` is the whole
+    rebuild. **Rebuild it at least every 30 days**: GitHub stops dispatching
+    jobs to a runner whose agent binary is older than that.
+  - The image is captured **without Sysprep** - generalize hangs it (the
+    instance goes to status `impaired` and never shuts down) - so the last
+    build step runs `EC2Launch.exe reset` instead, and the pipeline uses a
+    custom build workflow. Two consequences worth knowing: the auto-logon
+    registry values have to be written during the build, because there is no
+    Setup phase on the runtime instance to run `SetupComplete.cmd`; and every
+    instance from this AMI shares one machine SID, which is harmless for
+    ephemeral runners that register per job.
+  - The `subtest` password is generated per build into the Secrets Manager
+    secret `subordinate/windows-desktop-ami/rdp` and is never in the
+    repository. RDP is enabled for that user, so a run can be watched live
+    (add a temporary 3389 rule to the instance's security group first - the
+    procedure is the same as the "Self-hosted AMD runner" two-monitor session
+    below). **Keep the AMI private**: auto-logon means the password is in the
+    image's registry in clear.
+  - The released MSI does not yet ship `subordinate-mcp.exe`
+    (`packaging/windows/build-msi.ps1` stages `subordinate.exe` and
+    `subordinate-cli.exe` only), so the smoke workflow builds the bridge on a
+    free hosted runner and stages it. The image records what it found in
+    `C:\SubordinateTest\image.json` as `mcp_in_msi`.
 - RunsOn's `*-gpu-*` images carry the NVIDIA driver and CUDA only, so the AMD
   runner uses the plain Ubuntu 26.04 image and jobs install the Mesa VA-API
   stack (`mesa-va-drivers`, `vainfo`) themselves. The GStreamer `va` plugin
@@ -971,7 +1016,14 @@ on EC2 instances in the project's AWS account through
 - GPU smoke test: run the **GPU smoke** workflow (`workflow_dispatch`). It
   checks `nvidia-smi` plus `gst-inspect-1.0 --exists nvh264enc` on the NVIDIA
   Linux runner, `/dev/dri` + `vainfo` plus `vah264enc` on the AMD box, and
-  `nvidia-smi` plus `nvh264enc`/`mfh264enc` on the NVIDIA Windows runner.
+  `nvidia-smi` plus `nvh264enc`/`mfh264enc` on the NVIDIA Windows runner. Its
+  last job, `nvidia-desktop-windows`, is the desktop one: it opens the editor
+  from the Start Menu shortcut with `examples/sample-project/demo.sub`,
+  photographs the desktop, clicks the media bin's `Import...` button through
+  UI Automation and photographs the file dialog that opens, and round-trips
+  `project.new`, `sequence.create` and `timeline.get_state` through
+  `subordinate-mcp` against that same running window. The screenshots are
+  uploaded as the `windows-desktop-screenshots` artifact.
 - Cost: the RunsOn config schema has no per-runner price cap, so hourly prices
   are recorded in comments there and every GPU job must set `timeout-minutes`.
   Runners request spot (`price-capacity-optimized`) with
@@ -986,6 +1038,17 @@ on EC2 instances in the project's AWS account through
   (14s download, 86s install) and 1m19s was the GStreamer installer; the
   remaining 4m06s was Windows boot and runner registration before the job
   started. Windows spot is rarely discounted, so budget the on-demand rate.
+- Measured cost of the desktop image (TASK-138, 2026-09-12). Building it is one
+  on-demand `g4dn.xlarge` Windows instance: the successful build
+  (`ami-0b3c82cb19d31ac1d`, recipe 1.1.3) took **29 minutes**, about
+  **0.36 USD** - 6 min of NVIDIA driver plus a reboot, 90 s for the MSI, Python
+  and the 443 MB clip, and 20 min of stopping the instance and snapshotting 80
+  GB. Getting there cost about 2.5 USD across seven builds, most of it two runs
+  that hung in Sysprep before that step was removed. The snapshot then costs
+  about 1.50 USD a month, so deregister superseded AMIs and delete their
+  snapshots. A `nvidia-desktop-windows` smoke job is about **0.11 USD**: run
+  34670630488 was 3m05s inside the job on an instance billed for about 9
+  minutes, 4 of which are Windows booting before the job starts.
 - Idle cost: the stack runs in public mode (`Private: false`, changed
   2026-09-09) so there is no NAT gateway; the only idle cost is the small
   Fargate scheduler (about 9 USD/month). Do not enable private mode: the

@@ -1,0 +1,164 @@
+name: SubordinateWindowsDesktopHelper
+description: The interactive helper that lets a job running in session 0 execute scripts on the desktop (TASK-138, component 3 of 4).
+schemaVersion: 1.0
+
+parameters:
+  - TestUser:
+      type: string
+      default: subtest
+      description: The auto-logon user whose session the helper runs in.
+
+phases:
+  - name: build
+    steps:
+      - name: InteractiveHelper
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $ErrorActionPreference = 'Stop'
+              $user = '{{ TestUser }}'
+              New-Item -ItemType Directory -Force -Path C:\SubordinateTest\queue, C:\SubordinateTest\out, C:\SubordinateTest\bin | Out-Null
+
+              # The helper. It runs in the auto-logon user's console session
+              # and is the only thing in this image that can see a desktop.
+              # Protocol: a job writes <id>.ps1 into queue\, the helper runs it
+              # with the console session's token, writes out\<id>.log (stdout
+              # and stderr) and finally out\<id>.exit with the exit code. The
+              # .exit file is written last, so its existence is the signal that
+              # the log is complete.
+              $helper = @'
+              $ErrorActionPreference = 'Continue'
+              $root = 'C:\SubordinateTest'
+              $queue = Join-Path $root 'queue'
+              $out = Join-Path $root 'out'
+              New-Item -ItemType Directory -Force -Path $queue, $out | Out-Null
+              # Heartbeat: proves to the job which session the helper is in and
+              # that it is still alive. A job that finds no fresh heartbeat
+              # knows the auto-logon did not happen and can say so.
+              $beat = Join-Path $root 'helper.json'
+              while ($true) {
+                @{
+                  pid = $PID
+                  session = (Get-Process -Id $PID).SessionId
+                  user = "$env:USERDOMAIN\$env:USERNAME"
+                  desktop = [System.Windows.Forms.SystemInformation]::VirtualScreen.ToString()
+                  at = (Get-Date).ToUniversalTime().ToString('o')
+                } | ConvertTo-Json -Compress | Set-Content -Encoding ASCII $beat
+                foreach ($job in (Get-ChildItem $queue -Filter *.ps1 -ErrorAction SilentlyContinue | Sort-Object Name)) {
+                  $id = [IO.Path]::GetFileNameWithoutExtension($job.Name)
+                  $log = Join-Path $out "$id.log"
+                  $done = Join-Path $out "$id.exit"
+                  $running = Join-Path $root "running-$id.ps1"
+                  try { Move-Item $job.FullName $running -Force } catch { continue }
+                  $code = 0
+                  try {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $running *> $log
+                    $code = $LASTEXITCODE
+                    if ($null -eq $code) { $code = 0 }
+                  } catch {
+                    $_ | Out-String | Add-Content $log
+                    $code = 1
+                  }
+                  Set-Content -Encoding ASCII $done "$code"
+                  Remove-Item $running -Force -ErrorAction SilentlyContinue
+                }
+                Start-Sleep -Milliseconds 500
+              }
+              '@
+              # System.Windows.Forms is needed for the heartbeat's screen size.
+              $helper = "Add-Type -AssemblyName System.Windows.Forms`r`n" + $helper
+              Set-Content -Encoding UTF8 'C:\SubordinateTest\bin\interactive-helper.ps1' $helper
+
+              # Logon-triggered task, running as the auto-logon user with its
+              # interactive token: that is what puts it in the console session.
+              # -WindowStyle Hidden keeps it from stealing focus from the app
+              # the job is about to drive.
+              $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+                -Argument '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\SubordinateTest\bin\interactive-helper.ps1"'
+              $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+              $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+              $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+              Register-ScheduledTask -TaskName 'SubordinateInteractiveHelper' -Action $action -Trigger $trigger `
+                -Principal $principal -Settings $settings -Force | Out-Null
+              Get-ScheduledTask -TaskName 'SubordinateInteractiveHelper' | Format-List TaskName, State | Out-String
+
+              # A job talks to the helper through this module, so the protocol
+              # lives in one place instead of being retyped in every workflow.
+              $client = @'
+              # Runs a script block in the interactive desktop session and
+              # returns its output. Throws when the helper is not alive or the
+              # script does not finish in time.
+              function Invoke-InteractiveScript {
+                param(
+                  [Parameter(Mandatory)] [string] $Script,
+                  [int] $TimeoutSeconds = 300,
+                  [string] $Name = ''
+                )
+                $root = 'C:\SubordinateTest'
+                $beatPath = Join-Path $root 'helper.json'
+                if (-not (Test-Path $beatPath)) { throw 'the interactive helper never started: no helper.json - did the auto-logon happen?' }
+                $beat = Get-Content $beatPath -Raw | ConvertFrom-Json
+                $age = (Get-Date).ToUniversalTime() - ([datetime]$beat.at).ToUniversalTime()
+                if ($age.TotalSeconds -gt 30) { throw "the interactive helper is stale ($([int]$age.TotalSeconds)s old)" }
+                if ([int]$beat.session -eq 0) { throw 'the interactive helper is in session 0, which has no desktop' }
+                $id = if ($Name) { "$([DateTime]::UtcNow.ToString('HHmmssfff'))-$Name" } else { [DateTime]::UtcNow.ToString('HHmmssfff') }
+                $log = Join-Path $root "out\$id.log"
+                $done = Join-Path $root "out\$id.exit"
+                Remove-Item $log, $done -Force -ErrorAction SilentlyContinue
+                Set-Content -Encoding UTF8 (Join-Path $root "queue\$id.ps1") $Script
+                $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+                while (-not (Test-Path $done)) {
+                  if ((Get-Date) -gt $deadline) {
+                    if (Test-Path $log) { Get-Content $log }
+                    throw "interactive script $id did not finish within $TimeoutSeconds s"
+                  }
+                  Start-Sleep -Milliseconds 300
+                }
+                $code = [int](Get-Content $done -Raw).Trim()
+                $output = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
+                [pscustomobject]@{ Id = $id; ExitCode = $code; Output = $output; Session = [int]$beat.session }
+              }
+              function Get-InteractiveHelper {
+                $p = 'C:\SubordinateTest\helper.json'
+                if (-not (Test-Path $p)) { return $null }
+                Get-Content $p -Raw | ConvertFrom-Json
+              }
+              Export-ModuleMember -Function Invoke-InteractiveScript, Get-InteractiveHelper
+              '@
+              Set-Content -Encoding UTF8 'C:\SubordinateTest\bin\InteractiveSession.psm1' $client
+
+
+      - name: ReRegisterTheTaskAfterSysprep
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $ErrorActionPreference = 'Stop'
+              $user = '{{ TestUser }}'
+              # Sysprep's generalize pass gives the machine a new SID, and a
+              # scheduled task whose principal was resolved against the old one
+              # can be orphaned by that. Registering it again from
+              # SetupComplete.cmd - which Windows runs at the end of Setup on
+              # the runtime instance, right where apply-autologon.ps1 runs -
+              # costs a second and removes the doubt.
+              $register = @"
+              `$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\SubordinateTest\bin\interactive-helper.ps1"'
+              `$trigger = New-ScheduledTaskTrigger -AtLogOn -User '$user'
+              `$principal = New-ScheduledTaskPrincipal -UserId '$user' -LogonType Interactive -RunLevel Highest
+              `$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+              Register-ScheduledTask -TaskName 'SubordinateInteractiveHelper' -Action `$action -Trigger `$trigger -Principal `$principal -Settings `$settings -Force | Out-Null
+              "@
+              Set-Content -Encoding ASCII 'C:\SubordinateTest\bin\register-helper-task.ps1' $register
+
+              $scripts = 'C:\Windows\Setup\Scripts'
+              New-Item -ItemType Directory -Force -Path $scripts | Out-Null
+              $sc = "$scripts\SetupComplete.cmd"
+              $line = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\SubordinateTest\bin\register-helper-task.ps1"'
+              if (Test-Path $sc) {
+                if (-not (Select-String -Path $sc -SimpleMatch 'register-helper-task.ps1' -Quiet)) { Add-Content $sc $line }
+              } else {
+                Set-Content -Encoding ASCII $sc "@echo off`r`n$line`r`n"
+              }
+              Get-Content $sc

@@ -1,0 +1,82 @@
+# Image Builder BUILD workflow: the AWS-managed `build-image` one with the
+# Windows Sysprep step removed (TASK-138).
+#
+# Why. Sysprep hangs this image. Builds 1.0.7 and 1.0.9 both ran every
+# component to "validate ok" and then went to instance status *impaired* -
+# the OS stopped answering the hypervisor - a few minutes into
+# `RunSysPrepScript`, and never shut down; 1.0.7 sat there for 55 minutes
+# before it was killed. The one thing on this image that a generalize pass
+# touches and a normal CI image does not is the NVIDIA display driver, which
+# is also the one thing the image exists for.
+#
+# Skipping generalize is safe here because nothing this image does depends on
+# it. RunsOn's runners are ephemeral and register with a JIT token per job, so
+# a shared machine SID buys an attacker nothing that the shared AMI does not
+# already give them; EC2Launch v2 keys its once-per-instance tasks on the
+# instance id, so a new instance still runs RunsOn's user data; and the last
+# build step runs `EC2Launch.exe reset`, which is AWS's documented way to
+# prepare an instance for imaging without Sysprep - it clears the launch
+# agent's state and logs so the AMI boots like a fresh one.
+#
+# Rebuild this from the AWS original when Image Builder ships a new version:
+#   aws imagebuilder get-workflow --region us-east-1 \
+#     --workflow-build-version-arn arn:aws:imagebuilder:us-east-1:aws:workflow/build/build-image/1.0.3 \
+#     --output text --query 'workflow.data'
+name: build-image-no-sysprep
+description: Build an AMI without running Sysprep (TASK-138).
+schemaVersion: 1.0
+
+steps:
+  - name: LaunchBuildInstance
+    action: LaunchInstance
+    onFailure: Abort
+    inputs:
+      waitFor: "ssmAgent"
+
+  - name: ApplyBuildComponents
+    action: ExecuteComponents
+    onFailure: Abort
+    if:
+      booleanEquals: true
+      value: "$.imagebuilder.hasBuildComponents"
+    inputs:
+      instanceId.$: "$.stepOutputs.LaunchBuildInstance.instanceId"
+
+  # InventoryCollection is also absent. It only records an SSM inventory of
+  # the build instance's software, which nothing here reads, and it needs
+  # ssm:CreateAssociation on the instance - a permission worth not granting for
+  # metadata nobody wants (it failed build 1.1.1 at exactly that point).
+
+  - name: RunSanitizeScript
+    action: SanitizeInstance
+    onFailure: Abort
+    if:
+      and:
+        - stringEquals: "AMI"
+          value: "$.imagebuilder.imageType"
+        - not:
+            stringEquals: "Windows"
+            value: "$.imagebuilder.platform"
+    inputs:
+      instanceId.$: "$.stepOutputs.LaunchBuildInstance.instanceId"
+
+  # RunSysPrepScript deliberately absent - see the comment at the top.
+
+  - name: CreateOutputAMI
+    action: CreateImage
+    onFailure: Abort
+    if:
+      stringEquals: "AMI"
+      value: "$.imagebuilder.imageType"
+    inputs:
+      instanceId.$: "$.stepOutputs.LaunchBuildInstance.instanceId"
+
+  - name: TerminateBuildInstance
+    action: TerminateInstance
+    onFailure: Continue
+    inputs:
+      instanceId.$: "$.stepOutputs.LaunchBuildInstance.instanceId"
+
+outputs:
+  - name: "ImageId"
+    value: "$.stepOutputs.CreateOutputAMI.imageId"

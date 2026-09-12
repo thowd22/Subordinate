@@ -1,0 +1,23 @@
+{
+  "name": "subordinate-windows-desktop",
+  "description": "Build instance for the Subordinate Windows NVIDIA desktop runner AMI (TASK-138). A g4dn.xlarge so the NVIDIA driver installs against the real T4; a public subnet of the RunsOn VPC because the stack runs in public mode and has no NAT gateway.",
+  "instanceProfileName": "SubordinateWindowsDesktopImageBuilder",
+  "instanceTypes": ["g4dn.xlarge"],
+  "subnetId": "subnet-06dfd78c962937569",
+  "securityGroupIds": ["SECURITY_GROUP_ID"],
+  "terminateInstanceOnFailure": true,
+  "logging": {
+    "s3Logs": {
+      "s3BucketName": "subordinate-test-media-731537225673",
+      "s3KeyPrefix": "imagebuilder-logs"
+    }
+  },
+  "instanceMetadataOptions": {
+    "httpTokens": "required",
+    "httpPutResponseHopLimit": 2
+  },
+  "resourceTags": {
+    "Project": "Subordinate",
+    "Task": "TASK-138"
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DriveTheBuildInstance",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:StopInstances",
+        "ec2:StartInstances",
+        "ec2:TerminateInstances",
+        "ec2:CreateImage",
+        "ec2:CreateTags",
+        "ec2:DeleteTags",
+        "ec2:Describe*",
+        "ec2:CreateSnapshot",
+        "ec2:CreateLaunchTemplate",
+        "ec2:DeleteLaunchTemplate",
+        "ec2:ModifyImageAttribute",
+        "ec2:ModifySnapshotAttribute",
+        "ec2:CopyImage",
+        "ec2:DeregisterImage"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "TalkToItOverSsm",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:SendCommand",
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommandInvocations",
+        "ssm:ListCommands",
+        "ssm:CancelCommand",
+        "ssm:DescribeInstanceInformation",
+        "ssm:DescribeInstanceAssociationsStatus",
+        "ssm:PutInventory",
+        "ssm:GetInventory",
+        "ssm:GetParameter",
+        "ssm:GetParameters"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "HandTheInstanceItsProfile",
+      "Effect": "Allow",
+      "Action": ["iam:PassRole", "iam:GetInstanceProfile"],
+      "Resource": [
+        "arn:aws:iam::731537225673:role/SubordinateWindowsDesktopImageBuilder",
+        "arn:aws:iam::731537225673:instance-profile/SubordinateWindowsDesktopImageBuilder"
+      ]
+    },
+    {
+      "Sid": "ReadItsOwnResources",
+      "Effect": "Allow",
+      "Action": ["imagebuilder:GetComponent", "imagebuilder:GetImage", "imagebuilder:GetWorkflow", "imagebuilder:ListComponents"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "WriteBuildLogs",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetBucketLocation", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::subordinate-test-media-731537225673",
+        "arn:aws:s3:::subordinate-test-media-731537225673/imagebuilder-logs/*"
+      ]
+    },
+    {
+      "Sid": "Logs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:us-east-1:731537225673:log-group:/aws/imagebuilder/*"
+    }
+  ]
+}
