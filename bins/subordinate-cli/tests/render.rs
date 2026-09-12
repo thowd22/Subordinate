@@ -49,6 +49,27 @@ fn run(args: &[&str]) -> (bool, String, String) {
     )
 }
 
+/// `--compact` puts the final structured error on one line. Diagnostics and
+/// progress legitimately share stderr, including GPU-driver warnings on Windows.
+fn error_json(stderr: &str) -> serde_json::Value {
+    let line = stderr
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .expect("stderr contains a structured error");
+    serde_json::from_str(line)
+        .unwrap_or_else(|error| panic!("stderr has no final JSON error: {error}: {stderr}"))
+}
+
+#[test]
+fn a_compact_error_is_read_after_gpu_driver_diagnostics() {
+    let stderr = concat!(
+        "WARN wgpu_hal::vulkan::instance: registry lookup failed\r\n",
+        "ERROR wgpu_hal::vulkan::instance: vkCreateInstance: Found no drivers!\r\n",
+        "{\"code\":\"export.unknown_encoder\",\"message\":\"nosuchenc is not known\"}\r\n\r\n",
+    );
+    assert_eq!(error_json(stderr)["code"], "export.unknown_encoder");
+}
+
 /// A scratch directory of its own for one test.
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("subordinate-cli-render-{name}"));
@@ -265,7 +286,7 @@ fn a_render_that_cannot_be_run_says_why_and_fails() {
     let output = dir.join("out.mp4");
     let out = output.to_str().expect("a utf-8 path").to_owned();
 
-    for (args, code) in [
+    for (mut args, code) in [
         (
             vec![
                 "render",
@@ -310,10 +331,10 @@ fn a_render_that_cannot_be_run_says_why_and_fails() {
             "core.invalid_argument",
         ),
     ] {
+        args.push("--compact");
         let (ok, _stdout, stderr) = run(&args);
         assert!(!ok, "{args:?} was accepted");
-        let error: serde_json::Value =
-            serde_json::from_str(&stderr).unwrap_or_else(|_| panic!("{args:?}: {stderr}"));
+        let error = error_json(&stderr);
         assert_eq!(error["code"], code, "{args:?} reported {error}");
     }
     assert!(!output.exists(), "a failed render left a file behind");
