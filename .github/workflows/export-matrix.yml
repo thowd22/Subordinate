@@ -771,6 +771,7 @@ jobs:
             --machine "AMD RX 9070 XT (yodaddy, Windows 11)" `
             --cli dist\subordinate-cli.exe `
             --out "$env:RUNNER_TEMP\export-matrix" `
+            --timeout 120 `
             @sources
 
       - name: Job summary

@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-task-143'
 created_date: '2026-09-12 03:58'
-updated_date: '2026-09-12 08:11'
+updated_date: '2026-09-12 09:20'
 labels:
   - export
   - gpu
@@ -68,4 +68,10 @@ GUI versus CLI on box (TASK-143 AC 3), run 34675906145: "vah264enc: window 12 fr
 BLOCKED on the NVIDIA rows, and not by anything in this branch: every RunsOn GPU job in the repository is failing at runner resolution with "failed to resolve runner spec: gpu-nvidia-linux not found", including hardware.yml on main, which has not changed (run 34676554315, 06:02 UTC) and the TASK-139 dispatches. .github/runs-on.yml on main is valid and unchanged since TASK-138 merged, and GPU jobs worked at 03:32 UTC, so something in the RunsOn stack or its repository config resolution broke between 05:00 and 06:00 UTC. The nvidia-linux, nvidia-windows and (through them) the NVENC half of the GUI comparison are waiting on that.
 
 Merged origin/main (release 0.1.3, the live preview work). Two collisions to record: main had taken TASK-144 for the viewer/playback decode work, so the preset-quality bug filed here was recreated as TASK-149 and the reference in docs/DEVELOPMENT.md follows it; and main added support::run_settled for exactly the cold-start repaint problem this branch had hit with its own settle helper, so the helper is gone and both window tests use main version.
+
+Run 34683736400, yodaddy (AMD RX 9070 XT, Windows 11, GStreamer 1.28.6): the AMF row exists at last, and it is the richest machine in the matrix - amfh264enc, amfh265enc, amfav1enc, mfh264enc, mfh265enc, x264enc, x265enc, svtav1enc and rav1enc all present and READY, amfav1enc ranked NONE and therefore only reachable because the matrix pins it. Every one of them wrote a file with the codec its preset asked for and the audio beside it. amfav1enc and mfh265enc are elements the exporter could not have been asked for at all before this branch added them to the catalogue.
+
+Twenty-nine of its thirty cells were marked failed by the driver rather than by the export, for two reasons now fixed: gst-launch treats a backslash as an escape, so the Windows path in the frame counter location= arrived mangled and the counter fell through to a decode the machine has no AAC decoder for; and the generated project left media info null, which routes a clip audio to symphonia rather than GStreamer (decode_audio asks the model, not the file), and symphonia has no Opus decoder, so every uhd cell died before an encoder was reached. TASK-150 is filed for the routing; the generator fills info in now and box stand-in clip carries AAC.
+
+Getting there needed three more yodaddy fixes worth recording: the machine has no Python and what python resolves to is the Microsoft Store stub, so the job unpacks the embeddable distribution under RUNNER_TEMP; get-sample-media.ps1 used Invoke-WebRequest -MaximumRetryCount, which is PowerShell 7 only and made every download fail instantly under Windows PowerShell 5.1; and GStreamer had to go on each step own PATH rather than only the runner GITHUB_PATH.
 <!-- SECTION:NOTES:END -->

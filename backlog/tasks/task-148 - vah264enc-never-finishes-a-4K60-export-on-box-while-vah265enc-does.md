@@ -1,10 +1,12 @@
 ---
 id: TASK-148
-title: 'vah264enc never finishes a 4K60 export on box, while vah265enc does'
+title: >-
+  A 4K60 H.264 export stalls part-way on every hardware encoder tried, on two
+  vendors and two operating systems
 status: To Do
 assignee: []
 created_date: '2026-09-12 05:32'
-updated_date: '2026-09-12 06:01'
+updated_date: '2026-09-12 10:28'
 labels:
   - export
   - gpu
@@ -16,9 +18,15 @@ ordinal: 168000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found by the export matrix, run 34674014655, on box (AMD Cezanne APU, Ubuntu 26.04, GStreamer 1.28.2, mesa VA-API). Sixty frames of the user 4K60 three-audio-track footage, rendered with subordinate-cli render --encoder vah264enc, produced no file and no error in ten minutes, for all three H.264 presets - youtube-1080p, youtube-4k and mezzanine, which differ only in container and audio codec, so it is the encoder and the canvas that matter and not the preset. The same sixty frames of the same project through vah265enc finished in seconds and validated clean, and vah264enc encodes the 1280x720 sample project fine over all three presets. So it is 4K specifically, on H.264, through VA-API, on this machine.
+Found by the export matrix on two machines that share no code below Subordinate.
 
-What makes it worth a task rather than a note: it hangs rather than failing. A user who picks YouTube 4K on an AMD laptop gets a progress bar that stops and never comes back, no error code, no part-written file to inspect and nothing in the log. Whatever the cause - a driver limit the element does not check, a caps negotiation that never completes, a deadlock in the appsrc feed at that frame size - the exporter has to notice and say so.
+box (AMD Cezanne APU, Ubuntu 26.04, GStreamer 1.28.2, mesa VA-API), run 34675906145: sixty frames of the user 4K60 footage with --encoder vah264enc stops at frame 20 of 60 at zero fps for two presets and at frame 1 for the third, and never finishes. The same sixty frames through vah265enc: seconds, clean.
+
+yodaddy (AMD RX 9070 XT, Windows 11, GStreamer 1.28.6, AMF), run 34685591190: the same sixty frames with --encoder amfh264enc stops at frame 22 of 60 for two presets and at frame 1 for the third. The same sixty frames through amfh265enc and amfav1enc: fifteen seconds each, clean, validated.
+
+Different vendor stacks, different operating systems, different drivers, the same shape of failure at the same place - and only for H.264, only at 4K. That points away from the encoders and at the export pipeline: the appsrc feed, the queueing between the compositor readback and the encoder, or h264parse, at a frame size where an H.264 encoder produces enough slices or holds enough reference frames to expose it. Both machines encode the 1280x720 sample project with the same elements over every preset without trouble.
+
+What makes it worth a task rather than a note: it hangs rather than failing. A user who picks YouTube 4K gets a progress bar that stops and never comes back, no error code, no part-written file to inspect and nothing in the log.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -27,6 +35,10 @@ What makes it worth a task rather than a note: it hangs rather than failing. A u
 - [ ] #2 An export that stops making progress fails with a named error naming the encoder and the canvas, rather than hanging, and the part-written file is cleaned up as any other failed export is
 - [ ] #3 Where the limit is a real one the encoder cannot exceed, the encoder probe or the export panel says so before the export starts rather than after it stalls
 - [ ] #4 The export matrix job on box passes its uhd x vah264enc cells, or the task records why that machine cannot
+- [ ] #5 The cause is identified from a GST_DEBUG log of a stalled pipeline on either machine and recorded in the task: which element stops, at which frame, and why
+- [ ] #6 A 4K60 H.264 export finishes on box with vah264enc and on yodaddy with amfh264enc, over every H.264 preset
+- [ ] #7 An export that stops making progress fails with a named error naming the encoder and the canvas, rather than hanging, and the part-written file is cleaned up as any other failed export is
+- [ ] #8 The export matrix uhd rows for vah264enc and amfh264enc pass
 <!-- AC:END -->
 
 ## Implementation Notes
