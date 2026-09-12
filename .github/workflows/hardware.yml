@@ -33,6 +33,14 @@ name: Hardware verification
 # "Self-hosted AMD runner").
 on:
   workflow_dispatch:
+    inputs:
+      only:
+        description: >-
+          Run one job instead of all of them, by name: nvidia-linux,
+          amd-linux, popout-two-output-linux, desktop-flows or nvidia-windows.
+          Empty runs everything, which is what the schedule does.
+        type: string
+        default: ""
   schedule:
     # 04:30 UTC, once a day. One NVIDIA job a night is about 2.50 USD a month.
     - cron: "30 4 * * *"
@@ -72,6 +80,7 @@ jobs:
   # artifact; the GPU job downloads them and spends its minutes measuring.
   build-linux:
     name: Build the Linux binaries (hosted, free)
+    if: inputs.only == '' || inputs.only == 'nvidia-linux'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -145,6 +154,7 @@ jobs:
 
   nvidia-linux:
     name: NVIDIA T4 (g4dn.xlarge, Ubuntu 24.04)
+    if: inputs.only == '' || inputs.only == 'nvidia-linux'
     needs: build-linux
     runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-linux
     # Hard stop on GPU spend; see the cost note in the header. With the build
@@ -342,6 +352,7 @@ jobs:
     # tools are already installed, so this job validates rather than installs,
     # and it costs nothing. See docs/DEVELOPMENT.md, "Self-hosted AMD runner".
     name: AMD APU (box, self-hosted, Ubuntu 26.04)
+    if: inputs.only == '' || inputs.only == 'amd-linux'
     runs-on: [self-hosted, linux, box, amd-gpu]
     timeout-minutes: 30
     env:
@@ -502,6 +513,7 @@ jobs:
   # headless server emulates a second display.
   popout-two-output-linux:
     name: Pop-out on two virtual outputs (box, self-hosted, AMD GPU)
+    if: inputs.only == '' || inputs.only == 'popout-two-output-linux'
     runs-on: [self-hosted, linux, box, amd-gpu]
     timeout-minutes: 30
     steps:
@@ -651,22 +663,234 @@ jobs:
   desktop-flows:
     name: Desktop flows
     needs: nvidia-linux
-    if: always()
+    if: always() && (inputs.only == '' || inputs.only == 'desktop-flows')
     uses: ./.github/workflows/desktop-flows.yml
 
+
   # ----------------------------------------------------------------------
-  # Windows jobs: deliberately absent, not forgotten (TASK-116 AC 1).
+  # Windows: the export path on a real NVIDIA GPU (TASK-146).
   #
-  #   nvidia-windows - the runner now works (TASK-115): `gpu-nvidia-windows`
-  #     is the stock windows22-full-x64 image on a g4dn.xlarge, and the job
-  #     installs the AWS-published NVIDIA driver itself in ~100s. No custom AMI.
-  #     To add the job, copy the nvidia-windows job from
-  #     .github/workflows/gpu-smoke.yml (driver + GStreamer 1.28 steps
-  #     verbatim), then run the encode matrix with `--encoder nvh264enc` and
-  #     `--encoder mfh264enc`. About 0.10 USD per run.
+  # `gpu-nvidia-windows` is the stock windows22-full-x64 image on a
+  # g4dn.xlarge; the job installs the AWS-published NVIDIA driver itself in
+  # about 100 seconds, exactly as gpu-smoke.yml's job does. Nothing is
+  # compiled here: `build-windows` builds the CLI on a free hosted runner and
+  # hands it over as an artifact.
   #
-  #   amd-windows - no hardware exists at all: AWS retired g4ad, there is no
-  #     AMD Windows host, and AMF cannot be exercised anywhere this project can
-  #     reach. TASK-65's AMF half stays manual until someone has such a
-  #     machine. Do not add a job that would silently pass on software.
+  # `needs: desktop-flows` is the same quota interlock the desktop flows are:
+  # the account's G-family quota is two g4dn.xlarge and the flows use both.
+  # About 0.15 USD per run.
+  build-windows:
+    name: Build the Windows binaries (hosted, free)
+    if: inputs.only == '' || inputs.only == 'nvidia-windows'
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hardware-windows
+          prefix-key: v1-rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
+
+      - name: Exclude build directories from Windows Defender
+        shell: pwsh
+        run: |
+          foreach ($p in @("${{ github.workspace }}", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup")) {
+            try { Add-MpPreference -ExclusionPath $p -ErrorAction Stop } catch { "could not exclude $p" }
+          }
+
+      - name: Install GStreamer (Windows, official installer)
+        shell: pwsh
+        run: |
+          $ver = $env:GST_VERSION
+          $exe = "gstreamer-1.0-msvc-x86_64-$ver.exe"
+          $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc/$exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          $dir = "C:\gstreamer\1.0\msvc_x86_64"
+          Start-Process -Wait -FilePath ".\$exe" -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/TYPE=devel","/ALLUSERS","/DIR=$dir"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$dir\lib\pkgconfig" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      # Debug, as the Linux binaries are built: the render is encoder-bound and
+      # a release build drags thin-LTO wasmtime through for nothing.
+      - name: Build subordinate-cli
+        run: cargo build -p subordinate-cli
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hardware-windows-binaries
+          path: target/debug/subordinate-cli.exe
+          retention-days: 7
+
+  nvidia-windows:
+    name: NVIDIA T4 (g4dn.xlarge, Windows Server 2022)
+    needs: [build-windows, desktop-flows]
+    # `always()` because desktop-flows is a quota interlock rather than a
+    # dependency and may be skipped or red; the binaries are a real dependency.
+    if: >-
+      always() && needs.build-windows.result == 'success'
+      && (inputs.only == '' || inputs.only == 'nvidia-windows')
+    runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-windows
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      MEDIA_BUCKET: subordinate-test-media-731537225673
+      MEDIA_KEY: meld-4k60-excerpt-2min.mkv
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: hardware-windows-binaries
+          path: bin
+
+      - name: Instance and GPU facts
+        continue-on-error: true
+        run: |
+          "runner=$env:RUNNER_NAME"
+          (Get-CimInstance Win32_OperatingSystem).Caption
+          Get-CimInstance Win32_VideoController | Format-List Name, DriverVersion
+
+      - name: Install NVIDIA driver (AWS public bucket, no reboot)
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bucket = "https://ec2-windows-nvidia-drivers.s3.amazonaws.com"
+          [xml]$list = (Invoke-WebRequest -UseBasicParsing "$bucket/?list-type=2&prefix=latest/").Content
+          $key = $list.ListBucketResult.Contents |
+                 Where-Object { $_.Key -like "*.exe" } |
+                 Sort-Object Key -Descending | Select-Object -First 1 -ExpandProperty Key
+          if (-not $key) { throw "no .exe under s3://ec2-windows-nvidia-drivers/latest/" }
+          $exe = Join-Path $env:RUNNER_TEMP (Split-Path $key -Leaf)
+          curl.exe -sS -L -o "$exe" "$bucket/$key"
+          if ($LASTEXITCODE -ne 0) { throw "driver download failed ($LASTEXITCODE)" }
+          # -s silent, -n no reboot: a RunsOn runner could not survive a
+          # restart, and NVENC does not need one.
+          $p = Start-Process -Wait -PassThru -FilePath $exe -ArgumentList "-s","-n"
+          if ($p.ExitCode -notin 0,1,1641,3010) { throw "driver install failed ($($p.ExitCode))" }
+          & "$env:SystemRoot\System32\nvidia-smi.exe"
+
+      - name: Install GStreamer (Windows, official installer)
+        run: |
+          $ver = $env:GST_VERSION
+          $exe = "gstreamer-1.0-msvc-x86_64-$ver.exe"
+          $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc/$exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          $dir = "C:\gstreamer\1.0\msvc_x86_64"
+          Start-Process -Wait -FilePath ".\$exe" -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/TYPE=runtime","/ALLUSERS","/DIR=$dir"
+          "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      # The bucket policy names the RunsOn instance role, so no credentials are
+      # configured: the instance profile is the identity (TASK-140).
+      - name: Fetch the 4K60 three-audio-track excerpt from S3
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path C:\SubordinateTest | Out-Null
+          $aws = 'C:\Program Files\Amazon\AWSCLIV2\aws.exe'
+          if (-not (Test-Path $aws)) { $aws = (Get-Command aws.exe -ErrorAction SilentlyContinue).Source }
+          if (-not $aws) { throw "no AWS CLI on this image" }
+          & $aws s3 cp "s3://$env:MEDIA_BUCKET/$env:MEDIA_KEY" "C:\SubordinateTest\$env:MEDIA_KEY" --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "could not fetch the clip ($LASTEXITCODE)" }
+          Get-Item "C:\SubordinateTest\$env:MEDIA_KEY" | Format-List Name, Length
+
+      - name: What this machine can encode
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\hardware" | Out-Null
+          & .\bin\subordinate-cli.exe diag --pretty 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP\hardware\diag.json"
+
+      - name: Build the render projects
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $media = "C:\SubordinateTest\$env:MEDIA_KEY"
+          $cli = (Resolve-Path .\bin\subordinate-cli.exe).Path
+          $python = (Get-Command python -ErrorAction SilentlyContinue).Source
+          if (-not $python) { $python = (Get-Command py -ErrorAction SilentlyContinue).Source }
+          if (-not $python) { throw "no Python on this image" }
+          # The editor's own starter canvas over the 4K60 source, which is what
+          # the desktop flow exports.
+          & $python scripts/make-test-project.py --cli $cli --media $media `
+            --out C:\SubordinateTest\hd.sub --frames 2880
+          # The source's own canvas, with three audio tracks over it.
+          & $python scripts/make-test-project.py --cli $cli --media $media `
+            --out C:\SubordinateTest\uhd-3audio.sub --resolution 3840x2160 `
+            --frame-rate 60 --audio-tracks 3 --frames 7200
+
+      # The export the desktop flow makes: a 1080p canvas over the 4K60 clip,
+      # on whichever encoder this machine can actually use. The automatic order
+      # is the point - the probe encodes a frame with each candidate at this
+      # canvas and takes the first that manages it (TASK-146).
+      - name: Export the 4K60 clip to a 1080p canvas
+        timeout-minutes: 8
+        run: |
+          $out = "$env:RUNNER_TEMP\hardware"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $env:SUBORDINATE_LOG = 'info,sub_export=debug'
+          & .\bin\subordinate-cli.exe render C:\SubordinateTest\hd.sub `
+            --preset $env:PRESET --out "$out\hd.mp4" --range 0:48 --verify --pretty |
+            Tee-Object "$out\hd.json"
+          if ($LASTEXITCODE -ne 0) { throw "the 1080p export failed ($LASTEXITCODE)" }
+          $report = Get-Content "$out\hd.json" -Raw | ConvertFrom-Json
+          if ($report.video_frames -ne 48) { throw "wrote $($report.video_frames) frames, not 48" }
+          if (-not $report.probe.video) { throw "the discoverer found no video stream" }
+          "::notice::1080p export: $($report.video_frames) frames on $($report.video_encoder)"
+
+      # The multi-audio-track UHD export: the sequence is the source's own
+      # 4K60 canvas and three audio tracks are mixed into it. Pinned to the
+      # software encoder because it is the export path being checked here, and
+      # because this machine's hardware encoders cannot carry a 4K canvas -
+      # see the step after this one.
+      - name: Export a 4K60 canvas with three audio tracks
+        timeout-minutes: 15
+        run: |
+          $out = "$env:RUNNER_TEMP\hardware"
+          $env:SUBORDINATE_LOG = 'info,sub_export=debug'
+          & .\bin\subordinate-cli.exe render C:\SubordinateTest\uhd-3audio.sub `
+            --preset $env:PRESET --out "$out\uhd-3audio.mp4" --range 0:48 `
+            --encoder x264enc --verify --pretty | Tee-Object "$out\uhd-3audio.json"
+          if ($LASTEXITCODE -ne 0) { throw "the UHD export failed ($LASTEXITCODE)" }
+          $report = Get-Content "$out\uhd-3audio.json" -Raw | ConvertFrom-Json
+          if ($report.video_frames -ne 48) { throw "wrote $($report.video_frames) frames, not 48" }
+          if ($report.audio_frames -le 0) { throw "no audio was written" }
+          if (-not $report.probe.video) { throw "the discoverer found no video stream" }
+          "::notice::UHD export: $($report.video_frames) frames, $($report.audio_frames) audio frames"
+
+      # Never fatal, and deliberately kept: on this runner no hardware encoder
+      # can carry a 4K canvas - NVENC cannot open a session for any canvas once
+      # this process holds a GPU device, and Media Foundation's encoder takes
+      # about twenty 4K frames and then stops taking buffers, which the export
+      # now reports as export.timeout rather than hanging on (TASK-146). The
+      # day a driver or a GStreamer release fixes either, this step says so.
+      - name: The same UHD export on whatever hardware offers (never fatal)
+        continue-on-error: true
+        timeout-minutes: 8
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $out = "$env:RUNNER_TEMP\hardware"
+          $env:SUBORDINATE_LOG = 'info,sub_export=debug'
+          & .\bin\subordinate-cli.exe render C:\SubordinateTest\uhd-3audio.sub `
+            --preset $env:PRESET --out "$out\uhd-hardware.mp4" --range 0:48 --verify --pretty 2>&1 |
+            Tee-Object "$out\uhd-hardware.log"
+          "uhd hardware export exit=$LASTEXITCODE"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hardware-nvidia-windows
+          path: ${{ runner.temp }}/hardware
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ----------------------------------------------------------------------
+  # amd-windows is deliberately absent, not forgotten (TASK-116 AC 1): no
+  # hardware exists at all. AWS retired g4ad, there is no AMD Windows host,
+  # and AMF cannot be exercised anywhere this project can reach. TASK-65's AMF
+  # half stays manual until someone has such a machine. Do not add a job that
+  # would silently pass on software.
   # ----------------------------------------------------------------------
