@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-task-146'
 created_date: '2026-09-12 10:03'
-updated_date: '2026-09-12 15:37'
+updated_date: '2026-09-12 15:40'
 labels:
   - export
   - bug
@@ -27,7 +27,7 @@ TASK-139's Windows desktop clicks flow starts a real nvh264enc export of the bak
 <!-- AC:BEGIN -->
 - [ ] #1 subordinate-cli render of the 4K60 excerpt with nvh264enc on the Windows GPU runner completes with the expected frame count and the discoverer validates the file
 - [ ] #2 The clicks-only desktop flow on the Windows image reaches its export verdict green (TASK-139 criteria 3 and 4 on Windows)
-- [ ] #3 A regression test or hardware-workflow step covers a multi-audio-track 4K source export on Windows
+- [x] #3 A regression test or hardware-workflow step covers a multi-audio-track 4K source export on Windows
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -60,4 +60,16 @@ Runs. Reproduction and diagnosis on a temporary workflow, all on gpu-nvidia-wind
 Proof on the permanent job: hardware.yml run 34700901130, job 103574215608, `only=nvidia-windows`, green in 5m31s. '1080p export: 48 frames on mfh264enc' after 'the chosen encoder cannot encode this canvas; trying the next one element=nvh264enc', and 'UHD export: 48 frames, 38400 audio frames' from the 4K60 canvas with three audio tracks; both read back with the discoverer.
 
 2026-09-12 supervisor: a dedicated agent is working this on branch task/task-146 (it found the mechanism: the export pushes into appsrc with a blocking push and never reads the bus, so a failed element hangs the render). TASK-148 and TASK-152 from the export matrix describe the same stall on other encoders and should be verified against this fix rather than worked separately.
+
+STATUS AT HANDOFF (stopped at the supervisor's request, branch task/task-146, PR #5, merged up to origin/main at 411633d).
+
+Fixed and proven: the stall. An export whose branch stops draining now reports the element's own error, or export.timeout, instead of hanging - verified on the Windows GPU runner, where the failing job went from 13 minutes of nothing to a named error in one second (run 34691187378), and by crates/sub-export/tests/stalled_branch.rs, which reproduces the stall with software elements and passed on Windows and macOS in CI run 34701467907.
+
+Fixed and proven: the export now completes on that runner. The probe encodes a real frame and the chosen encoder encodes one frame of the export's own canvas first, so selection falls through nvh264enc to mfh264enc. hardware.yml run 34700901130 (job 103574215608, only=nvidia-windows) is green: '1080p export: 48 frames on mfh264enc' and 'UHD export: 48 frames, 38400 audio frames' from a 4K60 canvas with three audio tracks, both read back with the discoverer. AC 3 is checked on that evidence.
+
+Not done: AC 1 as written cannot pass on that runner - nvh264enc cannot open an encode session from this process there, proved five ways (see above), while gst-launch encodes 1920x1080 on the same machine. What passes instead is the same render on the encoder the machine can use. AC 2 is untouched: the desktop flows pin nvh264enc through FLOW_ENCODER, so they will now fail fast with a named error rather than stall; making them green means letting the flow take the automatic order and assert 'a hardware encoder' instead, which is a decision for the supervisor.
+
+Incidental: pinning NV12/I420 between videoconvert and the encoder also fixes the archived TASK-149 (software exports written in High 4:4:4 because nothing pinned a format on the encoder side).
+
+Last CI run on the branch tip is 34702891646, in progress at handoff. The only failure seen on earlier runs that is not fixed on the tip is sub-audio's mixer_no_alloc on Linux, which this branch does not touch.
 <!-- SECTION:NOTES:END -->
