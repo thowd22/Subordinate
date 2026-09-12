@@ -365,61 +365,92 @@ def probe(path: Path, gst_prefix: str | None, timeout: int = 600) -> Probe:
 _CHAIN = re.compile(r"chain\s+\*+")
 
 
-def count_frames(path: Path, gst_prefix: str | None, timeout: int = 1800) -> tuple[int | None, str]:
-    """Decodes `path` and counts the video frames that come out.
+# Which demuxer opens which container. The counter reads the *muxed* video
+# track rather than decoding it, so nothing but the demuxer has to be installed.
+DEMUXERS: dict[str, str] = {
+    ".mp4": "qtdemux",
+    ".mov": "qtdemux",
+    ".m4v": "qtdemux",
+    ".mkv": "matroskademux",
+    ".webm": "matroskademux",
+}
+
+
+def count_frames(path: Path, gst_prefix: str | None, timeout: int = 600) -> tuple[int | None, str]:
+    """Counts the video frames in `path` and says how it counted them.
 
     This is the check the CLI's own `--verify` cannot make: the discoverer
     reads headers, and an encoder that writes a plausible header and then drops
     frames passes every header check there is. `identity silent=false` prints
     one `chain` line per buffer and `gst-launch -v` lets those lines out, so
-    counting them counts decoded frames.
+    counting them counts frames.
 
-    `caps=video/x-raw expose-all-streams=false` keeps the audio out of the
-    count without having to name a pad. Returns `(None, reason)` when the
-    pipeline could not run at all, so an unknown count reads as unknown rather
-    than as zero.
+    The first attempt reads the muxed video track straight off the demuxer:
+    one buffer per coded frame, and nothing but the demuxer needs to be
+    installed. That matters more than it sounds - the hosted runner has no AAC
+    *decoder*, so a full `decodebin` of an MP4 this matrix wrote failed to
+    preroll on the audio track and counted nothing at all (run 34672568992).
+    The audio pad is deliberately left unlinked: a demuxer's flow combiner only
+    errors when *every* pad is unlinked, so the video branch carries the
+    pipeline on its own.
+
+    Decoding is the fallback, for a container with no entry in `DEMUXERS`.
+    Returns `(None, reason)` when neither could run, so an unknown count reads
+    as unknown rather than as zero.
     """
     launch = gst_tool("gst-launch-1.0", gst_prefix)
-    attempts = [
-        [
-            launch,
-            "-v",
-            "uridecodebin",
-            f"uri={uri_of(path)}",
-            "caps=video/x-raw",
-            "expose-all-streams=false",
-            "!",
-            "identity",
-            "silent=false",
-            "!",
-            "fakesink",
-            "sync=false",
-        ],
-        [
-            launch,
-            "-v",
-            "filesrc",
-            f"location={path.resolve()}",
-            "!",
-            "decodebin",
-            "caps=video/x-raw",
-            "expose-all-streams=false",
-            "!",
-            "identity",
-            "silent=false",
-            "!",
-            "fakesink",
-            "sync=false",
-        ],
-    ]
+    location = str(path.resolve())
+    attempts: list[tuple[str, list[str]]] = []
+    demuxer = DEMUXERS.get(path.suffix.lower())
+    if demuxer:
+        attempts.append(
+            (
+                f"{demuxer} video track",
+                [
+                    launch,
+                    "-v",
+                    "filesrc",
+                    f"location={location}",
+                    "!",
+                    demuxer,
+                    "name=d",
+                    "d.video_0",
+                    "!",
+                    "identity",
+                    "silent=false",
+                    "!",
+                    "fakesink",
+                    "sync=false",
+                ],
+            )
+        )
+    attempts.append(
+        (
+            "decoded frames",
+            [
+                launch,
+                "-v",
+                "uridecodebin",
+                f"uri={uri_of(path)}",
+                "caps=video/x-raw",
+                "expose-all-streams=false",
+                "!",
+                "identity",
+                "silent=false",
+                "!",
+                "fakesink",
+                "sync=false",
+            ],
+        )
+    )
     last = ""
-    for argv in attempts:
+    for how, argv in attempts:
         done = run(argv, timeout=timeout)
         count = len(_CHAIN.findall(done.out))
         if done.ok and count:
-            return count, "identity chain count"
-        last = (done.err or done.out).strip()[-500:]
-    return None, f"the frame counter could not decode the file: {last}"
+            return count, how
+        last = (done.err or done.out).strip()[-300:]
+    return None, cell(f"the frame counter could not read the file: {last}")
 
 
 # --------------------------------------------------------------------------
@@ -761,6 +792,16 @@ def frames_for(source: Source, element: str, args: argparse.Namespace) -> int | 
     return source.frames
 
 
+def cell(text: str, limit: int = 400) -> str:
+    """One table cell: no newlines, no pipes, nothing that breaks a row.
+
+    GStreamer's failures are several lines of caps, and a raw one dropped into
+    a Markdown table silently ends the table (run 34672568992).
+    """
+    squashed = " ".join((text or "").split())
+    return squashed.replace("|", "/")[:limit]
+
+
 def one_line(text: str) -> str:
     """A multi-line failure squeezed into a table cell.
 
@@ -790,9 +831,9 @@ def one_line(text: str) -> str:
             cause = error.get("cause") or ""
             joined = " ".join(part for part in (code, message, reason, cause) if part)
             if joined:
-                return joined[:400].replace("|", "/")
+                return cell(joined)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return (lines[-1] if lines else "no output")[:400].replace("|", "/")
+    return cell(lines[-1] if lines else "no output")
 
 
 def matrix(args: argparse.Namespace) -> int:
@@ -946,7 +987,7 @@ def table(
             state = "not ready"
         else:
             state = "missing"
-        note = (encoder.get("detail") or "").replace("|", "/")[:120]
+        note = cell(encoder.get("detail") or "", 120)
         if not encoder["catalogued"]:
             note = (note + " " if note else "") + "(not in this build's catalogue)"
         lines.append(
@@ -984,7 +1025,7 @@ def table(
         lines.append(
             f"| {machine} | {case.source} | {case.preset} | `{case.encoder}` |"
             f" {mark.get(case.status, case.status)} | {size} | {frames} | {duration} |"
-            f" {case.video_codec or '-'} | {audio} | {case.detail.replace('|', '/')} |"
+            f" {case.video_codec or '-'} | {audio} | {cell(case.detail)} |"
         )
     lines.append("")
     passed = sum(1 for case in cases if case.status == "pass")
@@ -995,8 +1036,10 @@ def table(
     lines.append("### Notes")
     lines.append("")
     lines.append(
-        "- Frames are counted by decoding the written file, not by trusting the"
-        " encoder's own count: the left number is what came back out."
+        "- Frames are counted out of the written file, not taken from the"
+        " encoder's own count: the left number is what came back out, read off"
+        " the demuxed video track (or, for a container with no demuxer entry,"
+        " a full decode)."
     )
     lines.append(
         "- The canvas and the frame rate come from the *sequence*, not from the"

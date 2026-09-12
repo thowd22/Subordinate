@@ -1293,12 +1293,18 @@ shares it, so this workflow never asks for more than one.
 
 A render that exits zero is not a pass. For every cell the driver reads the
 written file back with `gst-discoverer-1.0` - stream layout, picture size,
-duration, audio codec and channels - and then *decodes* it and counts the
-frames that come out, which is the only check that catches an encoder writing a
-plausible header and dropping pictures. The count comes from
-`identity silent=false` under `gst-launch -v`, which prints one `chain` line
-per buffer; `caps=video/x-raw expose-all-streams=false` keeps the audio out of
-it.
+duration, audio codec and channels - and then counts the frames actually in it,
+which is the only check that catches an encoder writing a plausible header and
+dropping pictures. The count comes from `identity silent=false` under
+`gst-launch -v`, which prints one `chain` line per buffer, reading the video
+track straight off `qtdemux` or `matroskademux`.
+
+Reading the *muxed* track rather than decoding it is deliberate: the hosted
+runner has no AAC decoder, and a full `decodebin` of an MP4 this matrix had
+just written failed to preroll on its audio track and counted nothing at all
+(run 34672568992). The audio pad is left unlinked on purpose - a demuxer's flow
+combiner only errors when every pad is unlinked, so the video branch carries
+the pipeline by itself.
 
 Failing outputs and their discoverer reports are uploaded; passing ones are
 deleted, because a 4K60 matrix writes gigabytes of them.
