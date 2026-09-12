@@ -58,6 +58,7 @@ LAYOUT = {
 OFFSETS = {
     "Import": [35, 98],
     "row": [180, 178],
+    "new_folder": [170, 98],
 }
 
 #: The only methods this flow may call: reads, and nothing else.
@@ -202,6 +203,27 @@ def run(run: flowlib.Run) -> None:
             if _items(before):
                 raise AssertionError("the staged project should start with no media")
 
+        with run.step("the editor takes a click") as step:
+            # Before anything that depends on a *dialog*, prove the plain
+            # gesture: `New folder` is a button with a name, and the bin it
+            # creates is in the project a read can see. A failure here is the
+            # pointer not reaching the application; a failure in the next step
+            # with this one green is the file dialog, and the two are worth
+            # telling apart (run 34676801744).
+            before = _bins(read("project.get", {}))
+            folder, how = locate(session, window, "New folder", "new_folder", offsets)
+            for point in _candidates(folder, window):
+                session.click(point)
+                after = _bins(read("project.get", {}))
+                step.note(**{f"click_{point}": f"{before} -> {after} bins"})
+                if after > before:
+                    break
+            else:
+                raise AssertionError(
+                    f"the click did not reach the editor: still {before} bins in the project"
+                )
+            step.note(located_by=how, bins=after)
+
         with run.step("click Import... in the media bin") as step:
             control, how = locate(session, window, "Import", "Import", offsets)
             step.note(control=getattr(control, "as_dict", lambda: control)(), located_by=how)
@@ -298,12 +320,10 @@ def run(run: flowlib.Run) -> None:
         output = staged.directory / "clicks-export.mp4"
         with run.step("open the export panel") as step:
             session.activate(window)
-            tab = _by_role(session, "Export", TAB_ROLES, timeout=60)
-            session.click(tab)
-            time.sleep(1)
+            where = _open_export_panel(session, window)
             tree = [control.as_dict() for control in session.controls()]
             (out / "controls-export.json").write_text(json.dumps(tree, indent=1))
-            step.note(tab=tab.as_dict(), controls=len(tree))
+            step.note(tab=where, controls=len(tree))
 
         with run.step("limit the render to the first seconds") as step:
             # A clip dragged out of the bin is the whole two-minute source, and
@@ -377,6 +397,53 @@ def run(run: flowlib.Run) -> None:
     finally:
         bridge.close()
         session.stop(started)
+
+
+# -------------------------------------------------------- the export panel
+
+#: A control only the export panel draws, used to tell that it is open.
+EXPORT_MARKERS = ("Whole sequence", "Automatic", "Choose")
+
+
+def _open_export_panel(session, window) -> str:
+    """Click the dock tab named `Export`, which is painted rather than published.
+
+    egui_dock draws its tab strip itself, so the tabs are not in the
+    accessibility tree at all - `Export`, `Inspector` and `Timeline` are
+    nowhere in it (run 34676801744). What *is* in the tree is the Inspector's
+    own text, and the tab strip is the band directly above the panel it
+    belongs to, so the tab is found relative to a control the application does
+    publish rather than at a fixed point on the screen.
+    """
+    if _export_panel_open(session, timeout=2):
+        return "already open"
+    anchors = []
+    try:
+        inspector = session.find("Select a clip", timeout=10)
+        anchors.append((inspector.rect.x, inspector.rect.y))
+    except DesktopError:
+        pass
+    anchors.append(window.rect.point(0.78, 0.09))
+    for left, top in anchors:
+        for dx in (120, 100, 140, 80, 160, 60):
+            point = (left + dx, top - 26)
+            session.click(point)
+            if _export_panel_open(session, timeout=3):
+                return f"clicked {point}"
+    raise DesktopError(
+        "the export panel would not open: none of the points tried hit the dock "
+        "tab named Export"
+    )
+
+
+def _export_panel_open(session, *, timeout: float) -> bool:
+    for marker in EXPORT_MARKERS:
+        try:
+            session.find(marker, timeout=timeout / len(EXPORT_MARKERS))
+            return True
+        except DesktopError:
+            continue
+    return False
 
 
 # ---------------------------------------------------------------- the lanes
@@ -488,6 +555,21 @@ def _choose_file(session, path: Path) -> None:
 
 
 # ------------------------------------------------------------------- reading
+
+
+def _bins(project) -> int:
+    """How many bins the project holds, at any depth."""
+
+    def count(bin_) -> int:
+        if not isinstance(bin_, dict):
+            return 0
+        return 1 + sum(count(child) for child in bin_.get("children", []))
+
+    if isinstance(project, dict):
+        root = project.get("project", project)
+        if isinstance(root, dict) and "root_bin" in root:
+            return count(root["root_bin"])
+    return 0
 
 
 def _items(listed) -> list:
