@@ -1507,7 +1507,9 @@ packaging/
   validate.sh                        metadata tests; run this first
   linux/AppRun                       AppImage entry point (POSIX sh)
   linux/build-appimage.sh            stages the AppDir and packs it
+  linux/check-plugins.sh             loads every bundled plugin on a clean machine
   linux/gst-plugins.txt              which GStreamer plugins get bundled
+  linux/fallback-libs.txt            host libraries carried as a per-host fallback
   linux/subordinate.desktop          desktop entry, shared by both packages
   linux/subordinate.svg              icon, shared by both packages
   linux/io.github.thowd22.Subordinate.metainfo.xml   AppStream, shared
@@ -1588,6 +1590,59 @@ bundle -- a plugin with an unsatisfiable `dlopen`-only dependency (`libmfx` for
 scan time and the element is simply missing at runtime. Optional plugins are
 dropped with a note; a **required** one that cannot resolve fails the build.
 
+That check is necessary and not sufficient, and the difference cost two
+releases. It runs on the machine that built the package, where the GStreamer
+*development* packages have already installed every library the bundle links
+against, so a dependency the package does not carry resolves anyway and the
+plugin looks healthy. On a user's machine the scanner then cannot load it,
+blacklists it, prints a warning nobody reads, and the element is simply
+missing. `packaging/linux/check-plugins.sh` is the check that can only be made
+somewhere else: point it at the AppImage (or a staged AppDir) and it loads
+**every** bundled module through `AppRun`, printing the scanner's own
+`GST_PLUGIN_LOADING` line for any that will not load, and fails on the first
+one -- and on any blacklist entry in the registry.
+
+```bash
+packaging/linux/check-plugins.sh target/appimage/Subordinate-0.1.3-x86_64.AppImage
+```
+
+`packaging.yml`'s `appimage-smoke` job runs it on all three targets, which is
+what makes a plugin that lost a dependency a build failure rather than a bug
+report.
+
+### Fallback libraries
+
+`linux/fallback-libs.txt` lists four sonames -- `libva.so.2`, `libva-drm.so.2`,
+`libva-x11.so.2` and `libvdpau.so.1` -- that are on the excludelist *and*
+bundled anyway, in `usr/lib/fallback`, which is not on the library path.
+
+They have to be somewhere, because gst-libav's `libavcodec`, `libavformat`,
+`libavutil`, `libavfilter`, `libswscale`, `libswresample` and `libpostproc`
+all carry them in `DT_NEEDED`, as do the `va`, `qsv` and `msdk` plugins. The
+Ubuntu 24.04 desktop image had none of the four installed, so `libav` was
+blacklisted along with the hardware plugins and `media.probe` of an ordinary
+H.264/AAC MKV answered `media.unsupported` -- software decode broken by three
+missing *hardware* libraries (TASK-139, fixed by TASK-145).
+
+They cannot simply go in `usr/lib`, because libva and libvdpau are
+dispatchers: they `dlopen` the host's VA/VDPAU driver and bind it through a
+version-stamped init symbol (`__vaDriverInit_1_<minor>`). A bundled libva 2.20
+from the ubuntu:24.04 build base, put in front of the host's, would be handed
+Fedora 41's libva 2.22 driver and refuse it -- turning working hardware encode
+into silent software encode, which is precisely why the excludelist exists.
+
+So the choice is made per library and per machine, in `AppRun`: for each
+soname in the fallback directory it looks for the host's copy in the standard
+library directories, and links only the ones the host has no answer for into a
+shim directory that goes on `LD_LIBRARY_PATH`. Where the host has a libva, the
+host's libva is used; where it has none, the bundle's answers. Run the package
+with `SUB_APPIMAGE_VERBOSE=1` to see which ones it linked in.
+
+Add a soname there when `check-plugins.sh` fails on a clean container for want
+of a library that a host stack is entitled not to have. Never add a driver,
+libc, GL or the display/audio stack: those really must come from the host, and
+`validate.sh` fails if a fallback entry is not also on the excludelist.
+
 Two AppRun details are load-bearing:
 
 - **A private plugin registry per run.** GStreamer's registry caches absolute
@@ -1602,10 +1657,12 @@ GStreamer tool instead of the editor, which is how CI checks the package's own
 registry rather than the host's.
 
 What the host must still provide is the flip side of the excludelist: libc and
-libstdc++, the GL/EGL/gbm/libdrm stack, libva *and* libva-drm (the `va`,
-`libav`, `qsv` and `msdk` plugins all link the DRM backend, not just libva
-itself), libvdpau and the Vulkan loader, the X11 and Wayland client libraries
-including `libxcb-xkb` and `libxcb-render`, `libasound` and `libpulse`. That list is not maintained by hand: the
+libstdc++, the GL/EGL/gbm/libdrm stack, the Vulkan loader, the X11 and Wayland
+client libraries including `libxcb-xkb`, `libxcb-render` and `libXfixes`,
+`libasound` and `libpulse`. VA-API and VDPAU used to be on that list and are
+not any more -- see "Fallback libraries" above: the host's are still preferred
+wherever it has them, but a host without them no longer loses gst-libav.
+That list is not maintained by hand: the
 `appimage` job prints every library the bundle resolves outside its own AppDir
 into the run summary and ships it with the artifact as `host-libraries.txt`,
 and the smoke baselines are the distro spelling of it. A new name appearing
@@ -1620,9 +1677,9 @@ The `appimage-smoke` job runs the *artifact* -- never the build tree -- on
 three systems that did not build it: the `ubuntu-26.04` runner (newer glibc,
 the direction that has to work), an `ubuntu:24.04` container (the build base,
 i.e. the oldest system claimed) and a `fedora:41` container. All three run the
-same script: start the editor with `--help`, resolve `nvcodec`, `va`, `libav`
-and `x264` through the bundled registry, and fail if any plugin was
-blacklisted.
+same script: start the editor with `--help`, then `check-plugins.sh` over
+every bundled module, which fails on any that will not load and on any
+blacklist entry.
 
 ### Flatpak
 
@@ -2033,25 +2090,35 @@ runs exactly what CI runs:
    packaging failure, a path that only resolved because of where the build
    tree happened to be;
 4. probe the media with the bundled discoverer;
-5. export with the **best available encoder**: the candidates are
+5. write an **H.264/AAC MKV** with the package's own `gst-launch-1.0`,
+   `x264enc` and `voaacenc`, then read it back twice -- with the bundled
+   discoverer and through `media.probe` on the MCP bridge (step 8). The sample
+   media is all WebM, which VP9 and Opus decode without gst-libav ever being
+   loaded, and AAC decode is gst-libav's `avdec_aac`: a package whose `libav`
+   module is blacklisted passes every other step here and still answers
+   `media.unsupported` on the first real clip a user hands it, which is what
+   v0.1.2 and v0.1.3 did (TASK-139/145);
+6. export with the **best available encoder**: the candidates are
    `sub_export`'s own order (`nvh264enc`, `vah264enc`, `amfh264enc`,
    `mfh264enc`, `x264enc`), each pinned with `--encoder` and tried in turn, so
    a hosted runner ends up on software x264 and a machine with a GPU does not.
    Registered is not the same as usable -- `nvcodec` and `va` register
    elements that need a driver behind them -- so a candidate that cannot
    render falls through to the next one;
-6. validate what was written: `--verify` makes the package read its own output
+7. validate what was written: `--verify` makes the package read its own output
    back in process, and where the package ships `gst-discoverer-1.0` as a
    command it is read again from outside;
-7. drive the package from an agent: the bridge the package ships is spoken to
+8. drive the package from an agent: the bridge the package ships is spoken to
    over its stdin and stdout, one JSON-RPC line at a time (`initialize`,
-   `project.new`, `sequence.create`, `timeline.get_state`), and the timeline
-   that comes back has to carry the sequence the mutation just made. Nothing
+   `project.new`, `sequence.create`, `timeline.get_state`, `media.probe`), and
+   the timeline that comes back has to carry the sequence the mutation just
+   made, while `media.probe` has to answer a MediaInfo for the H.264/AAC file
+   of step 5 rather than `media.unsupported`. Nothing
    is running for it to attach to, so the bridge starts the `subordinate-cli`
    it finds beside itself — which is what proves the package ships a bridge
    and an engine that can find each other (TASK-142). No jq, no python and no
    MCP client library: the stdio transport is one message per line;
-8. open the project in the real editor window under Xvfb
+9. open the project in the real editor window under Xvfb
    (`subordinate --ui-smoke`), which paints, pops the viewer out and prints a
    ready line. On these machines wgpu lands on Mesa's lavapipe.
 
