@@ -196,7 +196,7 @@ class WindowsSession(Session):
 
     def click_free_move(self, x: int, y: int) -> None:
         self._mouse.move(coords=(int(x), int(y)))
-        time.sleep(0.4)
+        time.sleep(0.05)
 
     def key(self, keys: str) -> None:
         self._keyboard.send_keys(_chord(keys))
@@ -206,21 +206,13 @@ class WindowsSession(Session):
         self._keyboard.send_keys(text, with_spaces=True, pause=0.02)
         time.sleep(0.2)
 
-    def drag(self, source, destination, *, steps: int = 24, hold: float = 0.4) -> None:
-        x0, y0 = self.point_of(source)
-        x1, y1 = self.point_of(destination)
-        self._mouse.move(coords=(x0, y0))
-        time.sleep(hold)
-        self._mouse.press(button="left", coords=(x0, y0))
-        time.sleep(hold)
-        for step in range(1, steps + 1):
-            self._mouse.move(
-                coords=(x0 + (x1 - x0) * step // steps, y0 + (y1 - y0) * step // steps)
-            )
-            time.sleep(0.04)
-        time.sleep(hold)
-        self._mouse.release(button="left", coords=(x1, y1))
-        time.sleep(hold)
+    def press(self, x: int, y: int, *, button: int = 1) -> None:
+        name = {1: "left", 2: "middle", 3: "right"}.get(button, "left")
+        self._mouse.press(button=name, coords=(int(x), int(y)))
+
+    def release(self, x: int, y: int, *, button: int = 1) -> None:
+        name = {1: "left", 2: "middle", 3: "right"}.get(button, "left")
+        self._mouse.release(button=name, coords=(int(x), int(y)))
 
     # -------------------------------------------------------------- screenshot
 

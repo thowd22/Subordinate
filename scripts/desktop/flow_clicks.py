@@ -215,7 +215,14 @@ def run(run: flowlib.Run) -> None:
                 drop={"x": drop[0], "y": drop[1]},
                 lane=lane,
             )
-            session.drag(row, drop)
+            # The picture taken with the button still down is what says whether
+            # the application saw a drag at all: egui paints a ghost of the
+            # clip where it would land, or a refused wash where it may not.
+            session.drag(
+                row,
+                drop,
+                midway=lambda: session.screenshot("07a-mid-drag.png"),
+            )
             clips = _wait_until(
                 lambda: _clips(read, staged.sequence),
                 lambda found: len(found) >= 1,

@@ -219,13 +219,45 @@ class Session(abc.ABC):
         """Type `text` as keystrokes, as a person would."""
 
     @abc.abstractmethod
-    def drag(self, source, destination, *, steps: int = 24, hold: float = 0.4) -> None:
+    def press(self, x: int, y: int, *, button: int = 1) -> None:
+        """Press and hold a mouse button at a point."""
+
+    @abc.abstractmethod
+    def release(self, x: int, y: int, *, button: int = 1) -> None:
+        """Release a mouse button at a point."""
+
+    def drag(
+        self,
+        source,
+        destination,
+        *,
+        steps: int = 24,
+        hold: float = 0.4,
+        midway=None,
+    ) -> None:
         """Press at `source`, move to `destination` in `steps`, release.
 
         Stepped rather than teleported: egui starts a drag only once the
         pointer has moved while a button is down, so a single jump from one
-        point to another is a click, not a drag.
+        point to another is a click, not a drag. `midway` is called with the
+        pointer halfway and the button still down, which is where a flow takes
+        the picture that says whether the application noticed the drag at all.
         """
+        x0, y0 = self.point_of(source)
+        x1, y1 = self.point_of(destination)
+        self.click_free_move(x0, y0)
+        time.sleep(hold)
+        self.press(x0, y0)
+        time.sleep(hold)
+        for step in range(1, steps + 1):
+            self.click_free_move(
+                x0 + (x1 - x0) * step // steps, y0 + (y1 - y0) * step // steps
+            )
+            if midway is not None and step == steps // 2:
+                midway()
+        time.sleep(hold)
+        self.release(x1, y1)
+        time.sleep(hold)
 
     # -------------------------------------------------------------- screenshot
 
@@ -241,6 +273,7 @@ class Session(abc.ABC):
         cheapest thing that wakes the event loop and mutates nothing.
         """
         self.click_free_move(*window.rect.point(0.5, 0.45))
+        time.sleep(0.6)
 
     @abc.abstractmethod
     def click_free_move(self, x: int, y: int) -> None:

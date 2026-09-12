@@ -202,7 +202,15 @@ class LinuxSession(Session):
 
     def click_free_move(self, x: int, y: int) -> None:
         run([self._xdotool, "mousemove", "--sync", str(x), str(y)])
-        time.sleep(0.4)
+        time.sleep(0.05)
+
+    def press(self, x: int, y: int, *, button: int = 1) -> None:
+        self.click_free_move(x, y)
+        run([self._xdotool, "mousedown", str(button)])
+
+    def release(self, x: int, y: int, *, button: int = 1) -> None:
+        self.click_free_move(x, y)
+        run([self._xdotool, "mouseup", str(button)])
 
     def key(self, keys: str) -> None:
         run([self._xdotool, "key", "--clearmodifiers", keys])
@@ -211,22 +219,6 @@ class LinuxSession(Session):
     def type_text(self, text: str) -> None:
         run([self._xdotool, "type", "--clearmodifiers", "--delay", "25", text])
         time.sleep(0.2)
-
-    def drag(self, source, destination, *, steps: int = 24, hold: float = 0.4) -> None:
-        x0, y0 = self.point_of(source)
-        x1, y1 = self.point_of(destination)
-        run([self._xdotool, "mousemove", "--sync", str(x0), str(y0)])
-        time.sleep(hold)
-        run([self._xdotool, "mousedown", "1"])
-        time.sleep(hold)
-        for step in range(1, steps + 1):
-            x = x0 + (x1 - x0) * step // steps
-            y = y0 + (y1 - y0) * step // steps
-            run([self._xdotool, "mousemove", "--sync", str(x), str(y)])
-            time.sleep(0.04)
-        time.sleep(hold)
-        run([self._xdotool, "mouseup", "1"])
-        time.sleep(hold)
 
     # -------------------------------------------------------------- screenshot
 

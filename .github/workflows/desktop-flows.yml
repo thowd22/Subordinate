@@ -213,9 +213,23 @@ jobs:
         run: |
           set -euo pipefail
           export XDG_RUNTIME_DIR=/tmp/xdg-runtime-$(id -u)
-          mkdir -p "$XDG_RUNTIME_DIR"
+          mkdir -p "$XDG_RUNTIME_DIR" "$FLOW_OUT"
           chmod 700 "$XDG_RUNTIME_DIR"
-          dbus-run-session -- python3 -u scripts/desktop/flow_clicks.py
+          # The portal is started explicitly rather than left to D-Bus
+          # activation, so that its log is a file this job can upload: a
+          # dialog that never appears is nearly always the portal refusing,
+          # and it says so nowhere else.
+          dbus-run-session -- bash -c '
+            set -uo pipefail
+            for portal in /usr/libexec/xdg-desktop-portal-gtk /usr/libexec/xdg-desktop-portal; do
+              name=$(basename "$portal")
+              "$portal" -r >"$FLOW_OUT/$name.log" 2>&1 &
+              echo "started $name (pid $!)"
+            done
+            sleep 3
+            busctl --user list | grep -i portal || echo "no portal on the bus"
+            python3 -u scripts/desktop/flow_clicks.py
+          '
 
       - name: Screenshots, logs and the verdict
         if: always()
@@ -268,6 +282,25 @@ jobs:
         with:
           flow: flow_mcp.py
           name: mcp
+
+      # The same render, through the CLI and in this session rather than
+      # through the bridge in the console session. It tells a stall in the
+      # export path apart from a stall in how the flow drives it, and it is
+      # never fatal: the flow above is the job's verdict.
+      - name: Render the same project with the CLI (never fatal)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 6
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $project = 'C:\SubordinateTest\flow-project\flow.sub'
+          if (-not (Test-Path $project)) { 'no project to render'; exit 0 }
+          $env:SUBORDINATE_LOG = 'info,sub_export=debug'
+          & 'C:\Program Files\Subordinate\bin\subordinate-cli.exe' render $project `
+            --preset $env:FLOW_PRESET --out "$env:RUNNER_TEMP\flow-out\cli-render.mp4" `
+            --range 0:48 --encoder nvh264enc --verify 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP\flow-out\cli-render.log"
+          "cli render exit=$LASTEXITCODE"
       - name: Screenshots, logs and the verdict
         if: always()
         uses: actions/upload-artifact@v4
