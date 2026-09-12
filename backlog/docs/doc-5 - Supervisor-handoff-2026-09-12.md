@@ -35,3 +35,17 @@ State of the project when the supervising session paused (usage limits).
 - Workers must not create Backlog tasks (id collisions); the supervisor files follow-ups after merges.
 - Merge agent branches with --no-ff; if a task file conflicts, keep both sides and dedupe frontmatter keys; run backlog doctor before pushing.
 - cargo target directories are never garbage-collected: clean the agents' checkout target when it passes 40 GB.
+
+
+## Stopped on 2026-09-12 at the user's usage limit
+- Wave workflow run wf_423097c5-8cf was STOPPED mid-wave. TASK-150 finished and is merged. Workers on TASK-149, 151, 153, 154 and 155 were cut off; their worktrees under /home/admin2/Subordinate/.claude/worktrees/ still hold whatever they had:
+task/task-155: 15 uncommitted files, 0 commits ahead of main (/home/admin2/Subordinate/.claude/worktrees/wf_423097c5-8cf-2)
+task/task-150: 0 uncommitted files, 1 commits ahead of main (/home/admin2/Subordinate/.claude/worktrees/wf_423097c5-8cf-3)
+task/task-154: 7 uncommitted files, 0 commits ahead of main (/home/admin2/Subordinate/.claude/worktrees/wf_423097c5-8cf-4)
+task/task-149: 8 uncommitted files, 0 commits ahead of main (/home/admin2/Subordinate/.claude/worktrees/wf_423097c5-8cf-5)
+task/task-151: 4 uncommitted files, 0 commits ahead of main (/home/admin2/Subordinate/.claude/worktrees/wf_423097c5-8cf-6)
+task/task-153: 17 uncommitted files, 0 commits ahead of main (/home/admin2/Subordinate/.claude/worktrees/wf_423097c5-8cf-7)
+
+  On resume: for each, `git -C <worktree> status`; if the work looks usable, commit it on its task branch and let a fresh worker continue from it (relaunching the wave with the same task starts from main, so merge or discard first); otherwise `git worktree remove --force` and delete the branch. Those tasks remain To Do on main.
+- The TASK-146 agent (export stall) was asked to commit a WIP state to task/task-146 and stop; read its notes before relaunching.
+- The Windows desktop AMI 1.1.6 build and its smoke job were left running unattended (a shell task, no agent tokens); check the newest subordinate-windows-desktop AMI and update .github/runs-on.yml if it succeeded.
