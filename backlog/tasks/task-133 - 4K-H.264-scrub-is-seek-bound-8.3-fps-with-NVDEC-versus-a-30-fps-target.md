@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-task-133-2'
 created_date: '2026-09-11 14:48'
-updated_date: '2026-09-12 04:03'
+updated_date: '2026-09-12 04:27'
 labels:
   - media
   - performance
@@ -127,6 +127,39 @@ Validation (second pass): cargo fmt --all --check clean, cargo clippy --workspac
 2026-09-11 supervisor measurement after the second merge (hardware run 34635562025, box APU, vah264dec): 4K scrub 9.898 fps (seek p50 11.3 ms, decode-forward p50 63.5 ms, still 14.2 pictures per seek); 1080p scrub 22.7 fps with 14 frames per seek. The delivered change removed unshown pictures from delivery but every step still decodes about half a GOP, so the decode count per step is unchanged. The NVIDIA job of that run failed at runner launch (RunsOn capacity while two T4 jobs were already running), so no T4 number this time. Next pass must change the seek strategy itself: for a forward step inside the current GOP continue decoding from the last decoded picture without a flushing seek, and keep the current GOP's decoded pictures in the frame cache so backward steps hit; measure frames-decoded-per-step, which should drop from 14 to about 1 for sequential scrubbing.
 
 2026-09-11 T4 measurement (hardware run 34640251740, nvh264dec): 4K scrub 9.782 fps; the split moved: decode-forward p50 is now 5.1 ms with 3.3 pictures per seek (the delivery change worked on NVDEC), but seek p50 rose to 86.3 ms, so each step is now dominated by the flushing seek and decoder preroll itself. On the box APU (vah264dec) the same run shows the old shape (14 pictures per seek). Conclusion for the next pass: eliminate the flushing seek for forward steps inside the current GOP (continue decoding from the last picture) and keep GOP pictures cached; on NVDEC that alone should take a sequential step from about 90 ms to a few ms.
+
+## Third pass: the step that does not seek
+
+Branch `task/task-133-scrub`, commit "TASK-133: stop a scrub step seeking for ground the decoder is already on".
+
+What the previous pass left was two shapes of the same mistake. On the T4 (run 34640251740) the flushing seek alone was 86.3 ms of a step, with only 3.3 pictures decoded; on the box APU (run 34635562025) the seek was 11.3 ms and the step decoded 14.2 pictures. Both are a step flushing the pipeline back to a keyframe for a picture the decoder had already passed, or had just handed out.
+
+Two changes, both of which need the PtsIndex:
+
+* **The decoder keeps what it decodes.** Every picture a `seek_to` step pulls goes into a byte-budgeted `FrameCache` of that decoder's own (`DecoderOptions::gop_cache_bytes`, 64 MiB by default: five 4K pictures, twenty-two at 1080p). A step whose target the index resolves to a cached timestamp is handed that picture -- no seek, no decode, and the pipeline deliberately left where it stands, so the next forward step decodes on rather than rewinding to it. `VideoFrame::try_clone` makes that free: a second read-only mapping of the same GStreamer buffer, never a copy of the pixels.
+* **The no-seek rule is now 'cheaper than seeking'.** Both ways of reaching a target are priced in pictures: decoding on costs the pictures between here and the target, seeking costs the pictures from the target's keyframe to it plus the flush, which `DecoderOptions::forward_decode_slack` prices at twelve. The old 'inside the current GOP' rule is that comparison with the slack at zero, so a step one or two pictures past the next keyframe now decodes on instead of flushing.
+
+Playback is untouched: only `seek_to` fills or reads the cache, a decoder with no index keeps nothing (it could never look one up), and `next_frame` and `DecodeAhead` are exactly as they were.
+
+## Measuring what a scrub is
+
+The existing scrub scenario alternates head and tail, so every step lands in a GOP the decoder is not in and a flush is unavoidable -- it is the worst case, not what a hand does, and it stays in the report unchanged. A second scenario, `scrub_drag`, drags the playhead three pictures forward at a time and four back every fourth move, which is the workload the criterion is about. perf.json now carries `frames_decoded`, `seeks_issued` and `cache_hits` per scenario and the summaries print all three per step. `subordinate-bench --legacy-scrub` measures the pre-change path on the same binary, so a before-and-after needs no rebuild -- that is how the numbers below were taken, and it works on the runners too.
+
+## Local software measurement (WSL2, release, --no-gpu --seeks 20, avdec_h264)
+
+| fixture | scenario | before | after | pictures/step | seeks/step |
+| --- | --- | --- | --- | --- | --- |
+| bars_1080p | scrub_drag | 83.393 fps | **809.500 fps** | 2.65 -> 1.15 | 0.35 -> 0.00 |
+| bars_2160p | scrub_drag | 31.529 fps | **130.668 fps** | 2.60 -> 1.55 | 0.40 -> 0.05 |
+| bars_2160p | scrub (jump) | 18.123 fps | 18.045 fps | 3.00 | 0.90 |
+
+Repeats: 4K drag 29.904 fps legacy, 130.863 fps after. Eight of the twenty timed 4K drag steps are cache hits and one seeks. The jump scrub does not move and should not: each of its steps is a fresh GOP.
+
+## Validation so far
+
+cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean; cargo test -p sub-media -p subordinate-bench green; cargo test --workspace --exclude sub-ui green (exit 0). Frame accuracy: seek_fixtures unchanged and passing (burnt-in timecode plus whole-picture comparison), and two new fixture tests in index_fixtures -- one walks a drag over a GOP and compares every picture the cache hands back against the same file decoded from the start, the other proves a step just past the next keyframe decodes on while one far ahead still seeks.
+
+Hardware run 34672738874 dispatched from the branch; numbers to follow.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

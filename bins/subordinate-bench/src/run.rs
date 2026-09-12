@@ -436,18 +436,28 @@ pub fn drag_targets(index: &PtsIndex, count: u64) -> Option<Vec<RationalTime>> {
     if count == 0 || index.len() < DRAG_FORWARD * 2 {
         return None;
     }
-    let last = index.len() - 1;
-    let mut frame = last * DRAG_START_NUMERATOR / DRAG_START_DENOMINATOR;
-    let mut targets = Vec::new();
+    drag_frames(count, index.len() - 1)
+        .into_iter()
+        .map(|frame| index.pts(frame))
+        .collect()
+}
+
+/// The walk itself: picture numbers, given the last one the clip holds.
+///
+/// Separated from the index so the shape of a drag can be asserted without a
+/// file to index.
+fn drag_frames(count: u64, last: usize) -> Vec<usize> {
+    let mut frame = (last * DRAG_START_NUMERATOR / DRAG_START_DENOMINATOR).min(last);
+    let mut frames = Vec::new();
     for step in 0..count {
-        targets.push(index.pts(frame.min(last))?);
+        frames.push(frame);
         if step % DRAG_PERIOD == DRAG_PERIOD - 1 {
             frame = frame.saturating_sub(DRAG_BACK);
         } else {
             frame = (frame + DRAG_FORWARD).min(last);
         }
     }
-    Some(targets)
+    frames
 }
 
 /// Pictures a drag moves forward in one step.
@@ -637,12 +647,32 @@ fn nanos_between(start: Instant, end: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{FIXTURES, Options, scrub_targets};
+    use super::{FIXTURES, Options, drag_frames, scrub_targets};
     use sub_media::probe::NANOSECONDS;
 
     #[test]
     fn the_measured_fixtures_are_the_1080p_and_4k_clips() {
         assert_eq!(FIXTURES, ["bars_1080p_h264.mp4", "bars_2160p_h264.mp4"]);
+    }
+
+    #[test]
+    fn a_drag_walks_forward_and_doubles_back_inside_the_clip() {
+        // Three pictures forward, four back every fourth move: a little over a
+        // picture of travel a step, which is a hand on a scrub bar.
+        let frames = drag_frames(12, 99);
+        assert_eq!(&frames[..6], &[39, 42, 45, 48, 44, 47]);
+        assert!(frames.iter().all(|frame| *frame <= 99));
+        assert!(
+            frames[frames.len() - 1] > frames[0],
+            "a drag travels forward on balance"
+        );
+    }
+
+    #[test]
+    fn a_drag_stays_inside_a_clip_too_short_to_travel_across() {
+        // Nothing may run off either end, however many steps are asked for.
+        let frames = drag_frames(20, 3);
+        assert!(frames.iter().all(|frame| *frame <= 3));
     }
 
     #[test]
