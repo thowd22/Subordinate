@@ -1265,10 +1265,14 @@ does:
     rather than a hang.
   * So the readiness probe was answering the wrong question. It drove each
     element to `READY`, which a hardware encoder reaches long before it opens a
-    session. It now encodes a real frame, and the encoder an export is about to
-    plug encodes one frame of the *export's own canvas* before the pipeline is
-    built - a small frame is not the question either. A pinned encoder that
-    cannot is refused by name and reason; the automatic order walks on.
+    session. Hardware now encodes a real frame during discovery and another
+    at the export canvas before the pipeline is built. A pinned hardware
+    encoder that cannot is refused by name and reason; automatic selection
+    continues to the next candidate. Software only initializes to READY:
+    full-resolution CPU encoding may legitimately exceed the hardware probe's
+    five-second deadline (rav1enc on yodaddy, run 34710769860). The actual
+    software export validates its format and handles bus errors or missing
+    progress under the request's stall timeout.
 * **The editor's endpoint does not serve `export.*`.** Only
   `subordinate-cli serve` installs the host-backed families
   (`docs/schema/host-api.json`); the editor serves the engine's own methods and

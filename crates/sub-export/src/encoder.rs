@@ -212,7 +212,7 @@ const CATALOGUE: &[Candidate] = &[
 pub struct ElementProbe {
     /// Whether the element factory is registered and could be instantiated.
     pub present: bool,
-    /// Whether the element encoded a frame here.
+    /// Whether hardware encoded a frame, or software initialized to READY here.
     pub ready: bool,
     /// Whether this machine has ranked the factory `NONE`.
     pub deranked: bool,
@@ -226,7 +226,7 @@ impl ElementProbe {
         Self::default()
     }
 
-    /// The element is registered and encoded a frame here.
+    /// The element passed its backend readiness check.
     pub fn ready() -> Self {
         Self {
             present: true,
@@ -283,7 +283,7 @@ pub struct EncoderStatus {
     pub hardware: bool,
     /// Whether the factory is registered and could be instantiated.
     pub present: bool,
-    /// Whether the element encoded a frame here, which is what makes it usable.
+    /// Whether hardware encoded a frame, or software initialized to READY here.
     pub ready: bool,
     /// Whether this machine ranks the factory `NONE`. Such an element is kept
     /// out of the automatic order but still honoured when it is pinned.
@@ -426,8 +426,8 @@ pub struct EncoderProbe {
 static CACHED: OnceLock<Result<EncoderProbe, SubError>> = OnceLock::new();
 
 impl EncoderProbe {
-    /// Probes this machine, instantiating every catalogued encoder and driving
-    /// one frame with it.
+    /// Probes this machine: hardware encodes a small frame; software only
+    /// initializes to READY, so slow CPU encoding cannot delay discovery.
     ///
     /// # Errors
     ///
@@ -457,7 +457,7 @@ impl EncoderProbe {
 
     /// Builds a probe result from an arbitrary element probe, which is what
     /// lets the tests describe a machine without having one.
-    fn from_probe(os: &str, probe: &dyn Fn(&str) -> ElementProbe) -> Self {
+    pub(crate) fn from_probe(os: &str, probe: &dyn Fn(&str) -> ElementProbe) -> Self {
         let encoders = CATALOGUE
             .iter()
             .map(|entry| {
@@ -620,8 +620,8 @@ fn probe_element(name: &str) -> ElementProbe {
 /// nothing anywhere.
 const PROBE_CANVAS: (u32, u32) = (640, 480);
 
-/// How long one element is given to encode that frame before it is written
-/// off as unusable here.
+/// How long a hardware encoder has to demonstrate an encode session.
+/// Software discovery and export selection never use this encode deadline.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Whether `name` can actually encode on this machine, in this process.
@@ -636,11 +636,34 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// frame later (TASK-146). One frame through `videotestsrc ! videoconvert !
 /// <encoder> ! fakesink` asks the question the export is about to ask.
 ///
-/// The pipeline is torn down before the answer is returned, so nothing the
-/// probe opened is still held when the export builds its own.
+/// Software encoders have no device session to verify. They only initialize
+/// to READY here; encoding even one CPU frame can legitimately exceed the
+/// hardware probe deadline. Their actual exports own format validation and
+/// progress-aware timeouts. Every probe is torn down before returning.
 fn probe_ready(name: &str) -> ElementProbe {
+    probe_ready_with(name, &can_encode)
+}
+
+/// Separate hardware encode checks from bounded software initialization.
+fn probe_ready_with(
+    name: &str,
+    encode: &dyn Fn(&str, u32, u32) -> Result<(), EncodeRefusal>,
+) -> ElementProbe {
+    if CATALOGUE
+        .iter()
+        .any(|entry| entry.element == name && !entry.vendor.is_hardware())
+    {
+        if gst::ElementFactory::find(name).is_none() {
+            return ElementProbe::missing();
+        }
+        return if starts_to_ready(name) {
+            ElementProbe::ready()
+        } else {
+            ElementProbe::not_ready("the software encoder could not initialize to READY")
+        };
+    }
     let (width, height) = PROBE_CANVAS;
-    match can_encode(name, width, height) {
+    match encode(name, width, height) {
         Ok(()) => ElementProbe::ready(),
         Err(EncodeRefusal::Missing) => {
             tracing::debug!(element = name, "encoder element not available");
@@ -761,7 +784,8 @@ fn starts_to_ready(name: &str) -> bool {
     };
     let started = match element.set_state(gst::State::Ready) {
         Ok(gst::StateChangeSuccess::Async) => {
-            element.state(gst::ClockTime::from_seconds(2)).0.is_ok()
+            let (result, current, _) = element.state(gst::ClockTime::from_seconds(2));
+            result.is_ok() && current == gst::State::Ready
         }
         Ok(_) => true,
         Err(err) => {
@@ -803,8 +827,34 @@ pub fn element_is_usable(name: &str) -> bool {
 mod tests {
     use super::{
         CATALOGUE, CODECS, ElementProbe, EncoderPreferences, EncoderProbe, EncoderVendor,
-        VideoCodec, encoder_names,
+        VideoCodec, encoder_names, gst,
     };
+
+    #[test]
+    fn software_discovery_does_not_encode_a_frame() {
+        gst::init().unwrap();
+        if gst::ElementFactory::find("x264enc").is_none() {
+            eprintln!("skipping: x264enc is unavailable");
+            return;
+        }
+        let found = super::probe_ready_with("x264enc", &|_, _, _| {
+            panic!("software discovery must not encode a dummy frame")
+        });
+        assert!(found.present && found.ready);
+    }
+
+    #[test]
+    fn hardware_discovery_still_observes_encode_failure() {
+        let found = super::probe_ready_with("nvh264enc", &|name, width, height| {
+            assert_eq!(name, "nvh264enc");
+            assert_eq!((width, height), super::PROBE_CANVAS);
+            Err(super::EncodeRefusal::Refused(
+                "cannot open device".to_owned(),
+            ))
+        });
+        assert!(found.present && !found.ready);
+        assert_eq!(found.detail.as_deref(), Some("cannot open device"));
+    }
 
     fn nothing_works(_: &str) -> ElementProbe {
         ElementProbe::missing()

@@ -727,17 +727,15 @@ impl ExportElements {
     }
 }
 
-/// Confirms `chosen` can encode this export's canvas, or finds one that can.
+/// Confirms a hardware encoder can open a session for this export's canvas.
 ///
-/// The session probe encodes a small frame, and a small frame is not the
-/// question: on the Windows GPU runner every NVENC element encodes 640x480 and
-/// then refuses to open a session for 1920x1080 seconds later in the same
-/// process (TASK-146). So the encoder an export is about to plug encodes one
-/// frame of the *export's* canvas first, which costs a few tens of
-/// milliseconds and is the difference between an export that runs and one that
-/// dies on its first frame.
+/// Small hardware probes cannot reveal every resolution-specific device
+/// failure (TASK-146), so hardware also gets a full-canvas check. Software
+/// bypasses frame preflight: CPU latency is not an availability failure, and
+/// its real export already validates caps and reports bus errors or stalls.
+/// This also applies when software is the fallback for a failed device.
 ///
-/// An encoder the user pinned is never swapped — the pin is the decision the
+/// A hardware encoder the user pinned is never swapped — the pin is the decision the
 /// order withholds — but it is still asked, so the refusal names the element
 /// and says what it answered. The automatic order walks on to the next usable
 /// encoder and says in the log which one it left behind.
@@ -752,8 +750,22 @@ fn verify_at_canvas<'a>(
     preferences: &EncoderPreferences,
     chosen: &'a EncoderStatus,
 ) -> SubResult<&'a EncoderStatus> {
+    verify_at_canvas_with(probe, settings, preferences, chosen, &can_encode)
+}
+
+/// Hardware preflight with an injectable encode operation for regression tests.
+fn verify_at_canvas_with<'a>(
+    probe: &'a EncoderProbe,
+    settings: &ExportSettings,
+    preferences: &EncoderPreferences,
+    chosen: &'a EncoderStatus,
+    encode: &dyn Fn(&str, u32, u32) -> Result<(), crate::encoder::EncodeRefusal>,
+) -> SubResult<&'a EncoderStatus> {
+    if !chosen.hardware {
+        return Ok(chosen);
+    }
     let (width, height) = (settings.width, settings.height);
-    let refusal = match can_encode(&chosen.element, width, height) {
+    let refusal = match encode(&chosen.element, width, height) {
         Ok(()) => return Ok(chosen),
         Err(refusal) => refusal,
     };
@@ -783,12 +795,17 @@ fn verify_at_canvas<'a>(
         if candidate.element == chosen.element {
             continue;
         }
-        match can_encode(&candidate.element, width, height) {
+        let result = if candidate.hardware {
+            encode(&candidate.element, width, height)
+        } else {
+            Ok(())
+        };
+        match result {
             Ok(()) => {
                 tracing::info!(
                     element = %candidate.element,
                     skipped = ?skipped,
-                    "encoding with the first encoder that can take this canvas"
+                    "using the first available fallback encoder"
                 );
                 return Ok(candidate);
             }
@@ -2446,3 +2463,6 @@ mod tests {
 
 #[cfg(test)]
 mod slow_tests;
+
+#[cfg(test)]
+mod canvas_tests;
