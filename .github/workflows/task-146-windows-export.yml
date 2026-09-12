@@ -156,10 +156,11 @@ jobs:
           $out = "$env:RUNNER_TEMP\probe"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
           gst-inspect-1.0 --version
-          foreach ($e in @("nvh264enc","nvh264dec","d3d11h264dec","d3d12h264dec","x264enc","mfh264enc","avdec_h264","avenc_aac")) {
+          foreach ($e in @("nvh264enc","nvd3d11h264enc","nvd3d12h264enc","nvautogpuh264enc","nvh264dec","d3d11h264dec","d3d12h264dec","x264enc","mfh264enc","avdec_h264","avenc_aac")) {
             gst-inspect-1.0 --exists $e
             if ($LASTEXITCODE -eq 0) { "present  $e" } else { "absent   $e" }
           }
+          gst-inspect-1.0 nvcodec 2>&1 | Tee-Object "$out\nvcodec.txt"
           & .\bin\subordinate-cli.exe diag --pretty 2>&1 | Tee-Object "$out\diag.json"
           gst-discoverer-1.0 "C:\SubordinateTest\$env:MEDIA_KEY" 2>&1 | Tee-Object "$out\discoverer.txt"
 
@@ -292,6 +293,19 @@ jobs:
             "render","C:\SubordinateTest\flow-like.sub","--preset","youtube-1080p",
             "--out","$out\flow-like-mf.mp4","--range","0:48","--encoder","mfh264enc","--verify"
             ) @{ SUBORDINATE_LOG = $trace; GST_DEBUG = "3,mfvideoenc:4" } 300
+
+          # 5g. The Direct3D-backed NVENC elements. MediaFoundation's D3D11
+          #     encode works from this process while the CUDA NVENC cannot
+          #     open a session at all, so the question is whether nvcodec's own
+          #     D3D11 and D3D12 encoders can.
+          foreach ($e in @("nvd3d11h264enc","nvd3d12h264enc","nvautogpuh264enc")) {
+            gst-inspect-1.0 --exists $e
+            if ($LASTEXITCODE -ne 0) { "absent   $e - skipped"; continue }
+            Probe "render-flowlike-$e" $cli @(
+              "render","C:\SubordinateTest\flow-like.sub","--preset","youtube-1080p",
+              "--out","$out\flow-like-$e.mp4","--range","0:48","--encoder",$e,"--verify"
+              ) @{ SUBORDINATE_LOG = $trace; GST_DEBUG = "3,nvencoder:5"; GST_DEBUG_FILE = "$out\render-$e.gst.log"; GST_DEBUG_NO_COLOR = "1" } 300
+          }
 
           # 5c. The same render with the encoder probe asking only whether the
           #     element exists, instead of taking it to READY and back.
