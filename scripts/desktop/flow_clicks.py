@@ -640,6 +640,19 @@ def _x11_dialog(session, window) -> dict | None:
     return None
 
 
+def _still_open(window_id) -> bool:
+    """Whether that X window is still on the display."""
+    if not window_id:
+        return False
+    found = subprocess.run(
+        ["xdotool", "getwindowname", str(window_id)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return found.returncode == 0
+
+
 def _choose_file(session, path: Path, dialog: dict) -> str:
     """Choose `path` in whichever native chooser came up, and say how.
 
@@ -698,6 +711,19 @@ def _choose_file(session, path: Path, dialog: dict) -> str:
             row = session.find(path.name, timeout=15)
             session.click(row, double=True)
             time.sleep(2)
+            # A double-click that only *selected* the row leaves the chooser
+            # open, so the dialog is confirmed the way a person would confirm
+            # it - Return, then the Open button - and only while it is still
+            # there.
+            if _still_open(window_id):
+                send_key("Return")
+                time.sleep(2)
+            if _still_open(window_id):
+                try:
+                    session.click(session.find("Open", timeout=5))
+                    time.sleep(2)
+                except DesktopError:
+                    pass
             return f"double-clicked the row named {path.name!r} (focus={focused})"
         except DesktopError:
             pass

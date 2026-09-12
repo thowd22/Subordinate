@@ -21,12 +21,12 @@ jobs:
   linux:
     uses: ./.github/workflows/desktop-flows.yml
     with:
-      only: linux-clicks
+      only: ''
       linux_runner: ami=ami-08dbaf8367717a9a3/family=g4dn.xlarge/spot=false
       windows_runner: ami=ami-0b3c82cb19d31ac1d/family=g4dn.xlarge/spot=false
 
   windows:
-    if: false
+    if: false  # the linux caller runs every job
     uses: ./.github/workflows/desktop-flows.yml
     with:
       only: windows-clicks
