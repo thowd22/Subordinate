@@ -247,6 +247,52 @@ the whole picture, and `index_fixtures` now also walks a drag over a GOP and
 compares every picture the cache hands back against the same file decoded from
 the start.
 
+### On the Linux CI benchmark
+
+CI runs the harness twice on Linux for the same reason — as shipped, and with
+`--legacy-scrub` — so the software half of the criterion has a before-and-after
+on the machine it is stated against rather than on a developer's laptop. Run
+34673843404, debug build, no GPU but Mesa's lavapipe:
+
+| Fixture | Scenario | before | after |
+| --- | --- | --- | --- |
+| `bars_1080p_h264.mp4` | `scrub_drag` | 22.6 fps | **42.9 fps** |
+| `bars_2160p_h264.mp4` | `scrub_drag` | 8.3 fps | **13.6 fps** |
+| `bars_2160p_h264.mp4` | `scrub` (jump) | 5.3 fps | 4.8 fps |
+
+Debug numbers, and every one of them an upper bound on nothing but itself — but
+the shape is the same, and the ceiling is visible in it: 4K playback on that
+runner is 14.3 fps, so the 13.6 fps drag is within 5% of what the machine can
+decode and upload at all. What is left of a drag step there is the lavapipe
+upload (decode-forward p50 is 0.044 ms), not the seek path.
+
+### On hardware: the criterion, met
+
+Run 34673268738 of the `Hardware verification` workflow, both passes on the
+same binary and the same machine, harness defaults (30 steps, GPU upload
+included):
+
+| Machine | Decoder | Fixture | before | after | pictures/step | seeks/step |
+| --- | --- | --- | --- | --- | --- | --- |
+| T4 (g4dn.xlarge) | `nvh264dec` | `bars_2160p` drag | 23.4 fps | **101.0 fps** | 2.60 → 1.36 | 0.40 → 0.03 |
+| T4 (g4dn.xlarge) | `nvh264dec` | `bars_1080p` drag | 63.5 fps | **198.2 fps** | 2.63 → 1.36 | 0.36 → 0.03 |
+| T4 (g4dn.xlarge) | `nvh264dec` | `bars_2160p` jump scrub | 9.8 fps | 9.8 fps | 3.00 | 0.90 |
+| box (AMD APU) | `vah264dec` | `bars_2160p` drag | 20.9 fps | **45.0 fps** | 2.60 → 1.36 | 0.40 → 0.03 |
+| box (AMD APU) | `vah264dec` | `bars_1080p` drag | 45.2 fps | **144.7 fps** | 2.63 → 1.36 | 0.36 → 0.03 |
+| box (AMD APU) | `vah264dec` | `bars_2160p` jump scrub | 10.6 fps | 10.6 fps | 3.00 | 0.90 |
+
+**Phase 1's exit criterion is met on both.** 101.0 fps on the T4 and 45.0 fps
+on the box APU, against ">30 fps 4K scrub on Linux with nvdec/va", each through
+the hardware decoder the workflow asserts by name. Fourteen of the thirty
+timed steps are answered from the cache and one seeks.
+
+The 4K drag step on the T4 is now seek p50 0.000 ms and decode-forward p50
+0.016 ms: what it costs is the upload and a lookup, not the decoder. The jump
+scrub beside it is unchanged at an 86.3 ms seek, which is the control — nothing
+about the flush got cheaper, it stopped happening. On the box the drag lands at
+45.0 fps against that machine's own 4K *playback* rate of 45.6 fps, so the
+drag is now at its decode-and-upload ceiling.
+
 ## Baseline: NVIDIA T4, hardware decode (nvdec)
 
 Recorded 2026-09-11 (TASK-116), the first numbers from real GPU hardware. AWS

@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-task-133-2'
 created_date: '2026-09-11 14:48'
-updated_date: '2026-09-12 04:44'
+updated_date: '2026-09-12 04:49'
 labels:
   - media
   - performance
@@ -175,6 +175,23 @@ The workflow now runs the bench twice on each runner -- once as shipped, once wi
 The job's own criteria line: '4K H.264 scrub (scrub_drag): **44.956 fps** through vah264dec (criterion: above 30 fps) - PASS', with '4K decode element: vah264dec - PASS'. 4K playback on this machine is 45.572 fps with the upload stage, so the drag is now at the machine's decode-and-upload ceiling rather than at the seek's.
 
 The jump scrub is unchanged on both fixtures, which is the control: every one of its steps lands in a GOP the decoder is not in, so it flushes whatever the planner knows.
+
+## Hardware: NVIDIA T4 (nvh264dec), run 34673268738
+
+Same run, g4dn.xlarge through RunsOn, GStreamer 1.24, GPU upload included, harness defaults (30 steps), both passes on the same binary:
+
+| fixture | scenario | before (--legacy-scrub) | after | pictures/step | seeks/step | cached |
+| --- | --- | --- | --- | --- | --- | --- |
+| bars_2160p | scrub_drag | 23.430 fps | **100.981 fps** | 2.60 -> 1.36 | 0.40 -> 0.03 | 14 of 30 |
+| bars_1080p | scrub_drag | 63.536 fps | **198.188 fps** | 2.63 -> 1.36 | 0.36 -> 0.03 | 14 of 30 |
+| bars_2160p | scrub (jump) | 9.774 fps | 9.795 fps | 3.00 | 0.90 | 0 |
+| bars_1080p | scrub (jump) | 30.593 fps | 33.874 fps | 3.00 -> 2.33 | 0.90 -> 0.83 | 4 |
+
+The job's criteria lines: '4K H.264 scrub (scrub_drag): **100.981 fps** through nvh264dec (criterion: above 30 fps) - PASS' and '4K decode element: nvh264dec - PASS'. The 4K drag step is now seek p50 0.000 ms and decode-forward p50 0.016 ms -- the step is the upload and the cache lookup, not the decoder -- against the jump scrub's unchanged 86.3 ms seek, which is the control that says nothing about the flush itself got cheaper: it stopped happening.
+
+Readback on the same run: 576.1 fps on the T4, PASS.
+
+Costs: the NVIDIA job is the only money in the workflow and ran inside its usual envelope; the second bench pass is seconds on a job already paid for. Two earlier dispatches (34672738874, 34673091566) were cancelled before any T4 instance launched -- the first to add the --legacy-scrub pass to the workflow, the second to fix the drag's warm-up seeding the cache it was about to measure -- so this is the only T4 instance this pass spent.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
