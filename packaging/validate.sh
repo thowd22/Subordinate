@@ -80,9 +80,17 @@ for script in "$linux_dir/build-appimage.sh" "$flatpak_dir/build-flatpak.sh" \
 done
 [ -x "$apprun" ] || fail "AppRun is not executable"
 if command -v shellcheck >/dev/null 2>&1; then
-    check "shellcheck packaging scripts" shellcheck -S warning \
-        "$apprun" "$check_plugins" "$linux_dir/build-appimage.sh" \
-        "$flatpak_dir/build-flatpak.sh"
+    # Printed on failure: "FAIL: shellcheck packaging scripts" on its own says
+    # nothing, and the CI runner's shellcheck is newer than most developers'.
+    if shellcheck -S warning "$apprun" "$check_plugins" \
+        "$linux_dir/build-appimage.sh" "$flatpak_dir/build-flatpak.sh" \
+        >/tmp/shellcheck.$$ 2>&1; then
+        pass "shellcheck packaging scripts ($(shellcheck --version | sed -n 's/^version: //p'))"
+    else
+        fail "shellcheck packaging scripts ($(shellcheck --version | sed -n 's/^version: //p'))"
+        sed -n '1,60p' /tmp/shellcheck.$$
+    fi
+    rm -f /tmp/shellcheck.$$
 else
     skip "shellcheck not installed"
 fi

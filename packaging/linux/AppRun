@@ -46,7 +46,10 @@ if [ -d "$libdir/fallback" ]; then
     # Recreated every run: a machine that has since installed libva must stop
     # getting the bundled one. A path that is not a directory this user owns
     # (someone else got there first) is stepped around, not written to.
-    if [ -e "$shim" ] && { [ ! -d "$shim" ] || [ ! -O "$shim" ]; }; then
+    # `test -O` would say this in one word and is not in POSIX sh, so the
+    # question goes to find: is that path a directory belonging to this user?
+    owned=$(find "$shim" -maxdepth 0 -type d -uid "$(id -u)" 2>/dev/null || true)
+    if [ -e "$shim" ] && [ -z "$owned" ]; then
         shim=$(mktemp -d "${TMPDIR:-/tmp}/subordinate-hostlibs-XXXXXX" 2>/dev/null || echo "")
     else
         mkdir -p "$shim" 2>/dev/null || shim=""
