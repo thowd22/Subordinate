@@ -17,6 +17,11 @@
 //! frames done, an ETA and encoder statistics, stops on a cancel token, and
 //! deletes the part-written file when an export does not reach its end.
 //!
+//! The rate-control mapping lives in [`rate_control`]: per catalogued
+//! encoder, which properties carry an average bitrate and which carry a
+//! constant-quality target, applied defensively so an element that spells a
+//! knob differently warns instead of failing the export.
+
 //! Presets live in [`presets`]: the container, codecs, resolution, rate and
 //! quality of a named export target, shipped as TOML data and extensible by a
 //! user file in the config directory.
@@ -26,6 +31,7 @@ pub mod encoder;
 pub mod job;
 pub mod pipeline;
 pub mod presets;
+pub mod rate_control;
 #[cfg(feature = "sequence")]
 pub mod sequence;
 
@@ -46,13 +52,13 @@ pub use job::{
 };
 pub use pipeline::{
     AUDIO_CODECS, AudioCodec, AudioFrameSource, BYTES_PER_PIXEL, CONTAINERS, Container,
-    ExportElements, ExportPipeline, ExportReport, ExportSettings, PcmAudioSource, SolidFrames,
-    VideoFrameSource, export, export_with,
+    ExportElements, ExportPipeline, ExportReport, ExportSettings, MAX_CRF, PcmAudioSource,
+    SolidFrames, VideoFrameSource, VideoQuality, export, export_with,
 };
 pub use presets::{
-    AudioPreset, PRESETS_FILE_NAME, Preset, PresetLibrary, VideoPreset, VideoQuality, config_dir,
-    presets_path,
+    AudioPreset, PRESETS_FILE_NAME, Preset, PresetLibrary, VideoPreset, config_dir, presets_path,
 };
+pub use rate_control::{apply_audio_bitrate, apply_video_quality};
 
 /// Stable [`sub_core::ErrorCode`] constants this crate returns.
 ///

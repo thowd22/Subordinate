@@ -46,9 +46,15 @@ use crate::codes;
 use crate::encoder::{
     EncoderPreferences, EncoderProbe, EncoderStatus, VideoCodec, can_encode, element_is_usable,
 };
+use crate::rate_control;
 
 /// Nanoseconds in one second, the unit GStreamer timestamps use.
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
+
+/// The largest CRF any of the exporter's encoders accepts, on the H.264
+/// scale the presets are written in. Encoders with a wider quantiser range are
+/// given the value rescaled onto theirs (see [`crate::rate_control`]).
+pub const MAX_CRF: u8 = 51;
 
 /// Bytes of RGBA per pixel, matching `sub_render::readback::BYTES_PER_PIXEL`.
 pub const BYTES_PER_PIXEL: usize = 4;
@@ -250,6 +256,34 @@ fn video_parser(codec: VideoCodec) -> &'static str {
     }
 }
 
+/// How a video stream's quality is asked for: a rate, or a quality target.
+///
+/// The two are mutually exclusive, and a preset that gives both or neither is
+/// rejected naming the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoQuality {
+    /// An average bitrate in kbit/s, what a delivery target asks for.
+    Bitrate {
+        /// Kilobits per second.
+        kbps: u32,
+    },
+    /// A constant-quality factor, where lower is better and 0 is lossless.
+    Crf {
+        /// The CRF value, 0 through 51.
+        value: u8,
+    },
+}
+
+impl std::fmt::Display for VideoQuality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bitrate { kbps } => write!(f, "{kbps} kbit/s"),
+            Self::Crf { value } => write!(f, "CRF {value}"),
+        }
+    }
+}
+
 /// What an export writes: the canvas, the rates and the codecs.
 ///
 /// The audio side is optional: an export with no audio builds a video-only
@@ -279,6 +313,14 @@ pub struct ExportSettings {
     pub sample_rate: u32,
     /// Channels per audio frame.
     pub channels: u16,
+    /// The bitrate or CRF the video encoder is driven with, or `None` to let
+    /// the element keep its own default rate control.
+    #[serde(default)]
+    pub video_quality: Option<VideoQuality>,
+    /// The audio bitrate in kbit/s, or `None` for a lossless codec or for the
+    /// encoder's own default.
+    #[serde(default)]
+    pub audio_bitrate_kbps: Option<u32>,
 }
 
 impl ExportSettings {
@@ -295,6 +337,8 @@ impl ExportSettings {
             audio_codec: Some(AudioCodec::Aac),
             sample_rate: 48_000,
             channels: 2,
+            video_quality: None,
+            audio_bitrate_kbps: None,
         }
     }
 
@@ -328,6 +372,26 @@ impl ExportSettings {
         self
     }
 
+    /// The same settings driving the video encoder at `quality`.
+    ///
+    /// `None` leaves the encoder element on its own default rate control,
+    /// which is what an export that names no preset gets.
+    #[must_use]
+    pub fn with_video_quality(mut self, quality: Option<VideoQuality>) -> Self {
+        self.video_quality = quality;
+        self
+    }
+
+    /// The same settings asking the audio encoder for `kbps` kbit/s.
+    ///
+    /// `None` is the lossless case and the no-opinion case alike: nothing is
+    /// set on the element.
+    #[must_use]
+    pub fn with_audio_bitrate(mut self, kbps: Option<u32>) -> Self {
+        self.audio_bitrate_kbps = kbps;
+        self
+    }
+
     /// Bytes in one RGBA frame of this canvas.
     pub fn frame_bytes(&self) -> usize {
         self.width as usize * self.height as usize * BYTES_PER_PIXEL
@@ -337,8 +401,8 @@ impl ExportSettings {
     ///
     /// # Errors
     ///
-    /// - [`codes::INVALID_SETTINGS`] for a zero dimension, sample rate or
-    ///   channel count.
+    /// - [`codes::INVALID_SETTINGS`] for a zero dimension, sample rate,
+    ///   channel count or bitrate, and for a CRF above 51.
     /// - [`codes::UNSUPPORTED_COMBINATION`] when the container cannot carry
     ///   one of the codecs.
     pub fn validate(&self) -> SubResult<()> {
@@ -349,6 +413,30 @@ impl ExportSettings {
             )
             .with_detail("width", self.width)
             .with_detail("height", self.height));
+        }
+        match self.video_quality {
+            Some(VideoQuality::Bitrate { kbps: 0 }) => {
+                return Err(SubError::new(
+                    codes::INVALID_SETTINGS,
+                    "a video bitrate is strictly positive",
+                )
+                .with_detail("video_bitrate_kbps", 0));
+            }
+            Some(VideoQuality::Crf { value }) if value > MAX_CRF => {
+                return Err(SubError::new(
+                    codes::INVALID_SETTINGS,
+                    format!("a CRF is 0 through {MAX_CRF}"),
+                )
+                .with_detail("video_crf", u32::from(value)));
+            }
+            _ => {}
+        }
+        if self.audio_bitrate_kbps == Some(0) {
+            return Err(SubError::new(
+                codes::INVALID_SETTINGS,
+                "an audio bitrate is strictly positive",
+            )
+            .with_detail("audio_bitrate_kbps", 0));
         }
         if !self.container.accepts_video(self.video_codec) {
             return Err(SubError::new(
@@ -1259,6 +1347,16 @@ fn build_video_branch(
     let src = make_element("appsrc")?;
     let convert = make_element("videoconvert")?;
     let encoder = make_coded_element(&elements.video_encoder, codes::ENCODER_UNAVAILABLE)?;
+    if let Some(quality) = settings.video_quality {
+        for warning in rate_control::apply_video_quality(&encoder, &elements.video_encoder, quality)
+        {
+            tracing::warn!(
+                element = elements.video_encoder.as_str(),
+                quality = %quality,
+                "{warning}"
+            );
+        }
+    }
     let filter = make_element("capsfilter")?;
     filter.set_property(
         "caps",
@@ -1342,6 +1440,11 @@ fn build_audio_branch(
     let convert = make_element("audioconvert")?;
     let resample = make_element("audioresample")?;
     let encoder = make_coded_element(encoder_name, codes::ENCODER_UNAVAILABLE)?;
+    if let Some(kbps) = settings.audio_bitrate_kbps {
+        for warning in rate_control::apply_audio_bitrate(&encoder, encoder_name, kbps) {
+            tracing::warn!(element = encoder_name, bitrate_kbps = kbps, "{warning}");
+        }
+    }
     let mut chain = vec![src.clone(), convert, resample, encoder];
     if let Some(parser) = codec.parser().filter(|name| element_is_usable(name)) {
         chain.push(make_element(parser)?);
@@ -1544,6 +1647,7 @@ mod tests {
         AUDIO_CODECS, AudioCodec, AudioFrameSource, CONTAINERS, ChromaFormat, Container,
         ExportSettings, PcmAudioSource, SolidFrames, VideoFrameSource, audio_nanos,
         chroma_caps_for, codes, declared_sink_formats, element_is_usable, video_parser,
+        MAX_CRF, VideoQuality,
     };
     use gstreamer as gst;
     use sub_time::Rational;
@@ -1626,6 +1730,65 @@ mod tests {
         silent
             .validate()
             .expect("a video-only export needs no audio format");
+    }
+
+    #[test]
+    fn settings_default_to_the_encoder_s_own_rate_control() {
+        let settings = settings(Rational::FPS_24);
+        assert_eq!(settings.video_quality, None);
+        assert_eq!(settings.audio_bitrate_kbps, None);
+        settings.validate().expect("no quality is a valid export");
+    }
+
+    #[test]
+    fn a_quality_and_an_audio_bitrate_survive_the_builders_and_serde() {
+        let settings = settings(Rational::FPS_24)
+            .with_video_quality(Some(VideoQuality::Bitrate { kbps: 12_000 }))
+            .with_audio_bitrate(Some(192));
+        assert_eq!(
+            settings.video_quality,
+            Some(VideoQuality::Bitrate { kbps: 12_000 })
+        );
+        assert_eq!(settings.audio_bitrate_kbps, Some(192));
+        settings.validate().expect("a bitrate export is valid");
+        let json = serde_json::to_string(&settings).expect("settings serialise");
+        let back: ExportSettings = serde_json::from_str(&json).expect("settings deserialise");
+        assert_eq!(back, settings);
+    }
+
+    #[test]
+    fn settings_written_before_quality_existed_still_load() {
+        let json = r#"{"width":16,"height":16,"frame_rate":{"numerator":24,"denominator":1},
+            "container":"mkv","video_codec":"h264","audio_codec":"aac","sample_rate":48000,
+            "channels":2}"#;
+        let settings: ExportSettings = serde_json::from_str(json).expect("old settings load");
+        assert_eq!(settings.video_quality, None);
+        assert_eq!(settings.audio_bitrate_kbps, None);
+    }
+
+    #[test]
+    fn validation_rejects_a_zero_bitrate_and_an_out_of_range_crf() {
+        let zero_video =
+            settings(Rational::FPS_24).with_video_quality(Some(VideoQuality::Bitrate { kbps: 0 }));
+        let error = zero_video
+            .validate()
+            .expect_err("a zero bitrate is refused");
+        assert_eq!(error.code(), crate::codes::INVALID_SETTINGS);
+        let wild_crf = settings(Rational::FPS_24)
+            .with_video_quality(Some(VideoQuality::Crf { value: MAX_CRF + 1 }));
+        let error = wild_crf
+            .validate()
+            .expect_err("a CRF above the scale is refused");
+        assert_eq!(error.code(), crate::codes::INVALID_SETTINGS);
+        let zero_audio = settings(Rational::FPS_24).with_audio_bitrate(Some(0));
+        let error = zero_audio
+            .validate()
+            .expect_err("a zero audio bitrate is refused");
+        assert_eq!(error.code(), crate::codes::INVALID_SETTINGS);
+        settings(Rational::FPS_24)
+            .with_video_quality(Some(VideoQuality::Crf { value: MAX_CRF }))
+            .validate()
+            .expect("the worst CRF on the scale is still valid");
     }
 
     #[test]

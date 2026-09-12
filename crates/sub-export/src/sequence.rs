@@ -93,9 +93,12 @@ pub fn settings_for_sequence(
         preset.container,
     )
     .with_video_codec(video.codec)
+    .with_video_quality(Some(video.quality))
     .with_audio_codec(preset.audio.as_ref().map(|audio| audio.codec));
     if let Some(audio) = &preset.audio {
-        settings = settings.with_audio_format(audio.sample_rate, audio.channels);
+        settings = settings
+            .with_audio_format(audio.sample_rate, audio.channels)
+            .with_audio_bitrate(audio.bitrate_kbps);
     }
     if !has_audio(sequence) {
         settings = settings.with_audio_codec(None);

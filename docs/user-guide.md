@@ -197,6 +197,13 @@ lossless, software), `h265-archive`, `av1-archive` and `audio-only`. Presets are
 code: a TOML file in the config directory adds presets and replaces built-ins by
 id, and exporter plugins contribute presets that sit in the same list.
 
+A preset's quality — an average bitrate for a delivery target, a CRF for a
+master — is set on whichever encoder runs, in that encoder's own spelling, so
+`mezzanine` really does write a bigger file than `youtube-1080p`. Two backends
+have no constant-quality mode at all: Apple VideoToolbox and Windows Media
+Foundation encode to an average bitrate only, so a CRF preset on one of them
+falls back to the encoder's default and logs a warning saying so.
+
 The range is either the whole sequence or the in-to-out range set with `I` and
 `O`. The encoder is **Automatic** unless one is pinned — see
 [Troubleshooting](#troubleshooting).

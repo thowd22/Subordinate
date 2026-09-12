@@ -36,7 +36,7 @@ use sub_time::Rational;
 use crate::chroma::ChromaFormat;
 use crate::codes;
 use crate::encoder::VideoCodec;
-use crate::pipeline::{AudioCodec, Container, ExportSettings};
+use crate::pipeline::{AudioCodec, Container, ExportSettings, MAX_CRF, VideoQuality};
 
 /// The environment variable that overrides where the config directory is.
 ///
@@ -50,9 +50,6 @@ pub const PRESETS_FILE_NAME: &str = "presets.toml";
 /// The shipped presets, embedded at compile time.
 const BUILTIN_TOML: &str = include_str!("../presets/builtin.toml");
 
-/// The largest CRF any of the exporter's encoders accepts.
-const MAX_CRF: u8 = 51;
-
 /// The most audio channels a preset may ask for.
 const MAX_CHANNELS: u16 = 8;
 
@@ -61,34 +58,6 @@ const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 
 /// The channel count a preset gets when it does not say.
 const DEFAULT_CHANNELS: u16 = 2;
-
-/// How a video stream's quality is asked for: a rate, or a quality target.
-///
-/// The two are mutually exclusive, and a preset that gives both or neither is
-/// rejected naming the field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VideoQuality {
-    /// An average bitrate in kbit/s, what a delivery target asks for.
-    Bitrate {
-        /// Kilobits per second.
-        kbps: u32,
-    },
-    /// A constant-quality factor, where lower is better and 0 is lossless.
-    Crf {
-        /// The CRF value, 0 through 51.
-        value: u8,
-    },
-}
-
-impl std::fmt::Display for VideoQuality {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Bitrate { kbps } => write!(f, "{kbps} kbit/s"),
-            Self::Crf { value } => write!(f, "CRF {value}"),
-        }
-    }
-}
 
 /// The video half of a preset.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,9 +134,12 @@ impl Preset {
             ExportSettings::new(video.width, video.height, video.frame_rate, self.container)
                 .with_video_codec(video.codec)
                 .with_chroma(video.chroma)
+                .with_video_quality(Some(video.quality))
                 .with_audio_codec(self.audio.as_ref().map(|audio| audio.codec));
         if let Some(audio) = &self.audio {
-            settings = settings.with_audio_format(audio.sample_rate, audio.channels);
+            settings = settings
+                .with_audio_format(audio.sample_rate, audio.channels)
+                .with_audio_bitrate(audio.bitrate_kbps);
         }
         settings.validate()?;
         Ok(settings)
@@ -903,6 +875,59 @@ mod tests {
         let audio = preset.audio.as_ref().expect("has audio");
         assert_eq!(audio.codec, AudioCodec::Flac);
         assert_eq!(audio.bitrate_kbps, None, "FLAC takes no bitrate");
+    }
+
+    #[test]
+    fn a_preset_hands_its_quality_to_the_export_settings() {
+        let library = PresetLibrary::builtin();
+        let youtube = library
+            .require("youtube-1080p")
+            .expect("the built-ins carry youtube-1080p");
+        let settings = youtube.to_settings().expect("a video preset has settings");
+        assert_eq!(
+            settings.video_quality,
+            Some(VideoQuality::Bitrate { kbps: 12_000 }),
+            "the preset's bitrate must reach the encoder"
+        );
+        assert_eq!(settings.audio_bitrate_kbps, Some(192));
+
+        for preset in library.iter() {
+            let Some(video) = preset.video.as_ref() else {
+                continue;
+            };
+            let settings = preset.to_settings().expect("a video preset has settings");
+            assert_eq!(
+                settings.video_quality,
+                Some(video.quality),
+                "preset '{}' loses its quality on the way to the pipeline",
+                preset.id
+            );
+            assert_eq!(
+                settings.audio_bitrate_kbps,
+                preset.audio.as_ref().and_then(|audio| audio.bitrate_kbps),
+                "preset '{}' loses its audio bitrate",
+                preset.id
+            );
+        }
+    }
+
+    #[test]
+    fn two_presets_of_different_quality_make_different_settings() {
+        let library = PresetLibrary::builtin();
+        let youtube = library
+            .require("youtube-1080p")
+            .expect("the built-ins carry youtube-1080p")
+            .to_settings()
+            .expect("settings");
+        let mezzanine = library
+            .require("mezzanine")
+            .expect("the built-ins carry mezzanine")
+            .to_settings()
+            .expect("settings");
+        assert_ne!(
+            youtube.video_quality, mezzanine.video_quality,
+            "the delivery and the master preset must not ask the encoder for the same thing"
+        );
     }
 
     #[test]

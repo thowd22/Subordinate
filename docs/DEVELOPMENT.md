@@ -1468,9 +1468,15 @@ deleted, because a 4K60 matrix writes gigabytes of them.
   (`settings_for_sequence`). A 4K60 source under `youtube-1080p` is written
   4K60, and the preset's own size and rate come back as warnings. The summary
   says so under every table.
-- **The preset's bitrate and CRF reach nothing.** `ExportSettings` carries no
-  quality field, so a preset currently selects the container, the codecs and
-  the audio format and nothing else (TASK-149).
+- **The preset's bitrate and CRF reach the encoder** (TASK-149).
+  `ExportSettings` carries the video quality and the audio bitrate, and
+  `sub_export::rate_control` maps them onto each catalogued element's own
+  properties - `bitrate`/`pass` on `x264enc`, `qp` on `x265enc`, `crf` on
+  `svtav1enc`, `rc-mode` plus `qp-const` on NVENC, `rate-control` plus the
+  per-frame quantisers on VA-API and AMF, and bitrate only on VideoToolbox and
+  Media Foundation, which have no constant-quality mode. A knob an element does
+  not carry is a `tracing::warn!`, not a failed export, so a cell whose file
+  looks default-sized should be checked against the run's warnings.
 - **`audio-only` is not in the matrix.** It has no video stream, and `render`
   refuses it before an encoder is chosen.
 - **Hardware encoders are ranked `NONE`,** so the driver treats "present and
