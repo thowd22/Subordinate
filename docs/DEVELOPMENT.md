@@ -930,6 +930,50 @@ on EC2 instances in the project's AWS account through
     are present afterwards.
   - Copy the `nvidia-windows` job in `.github/workflows/gpu-smoke.yml`
     verbatim for any new Windows GPU job.
+- **Driving the real application on Windows needs the other runner**,
+  `gpu-nvidia-desktop-windows` (TASK-138). RunsOn starts its agent from the
+  instance's user data - `bootstrap-<tag>-agent-windows.exe` → `cmd.exe` →
+  `Runner.Listener.exe` → `Runner.Worker.exe`, all in session 0 as
+  `NT AUTHORITY\SYSTEM` - and session 0 has no desktop. The editor does not
+  just look wrong there, it dies: `SwapChain creation error ... Invalid
+  surface` (run 34656029109). The agent cannot be moved, because the user data
+  is the control plane's and carries that job's JIT registration, so the
+  desktop AMI keeps RunsOn's arrangement and adds a bridge:
+  - It logs a local administrator `subtest` on to the console session at boot
+    and starts an **interactive helper** there from a logon scheduled task.
+  - A job in session 0 drops a PowerShell script in
+    `C:\SubordinateTest\queue` and reads back the log and exit code, through
+    `Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1` and
+    `Invoke-InteractiveScript`. It refuses to run when the helper's heartbeat
+    is missing, stale, or in session 0, so "the auto-logon did not happen" is
+    an error and not a mystery timeout.
+  - The image also carries the NVIDIA driver (no 100 s per job), the newest
+    `v*` release MSI with its bundled GStreamer 1.28, Python with pywinauto,
+    and the 4K clip at `C:\SubordinateTest\meld-4k60-excerpt-2min.mkv`.
+  - It is built by EC2 Image Builder from `infra/images/windows-desktop/`;
+    that directory's `README.md` is the runbook, and `build.sh` is the whole
+    rebuild. **Rebuild it at least every 30 days**: GitHub stops dispatching
+    jobs to a runner whose agent binary is older than that.
+  - The image is captured **without Sysprep** - generalize hangs it (the
+    instance goes to status `impaired` and never shuts down) - so the last
+    build step runs `EC2Launch.exe reset` instead, and the pipeline uses a
+    custom build workflow. Two consequences worth knowing: the auto-logon
+    registry values have to be written during the build, because there is no
+    Setup phase on the runtime instance to run `SetupComplete.cmd`; and every
+    instance from this AMI shares one machine SID, which is harmless for
+    ephemeral runners that register per job.
+  - The `subtest` password is generated per build into the Secrets Manager
+    secret `subordinate/windows-desktop-ami/rdp` and is never in the
+    repository. RDP is enabled for that user, so a run can be watched live
+    (add a temporary 3389 rule to the instance's security group first - the
+    procedure is the same as the "Self-hosted AMD runner" two-monitor session
+    below). **Keep the AMI private**: auto-logon means the password is in the
+    image's registry in clear.
+  - The released MSI does not yet ship `subordinate-mcp.exe`
+    (`packaging/windows/build-msi.ps1` stages `subordinate.exe` and
+    `subordinate-cli.exe` only), so the smoke workflow builds the bridge on a
+    free hosted runner and stages it. The image records what it found in
+    `C:\SubordinateTest\image.json` as `mcp_in_msi`.
 - RunsOn's `*-gpu-*` images carry the NVIDIA driver and CUDA only, so the AMD
   runner uses the plain Ubuntu 26.04 image and jobs install the Mesa VA-API
   stack (`mesa-va-drivers`, `vainfo`) themselves. The GStreamer `va` plugin
