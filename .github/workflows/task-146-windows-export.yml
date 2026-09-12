@@ -318,6 +318,14 @@ jobs:
           # 5h. What the probe itself now reports, element by element.
           Probe "diag-after-the-probe" $cli @("diag","--pretty") @{ SUBORDINATE_LOG = "info" } 120
 
+          # 6b. The same UHD render on the software encoder, which says
+          #     whether a 4K canvas with three audio tracks is the export
+          #     path's problem or the encoder's.
+          Probe "render-uhd-3audio-x264" $cli @(
+            "render","C:\SubordinateTest\uhd-3audio.sub","--preset","youtube-1080p",
+            "--out","$out\uhd-3audio-x264.mp4","--range","0:48","--encoder","x264enc","--verify","--pretty"
+            ) @{ SUBORDINATE_LOG = 'info,sub_export=debug'; GST_DEBUG = "2" } 600
+
           # 6. What the task asks for: 4K60 canvas, three audio tracks, NVENC.
           Probe "render-uhd-3audio-auto" $cli @(
             "render","C:\SubordinateTest\uhd-3audio.sub","--preset","youtube-1080p",

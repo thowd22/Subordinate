@@ -58,6 +58,22 @@ pub const BYTES_PER_PIXEL: usize = 4;
 /// ahead of the other and the cap only bounds the encoder's backlog.
 const APPSRC_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
+/// How many whole frames the video branch must be able to hold, whatever the
+/// canvas.
+///
+/// A 4K RGBA frame is 33 177 600 bytes, so [`APPSRC_MAX_BYTES`] holds exactly
+/// none of them: every push would have to wait for the queue to empty, which
+/// serialises the compositor against the encoder and gives an asynchronous
+/// encoder no run of frames to work on. The cap is raised to hold this many
+/// instead, which is what lets the two overlap.
+const APPSRC_MIN_FRAMES: u64 = 4;
+
+/// The queue cap for a video branch on `settings`' canvas.
+fn video_queue_bytes(settings: &ExportSettings) -> u64 {
+    let frame = settings.frame_bytes() as u64;
+    APPSRC_MAX_BYTES.max(frame.saturating_mul(APPSRC_MIN_FRAMES))
+}
+
 /// How long [`ExportPipeline::finish`] waits for the muxer before giving up.
 const EOS_TIMEOUT_SECONDS: u64 = 120;
 
@@ -1241,7 +1257,7 @@ fn build_video_branch(
         .downcast::<AppSrc>()
         .map_err(|_| SubError::new(codes::PIPELINE_FAILED, "appsrc has the wrong type"))?;
     src.set_caps(Some(&video_caps(settings)));
-    configure_appsrc(&src);
+    configure_appsrc(&src, video_queue_bytes(settings));
     Ok(src)
 }
 
@@ -1318,7 +1334,7 @@ fn build_audio_branch(
         .downcast::<AppSrc>()
         .map_err(|_| SubError::new(codes::PIPELINE_FAILED, "appsrc has the wrong type"))?;
     src.set_caps(Some(&audio_caps(settings)));
-    configure_appsrc(&src);
+    configure_appsrc(&src, APPSRC_MAX_BYTES);
     Ok(src)
 }
 
@@ -1387,11 +1403,11 @@ fn audio_caps(settings: &ExportSettings) -> gst::Caps {
 /// caps, a muxer waiting for a stream that is not coming — stops the export
 /// dead with the failure sitting unread on the bus (TASK-146). The exporter
 /// waits for room itself instead, in slices, reading the bus between them.
-fn configure_appsrc(src: &AppSrc) {
+fn configure_appsrc(src: &AppSrc, max_bytes: u64) {
     src.set_format(gst::Format::Time);
     src.set_is_live(false);
     src.set_property("block", false);
-    src.set_max_bytes(APPSRC_MAX_BYTES);
+    src.set_max_bytes(max_bytes);
     src.set_do_timestamp(false);
     src.set_property_from_str("stream-type", "stream");
 }
