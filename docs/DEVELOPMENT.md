@@ -145,6 +145,38 @@ its own: it connects to the editor the socket lock file advertises, and starts
 whether or not a window is open, and the headless server it started stops with
 it.
 
+The editor is the preferred half of that. A GUI started from the command line
+binds the per-user endpoint at startup — on a thread of its own, never the UI
+thread — and publishes the same lock file `subordinate-cli serve` does, so a
+bridge finds the running window first and an agent's edits land in the project
+the user is looking at: same undo stack, visible in the panels on the next
+frame. Which one a session got is in the bridge's stderr log
+(`connected to the running editor` or `no editor is listening; starting a
+headless engine instead`) and in the MCP server's own `instructions`.
+
+**One editor to an endpoint.** At startup the editor asks its address, and the
+one its lock file records, whether anything replies. If something does, another
+editor is live: this one refuses the endpoint (`command.address_in_use`, logged
+with the other pid) and runs on without an agent surface — a second window is
+still a perfectly good editor, it just is not the one agents reach. If nothing
+replies, the socket and lock file were left by an editor that crashed, and the
+new one takes them over. A clean exit removes both.
+
+```
+subordinate cut.sub                        # serves the 'default' endpoint
+subordinate --instance scratch cut.sub     # a second editor with its own endpoint
+subordinate --no-command-api cut.sub       # no agent surface at all
+```
+
+`SUBORDINATE_INSTANCE`, `SUBORDINATE_ENDPOINT_DIR` and
+`SUBORDINATE_NO_COMMAND_API=1` do the same from the environment, and the first
+two are the variables the bridge reads from the other side, so pointing an
+editor and a bridge at one private endpoint is one pair of settings. The
+`ui-smoke ready` line reports the result as `command_api=<address>`,
+`command_api=refused:<code>` or `command_api=off`, and is not printed until the
+endpoint has settled — so a script that waits for that line may connect
+immediately afterwards.
+
 Its tools are generated from `docs/schema/command-api.json`, one per Command
 API method, with the same descriptions and parameter schemas. Method names are
 dotted and MCP tool names may not be, so each dot becomes an underscore:
@@ -1020,13 +1052,12 @@ test clip with the bundled `gst-discoverer`, and runs an MCP round-trip
 while the window is still up. The screenshot, the app log, the window
 geometry and the MCP transcript come back as `desktop-smoke-<sha>`.
 
-One caveat about that round-trip: the editor process does **not** bind the
-Command API endpoint today (`sub-ui` builds a `Dispatcher` but nothing calls
-`Server::bind`), so the bridge starts `subordinate-cli serve` and talks to
-that - the same engine and the same dispatcher with nothing drawn. The call
-really does go over the socket and really does come back; it just is not the
-GUI process's own project. When the editor learns to serve its endpoint, this
-job's assertion gets stronger for free.
+That round-trip is against the GUI process itself (TASK-141). The editor binds
+the endpoint at startup, the job's MCP step runs with
+`SUBORDINATE_MCP_NO_LAUNCH=1` so the bridge cannot quietly fall back to a
+headless engine, and what it reads back with `timeline.get_state` is the
+sequence the screenshot shows. A run in which the editor failed to bind fails
+the step rather than passing against a project nobody can see.
 
 ### Rebuilding the image
 

@@ -44,8 +44,14 @@ pub struct EditorSession {
     /// The Command API over that engine, in process. It is the same surface
     /// the MCP bridge and the CLI reach over the socket, so a window feature
     /// that cannot be expressed as a Command API call does not exist
-    /// (docs/PLAN.md §4).
-    commands: Dispatcher,
+    /// (docs/PLAN.md §4). Shared rather than owned, because the socket server
+    /// ([`crate::command_api`]) serves this very dispatcher from its own
+    /// threads.
+    commands: Arc<Dispatcher>,
+    /// How many engines this session has had. Opening a project replaces the
+    /// engine, and with it the dispatcher; the socket server watches this so
+    /// it can rebind onto the engine the panels are now drawing.
+    generation: u64,
     /// The file the project came from, once one has been opened.
     project_file: Option<PathBuf>,
     /// The autosave worker, running whenever a project file is known.
@@ -65,13 +71,14 @@ impl EditorSession {
         let events = engine.handle().subscribe();
         let project = engine.handle().snapshot();
         let revision = engine.handle().revision();
-        let commands = Dispatcher::new(engine.handle().clone());
+        let commands = Arc::new(Dispatcher::new(engine.handle().clone()));
         Ok(Self {
             engine,
             project,
             revision,
             events,
             commands,
+            generation: 0,
             project_file: None,
             autosave: None,
             last_error: None,
@@ -89,8 +96,24 @@ impl EditorSession {
     /// Every method the MCP bridge and the CLI can call is here, running
     /// against the very project the panels are drawing.
     #[must_use]
-    pub const fn commands(&self) -> &Dispatcher {
+    pub fn commands(&self) -> &Dispatcher {
         &self.commands
+    }
+
+    /// The same dispatcher as a shared pointer, for the socket server that
+    /// serves it to other processes.
+    #[must_use]
+    pub fn commands_arc(&self) -> Arc<Dispatcher> {
+        Arc::clone(&self.commands)
+    }
+
+    /// How many engines this session has had, counting from zero.
+    ///
+    /// It moves when — and only when — the project is replaced, which is the
+    /// one event that invalidates a dispatcher handed out earlier.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The project as of the last poll.
@@ -330,7 +353,8 @@ impl EditorSession {
         self.revision = engine.handle().revision();
         // The dispatcher holds a handle to the outgoing engine, so it is
         // rebuilt with the new one rather than left pointing at a dead thread.
-        self.commands = Dispatcher::new(engine.handle().clone());
+        self.commands = Arc::new(Dispatcher::new(engine.handle().clone()));
+        self.generation += 1;
         self.engine = engine;
         self.project_file = file;
         self.start_autosave();
@@ -468,6 +492,7 @@ impl std::fmt::Debug for EditorSession {
         formatter
             .debug_struct("EditorSession")
             .field("revision", &self.revision)
+            .field("generation", &self.generation)
             .field("project_file", &self.project_file)
             .field("autosaving", &self.autosave.is_some())
             .finish_non_exhaustive()

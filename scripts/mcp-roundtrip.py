@@ -15,6 +15,11 @@ the call reads the way the API is documented.
     scripts/mcp-roundtrip.py --mcp /usr/local/bin/subordinate-mcp \
         'project.new={"name":"Desktop smoke"}' 'timeline.get_state={}'
 
+`--require-editor` additionally fails the run unless the bridge reached a
+running editor: the MCP server says which it got in the `instructions` of its
+`initialize` reply, and a headless engine the bridge started itself edits a
+project nobody can see.
+
 Exit status is 0 only if every call returned a result rather than an error.
 """
 
@@ -27,6 +32,11 @@ import subprocess
 import sys
 
 PROTOCOL_VERSION = "2025-06-18"
+
+# How the MCP server's instructions open the sentence naming what this session
+# is driving (bins/subordinate-mcp/src/bridge.rs).
+EDITOR_NOTE = "Connected to the editor already running at"
+HEADLESS_NOTE = "No editor was listening"
 
 
 class Bridge:
@@ -90,6 +100,15 @@ def parse_call(argument: str) -> tuple[str, dict]:
     return method, arguments
 
 
+def connection_note(instructions: str) -> str:
+    """The sentence in the server's instructions naming what it is driving."""
+    for marker in (EDITOR_NOTE, HEADLESS_NOTE):
+        at = instructions.find(marker)
+        if at != -1:
+            return " ".join(instructions[at:].split())
+    return ""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -102,6 +121,17 @@ def main() -> int:
         type=float,
         default=60.0,
         help="how long to wait for the bridge to exit at the end",
+    )
+    parser.add_argument(
+        "--require-editor",
+        action="store_true",
+        help="fail unless the bridge reached a running editor rather than starting one",
+    )
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=2000,
+        help="how much of each result to print (default: 2000)",
     )
     parser.add_argument(
         "calls",
@@ -132,6 +162,15 @@ def main() -> int:
             return 1
         server = initialized["result"]["serverInfo"]
         print(f"connected to {server['name']} {server.get('version', '')}".strip())
+        note = connection_note(initialized["result"].get("instructions", ""))
+        if note:
+            print(f"connection: {note}")
+        if options.require_editor and not note.startswith(EDITOR_NOTE):
+            print(
+                f"the bridge is not driving a running editor: {note or 'it said nothing'}",
+                file=sys.stderr,
+            )
+            return 1
         bridge.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
         for method, arguments in calls:
@@ -153,7 +192,7 @@ def main() -> int:
                 payload = [
                     block.get("text") for block in result.get("content", [])
                 ]
-            print(f"{method}: {json.dumps(payload)[:2000]}")
+            print(f"{method}: {json.dumps(payload)[: options.max_chars]}")
     finally:
         bridge.close()
 

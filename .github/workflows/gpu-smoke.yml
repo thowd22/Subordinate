@@ -89,10 +89,15 @@ jobs:
       # login profile, so the image's /etc/profile.d never reaches these steps.
       DISPLAY: ':0'
       XAUTHORITY: /run/subordinate/Xauthority
-      # Which headless engine the MCP bridge launches when it finds no editor
-      # listening. On the image the CLI is a wrapper in /usr/local/bin rather
-      # than a binary beside subordinate-mcp, so it has to be named.
-      SUBORDINATE_CLI: /usr/local/bin/subordinate-cli
+      # The Command API endpoint, named explicitly rather than left to
+      # XDG_RUNTIME_DIR: the editor is started from one step's shell and the
+      # bridge from another, and both have to land on the same socket. The
+      # editor reads this variable, and so does subordinate-mcp.
+      SUBORDINATE_ENDPOINT_DIR: ${{ runner.temp }}/subordinate-endpoint
+      # The bridge must drive the window, not a headless engine of its own:
+      # with no fallback allowed, a session that cannot reach the editor fails
+      # the step instead of quietly editing a project nobody can see.
+      SUBORDINATE_MCP_NO_LAUNCH: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -150,7 +155,16 @@ jobs:
             cat "$out/app.log"
             exit 1
           fi
-          grep 'ui-smoke ready' "$out/app.log"
+          ready=$(grep -m1 'ui-smoke ready' "$out/app.log")
+          echo "$ready"
+          # The ready line is printed only once the endpoint has settled, so
+          # what it says about the Command API is final: an address means the
+          # window is the one agents reach, and anything else means the MCP
+          # step below would be testing something other than the GUI.
+          case "$ready" in
+            *command_api=off*|*command_api=refused:*|*command_api=starting*)
+              echo "::error::the editor is not serving the Command API: $ready"; exit 1 ;;
+          esac
 
       - name: Window, screenshot and adapter
         run: |
@@ -201,38 +215,50 @@ jobs:
           subordinate-gst-discoverer "$media" | tee "${{ steps.editor.outputs.out }}/probe.txt"
           grep -qi 'video' "${{ steps.editor.outputs.out }}/probe.txt"
 
-      # The editor does not bind the Command API endpoint yet, so the bridge
-      # starts `subordinate-cli serve` - the same engine and the same
-      # dispatcher with nothing drawn - and speaks to that. The round-trip is
-      # still the real one: mutations go over the socket and the timeline that
-      # comes back is the one they produced, while the editor window is up on
-      # :0 beside it.
+      # The round-trip is against the GUI process itself (TASK-141): the
+      # editor binds the endpoint at startup, the bridge finds its lock file
+      # and drives the project that window has open. --require-editor fails
+      # the step if the bridge ended up on a headless engine instead, and
+      # SUBORDINATE_MCP_NO_LAUNCH stops it starting one at all.
       #
-      # `project.new` on its own cannot demonstrate a read: the project it
-      # creates is empty, and `timeline.get_state` then fails - correctly -
-      # with `the project has no sequences` (run 34661369585). Opening the
-      # committed sample project instead fails just as correctly with `the
-      # project has more than one sequence, so one must be named` (run
-      # 34663392571). So the chain makes exactly one sequence and reads that
-      # one: new project, create a sequence in it, read the timeline back.
-      - name: MCP round-trip while the window is up
+      # The sequence read back is the sample project's own `Main`, whose id is
+      # committed in the fixture and whose clips are in the screenshot taken a
+      # step earlier. A headless `subordinate-cli serve` could not answer it:
+      # it starts on an empty project and would refuse with `the project has
+      # no sequences`. The rename that follows proves the write half - it goes
+      # into the window's undo stack - and the second read shows it landed.
+      - name: MCP round-trip against the editor's own project
         run: |
           set -o pipefail
           out="${{ steps.editor.outputs.out }}"
-          settings='{"resolution":{"width":1920,"height":1080},'
-          settings+='"frame_rate":{"numerator":24000,"denominator":1001},'
-          settings+='"sample_rate":48000,'
-          settings+='"color":{"space":"rec709","transfer":"bt709","primaries":"bt709"}}'
+          fixture=crates/sub-model/tests/fixtures/sample-project.sub
+          sequence=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['project']['sequences'][0]['id'])" "$fixture")
+          echo "sequence=$sequence"
           # timeout, because a stdio bridge that never answers would otherwise
           # hold a GPU instance open until the job's own 30-minute limit.
           timeout 180 python3 scripts/mcp-roundtrip.py --mcp /usr/local/bin/subordinate-mcp \
-            'project.new={"name":"Desktop smoke"}' \
-            "sequence.create={\"name\":\"Main\",\"settings\":$settings}" \
-            'timeline.get_state={}' \
+            --require-editor --max-chars 200000 \
+            "timeline.get_state={\"sequence\":\"$sequence\"}" \
+            "sequence.rename={\"sequence\":\"$sequence\",\"name\":\"Renamed by MCP\"}" \
+            "timeline.get_state={\"sequence\":\"$sequence\"}" \
             | tee "$out/mcp.txt"
           grep -q '^timeline.get_state: ' "$out/mcp.txt"
+          grep -q "$sequence" "$out/mcp.txt" \
+            || { echo "::error::the timeline read back is not the editor's sequence"; exit 1; }
+          grep -q 'Renamed by MCP' "$out/mcp.txt" \
+            || { echo "::error::the rename did not reach the editor's project"; exit 1; }
           # The window is still the one that was photographed.
           xdotool search --name 'Subordinate' >/dev/null
+
+      # Proof the edit landed in the window rather than beside it: the editor
+      # logs its own revision on the way out, and the renamed sequence is in
+      # the second screenshot.
+      - name: Screenshot the window after the agent edited it
+        run: |
+          out="${{ steps.editor.outputs.out }}"
+          xdotool search --name '^Subordinate$' windowactivate --sync windowraise || true
+          scrot -o "$out/display0-after-mcp.png"
+          identify "$out/display0-after-mcp.png" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Stop the editor
         if: always()

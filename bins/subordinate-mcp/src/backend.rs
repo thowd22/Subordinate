@@ -140,7 +140,10 @@ impl Backend {
         match Client::connect(&endpoint) {
             Ok(client) => {
                 let address = endpoint.address().clone();
-                info!(address = %address.to_wire(), "connected to a running editor");
+                info!(
+                    address = %address.to_wire(),
+                    "connected to the running editor: edits appear in its window",
+                );
                 Ok(Self {
                     client: Mutex::new(client),
                     address,
@@ -148,7 +151,10 @@ impl Backend {
                 })
             }
             Err(error) if error.code == sub_command::codes::NOT_RUNNING && options.launch => {
-                debug!("no editor is running; starting one headlessly");
+                info!(
+                    address = %endpoint.address().to_wire(),
+                    "no editor is listening; starting a headless engine instead",
+                );
                 Self::launch(options)
             }
             Err(error) => Err(error),
@@ -179,7 +185,10 @@ impl Backend {
         let announced = readiness(&mut child, &mut stdout)
             .and_then(|line| announced_address(&line))
             .and_then(|address| {
-                info!(address = %address.to_wire(), "started a headless server");
+                info!(
+                    address = %address.to_wire(),
+                    "started a headless server: its edits appear in no window",
+                );
                 Client::connect_to(&address).map(|client| (address, client))
             });
         let (address, client) = match announced {

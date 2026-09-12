@@ -31,10 +31,48 @@ and MCP tool names may only contain `[A-Za-z0-9_-]`, so **each dot becomes an
 underscore**: the tool is `clip_trim_in`, and its title carries the method name
 unchanged.
 
-The bridge connects to whatever editor the socket lock file advertises, and
-starts `subordinate-cli serve` itself when no editor is running — so an agent can
-work whether or not a window is open, and a headless server it started stops when
-it does.
+## Which editor an agent drives
+
+The bridge prefers the editor the user is looking at. The running editor binds
+the per-user endpoint at startup and publishes a lock file naming it; the bridge
+reads that file and connects, and every edit it then makes is applied to the
+project that window has open — on the same undo stack, visible in the panels on
+the window's next frame. Only when nothing is listening does the bridge start
+`subordinate-cli serve` itself: the same engine and the same dispatcher with
+nothing drawn, whose edits appear on no screen and which stops when the session
+does.
+
+Which of the two it got is said twice, so it is never a guess:
+
+- in the bridge's log, on stderr, as `connected to the running editor` or
+  `no editor is listening; starting a headless engine instead`, with the address;
+- in the MCP server's own `instructions`, in `initialize`, as a closing sentence
+  naming the address and saying whether edits are on screen.
+
+Setting `SUBORDINATE_MCP_NO_LAUNCH` turns the fallback off, so a session that must
+drive the real window fails with `command.not_running` instead of quietly
+editing a headless project.
+
+### One editor to an endpoint
+
+An endpoint belongs to whoever answers on it. When an editor starts, it asks
+its address — and the address its lock file records — whether anything replies:
+
+- **Something replies.** Another editor is live, so this one *refuses* the
+  endpoint (`command.address_in_use`, logged with the other process's pid) and
+  runs on without an agent surface of its own. The first editor keeps the
+  clients it has; the second is simply not the one agents reach. Give it
+  a `SUBORDINATE_INSTANCE` of its own (or `subordinate --instance <name>`) and it gets
+  an endpoint of its own that a bridge with the same instance name will find.
+- **Nothing replies.** The socket and the lock file are a corpse left by an
+  editor that crashed, so the new editor *takes over*: it unlinks them and
+  binds. A clean exit leaves neither behind.
+
+The editor reads the two variables that say where the endpoint is —
+`SUBORDINATE_INSTANCE` and `SUBORDINATE_ENDPOINT_DIR`, the same ones the bridge
+reads from the other side, so pointing an editor and a bridge at one private
+endpoint is a single pair of settings — plus `SUBORDINATE_NO_COMMAND_API`,
+which is the editor's own: set it and the window serves nothing at all.
 
 ## Setting up .mcp.json
 
@@ -69,7 +107,7 @@ this checkout. The environment the bridge reads:
 | `SUBORDINATE_INSTANCE` | Which editor instance to reach; defaults to `default` |
 | `SUBORDINATE_ENDPOINT_DIR` | Where the socket and lock file live, overriding the per-user default |
 | `SUBORDINATE_CLI` | The `subordinate-cli` to launch, when it is not the one beside `subordinate-mcp` |
-| `SUBORDINATE_MCP_NO_LAUNCH` | `1` to fail with `command.not_running` rather than start a headless server |
+| `SUBORDINATE_MCP_NO_LAUNCH` | `1` to fail with `command.not_running` rather than start a headless server — use it when the session must drive the running window |
 | `SUBORDINATE_LOG` | The log filter; diagnostics go to stderr, because stdout is the protocol |
 
 stdout carries the protocol and nothing else. Every diagnostic goes to stderr,
