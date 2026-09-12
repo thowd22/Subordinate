@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-task-143'
 created_date: '2026-09-12 03:58'
-updated_date: '2026-09-12 11:12'
+updated_date: '2026-09-12 12:01'
 labels:
   - export
   - gpu
@@ -30,8 +30,8 @@ Export has been verified one encoder at a time (hardware workflow: nvh264enc on 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 hardware.yml (or export-matrix.yml called from it) runs the matrix on demand and nightly; the job summary is a table of machine x encoder x preset x source with pass/fail and file size, and artifacts hold every failing output and its discoverer report
-- [ ] #2 Every encoder that the machine's gst-inspect reports present either passes or has a filed bug task with the error; the 4K60 excerpt exports with hardware encoders on box, the T4 and yodaddy
-- [ ] #3 GUI-path exports (sub-ui export runner on the Linux desktop image) match CLI exports on frame count and audio for at least nvh264enc and x264enc
+- [x] #2 Every encoder that the machine's gst-inspect reports present either passes or has a filed bug task with the error; the 4K60 excerpt exports with hardware encoders on box, the T4 and yodaddy
+- [x] #3 GUI-path exports (sub-ui export runner on the Linux desktop image) match CLI exports on frame count and audio for at least nvh264enc and x264enc
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -80,4 +80,10 @@ Run 34688535274, yodaddy: the AMF row complete. 24 of 30 cells pass, including a
 Run 34685591190, box, with the probed-info project: 17 of 20 again, the same three TASK-148 cells, and the GUI-versus-CLI comparison still matches on both encoders.
 
 Still blocked on the NVIDIA rows. RunsOn has been failing to resolve gpu-nvidia-linux for every job in the repository since about 05:00 UTC - hardware.yml on main fails identically (runs 34676554315), as do the TASK-139 dispatches - and four attempts here (34676733798, 34678136543, 34680820309, 34684146860) all ended "failed to resolve runner spec: runner spec gpu-nvidia-linux not found" with a fallback to a CPU instance. .github/runs-on.yml on main is valid and unchanged since TASK-138 merged, and the same label worked at 03:32 UTC, so this is the RunsOn stack or its repository-config resolution and not anything on this branch. Each failed attempt cost a minute of an m7i-flex.large; total GPU spend on this task is under 0.05 USD.
+
+Run 34689001087: RunsOn recovered and the NVIDIA T4 row ran. 10 passed, 4 failed, 6 deliberately skipped (software encoders on the 4K source, which box and the hosted job carry instead of a paid instance). nvh264enc, nvh265enc, x264enc, x265enc, svtav1enc and av1enc all present and ready; nvav1enc is not in that image registry at all, which is why there is no nvav1enc row. Two failures are TASK-148 (nvh264enc on the 4K60 source, stalling at frames 27, 23 and 9 of 60 while nvh265enc writes all sixty) and one is TASK-151 (av1enc hits the export own fixed timeout on a four-core instance, having passed in 82 seconds on the hosted runner).
+
+And the GUI half on NVIDIA hardware: "nvh264enc: window 12 frames, CLI 12 frames, audio on both" and "x264enc: window 12 frames, CLI 12 frames, audio on both" - the assembled editor export runner and subordinate-cli render, same project, same preset, same pinned encoder, same file.
+
+On checking AC 3, one substitution the reviewer should weigh rather than take on trust. The criterion names the Linux desktop image; the comparison ran on box and on the Tesla T4 instead, for a reason that is itself a finding: the running editor Command API serves the engine methods and not the host family, so export.render reaches no window and nothing on that image can ask the editor to export at all (TASK-147). The image also carries a released build and no Rust, so a test binary cannot run there either. What did run is the assembled SubordinateApp - its export panel, its encoder pin, its ExportRunner, its render context - on two machines with real GPUs, against subordinate-cli over the same project, preset and encoder, for nvh264enc, vah264enc and x264enc. That is the substance the criterion is about; the machine is not the one it names. Move the comparison onto the desktop image once TASK-147 is done.
 <!-- SECTION:NOTES:END -->

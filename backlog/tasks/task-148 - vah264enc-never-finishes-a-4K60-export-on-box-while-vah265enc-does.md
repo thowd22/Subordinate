@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-12 05:32'
-updated_date: '2026-09-12 11:12'
+updated_date: '2026-09-12 12:01'
 labels:
   - export
   - gpu
@@ -53,4 +53,6 @@ with GST_DEBUG=2,va*:6,vah264enc:7 on box.
 Software H.264 at the same canvas is fine: x264enc writes the same sixty 4K60 frames on box over all three H.264 presets and validates clean (run 34685591190). So it is the hardware H.264 encoders specifically - vah264enc and amfh264enc - and not H.264 at 4K in general, which narrows it to whatever those two have in common that x264enc does not: a DMA or surface-backed buffer pool between the compositor readback and the encoder.
 
 Run 34688535274 adds a third encoder with the identical signature: mfh264enc, Media Foundation on yodaddy, stops at frame 22 of 60 for youtube-1080p and youtube-4k and at frame 1 for mezzanine - the same frames as amfh264enc on the same machine - while mfh265enc writes the same sixty 4K frames and validates clean. Three hardware H.264 encoders now: VA-API on Linux/Mesa, AMF on Windows, Media Foundation on Windows. Three different vendor stacks, two operating systems, one failure, always H.264, always 4K, always around frame 22 or frame 1. x264enc at the same canvas on both machines is fine.
+
+And a fourth, on a fourth vendor: nvh264enc on the Tesla T4 (Ubuntu 24.04, GStreamer 1.24, run 34689001087) stalls on the same sixty 4K60 frames at frame 27, 23 and 9 of 60 for the three H.264 presets, while nvh265enc writes all sixty and validates clean. NVENC, AMF, Media Foundation and VA-API - every hardware H.264 encoder this project can reach, on three operating systems - and x264enc at the same canvas on the same machines is fine. Whatever this is, it is not a driver.
 <!-- SECTION:NOTES:END -->
