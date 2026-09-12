@@ -72,8 +72,17 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 /// The committed sample project's folder.
+///
+/// `CARGO_MANIFEST_DIR` is baked in at compile time, so a test binary built on
+/// one machine and run on another - which is how the export matrix keeps
+/// compilation off the GPU instances - would look for the sample project in a
+/// path that does not exist there. `SUBORDINATE_SAMPLE_PROJECT` names the
+/// folder instead when it is set.
 fn sample_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/sample-project")
+    match std::env::var("SUBORDINATE_SAMPLE_PROJECT") {
+        Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+        _ => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/sample-project"),
+    }
 }
 
 /// The sample project copied into a folder of the test's own, media and all.
@@ -310,6 +319,168 @@ fn an_unsaved_project_says_why_it_cannot_be_exported() {
         Some(sub_ui::app::NO_RENDERER_REASON),
         "an unsaved project offers an Export button that could only fail"
     );
+}
+
+/// The environment variable naming the encoders the GUI-versus-CLI comparison
+/// runs for, comma separated, and the one naming the `subordinate-cli` it
+/// compares against.
+///
+/// Both are absent everywhere but the export matrix workflow, and the test
+/// below skips itself when either is: hosted CI has no hardware encoder to
+/// compare and no reason to run a render twice.
+const MATRIX_ENCODERS_ENV: &str = "SUBORDINATE_MATRIX_ENCODERS";
+const MATRIX_CLI_ENV: &str = "SUBORDINATE_CLI";
+
+/// The window's export and `subordinate-cli render` write the same file.
+///
+/// TASK-135 connected the editor's export to the compositor readback and the
+/// offline mix, and TASK-143 is where that claim is finally tested against the
+/// other path on real hardware: the same project, the same preset, the same
+/// pinned encoder, exported once by the assembled window and once by the CLI,
+/// and the two files compared on what an export is for - how many frames came
+/// back out of it and whether the sound is there.
+///
+/// The encoder is pinned on both sides rather than left to the automatic
+/// order, because the interesting comparison is per encoder: a GUI export that
+/// silently landed on `x264enc` while the CLI used NVENC would compare two
+/// different things and pass.
+#[test]
+fn the_window_and_the_cli_write_the_same_file_for_each_encoder() {
+    if !support::can_render() {
+        return;
+    }
+    let Ok(encoders) = std::env::var(MATRIX_ENCODERS_ENV) else {
+        eprintln!("skipping: {MATRIX_ENCODERS_ENV} names no encoders to compare");
+        return;
+    };
+    let cli = match std::env::var(MATRIX_CLI_ENV) {
+        Ok(path) if Path::new(&path).is_file() => PathBuf::from(path),
+        _ => {
+            eprintln!("skipping: {MATRIX_CLI_ENV} does not name a subordinate-cli binary");
+            return;
+        }
+    };
+    let Some(path) = sample_copy("gui-vs-cli") else {
+        return;
+    };
+
+    let probe = sub_export::EncoderProbe::cached().expect("an encoder probe");
+    for element in encoders.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let pinnable = probe
+            .encoders
+            .iter()
+            .any(|status| status.element == element && status.is_pinnable());
+        if !pinnable {
+            eprintln!("skipping {element}: this machine cannot start it");
+            continue;
+        }
+
+        let mut harness = app_harness(&path);
+        harness.run();
+        let project = harness.state().project().clone();
+        let sequence = sequence_of(&project);
+        let id = sequence.id;
+        let gui_output = path.with_file_name(format!("gui-{element}.mkv"));
+        let cli_output = path.with_file_name(format!("cli-{element}.mkv"));
+
+        {
+            let panel = harness.state_mut().export_panel();
+            panel.select_preset(PRESET).expect("the preset is offered");
+            panel.select_sequence(&project, id);
+            panel.set_range(ExportRange::InToOut);
+            panel.set_in_out(0, FRAMES);
+            panel.set_output(&gui_output);
+            panel
+                .set_encoder_override(Some(element))
+                .expect("the element is catalogued");
+        }
+        let request = harness
+            .state_mut()
+            .export_panel()
+            .request(&project)
+            .expect("the panel builds a request");
+        harness
+            .state_mut()
+            .apply_export(ExportAction::Start(Box::new(request)));
+        run_until_settled(&mut harness);
+        let gui = match harness.state().export_status() {
+            ExportStatus::Finished(report) => report.clone(),
+            ExportStatus::Failed { error, .. } => {
+                panic!(
+                    "the window's export with {element} failed: [{}] {}",
+                    error.code, error.message
+                )
+            }
+            other => {
+                panic!("the window's export with {element} neither finished nor failed: {other:?}")
+            }
+        };
+        assert_eq!(
+            gui.video_encoder, element,
+            "the window exported with {} rather than the pinned {element}",
+            gui.video_encoder
+        );
+
+        let render = std::process::Command::new(&cli)
+            .args([
+                "render",
+                &path.display().to_string(),
+                "--sequence",
+                SEQUENCE,
+                "--preset",
+                PRESET,
+                "--encoder",
+                element,
+                "--range",
+                &format!("0:{FRAMES}"),
+                "--out",
+                &cli_output.display().to_string(),
+                "--compact",
+            ])
+            .output()
+            .expect("subordinate-cli runs");
+        assert!(
+            render.status.success(),
+            "subordinate-cli render with {element} failed: {}",
+            String::from_utf8_lossy(&render.stderr)
+        );
+
+        let gui_info = sub_media::probe::probe(&gui_output).expect("the window's file probes");
+        let cli_info = sub_media::probe::probe(&cli_output).expect("the CLI's file probes");
+        let rate = sequence.settings.frame_rate;
+        let frames = |info: &sub_media::probe::MediaInfo| {
+            info.duration
+                .expect("the file has a duration")
+                .rescaled_to_rounding(rate, sub_time::Rounding::Nearest)
+                .value()
+        };
+        assert_eq!(
+            frames(&gui_info),
+            frames(&cli_info),
+            "{element}: the window wrote {} frames and the CLI wrote {}",
+            frames(&gui_info),
+            frames(&cli_info),
+        );
+        assert_eq!(
+            frames(&gui_info),
+            FRAMES,
+            "{element}: neither path wrote the frames it was asked for"
+        );
+        assert_eq!(
+            gui_info.has_audio(),
+            cli_info.has_audio(),
+            "{element}: only one of the two paths wrote audio"
+        );
+        assert!(
+            gui_info.has_audio(),
+            "{element}: neither path wrote the sequence's audio"
+        );
+        eprintln!(
+            "{element}: window {} frames, CLI {} frames, audio on both",
+            frames(&gui_info),
+            frames(&cli_info),
+        );
+    }
 }
 
 /// `gst-discoverer-1.0`'s own report on `path`, when the binary is installed.

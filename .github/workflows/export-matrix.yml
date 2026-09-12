@@ -20,18 +20,23 @@ name: Export matrix
 # passing ones are deleted, because a 4K60 matrix writes gigabytes of them.
 #
 # ---------------------------------------------------------------- cost ------
-# Three of the jobs cost money, all of them g4dn.xlarge in us-east-1:
+# Two of the jobs cost money, all of them g4dn.xlarge in us-east-1:
 #
-#   nvidia-linux    spot, timeout 30 -> under 0.13 USD
+#   nvidia-linux    spot, timeout 35 -> under 0.16 USD
 #   nvidia-windows  spot, timeout 35 -> under 0.15 USD
-#   gui-vs-cli      on-demand (the desktop image runs spot=false), timeout 30
-#                   -> under 0.27 USD
 #
-# so a full run is well under 0.60 USD and the nightly schedule is about 18 USD
-# a month at the worst case, under 10 on spot. The three are chained with
-# `needs` rather than run side by side: the account's G-family quota allows two
-# g4dn instances at once and other work shares it, so this workflow never asks
-# for more than one.
+# so a full run is under 0.35 USD and the nightly schedule is about 10 USD a
+# month at the worst case, half that on spot. The two are chained with `needs`
+# rather than run side by side: the account's G-family quota allows two `g4dn`
+# instances at once and other work shares it, so this workflow never asks for
+# more than one.
+#
+# There is no job on the Linux desktop image, deliberately. The editor's own
+# Command API serves the engine's methods and not the `host::*` family, so
+# `export.render` reaches no running window and nothing on that image can ask
+# the editor to export at all (TASK-147). The GUI half of the comparison is
+# therefore a test binary built from `sub-ui` - the assembled window, its
+# export panel and its ExportRunner - run on box and on the T4.
 #
 # box and yodaddy are free (self-hosted), and so are the two build jobs and the
 # hosted software job. yodaddy is the user's daily-use desktop: its job installs
@@ -58,15 +63,6 @@ on:
           - nvidia-linux
           - nvidia-windows
           - amd-windows
-          - gui-vs-cli
-      desktop_runner:
-        description: >-
-          RunsOn selector for the gui-vs-cli job. RunsOn reads
-          .github/runs-on.yml from the default branch only, so a new or changed
-          AMI has to be spelled out inline until it is merged:
-          ami=ami-0123.../family=g4dn.xlarge/spot=false
-        type: string
-        default: runner=gpu-nvidia-desktop-linux
   schedule:
     # 05:40 UTC, an hour after hardware.yml, so the two never bid for the same
     # GPU quota.
@@ -102,7 +98,6 @@ jobs:
   # and hand them over as artifacts, exactly as hardware.yml does.
   build-linux:
     name: Build the Linux CLI (hosted, free)
-    if: inputs.only != 'gui-vs-cli'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -133,12 +128,31 @@ jobs:
       # Debug, like hardware.yml's: a render is encoder-bound, and a release
       # build drags a thin-LTO wasmtime through the slowest link in the
       # repository for no measurable gain here.
-      - name: Build subordinate-cli
+      # subordinate-cli, and the sub-ui test binary that drives the *window's*
+      # export runner: the GUI half of the comparison is a test of the
+      # assembled editor, so it is compiled here and run on the machines with
+      # GPUs, exactly as hardware.yml does with the readback test.
+      - name: Build subordinate-cli and the GUI export test
         run: |
           cargo build -p subordinate-cli
+          cargo test -p sub-ui --test export_end_to_end --no-run \
+            --message-format=json > /tmp/gui-export-build.json
           mkdir -p dist
+          python3 - <<'PY'
+          import json, pathlib, shutil
+          binary = None
+          for line in pathlib.Path("/tmp/gui-export-build.json").read_text().splitlines():
+              message = json.loads(line)
+              executable = message.get("executable")
+              if executable and message.get("target", {}).get("name") == "export_end_to_end":
+                  binary = executable
+          if binary is None:
+              raise SystemExit("cargo did not report an export_end_to_end test binary")
+          shutil.copy2(binary, "dist/gui-export-test")
+          PY
           cp target/debug/subordinate-cli dist/
           chmod +x dist/*
+          ls -l dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -363,9 +377,34 @@ jobs:
             --out target/export-matrix \
             "${sources[@]}"
 
+      # The GUI half (TASK-143 AC 3): the assembled window exports the sample
+      # project through its own ExportRunner with the encoder pinned, then the
+      # CLI renders the same frames of the same project with the same encoder,
+      # and the two files are compared on frame count and audio. box is free,
+      # has a real GPU and carries both a hardware and a software H.264
+      # encoder, so this is where the comparison is iterated.
+      - name: The window's export against the CLI's
+        env:
+          SUBORDINATE_MATRIX_ENCODERS: vah264enc,x264enc
+          SUBORDINATE_CLI: ${{ github.workspace }}/target/debug/subordinate-cli
+        run: |
+          mkdir -p target/export-matrix
+          xvfb-run -a cargo test -p sub-ui --test export_end_to_end -- \
+            the_window_and_the_cli_write_the_same_file_for_each_encoder --nocapture \
+            2>&1 | tee target/export-matrix/gui-vs-cli.txt
+
       - name: Job summary
         if: always()
-        run: cat target/export-matrix/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+        run: |
+          cat target/export-matrix/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+          {
+            echo
+            echo "### The window's export against the CLI's"
+            echo
+            echo '```'
+            grep -E "^(vah264enc|x264enc|skipping)" target/export-matrix/gui-vs-cli.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -381,7 +420,7 @@ jobs:
     if: github.event_name != 'push' && (inputs.only == '' || inputs.only == 'nvidia-linux')  # TEMP TASK-143
     needs: build-linux
     runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-linux
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -470,9 +509,33 @@ jobs:
             --no-software-for uhd \
             "${sources[@]}"
 
+      # TASK-143 AC 3 on NVIDIA hardware: the window's export runner against the
+      # CLI's, nvh264enc and x264enc. The test binary was built by build-linux,
+      # so SUBORDINATE_SAMPLE_PROJECT points it at this checkout rather than at
+      # the path it was compiled in.
+      - name: The window's export against the CLI's
+        env:
+          SUBORDINATE_MATRIX_ENCODERS: nvh264enc,x264enc
+          SUBORDINATE_CLI: ${{ github.workspace }}/dist/subordinate-cli
+          SUBORDINATE_SAMPLE_PROJECT: ${{ github.workspace }}/examples/sample-project
+        run: |
+          mkdir -p target/export-matrix
+          xvfb-run -a ./dist/gui-export-test \
+            the_window_and_the_cli_write_the_same_file_for_each_encoder --nocapture \
+            2>&1 | tee target/export-matrix/gui-vs-cli.txt
+
       - name: Job summary
         if: always()
-        run: cat target/export-matrix/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+        run: |
+          cat target/export-matrix/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+          {
+            echo
+            echo "### The window's export against the CLI's"
+            echo
+            echo '```'
+            grep -E "^(nvh264enc|x264enc|skipping)" target/export-matrix/gui-vs-cli.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -708,85 +771,3 @@ jobs:
             Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
           }
           Get-ChildItem $env:RUNNER_TEMP | Select-Object Name, Length | Format-Table -AutoSize | Out-String -Width 120
-
-  # ------------------------------------------------------------- GUI vs CLI
-  # The editor's own export runner against the CLI's, on a machine with a real
-  # GPU and a real desktop (TASK-143 AC 3). The desktop image carries the
-  # released AppImage, its bundled GStreamer 1.28 and the 4K60 clip, so nothing
-  # is built or downloaded here - everything this job runs is what a user's
-  # install would run.
-  gui-vs-cli:
-    name: GUI export against CLI export (desktop image, Xorg on :0)
-    # TEMP TASK-143: the push guard comes out before this merges.
-    if: >-
-      ${{ !cancelled() && github.event_name != 'push'
-      && (inputs.only == '' || inputs.only == 'gui-vs-cli') }}
-    needs: nvidia-windows
-    runs-on: runs-on=${{ github.run_id }}/${{ inputs.desktop_runner || 'runner=gpu-nvidia-desktop-linux' }}
-    timeout-minutes: 30
-    env:
-      DISPLAY: ':0'
-      XAUTHORITY: /run/subordinate/Xauthority
-      SUBORDINATE_ENDPOINT_DIR: /tmp/subordinate-endpoint
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Instance, image and GPU facts
-        run: |
-          echo "runner=$RUNNER_NAME ami=${RUNS_ON_AMI_ID:-unknown}"
-          . /etc/os-release && echo "os=$PRETTY_NAME"
-          echo "release baked in: $(cat /opt/subordinate/RELEASE_TAG)"
-          nvidia-smi
-          systemctl is-active subordinate-xorg.service
-          /usr/local/bin/subordinate-wait-for-display
-
-      # The AppImage's own GStreamer, reached through the image's wrappers:
-      # there is no system GStreamer on this machine at all.
-      - name: What this build can encode with
-        run: |
-          mkdir -p target/gui-vs-cli
-          python3 scripts/export-matrix.py discover \
-            --cli /usr/local/bin/subordinate-cli \
-            --gst-prefix subordinate- \
-            --out target/gui-vs-cli/discovery.json >/dev/null
-          python3 -c "import json;d=json.load(open('target/gui-vs-cli/discovery.json'));[print(e['element'], e['present'], e['ready'], e['deranked']) for e in d['encoders']]"
-
-      - name: A project around the baked-in 4K60 clip
-        id: project
-        run: |
-          media=$(ls /opt/subordinate/test-media/* | head -n1)
-          echo "media=$media"
-          python3 scripts/export-matrix.py project \
-            --media "$media" --out "$RUNNER_TEMP/uhd-project" --sequence "UHD" \
-            --seconds 4 --gst-prefix subordinate- | tee target/gui-vs-cli/project.json
-          echo "project=$RUNNER_TEMP/uhd-project/uhd.sub" >>"$GITHUB_OUTPUT"
-
-      # Two runs of the same comparison, because which encoder the editor picks
-      # is not a Command API parameter: it is the automatic order, and
-      # GST_PLUGIN_FEATURE_RANK is what moves an element within it. Hardware
-      # encoders ship ranked NONE, so the default order lands on x264enc;
-      # ranking nvh264enc primary puts NVENC in front of it.
-      - name: GUI against CLI, nvh264enc
-        run: ./scripts/gui-vs-cli.sh nvh264enc "${{ steps.project.outputs.project }}" primary
-
-      - name: GUI against CLI, x264enc
-        run: ./scripts/gui-vs-cli.sh x264enc "${{ steps.project.outputs.project }}" none
-
-      - name: Job summary
-        if: always()
-        run: |
-          {
-            echo "## GUI-path export against the CLI export (desktop image)"
-            echo
-            for f in target/gui-vs-cli/*/summary.md; do
-              [ -f "$f" ] && sed -n '3,$p' "$f"
-            done
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: export-matrix-gui-vs-cli
-          path: target/gui-vs-cli
-          if-no-files-found: warn
-          retention-days: 30
