@@ -1087,12 +1087,12 @@ fn is_written(path: &Path) -> bool {
 pub const PROXY_DIR: &str = "proxies";
 
 /// Transcodes a proxy for one of `project`'s media items and returns its
-/// project-relative path.
+/// path relative to the project, or absolute when its source is external.
 ///
 /// This is what `media.make_proxy` does in whichever process is serving the
 /// Command API — the editor or `subordinate-cli serve` — so the file lands in
-/// the same `proxies/` folder and the path recorded on the media item stays
-/// project-relative either way (docs/PLAN.md §5.6).
+/// the same `proxies/` folder. External-source proxies retain their actual
+/// location across the first Save As or a subsequent project relocation.
 ///
 /// Slow: it decodes and re-encodes the whole source, so a caller on a UI
 /// thread runs it on a worker.
@@ -1107,13 +1107,18 @@ pub fn proxy_for_media(
     project_dir: &Path,
     media: sub_model::MediaId,
 ) -> SubResult<String> {
-    let source = project.absolute_path(project_dir, media).ok_or_else(|| {
-        SubError::new(
-            sub_core::codes::NOT_FOUND,
-            "no such media item in the project",
-        )
-        .with_detail("media", media.to_string())
-    })?;
+    let item = project
+        .media
+        .iter()
+        .find(|item| item.id == media)
+        .ok_or_else(|| {
+            SubError::new(
+                sub_core::codes::NOT_FOUND,
+                "no such media item in the project",
+            )
+            .with_detail("media", media.to_string())
+        })?;
+    let source = item.path.resolve(project_dir);
     let info = probe(&source)?;
     let video = info.video.first().ok_or_else(|| {
         SubError::new(
@@ -1129,9 +1134,21 @@ pub fn proxy_for_media(
         ..defaults
     };
     let proxy = Proxy::generate(&source, &project_dir.join(PROXY_DIR), options)?;
-    let file = proxy.path();
-    let relative = file.strip_prefix(project_dir).unwrap_or(&file);
-    Ok(relative.to_string_lossy().replace('\\', "/"))
+    proxy_reference(&item.path, project_dir, &proxy.path())
+}
+
+/// Keep proxies for external sources anchored to their generation directory.
+fn proxy_reference(
+    source: &sub_model::MediaPath,
+    project_dir: &Path,
+    file: &Path,
+) -> SubResult<String> {
+    let reference = if source.is_external() {
+        sub_model::MediaPath::external(file)?
+    } else {
+        sub_model::MediaPath::relative_to(project_dir, file)?
+    };
+    Ok(reference.to_string())
 }
 
 #[cfg(test)]
@@ -1141,6 +1158,23 @@ mod tests {
     use sub_time::Rational;
 
     use super::*;
+
+    #[test]
+    fn proxy_reference_stays_external_only_for_external_sources() {
+        let draft = std::env::temp_dir().join("draft-project");
+        let generated = draft.join("proxies").join("take.mp4");
+        let external =
+            sub_model::MediaPath::external(&std::env::temp_dir().join("take.mp4")).unwrap();
+        assert_eq!(
+            Path::new(&proxy_reference(&external, &draft, &generated).unwrap()),
+            generated
+        );
+        let relative = sub_model::MediaPath::new("media/take.mp4").unwrap();
+        assert_eq!(
+            proxy_reference(&relative, &draft, &generated).unwrap(),
+            "proxies/take.mp4"
+        );
+    }
 
     /// A video stream description with just the fields the policy reads.
     fn video(codec: &str, width: u32, height: u32) -> VideoStreamInfo {

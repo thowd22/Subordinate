@@ -239,3 +239,18 @@ GPU adapters and missing test filters fail rather than silently pass. Use
 `only=regressions` for just these two free runner jobs (or `box`/`yodaddy` for
 one); the native clicks/MCP flows continue on isolated paid desktop instances.
 No compilation happens on paid instances or the user's machines.
+
+Run the focused checks against a branch without starting paid runners:
+
+```sh
+gh workflow run desktop-flows.yml --ref my-branch -f only=regressions
+# Select one machine with only=box or only=yodaddy.
+```
+
+The same tests run in normal Linux, macOS and Windows pull-request CI through
+`cargo test --workspace -- --test-threads=1`. To replay a downloaded desktop
+artifact, check out its commit, set `GITHUB_SHA` to that full commit and run
+`python scripts/desktop/run-regressions.py dist` with GStreamer on PATH (on
+Windows, use the artifact's `python/python.exe` and bundled runtime paths as
+shown in the workflow). The script verifies the binaries and creates all
+required first-use fixtures automatically.

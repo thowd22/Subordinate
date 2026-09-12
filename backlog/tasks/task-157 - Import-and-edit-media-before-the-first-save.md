@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - codex
 created_date: '2026-09-12 21:44'
-updated_date: '2026-09-12 22:08'
+updated_date: '2026-09-12 22:14'
 labels: []
 dependencies: []
 priority: high
@@ -38,4 +38,6 @@ Add explicit external media references alongside strict relative paths; use stab
 Added explicit tagged external media references alongside legacy strict relative strings. GUI imports retain stable source paths before first Save and through in-flight imports, preview, Undo/Redo and reopening. Real fixture-based assembled-editor regression and real MCP subprocess regression pass. Combined model, Command API, UI and MCP suites passed 955 tests with no failures (one existing ignored test). Routine desktop flows now begin with unsaved projects rather than staged populated projects; same-commit artifact provisioning and box/yodaddy offscreen regression jobs are being integrated.
 
 Routine coverage is wired into normal workspace UI/MCP tests and Desktop flows for Linux/Windows GPU runners plus box/yodaddy. Hosted builders package the selected commit with SHA/hash verification; focused regressions generate their own fixtures, reject skipped tests, and isolate configuration and MCP endpoints. All four relocated regressions passed locally. Remote runner validation pending.
+
+Review also fixed proxies created before first Save: proxies of external sources retain their actual generation path through Save As and undo/redo. Focused Command API save/reopen and proxy path regressions pass, and sub-command/sub-media strict Clippy passes.
 <!-- SECTION:NOTES:END -->
