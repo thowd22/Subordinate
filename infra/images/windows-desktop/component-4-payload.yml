@@ -188,10 +188,15 @@ phases:
               if (-not (Get-ScheduledTask -TaskName 'SubordinateInteractiveHelper' -ErrorAction SilentlyContinue)) {
                 throw 'the SubordinateInteractiveHelper task is not registered'
               }
-              # Auto-logon is deliberately not configured yet - sysprep would
-              # hang on it (build 1.0.7) and generalize would clear it anyway.
-              # What has to be true here is that SetupComplete.cmd will apply
-              # it on the runtime instance's first boot.
+              # The image is captured without Sysprep, so the auto-logon values
+              # written during the build are what the runner boots with. Build
+              # 1.1.2 shipped without them - SetupComplete.cmd never runs when
+              # there is no Setup phase - and the smoke job found a console
+              # session with nobody logged on (run 34667886109).
+              $wl = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+              if ($wl.AutoAdminLogon -ne '1') { throw 'AutoAdminLogon is not set' }
+              if ($wl.DefaultUserName -ne '{{ TestUser }}') { throw "DefaultUserName is $($wl.DefaultUserName)" }
+              if (-not $wl.DefaultPassword) { throw 'DefaultPassword is empty' }
               if (-not (Select-String -Path 'C:\Windows\Setup\Scripts\SetupComplete.cmd' -SimpleMatch 'apply-autologon.ps1' -Quiet)) {
                 throw 'SetupComplete.cmd does not call apply-autologon.ps1'
               }

@@ -48,24 +48,32 @@ phases:
                 try { Add-LocalGroupMember -Group $g -Member $user -ErrorAction Stop } catch { "already in $g" }
               }
 
-              # Auto-logon is NOT configured here. Image Builder syspreps the
-              # image at the end of the build, and an image that is already
-              # set to log a user on automatically hangs the generalize pass:
-              # build 1.0.7 went unreachable (instance status impaired) a few
-              # minutes into sysprep and never shut down. It is also pointless,
-              # because generalize clears those values anyway.
+              # Auto-logon, baked straight into the image. This works because
+              # the image is captured without Sysprep (see
+              # workflow-build-no-sysprep.yml): nothing clears these values
+              # between here and the runner's first boot.
               #
-              # Instead the values are written by SetupComplete.cmd, which
-              # Windows runs at the very end of Setup on the *runtime*
-              # instance, before the logon screen appears - the standard way to
-              # bake auto-logon into an image.
+              # DefaultDomainName is '.' - the local machine - and not this
+              # build instance's name, which EC2Launch replaces on the runtime
+              # instance anyway.
+              $wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+              Set-ItemProperty $wl AutoAdminLogon '1' -Type String
+              Set-ItemProperty $wl DefaultUserName $user -Type String
+              Set-ItemProperty $wl DefaultDomainName '.' -Type String
+              Set-ItemProperty $wl DefaultPassword $plain -Type String
+              Remove-ItemProperty $wl AutoLogonCount -ErrorAction SilentlyContinue
+              Remove-ItemProperty $wl AutoLogonSID -ErrorAction SilentlyContinue
+
+              # The same values in a script SetupComplete.cmd runs, which is
+              # the belt to that braces: it costs nothing and covers a rebuild
+              # that does put Sysprep back.
               $dir = 'C:\SubordinateTest\bin'
               New-Item -ItemType Directory -Force -Path $dir | Out-Null
               @"
               `$wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
               Set-ItemProperty `$wl AutoAdminLogon '1' -Type String
               Set-ItemProperty `$wl DefaultUserName '$user' -Type String
-              Set-ItemProperty `$wl DefaultDomainName `$env:COMPUTERNAME -Type String
+              Set-ItemProperty `$wl DefaultDomainName '.' -Type String
               Set-ItemProperty `$wl DefaultPassword '$plain' -Type String
               Remove-ItemProperty `$wl AutoLogonCount -ErrorAction SilentlyContinue
               "@ | Set-Content -Encoding ASCII "$dir\apply-autologon.ps1"
