@@ -237,7 +237,7 @@ jobs:
           Probe "render-flowlike-nvenc" $cli @(
             "render","C:\SubordinateTest\flow-like.sub","--preset","youtube-1080p",
             "--out","$out\flow-like-nvenc.mp4","--range","0:48","--encoder","nvh264enc","--verify"
-            ) @{ SUBORDINATE_LOG = $trace; GST_DEBUG = "3,appsrc:6,nvh264enc:5,nvh264dec:5,nvdec:5,cudaupload:5,mp4mux:5,qtmux:5,videoconvert:4"; GST_DEBUG_FILE = "$out\render-flowlike-nvenc.gst.log"; GST_DEBUG_NO_COLOR = "1" } 240
+            ) @{ SUBORDINATE_LOG = $trace; GST_DEBUG = "3,nvencoder:5,cudacontext:6,cudadevice:5,nvdec:4,d3d11decoder:4,videoconvert:4"; GST_DEBUG_FILE = "$out\render-flowlike-nvenc.gst.log"; GST_DEBUG_NO_COLOR = "1" } 240
 
           # 4. The same render with a software encoder: NVENC or not?
           Probe "render-flowlike-x264" $cli @(
@@ -269,6 +269,29 @@ jobs:
             "h264parse","!","nvh264dec","!","identity","eos-after=48","!","videoconvert","!",
             "nvh264enc","!","h264parse","!","mp4mux","!","filesink","location=$outSlash/dec-enc.mp4"
             ) @{ GST_DEBUG = "3,nvencoder:5" } 240
+
+          # 5d. A range past the end of the only clip: the compositor draws an
+          #     empty canvas and no decoder is ever opened, so this is the
+          #     export pipeline on its own inside our process.
+          Probe "render-emptyrange-nvenc" $cli @(
+            "render","C:\SubordinateTest\flow-like.sub","--preset","youtube-1080p",
+            "--out","$out\empty-nvenc.mp4","--range","3000:3048","--encoder","nvh264enc","--verify"
+            ) @{ SUBORDINATE_LOG = $trace; GST_DEBUG = "3,nvencoder:5,cudacontext:6,cudadevice:5"; GST_DEBUG_FILE = "$out\render-emptyrange.gst.log"; GST_DEBUG_NO_COLOR = "1" } 240
+
+          # 5e. The same render with no wgpu device on a real driver: the noop
+          #     backend draws nothing, which is enough to say whether holding a
+          #     GPU device is what takes NVENC away.
+          Probe "render-flowlike-noop" $cli @(
+            "render","C:\SubordinateTest\flow-like.sub","--preset","youtube-1080p",
+            "--out","$out\flow-like-noop.mp4","--range","0:48","--encoder","nvh264enc"
+            ) @{ SUBORDINATE_LOG = $trace; WGPU_BACKEND = "noop"; GST_DEBUG = "3,nvencoder:5" } 240
+
+          # 5f. MediaFoundation's hardware H.264, for a second opinion on
+          #     whether any hardware encoder works from inside this process.
+          Probe "render-flowlike-mf" $cli @(
+            "render","C:\SubordinateTest\flow-like.sub","--preset","youtube-1080p",
+            "--out","$out\flow-like-mf.mp4","--range","0:48","--encoder","mfh264enc","--verify"
+            ) @{ SUBORDINATE_LOG = $trace; GST_DEBUG = "3,mfvideoenc:4" } 300
 
           # 5c. The same render with the encoder probe asking only whether the
           #     element exists, instead of taking it to READY and back.
