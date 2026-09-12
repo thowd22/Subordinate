@@ -145,7 +145,16 @@ def gst_tool(name: str, prefix: str | None) -> str:
     script go through them, so the runtime that is measured is the runtime the
     editor actually exports with.
     """
-    return f"{prefix}{name}" if prefix else name
+    tool = f"{prefix}{name}" if prefix else name
+    # Windows needs the extension spelled out. CreateProcess appends `.exe`
+    # only when the name has no extension at all, and every GStreamer tool is
+    # called `...-1.0` - Windows reads `.0` as the extension, searches for a
+    # file by that exact name and reports "the system cannot find the file
+    # specified" from a directory that is on PATH and does hold the binary
+    # (TASK-143, yodaddy, run 34682535386).
+    if os.name == "nt":
+        tool += ".exe"
+    return tool
 
 
 @dataclass
