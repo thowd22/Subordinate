@@ -1,0 +1,746 @@
+name: Export matrix
+
+# Every encoder every machine carries, every preset, both sources, from the CLI
+# and - on the Linux desktop image - from the editor's own export runner
+# (TASK-143).
+#
+# Export had been verified one encoder at a time: nvh264enc on the T4 and
+# vah264enc on box (hardware.yml), an AMF smoke on the user's desktop
+# (gpu-smoke.yml), x264enc in CI. Never as a matrix, never for HEVC or AV1,
+# never through the GUI on real hardware, and never with the written file
+# checked beyond "it has an H.264 stream in it". This workflow is the matrix,
+# and every job runs the same driver - scripts/export-matrix.py - so the rows
+# of the table are comparable between machines.
+#
+# What each job proves is in its summary: the encoders the machine's registry
+# and the exporter's own probe report, then one row per source x preset x
+# encoder with pass/fail, the file size, the frames that came back out of a
+# decode of the written file (not the encoder's own count), the duration and
+# the audio layout. Failing outputs and their discoverer reports are uploaded;
+# passing ones are deleted, because a 4K60 matrix writes gigabytes of them.
+#
+# ---------------------------------------------------------------- cost ------
+# Three of the jobs cost money, all of them g4dn.xlarge in us-east-1:
+#
+#   nvidia-linux    spot, timeout 30 -> under 0.13 USD
+#   nvidia-windows  spot, timeout 35 -> under 0.15 USD
+#   gui-vs-cli      on-demand (the desktop image runs spot=false), timeout 30
+#                   -> under 0.27 USD
+#
+# so a full run is well under 0.60 USD and the nightly schedule is about 18 USD
+# a month at the worst case, under 10 on spot. The three are chained with
+# `needs` rather than run side by side: the account's G-family quota allows two
+# g4dn instances at once and other work shares it, so this workflow never asks
+# for more than one.
+#
+# box and yodaddy are free (self-hosted), and so are the two build jobs and the
+# hosted software job. yodaddy is the user's daily-use desktop: its job installs
+# nothing system-wide, writes only under RUNNER_TEMP and deletes what it wrote.
+#
+# Never add `push` or `pull_request` here, for the same reasons hardware.yml
+# gives.
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Run a single matrix job instead of all of them'
+        type: choice
+        default: ''
+        options:
+          - ''
+          - hosted-software
+          - amd-linux
+          - nvidia-linux
+          - nvidia-windows
+          - amd-windows
+          - gui-vs-cli
+      desktop_runner:
+        description: >-
+          RunsOn selector for the gui-vs-cli job. RunsOn reads
+          .github/runs-on.yml from the default branch only, so a new or changed
+          AMI has to be spelled out inline until it is merged:
+          ami=ami-0123.../family=g4dn.xlarge/spot=false
+        type: string
+        default: runner=gpu-nvidia-desktop-linux
+  schedule:
+    # 05:40 UTC, an hour after hardware.yml, so the two never bid for the same
+    # GPU quota.
+    - cron: "40 5 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: export-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  GST_VERSION: "1.28.6"
+  # demo.sub carries two sequences, so the render command has to name one.
+  SAMPLE_SEQUENCE: Main cut
+  # How much of each source is rendered per cell. The matrix is about the
+  # encoders, not about throughput: 50 frames of the sample (two seconds at its
+  # 25 fps timebase) and 60 frames of the 4K60 excerpt (one second) is enough
+  # for a frame count, a duration and an audio check, and keeps a cell at a few
+  # seconds even on a software encoder at 4K.
+  SAMPLE_FRAMES: "50"
+  UHD_FRAMES: "60"
+
+jobs:
+  # ------------------------------------------------------------------ builds
+  # Nothing is compiled on a GPU instance or on the user's desktop: both are
+  # slower and one of them is expensive. Free hosted runners build the binaries
+  # and hand them over as artifacts, exactly as hardware.yml does.
+  build-linux:
+    name: Build the Linux CLI (hosted, free)
+    if: inputs.only == '' || inputs.only != 'gui-vs-cli'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GStreamer (apt)
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*google*.list \
+                     /etc/apt/sources.list.d/*google*.sources \
+                     /etc/apt/sources.list.d/*microsoft*.list \
+                     /etc/apt/sources.list.d/*microsoft*.sources || true
+          sudo apt-get update || sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-tools \
+            pkg-config libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: export-matrix-linux-ubuntu24
+          prefix-key: v1-rust
+          cache-workspace-crates: true
+
+      # Debug, like hardware.yml's: a render is encoder-bound, and a release
+      # build drags a thin-LTO wasmtime through the slowest link in the
+      # repository for no measurable gain here.
+      - name: Build subordinate-cli
+        run: |
+          cargo build -p subordinate-cli
+          mkdir -p dist
+          cp target/debug/subordinate-cli dist/
+          chmod +x dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: export-matrix-cli-linux
+          path: dist/
+          retention-days: 7
+
+  build-windows:
+    name: Build the Windows CLI (hosted, free)
+    if: >-
+      inputs.only == '' || inputs.only == 'nvidia-windows'
+      || inputs.only == 'amd-windows'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GStreamer (Windows, official installer)
+        shell: pwsh
+        run: |
+          $ver = $env:GST_VERSION
+          $exe = "gstreamer-1.0-msvc-x86_64-$ver.exe"
+          $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc/$exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          $dir = "C:\gstreamer\1.0\msvc_x86_64"
+          Start-Process -Wait -FilePath ".\$exe" -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/TYPE=devel","/ALLUSERS","/DIR=$dir"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$dir\lib\pkgconfig" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: export-matrix-windows
+          prefix-key: v1-rust
+          cache-workspace-crates: true
+
+      - name: Build subordinate-cli
+        shell: pwsh
+        run: |
+          cargo build -p subordinate-cli
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\debug\subordinate-cli.exe dist\
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: export-matrix-cli-windows
+          path: dist/
+          retention-days: 7
+
+  # ------------------------------------------------------- free Linux matrix
+  hosted-software:
+    name: Software encoders (hosted ubuntu-24.04, free)
+    if: inputs.only == '' || inputs.only == 'hosted-software'
+    needs: build-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: export-matrix-cli-linux
+          path: dist
+      - run: chmod +x dist/*
+
+      # lavapipe is the adapter here: this runner has no GPU, and the
+      # compositor readback the export reads its frames from needs *an*
+      # adapter. That is the point of this job - it is the software row of the
+      # table, and the one that runs on every pull of the nightly for free.
+      - name: Install GStreamer, the software Vulkan driver and xvfb
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*google*.list \
+                     /etc/apt/sources.list.d/*google*.sources \
+                     /etc/apt/sources.list.d/*microsoft*.list \
+                     /etc/apt/sources.list.d/*microsoft*.sources || true
+          sudo apt-get update || sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libgstreamer-plugins-bad1.0-0 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x \
+            gstreamer1.0-plugins-base-apps libasound2t64 libvulkan1 mesa-vulkan-drivers xvfb
+          gst-inspect-1.0 --version
+
+      - name: Fetch the sample project media
+        run: ./scripts/get-sample-media.sh
+
+      - name: The matrix
+        run: |
+          xvfb-run -a python3 scripts/export-matrix.py run \
+            --machine "hosted ubuntu-24.04 (software)" \
+            --cli ./dist/subordinate-cli \
+            --out target/export-matrix \
+            --source "sample::examples/sample-project/demo.sub::$SAMPLE_SEQUENCE::$SAMPLE_FRAMES"
+
+      - name: Job summary
+        if: always()
+        run: cat target/export-matrix/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: export-matrix-hosted-software
+          path: target/export-matrix
+          if-no-files-found: warn
+          retention-days: 30
+
+  # --------------------------------------------------------------------- box
+  # The AMD half of the matrix, and the machine that holds the user's 4K60
+  # footage: ~/test-media/meld-4k60-full.mkv on its own disk. box is free, so
+  # it also cuts the short excerpt the Windows jobs need - yodaddy has no AWS
+  # role and cannot read the S3 copy, and shipping ten seconds of it through an
+  # artifact costs nothing.
+  amd-linux:
+    name: AMD APU (box, self-hosted, Ubuntu 26.04)
+    if: inputs.only == '' || inputs.only == 'amd-linux' || inputs.only == 'amd-windows'
+    runs-on: [self-hosted, linux, box, amd-gpu]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Put the Rust toolchain on PATH
+        run: |
+          found=""
+          for d in "$HOME/.cargo/bin" /usr/local/cargo/bin /opt/rust/bin; do
+            if [ -x "$d/cargo" ]; then found=$d; break; fi
+          done
+          [ -n "$found" ] || { echo "::error::no cargo on this runner; install rustup for the runner user"; exit 1; }
+          echo "$found" >> "$GITHUB_PATH"
+
+      - name: Host, DRM and GStreamer facts
+        run: |
+          echo "runner=$RUNNER_NAME"
+          . /etc/os-release && echo "os=$PRETTY_NAME"
+          ls -l /dev/dri
+          gst-inspect-1.0 --version
+          ls /usr/share/vulkan/icd.d/*.json >/dev/null 2>&1 \
+            || { echo "::error::no Vulkan ICD on box: install mesa-vulkan-drivers"; exit 1; }
+
+      - name: Build subordinate-cli
+        run: cargo build -p subordinate-cli
+
+      - name: Fetch the sample project media
+        run: ./scripts/get-sample-media.sh
+
+      # The user's own footage. The full file stays where it is - only a few
+      # frames of it are ever rendered - and a ten-second copy is cut for the
+      # Windows machines. `-c copy` keeps all three audio tracks; without
+      # ffmpeg the job says so and the Windows jobs fall back to what they can
+      # reach themselves.
+      - name: The 4K60 source and the excerpt for the Windows jobs
+        id: uhd
+        run: |
+          set -o pipefail
+          full="$HOME/test-media/meld-4k60-full.mkv"
+          if [ ! -f "$full" ]; then
+            echo "::warning::$full is not on this runner; the 4K60 rows will be missing"
+            echo "have=no" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ls -l "$full"
+          echo "have=yes" >>"$GITHUB_OUTPUT"
+          mkdir -p target/uhd
+          if command -v ffmpeg >/dev/null 2>&1; then
+            ffmpeg -y -loglevel error -t 10 -i "$full" -map 0 -c copy \
+              target/uhd/meld-4k60-excerpt-10s.mkv
+            ls -l target/uhd/meld-4k60-excerpt-10s.mkv
+            echo "excerpt=yes" >>"$GITHUB_OUTPUT"
+          else
+            echo "::warning::no ffmpeg on box: no excerpt was cut for the Windows jobs"
+            echo "excerpt=no" >>"$GITHUB_OUTPUT"
+          fi
+          python3 scripts/export-matrix.py project \
+            --media "$full" --out target/uhd-project --sequence "UHD" --seconds 5 \
+            | tee target/uhd/project.json
+
+      - uses: actions/upload-artifact@v4
+        if: steps.uhd.outputs.excerpt == 'yes'
+        with:
+          name: meld-4k60-excerpt-10s
+          path: target/uhd/meld-4k60-excerpt-10s.mkv
+          retention-days: 1
+
+      - name: The matrix
+        run: |
+          sources="--source sample::examples/sample-project/demo.sub::$SAMPLE_SEQUENCE::$SAMPLE_FRAMES"
+          if [ "${{ steps.uhd.outputs.have }}" = "yes" ]; then
+            sources="$sources --source uhd::target/uhd-project/uhd.sub::UHD::$UHD_FRAMES"
+          fi
+          # shellcheck disable=SC2086
+          xvfb-run -a python3 scripts/export-matrix.py run \
+            --machine "AMD Cezanne APU (box)" \
+            --cli ./target/debug/subordinate-cli \
+            --out target/export-matrix \
+            $sources
+
+      - name: Job summary
+        if: always()
+        run: cat target/export-matrix/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: export-matrix-amd-linux
+          path: target/export-matrix
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ---------------------------------------------------------------- NVIDIA T4
+  nvidia-linux:
+    name: NVIDIA T4 (g4dn.xlarge, Ubuntu 24.04)
+    if: inputs.only == '' || inputs.only == 'nvidia-linux'
+    needs: build-linux
+    runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-linux
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: export-matrix-cli-linux
+          path: dist
+      - run: chmod +x dist/*
+
+      - name: Instance and GPU facts
+        run: |
+          echo "runner=$RUNNER_NAME"
+          curl -fsS -m 3 http://169.254.169.254/latest/meta-data/instance-life-cycle || true; echo
+          . /etc/os-release && echo "os=$PRETTY_NAME"
+          nvidia-smi
+
+      - name: Restore the apt archive cache
+        id: apt-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: export-matrix-apt-${{ hashFiles('.github/workflows/export-matrix.yml') }}
+
+      - name: Install GStreamer and the Vulkan loader (apt)
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*google*.list \
+                     /etc/apt/sources.list.d/*google*.sources \
+                     /etc/apt/sources.list.d/*microsoft*.list \
+                     /etc/apt/sources.list.d/*microsoft*.sources || true
+          sudo sed -i \
+            -e 's|https\?://archive.ubuntu.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g' \
+            -e 's|https\?://security.ubuntu.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          if [ -d ~/apt-archives ]; then sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/ 2>/dev/null || true; fi
+          sudo apt-get update || sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            -o APT::Keep-Downloaded-Packages=true \
+            libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libgstreamer-plugins-bad1.0-0 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x \
+            gstreamer1.0-plugins-base-apps libasound2t64 libvulkan1 xvfb
+          gst-inspect-1.0 --version
+          mkdir -p ~/apt-archives && sudo cp /var/cache/apt/archives/*.deb ~/apt-archives/ \
+            && sudo chown -R "$USER" ~/apt-archives
+
+      - name: Save the apt archive cache
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
+
+      - name: Fetch the sample project media
+        run: ./scripts/get-sample-media.sh
+
+      # The RunsOn instance role may read the private test-media bucket
+      # (TASK-140), which is why the 4K60 excerpt does not have to travel
+      # through an artifact here.
+      - name: Fetch the 4K60 excerpt from S3
+        id: uhd
+        run: |
+          mkdir -p target/media
+          if aws s3 cp s3://subordinate-test-media-731537225673/meld-4k60-excerpt-2min.mkv \
+               target/media/meld-4k60-excerpt-2min.mkv --no-progress; then
+            ls -l target/media/
+            python3 scripts/export-matrix.py project \
+              --media target/media/meld-4k60-excerpt-2min.mkv \
+              --out target/uhd-project --sequence "UHD" --seconds 5
+            echo "have=yes" >>"$GITHUB_OUTPUT"
+          else
+            echo "::warning::the instance role could not read the excerpt; the 4K60 rows will be missing"
+            echo "have=no" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: The matrix
+        run: |
+          sources="--source sample::examples/sample-project/demo.sub::$SAMPLE_SEQUENCE::$SAMPLE_FRAMES"
+          if [ "${{ steps.uhd.outputs.have }}" = "yes" ]; then
+            sources="$sources --source uhd::target/uhd-project/uhd.sub::UHD::$UHD_FRAMES"
+          fi
+          # x265 at 4K on four vCPU is minutes a cell and proves nothing this
+          # instance is for; box and the hosted job carry the software rows.
+          # shellcheck disable=SC2086
+          xvfb-run -a python3 scripts/export-matrix.py run \
+            --machine "NVIDIA T4 (g4dn.xlarge, Linux)" \
+            --cli ./dist/subordinate-cli \
+            --out target/export-matrix \
+            --no-software-for uhd \
+            $sources
+
+      - name: Job summary
+        if: always()
+        run: cat target/export-matrix/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: export-matrix-nvidia-linux
+          path: target/export-matrix
+          if-no-files-found: warn
+          retention-days: 30
+
+  nvidia-windows:
+    name: NVIDIA T4 (g4dn.xlarge, Windows Server 2022)
+    if: inputs.only == '' || inputs.only == 'nvidia-windows'
+    # Chained rather than parallel: one g4dn of this workflow's at a time.
+    needs: [build-windows, nvidia-linux]
+    runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-windows
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: export-matrix-cli-windows
+          path: dist
+
+      - name: Instance facts
+        run: |
+          "runner=$env:RUNNER_NAME"
+          (Get-CimInstance Win32_OperatingSystem).Caption
+          Get-CimInstance Win32_VideoController | Format-List Name, DriverVersion
+
+      # Verbatim from gpu-smoke.yml: the stock image has no NVIDIA driver and
+      # the AWS bucket is world-readable, so no credentials are involved. -s -n
+      # is silent and no reboot, which an ephemeral runner could not survive.
+      - name: Install NVIDIA driver (AWS public bucket, no reboot)
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bucket = "https://ec2-windows-nvidia-drivers.s3.amazonaws.com"
+          [xml]$list = (Invoke-WebRequest -UseBasicParsing "$bucket/?list-type=2&prefix=latest/").Content
+          $key = $list.ListBucketResult.Contents |
+                 Where-Object { $_.Key -like "*.exe" } |
+                 Sort-Object Key -Descending | Select-Object -First 1 -ExpandProperty Key
+          if (-not $key) { throw "no .exe under s3://ec2-windows-nvidia-drivers/latest/" }
+          $exe = Join-Path $env:RUNNER_TEMP (Split-Path $key -Leaf)
+          curl.exe -sS -L -o "$exe" "$bucket/$key"
+          if ($LASTEXITCODE -ne 0) { throw "driver download failed ($LASTEXITCODE)" }
+          $p = Start-Process -Wait -PassThru -FilePath $exe -ArgumentList "-s","-n"
+          if ($p.ExitCode -notin 0,1,1641,3010) { throw "driver install failed ($($p.ExitCode))" }
+          & "$env:SystemRoot\System32\nvidia-smi.exe"
+
+      - name: Install GStreamer (Windows, official installer)
+        run: |
+          $ver = $env:GST_VERSION
+          $exe = "gstreamer-1.0-msvc-x86_64-$ver.exe"
+          $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc/$exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          $dir = "C:\gstreamer\1.0\msvc_x86_64"
+          Start-Process -Wait -FilePath ".\$exe" -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/TYPE=devel","/ALLUSERS","/DIR=$dir"
+          "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Fetch the sample project media
+        run: ./scripts/get-sample-media.ps1
+
+      - name: Fetch the 4K60 excerpt from S3
+        id: uhd
+        run: |
+          New-Item -ItemType Directory -Force target\media | Out-Null
+          aws s3 cp s3://subordinate-test-media-731537225673/meld-4k60-excerpt-2min.mkv `
+            target\media\meld-4k60-excerpt-2min.mkv --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            "::warning::the instance role could not read the excerpt; the 4K60 rows will be missing"
+            "have=no" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          } else {
+            python scripts/export-matrix.py project `
+              --media target/media/meld-4k60-excerpt-2min.mkv `
+              --out target/uhd-project --sequence "UHD" --seconds 5
+            "have=yes" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          }
+
+      - name: The matrix
+        run: |
+          $sources = @(
+            "--source", "sample::examples/sample-project/demo.sub::$env:SAMPLE_SEQUENCE::$env:SAMPLE_FRAMES"
+          )
+          if ("${{ steps.uhd.outputs.have }}" -eq "yes") {
+            $sources += @("--source", "uhd::target/uhd-project/uhd.sub::UHD::$env:UHD_FRAMES")
+          }
+          python scripts/export-matrix.py run `
+            --machine "NVIDIA T4 (g4dn.xlarge, Windows Server 2022)" `
+            --cli dist\subordinate-cli.exe `
+            --out target\export-matrix `
+            --no-software-for uhd `
+            @sources
+
+      - name: Job summary
+        if: always()
+        run: |
+          if (Test-Path target\export-matrix\summary.md) {
+            Get-Content target\export-matrix\summary.md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: export-matrix-nvidia-windows
+          path: target/export-matrix
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ----------------------------------------------------------------- yodaddy
+  # The only AMF hardware this project can reach: the user's own Windows 11
+  # desktop. It is a daily-use machine, so this job is deliberately the
+  # smallest in the workflow - GStreamer per-user under LOCALAPPDATA if it is
+  # not already there, everything else under RUNNER_TEMP, and the work
+  # directory emptied at the end whatever happened.
+  amd-windows:
+    name: AMD RX 9070 XT (yodaddy, self-hosted, Windows 11)
+    if: inputs.only == '' || inputs.only == 'amd-windows'
+    needs: [build-windows, amd-linux]
+    runs-on: [self-hosted, windows, yodaddy, amd-gpu]
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: export-matrix-cli-windows
+          path: dist
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: meld-4k60-excerpt-10s
+          path: ${{ runner.temp }}\media
+
+      - name: Host and GPU facts
+        run: |
+          "runner=$env:RUNNER_NAME"
+          (Get-CimInstance Win32_OperatingSystem).Caption
+          Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion | Format-Table -AutoSize | Out-String -Width 120
+
+      - name: Install GStreamer per-user if missing
+        run: |
+          $dir = "$env:LOCALAPPDATA\gstreamer\1.0\msvc_x86_64"
+          if (-not (Test-Path "$dir\bin\gst-inspect-1.0.exe")) {
+            $ProgressPreference = 'SilentlyContinue'
+            $name = "gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.exe"
+            $exe = "$env:RUNNER_TEMP\$name"
+            Invoke-WebRequest -UseBasicParsing -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc/$name" -OutFile $exe
+            $p = Start-Process -Wait -PassThru -FilePath $exe -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/CURRENTUSER","/TYPE=devel","/DIR=$dir"
+            "installer exit $($p.ExitCode)"
+            Remove-Item $exe -ErrorAction SilentlyContinue
+          } else { "already installed" }
+          "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Python is present
+        run: |
+          $py = Get-Command python -ErrorAction SilentlyContinue
+          if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+          if (-not $py) {
+            Write-Output "::error::no python on yodaddy: install Python 3 for the runner user (winget install Python.Python.3.12)"
+            exit 1
+          }
+          "PY=$($py.Source)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          & $py.Source --version
+
+      - name: Fetch the sample project media
+        run: ./scripts/get-sample-media.ps1
+
+      - name: The 4K60 source
+        id: uhd
+        run: |
+          $media = "$env:RUNNER_TEMP\media\meld-4k60-excerpt-10s.mkv"
+          if (-not (Test-Path $media)) {
+            Write-Output "::warning::box cut no excerpt for this job; the 4K60 rows will be missing"
+            "have=no" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          } else {
+            & $env:PY scripts/export-matrix.py project --media $media `
+              --out "$env:RUNNER_TEMP\uhd-project" --sequence "UHD" --seconds 5
+            "have=yes" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          }
+
+      - name: The matrix
+        run: |
+          $sources = @(
+            "--source", "sample::examples/sample-project/demo.sub::$env:SAMPLE_SEQUENCE::$env:SAMPLE_FRAMES"
+          )
+          if ("${{ steps.uhd.outputs.have }}" -eq "yes") {
+            $sources += @("--source", "uhd::$env:RUNNER_TEMP\uhd-project\uhd.sub::UHD::$env:UHD_FRAMES")
+          }
+          & $env:PY scripts/export-matrix.py run `
+            --machine "AMD RX 9070 XT (yodaddy, Windows 11)" `
+            --cli dist\subordinate-cli.exe `
+            --out "$env:RUNNER_TEMP\export-matrix" `
+            @sources
+
+      - name: Job summary
+        if: always()
+        run: |
+          $summary = "$env:RUNNER_TEMP\export-matrix\summary.md"
+          if (Test-Path $summary) {
+            Get-Content $summary | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: export-matrix-amd-windows
+          path: ${{ runner.temp }}\export-matrix
+          if-no-files-found: warn
+          retention-days: 30
+
+      # This is someone's desktop: leave nothing behind.
+      - name: Clean up
+        if: always()
+        run: |
+          foreach ($p in @("$env:RUNNER_TEMP\export-matrix", "$env:RUNNER_TEMP\uhd-project", "$env:RUNNER_TEMP\media")) {
+            Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+          }
+          Get-ChildItem $env:RUNNER_TEMP | Select-Object Name, Length | Format-Table -AutoSize | Out-String -Width 120
+
+  # ------------------------------------------------------------- GUI vs CLI
+  # The editor's own export runner against the CLI's, on a machine with a real
+  # GPU and a real desktop (TASK-143 AC 3). The desktop image carries the
+  # released AppImage, its bundled GStreamer 1.28 and the 4K60 clip, so nothing
+  # is built or downloaded here - everything this job runs is what a user's
+  # install would run.
+  gui-vs-cli:
+    name: GUI export against CLI export (desktop image, Xorg on :0)
+    if: inputs.only == '' || inputs.only == 'gui-vs-cli'
+    needs: nvidia-windows
+    runs-on: runs-on=${{ github.run_id }}/${{ inputs.desktop_runner || 'runner=gpu-nvidia-desktop-linux' }}
+    timeout-minutes: 30
+    env:
+      DISPLAY: ':0'
+      XAUTHORITY: /run/subordinate/Xauthority
+      SUBORDINATE_ENDPOINT_DIR: /tmp/subordinate-endpoint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instance, image and GPU facts
+        run: |
+          echo "runner=$RUNNER_NAME ami=${RUNS_ON_AMI_ID:-unknown}"
+          . /etc/os-release && echo "os=$PRETTY_NAME"
+          echo "release baked in: $(cat /opt/subordinate/RELEASE_TAG)"
+          nvidia-smi
+          systemctl is-active subordinate-xorg.service
+          /usr/local/bin/subordinate-wait-for-display
+
+      # The AppImage's own GStreamer, reached through the image's wrappers:
+      # there is no system GStreamer on this machine at all.
+      - name: What this build can encode with
+        run: |
+          mkdir -p target/gui-vs-cli
+          python3 scripts/export-matrix.py discover \
+            --cli /usr/local/bin/subordinate-cli \
+            --gst-prefix subordinate- \
+            --out target/gui-vs-cli/discovery.json >/dev/null
+          python3 -c "import json;d=json.load(open('target/gui-vs-cli/discovery.json'));[print(e['element'], e['present'], e['ready'], e['deranked']) for e in d['encoders']]"
+
+      - name: A project around the baked-in 4K60 clip
+        id: project
+        run: |
+          media=$(ls /opt/subordinate/test-media/* | head -n1)
+          echo "media=$media"
+          python3 scripts/export-matrix.py project \
+            --media "$media" --out "$RUNNER_TEMP/uhd-project" --sequence "UHD" \
+            --seconds 4 --gst-prefix subordinate- | tee target/gui-vs-cli/project.json
+          echo "project=$RUNNER_TEMP/uhd-project/uhd.sub" >>"$GITHUB_OUTPUT"
+
+      # Two runs of the same comparison, because which encoder the editor picks
+      # is not a Command API parameter: it is the automatic order, and
+      # GST_PLUGIN_FEATURE_RANK is what moves an element within it. Hardware
+      # encoders ship ranked NONE, so the default order lands on x264enc;
+      # ranking nvh264enc primary puts NVENC in front of it.
+      - name: GUI against CLI, nvh264enc
+        run: ./scripts/gui-vs-cli.sh nvh264enc "${{ steps.project.outputs.project }}" primary
+
+      - name: GUI against CLI, x264enc
+        run: ./scripts/gui-vs-cli.sh x264enc "${{ steps.project.outputs.project }}" none
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## GUI-path export against the CLI export (desktop image)"
+            echo
+            for f in target/gui-vs-cli/*/summary.md; do
+              [ -f "$f" ] && sed -n '3,$p' "$f"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: export-matrix-gui-vs-cli
+          path: target/gui-vs-cli
+          if-no-files-found: warn
+          retention-days: 30
