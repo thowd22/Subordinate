@@ -211,3 +211,31 @@ gh workflow run desktop-flows.yml --ref main -f only=linux-clicks
 gh workflow run desktop-flows.yml --ref my-branch \
   -f linux_runner=ami=ami-08dbaf8367717a9a3/family=g4dn.xlarge/spot=false
 ```
+
+## Fresh-project regression coverage
+
+Both routine flows launch the editor without a project file. The clicks flow
+checks each track context menu on an empty timeline (undoing back to empty),
+imports an external file through the native chooser before saving, and drops
+it onto the empty timeline to create its first sequence and video track.
+The MCP flow calls `project.new`, imports `{external: absolutePath}` media,
+and creates the sequence and tracks through commands. Both retain their edit
+and export checks and verify media references and timeline edits after the
+first save and reopen. No staged project or copied source media masks first use.
+
+`FLOW_REQUESTED_REF` identifies the checkout, `FLOW_TESTED_REF` the current
+artifact, and `FLOW_INSTALLED_RELEASE` the image's unused baked application.
+Hosted builders produce the editor, CLI, MCP bridge and focused test binaries
+from the same SHA. Binary hashes and the SHA are checked before any test runs.
+The Windows artifact includes its GStreamer runtime; Linux uses the matching
+Ubuntu runtime. The image supplies the isolated desktop and test media only.
+
+Routine hardware/nightly/release runs include noninteractive `box` and
+`yodaddy` jobs. They execute the real egui application harness tests
+`empty_timeline_drop`, `empty_track_menu`, `media_import_app`, and the MCP stdio
+import/save/reopen regression. They create temporary configuration and endpoint
+directories, inject no desktop input, and do not open the user's editor. Missing
+GPU adapters and missing test filters fail rather than silently pass. Use
+`only=regressions` for just these two free runner jobs (or `box`/`yodaddy` for
+one); the native clicks/MCP flows continue on isolated paid desktop instances.
+No compilation happens on paid instances or the user's machines.

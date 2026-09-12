@@ -5,7 +5,7 @@ status: Done
 assignee:
   - codex
 created_date: '2026-09-12 21:31'
-updated_date: '2026-09-12 21:36'
+updated_date: '2026-09-12 22:01'
 labels: []
 dependencies: []
 priority: high
@@ -38,6 +38,8 @@ Reproduce empty-project and pointer drag paths, implement the smallest coherent 
 User confirmed the floating clip label follows the pointer but dropping creates no track. Assembled-editor pointer regression reproduces the fresh-project failure before changes: zero sequences after drop. Scope includes no sequence and an existing sequence with zero tracks, with one-step undo and redo preserving imported media and edit identities.
 
 Implemented gesture-only bootstrap using InsertSequence/InsertTrack and clip placement in one command group. Existing populated tracks keep prior refusal rules. Real assembled-window pointer regression failed before and passes after; it covers absent and existing-empty sequence, Undo and Redo. Six existing bin-edit interaction/snapshot tests and six source-edit unit tests pass. All-target sub-ui clippy with warnings denied and workspace formatting pass. No EC2 jobs used.
+
+User also reproduced Add video track and Add audio track menu actions doing nothing. Added a real context-menu regression that failed with zero sequences before the fix and passes after, including Undo and Redo for both kinds. Menu actions now bootstrap the missing sequence as a single edit before the inactive-tab guard.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

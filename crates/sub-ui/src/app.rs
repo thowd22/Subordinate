@@ -113,13 +113,8 @@ pub const PROJECT_EXTENSION: &str = "sub";
 /// card of twenty rushes is undone with one press (TASK-136).
 pub const IMPORT_GROUP_LABEL: &str = "Import media";
 
-/// Why an import into a project that has never been saved is refused.
-///
-/// Media paths are stored relative to the project file, so a project with no
-/// file has nothing for an imported path to be relative to. This is the same
-/// rule that holds the Export button closed, said for import.
-pub const NO_IMPORT_REASON: &str =
-    "Save the project to a file before importing: its media is named relative to it";
+/// Why an import cannot initialize its working directory.
+pub const NO_IMPORT_REASON: &str = "The media working directory could not be initialized";
 
 /// What one frame's panels asked the engine to do.
 ///
@@ -166,15 +161,8 @@ fn is_yes(value: &str) -> bool {
 /// line. Anything after the colon is diagnostics.
 pub const UI_SMOKE_READY: &str = "ui-smoke ready";
 
-/// Why the export panel's Export button is held closed for an unsaved project.
-///
-/// Everything else an export needs is here: the panel, the job, and the
-/// compositor readback and offline mix behind [`export_sources`]. What a
-/// project that has never been written to a file lacks is a folder for its
-/// media paths to resolve against — clips name their media relative to the
-/// project file — so there is nothing for a decoder to open.
-pub const NO_RENDERER_REASON: &str =
-    "Save the project to a file before exporting: its media is named relative to it";
+/// Why the export working directory is unavailable.
+pub const NO_RENDERER_REASON: &str = "The export working directory could not be initialized";
 
 /// Options for launching the application.
 #[derive(Debug, Clone, Default)]
@@ -322,14 +310,11 @@ impl ProjectState {
 struct MediaHost {
     /// The imports and their follow-up thumbnail and waveform jobs.
     ///
-    /// `None` until the project has a file, because an imported path is
-    /// stored relative to that file and a sidecar folder is named after it.
-    /// Rebuilt whenever the project folder changes, so a Save As moves later
-    /// imports with it.
+    /// Created on the first import and retained through Save As, so in-flight
+    /// work keeps its source references and is not discarded by saving.
     queue: Option<ImportQueue>,
-    /// The project folder `queue` was built for, so the rebuild happens
-    /// exactly when the folder moves.
-    dir: Option<PathBuf>,
+    /// The project owning the queue; changing projects cancels stale imports.
+    project: Option<sub_model::ProjectId>,
     /// The relink dialog, open for one item or for every offline one.
     relink: RelinkDialog,
     /// What the last import or relink got wrong, newest last. Shown in the
@@ -342,7 +327,7 @@ impl MediaHost {
     fn new() -> Self {
         Self {
             queue: None,
-            dir: None,
+            project: None,
             relink: RelinkDialog::new(),
             problems: Vec::new(),
         }
@@ -504,7 +489,7 @@ pub struct SubordinateApp {
     /// have got (see [`crate::host_services`]).
     host: Arc<GuiHost>,
     /// Last file context published by the GUI (socket open/save updates the bridge directly).
-    host_file: Option<(u64, Option<PathBuf>)>,
+    host_file: Option<(u64, sub_model::ProjectId, Option<PathBuf>)>,
 }
 
 impl SubordinateApp {
@@ -692,6 +677,7 @@ impl SubordinateApp {
     fn sync_host_file(&mut self) {
         let file = (
             self.session.generation(),
+            self.session.project_arc().id,
             self.session.project_file().map(Path::to_path_buf),
         );
         if self.host_file.as_ref() != Some(&file) {
@@ -1483,11 +1469,7 @@ impl SubordinateApp {
         let project_dir = self.project_dir();
         self.previews.set_playing(self.scheduler.is_playing());
         self.previews.set_media_use(self.viewer.media_use());
-        self.previews.set_cache_dir(
-            self.session
-                .project_file()
-                .and_then(|file| sub_edit::autosave::sidecar_dir(file).ok()),
-        );
+        self.previews.set_cache_dir(Some(self.media_cache_dir()));
         let pictures = self.previews.pictures(
             &self.render,
             &self.jobs,
@@ -1699,16 +1681,13 @@ impl SubordinateApp {
 
     /// The folder a clip's relative media path resolves against.
     ///
-    /// That is the folder the project file itself lives in, so a project that
-    /// has never been saved has none and cannot be exported
-    /// ([`NO_RENDERER_REASON`]).
+    /// Unsaved projects use a draft directory for derived data; imported source
+    /// references are absolute and do not depend on that directory.
     fn project_dir(&self) -> Option<PathBuf> {
-        let file = self.session.project_file()?;
-        let folder = file.parent().unwrap_or(Path::new("."));
-        // Absolute, because the decoders open a URI and GStreamer takes no
-        // relative path. Plain, because on Windows `canonicalize` answers with
-        // a verbatim `\\?\C:\...` path, which GLib will not turn into a
-        // `file://` URI and which matches nothing a file dialog hands back.
+        let folder = match self.session.project_file() {
+            Some(file) => file.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            None => draft_project_dir(self.session.project_arc().id)?,
+        };
         std::fs::canonicalize(folder)
             .ok()
             .map(sub_model::plain_path)
@@ -1716,15 +1695,10 @@ impl SubordinateApp {
 
     /// Drains the running export's events into the panel. Once a frame.
     ///
-    /// The Export button's availability is refreshed here too: a project only
-    /// becomes exportable once it has a file of its own to resolve its media
-    /// against, which saving it gives it.
+    /// The Export button follows working-directory availability, including
+    /// the draft directory used before the first Save.
     fn poll_export(&mut self) -> bool {
-        let unavailable = self
-            .session
-            .project_file()
-            .is_none()
-            .then_some(NO_RENDERER_REASON);
+        let unavailable = self.project_dir().is_none().then_some(NO_RENDERER_REASON);
         let export = &mut self.export;
         export.panel.set_unavailable(unavailable);
         export.runner.poll(&mut export.panel) > 0
@@ -1814,28 +1788,40 @@ impl SubordinateApp {
     /// Makes sure the import queue matches the project as it stands, and
     /// says whether this project can be imported into at all.
     ///
-    /// False for a project that has never been saved: an imported path is
-    /// stored relative to the project file, so there is nothing to be relative
-    /// to and nowhere to put the thumbnail and waveform sidecars.
+    /// Imports keep external source references; a draft directory holds derived
+    /// data until a project file exists. Save As does not replace active jobs.
     fn ready_to_import(&mut self) -> bool {
-        let Some(file) = self.session.project_file().map(Path::to_path_buf) else {
-            return false;
-        };
-        let (Some(dir), Ok(cache)) = (self.project_dir(), sub_edit::autosave::sidecar_dir(&file))
-        else {
-            return false;
-        };
-        if self.media.dir.as_ref() != Some(&dir) {
-            // A queue built for the old folder would express new imports
-            // relative to it, so it is replaced rather than reused. Anything
-            // it still had in flight is asked to stop.
+        let project = self.session.project_arc().id;
+        if self.media.project != Some(project) {
             if let Some(stale) = self.media.queue.take() {
                 stale.cancel_all();
             }
-            self.media.queue = Some(ImportQueue::new(&dir, cache));
-            self.media.dir = Some(dir);
+            let Some(dir) = self.project_dir() else {
+                return false;
+            };
+            let cache = self.media_cache_dir();
+            self.media.queue = Some(ImportQueue::new(&dir, cache).with_options(
+                crate::media_import::ImportOptions {
+                    external_sources: true,
+                    ..Default::default()
+                },
+            ));
+            self.media.project = Some(project);
         }
         self.media.queue.is_some()
+    }
+
+    /// Derived media data needs a location even before the first Save.
+    fn media_cache_dir(&self) -> PathBuf {
+        self.session
+            .project_file()
+            .and_then(|file| sub_edit::autosave::sidecar_dir(file).ok())
+            .unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("subordinate-drafts")
+                    .join(self.session.project_arc().id.to_string())
+                    .join("cache")
+            })
     }
 
     /// Drains the finished imports and the relink search into the project.
@@ -1844,6 +1830,16 @@ impl SubordinateApp {
     /// Returns whether anything happened, so the window knows to repaint while
     /// a job is still running.
     fn poll_media(&mut self) -> bool {
+        if self
+            .media
+            .project
+            .is_some_and(|id| id != self.session.project_arc().id)
+        {
+            if let Some(stale) = self.media.queue.take() {
+                stale.cancel_all();
+            }
+            self.media = MediaHost::new();
+        }
         let mut busy = false;
         // The borrow on the queue ends with this block, because applying what
         // it produced goes through the session and the bin.
@@ -1963,6 +1959,7 @@ impl SubordinateApp {
             self.sync_project();
         }
         let Some(sequence) = self.tabs.active() else {
+            self.bootstrap_track_actions(&response);
             return;
         };
         self.apply_track_actions(sequence, &response);
@@ -2004,6 +2001,36 @@ impl SubordinateApp {
         }
         for action in response.marker_actions {
             let _ = self.session.apply_boxed(action.into_command(sequence));
+        }
+    }
+
+    /// Creates the missing sequence only when an empty-timeline menu adds a lane.
+    fn bootstrap_track_actions(&mut self, response: &TimelineResponse) {
+        for action in &response.actions {
+            let crate::track_header::TrackAction::Add { kind, index } = action else {
+                continue;
+            };
+            let sequence = self.sequence.clone();
+            let name = match kind {
+                sub_model::TrackKind::Video => "Video",
+                sub_model::TrackKind::Audio => "Audio",
+            };
+            let commands: Vec<sub_edit::BoxedCommand> = vec![
+                Box::new(sub_edit::commands::InsertSequence::new(
+                    self.session.project().sequences.len(),
+                    sequence.clone(),
+                )),
+                Box::new(sub_edit::commands::InsertTrack::new(
+                    sequence.id,
+                    *index,
+                    sub_model::Track::new(name, *kind),
+                )),
+            ];
+            let _ = self
+                .session
+                .apply_group(format!("Add {name} track"), commands);
+            self.sync_project();
+            break;
         }
     }
 
@@ -2646,6 +2673,15 @@ fn grain_duration(settings: ScrubSettings) -> Duration {
     }
     let nanos = numerator.saturating_mul(1_000_000_000) / denominator;
     Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+}
+
+/// Working directory for derived data before a project has a user-chosen file.
+pub(crate) fn draft_project_dir(project: sub_model::ProjectId) -> Option<PathBuf> {
+    let dir = std::env::temp_dir()
+        .join("subordinate-drafts")
+        .join(project.to_string());
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::canonicalize(dir).ok().map(sub_model::plain_path)
 }
 
 #[cfg(test)]

@@ -48,13 +48,17 @@ runs:
         $dest = 'C:\SubordinateTest\desktop'
         Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
         Copy-Item scripts\desktop $dest -Recurse
-        # The MSI has not always carried the bridge; the hosted job built one.
-        $installed = 'C:\Program Files\Subordinate\bin\subordinate-mcp.exe'
-        if (-not (Test-Path $installed)) {
-          New-Item -ItemType Directory -Force -Path C:\SubordinateTest\bin | Out-Null
-          Copy-Item mcp\subordinate-mcp.exe C:\SubordinateTest\bin\subordinate-mcp.exe -Force
-          'staged subordinate-mcp.exe from the hosted build'
-        }
+        $current = 'C:\SubordinateTest\current'
+        New-Item -ItemType Directory -Force $current | Out-Null
+        Copy-Item dist\* $current -Recurse -Force
+        $manifest = Get-Content "$current\build-info.json" -Raw | ConvertFrom-Json
+        if ($manifest.sha -ne $env:GITHUB_SHA) { throw 'application artifact does not match requested commit' }
+        $env:PATH = "$current\runtime\bin;$env:PATH"
+        $env:GST_PLUGIN_PATH = "$current\runtime\lib\gstreamer-1.0"
+        $env:GST_PLUGIN_SYSTEM_PATH = $env:GST_PLUGIN_PATH
+        $env:GST_PLUGIN_SCANNER = (Get-ChildItem "$current\runtime\libexec" -Filter gst-plugin-scanner.exe -Recurse | Select-Object -First 1).FullName
+        & "$current\python\python.exe" scripts/desktop/run-regressions.py $current
+        if ($LASTEXITCODE) { throw 'first-use regressions failed' }
         Remove-Item C:\SubordinateTest\flow-out -Recurse -Force -ErrorAction SilentlyContinue
         Get-ChildItem $dest -Recurse -File | Select-Object FullName, Length |
           Format-Table -AutoSize | Out-String -Width 200
@@ -64,16 +68,26 @@ runs:
       run: |
         $ErrorActionPreference = 'Stop'
         Import-Module C:\SubordinateTest\bin\InteractiveSession.psm1
-        $bridge = 'C:\Program Files\Subordinate\bin\subordinate-mcp.exe'
-        if (-not (Test-Path $bridge)) { $bridge = 'C:\SubordinateTest\bin\subordinate-mcp.exe' }
+        $current = 'C:\SubordinateTest\current'
+        $bridge = "$current\subordinate-mcp.exe"
         $settings = @{
+          FLOW_TESTED_REF = $env:GITHUB_SHA
+          SUBORDINATE_INSTANCE = 'desktop-current'
+          SUBORDINATE_ENDPOINT_DIR = 'C:\SubordinateTest\current-endpoint'
+          SUBORDINATE_CLI = "$current\subordinate-cli.exe"
+          PATH = "$current\runtime\bin;$env:PATH"
+          GST_PLUGIN_PATH = "$current\runtime\lib\gstreamer-1.0"
+          GST_PLUGIN_SYSTEM_PATH = "$current\runtime\lib\gstreamer-1.0"
+          GST_PLUGIN_SCANNER = (Get-ChildItem "$current\runtime\libexec" -Filter gst-plugin-scanner.exe -Recurse | Select-Object -First 1).FullName
+          FLOW_REQUESTED_REF = $env:GITHUB_SHA
+          FLOW_INSTALLED_RELEASE = (Get-Content C:\SubordinateTest\image.json -Raw | ConvertFrom-Json).release
           FLOW_OUT        = 'C:\SubordinateTest\flow-out'
           FLOW_WORK       = 'C:\SubordinateTest\flow-project'
           FLOW_MEDIA      = (Get-ChildItem C:\SubordinateTest\*.mkv, C:\SubordinateTest\test-media\*.mkv -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-          FLOW_EDITOR     = 'C:\Program Files\Subordinate\bin\subordinate.exe'
-          FLOW_CLI        = 'C:\Program Files\Subordinate\bin\subordinate-cli.exe'
+          FLOW_EDITOR     = "$current\subordinate.exe"
+          FLOW_CLI        = "$current\subordinate-cli.exe"
           FLOW_MCP        = $bridge
-          FLOW_DISCOVERER = 'C:\Program Files\Subordinate\bin\gst-discoverer-1.0.exe'
+          FLOW_DISCOVERER = "$current\runtime\bin\gst-discoverer-1.0.exe"
           FLOW_PRESET     = ($env:FLOW_PRESET ? $env:FLOW_PRESET : 'youtube-1080p')
           FLOW_ENCODER    = ($env:FLOW_ENCODER ? $env:FLOW_ENCODER : 'nvh264enc')
           # The Direct3D H.264 decoders stall on the baked 4K60 clip: the

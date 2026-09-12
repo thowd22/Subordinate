@@ -305,13 +305,12 @@ fn the_window_exports_the_sample_project_to_a_playable_file() {
 }
 
 #[test]
-fn an_unsaved_project_says_why_it_cannot_be_exported() {
+fn an_unsaved_project_has_a_working_directory_for_external_media() {
     if !support::can_render() {
         return;
     }
-    // A window with no project file: its clips would name media relative to a
-    // folder that does not exist, so the Export button is held closed rather
-    // than starting an export that could only fail.
+    // External source references and a draft working directory remove the
+    // save-first gate; ordinary sequence/encoder validation still applies.
     let mut harness = support::builder::<SubordinateApp>()
         .with_size(WINDOW_SIZE)
         .build_eframe(|cc| {
@@ -320,8 +319,8 @@ fn an_unsaved_project_says_why_it_cannot_be_exported() {
     support::run_settled(&mut harness);
     assert_eq!(
         harness.state_mut().export_panel().unavailable(),
-        Some(sub_ui::app::NO_RENDERER_REASON),
-        "an unsaved project offers an Export button that could only fail"
+        None,
+        "Save must not gate exports whose external media already resolves"
     );
 }
 

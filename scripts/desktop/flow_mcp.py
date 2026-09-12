@@ -21,18 +21,10 @@ Environment (all optional, and the workflow sets them):
 | `FLOW_ENCODER` | the encoder element the export must use (default `nvh264enc`) |
 | `FLOW_DISCOVERER` | the `gst-discoverer-1.0` that validates the output |
 
-**Why the render is a second bridge session.** Every edit below lands in the
-window on screen: the editor binds the Command API at startup and the bridge
-connects to it, with `SUBORDINATE_MCP_NO_LAUNCH=1` so a session that cannot
-reach the window fails instead of quietly editing a project nobody can see.
-The `export.*` family, though, is served by the *process* that owns the
-decoders and the encoder (docs/schema/host-api.json), and only
-`subordinate-cli serve` installs it - the editor's endpoint serves the engine's
-own methods and the plugin methods, and answers `core.method_not_found` for
-`export.render`. So the flow saves the project the window is holding and makes
-its last two calls through a second bridge, on a scratch instance of its own,
-against the file it just wrote. It is still MCP and nothing else; it is simply
-the only process on the machine that serves an export.
+The editing session starts without a project file. Import uses an explicit
+external reference, then the flow creates tracks, edits, saves and reopens.
+The final export uses a separate headless bridge after closing the editor so
+hardware decoder contention does not distort the export measurement.
 """
 
 from __future__ import annotations
@@ -42,6 +34,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -66,20 +59,27 @@ def run(run: flowlib.Run) -> None:
     encoder = _env("FLOW_ENCODER", "nvh264enc")
     discoverer = _env("FLOW_DISCOVERER", "subordinate-gst-discoverer")
 
-    with run.step("stage the project folder") as step:
-        staged = flowlib.stage(work, media, cli)
-        step.note(
-            project=str(staged.project),
-            media=staged.media_relative,
-            sequence=staged.sequence,
-            track=staged.video_track,
-            frame_rate=staged.frame_rate,
-        )
+    with run.step("prepare a fresh unsaved project") as step:
+        work = work.resolve()
+        work.mkdir(parents=True, exist_ok=True)
+        project = work / ("flow-" + flowlib.uuid7() + ".sub")
+        media = media.resolve(strict=True)
+        staged = SimpleNamespace(directory=work, project=project, media=media,
+                                 sequence=None, video_track=None,
+                                 frame_rate={"numerator": 24, "denominator": 1})
+        if project.exists():
+            raise AssertionError("the flow must start before the first save")
+        step.note(project=str(project), external_media=str(media),
+                  editor=editor, cli=cli, mcp=mcp,
+                  requested_ref=os.environ.get("FLOW_REQUESTED_REF", "local"),
+                  installed_release=os.environ.get("FLOW_INSTALLED_RELEASE", "unknown"),
+                  tested_ref=os.environ.get("FLOW_TESTED_REF", "unknown"),
+                  provenance="current artifact" if os.environ.get("FLOW_TESTED_REF") else "unverified local/baked binaries")
 
     app_log = out / "editor.log"
     with run.step("launch the editor on the desktop") as step:
         started = run.session.launch(
-            [editor, str(staged.project)], log=app_log, cwd=str(staged.directory)
+            [editor], log=app_log, cwd=str(staged.directory)
         )
         window = run.session.wait_for_title(WINDOW, timeout=180)
         window = run.session.maximize(window)
@@ -97,7 +97,8 @@ def run(run: flowlib.Run) -> None:
     # be a real 4K60 decode and short enough that the render is seconds.
     length = int(round(fps * 4))
     cut = int(round(fps * 2))
-    item = flowlib.media_item(staged.media.name, staged.media_relative)
+    item = flowlib.media_item(staged.media.name, "unused")
+    item["path"] = {"external": str(staged.media)}
     piece = flowlib.clip("Meld", item["id"], 0, length, rate)
 
     with run.step("connect the bridge to the editor's own endpoint") as step:
@@ -110,9 +111,10 @@ def run(run: flowlib.Run) -> None:
         )
         step.note(connection=bridge.connection)
     try:
-        with run.step("project.new and project.open through the bridge") as step:
+        with run.step("project.new without opening or saving a file") as step:
             bridge.call("project.new", {"name": "Desktop MCP flow"})
-            bridge.call("project.open", {"path": str(staged.project)})
+            if _project(bridge.call("project.get", {})).get("sequences"):
+                raise AssertionError("project.new must start with no sequences")
             state = bridge.call("project.get", {})
             step.note(connection=bridge.connection, project=_name_of(state))
 
@@ -123,6 +125,18 @@ def run(run: flowlib.Run) -> None:
             if item["id"] not in names:
                 raise AssertionError(f"the imported item is not in media.list: {names[:400]}")
             step.note(media=item["id"], path=item["path"])
+
+        with run.step("create the first sequence and tracks through MCP") as step:
+            bridge.call("sequence.create", {"name": "Main", "settings": {
+                "resolution": {"width": 1920, "height": 1080},
+                "frame_rate": rate, "sample_rate": 48000, "color": flowlib.COLOR}})
+            sequence = _project(bridge.call("project.get", {}))["sequences"][0]
+            staged.sequence = sequence["id"]
+            for name, kind in (("V1", "video"), ("A1", "audio")):
+                bridge.call("track.add", {"sequence": staged.sequence, "name": name, "kind": kind})
+            tracks = _find_tracks(bridge.call("timeline.get_state", {"sequence": staged.sequence}))
+            staged.video_track = next(t["id"] for t in tracks if t["kind"] == "video")
+            step.note(sequence=staged.sequence, tracks=len(tracks))
 
         with run.step("timeline.add_clip") as step:
             bridge.call(
@@ -156,7 +170,14 @@ def run(run: flowlib.Run) -> None:
 
         with run.step("project.save, so the render sees the edit") as step:
             bridge.call("project.save", {"path": str(staged.project)})
-            step.note(bytes=staged.project.stat().st_size)
+            bridge.call("project.new", {"name": "Reopen check"})
+            bridge.call("project.open", {"path": str(staged.project)})
+            listed = bridge.call("media.list", {})
+            if str(staged.media) not in _external_paths(listed):
+                raise AssertionError("save/reopen lost the external media reference")
+            if len(_clips(bridge, staged.sequence)) != 2:
+                raise AssertionError("save/reopen lost the timeline edit")
+            step.note(bytes=staged.project.stat().st_size, media=listed)
 
         with run.step("the window still holds what the agent edited") as step:
             window = run.session.wait_for_title(WINDOW, timeout=30)
@@ -165,8 +186,7 @@ def run(run: flowlib.Run) -> None:
     finally:
         bridge.close()
 
-    # The render is a process of its own either way - the editor does not serve
-    # the export family - and the editor is closed before it starts because on
+    # Close the editor before the headless export because on
     # Windows the two compete for the GPU's decoder: with the window still open
     # on the same 4K60 clip, the export managed one frame in fifteen minutes
     # (run 34672165182), and finished in seconds once it had the machine to
@@ -235,6 +255,19 @@ def run(run: flowlib.Run) -> None:
             )
 
     run.session.stop(started)
+
+
+def _external_paths(value):
+    if isinstance(value, dict):
+        result = [value["external"]] if isinstance(value.get("external"), str) else []
+        return result + [path for child in value.values() for path in _external_paths(child)]
+    if isinstance(value, list):
+        return [path for child in value for path in _external_paths(child)]
+    return []
+
+
+def _project(state):
+    return state.get("project", state)
 
 
 def _name_of(state) -> str:

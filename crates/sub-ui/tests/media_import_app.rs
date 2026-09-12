@@ -193,7 +193,11 @@ fn importing_from_the_bin_probes_off_the_ui_thread_and_lands_as_one_undo_step() 
 
     let project = project_of(harness.state());
     let bars = imported(&project, MP4).expect("the H.264 fixture imported");
-    assert_eq!(bars.path.as_str(), "footage/bars_1080p_h264.mp4");
+    assert!(bars.path.is_external());
+    assert_eq!(
+        std::fs::canonicalize(bars.path.resolve(Path::new("unused"))).unwrap(),
+        std::fs::canonicalize(&files[0]).unwrap()
+    );
     assert!(bars.hash.is_some(), "the bytes were hashed");
     assert!(!bars.offline);
     assert_eq!(project.bin_of(bars.id), Some(root), "filed in the open bin");
@@ -214,7 +218,11 @@ fn importing_from_the_bin_probes_off_the_ui_thread_and_lands_as_one_undo_step() 
 
     // The MKV: the container the v0.1.0 report was about.
     let vfr = imported(&project, MKV).expect("the Matroska fixture imported");
-    assert_eq!(vfr.path.as_str(), "footage/vfr_60_30.mkv");
+    assert!(vfr.path.is_external());
+    assert_eq!(
+        std::fs::canonicalize(vfr.path.resolve(Path::new("unused"))).unwrap(),
+        std::fs::canonicalize(&files[1]).unwrap()
+    );
     assert!(vfr.hash.is_some());
     let vfr_info = vfr.info.as_ref().expect("the MKV was probed");
     assert_eq!(
@@ -426,4 +434,89 @@ fn relinking_from_the_bin_searches_as_a_job_and_clears_the_offline_badge() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unsaved_import_preview_and_first_save_keep_sources_and_pending_jobs() {
+    if !support::can_render() {
+        return;
+    }
+    let (Some(video), Some(audio)) = (fixture(MP4), fixture("tone_48k_stereo.wav")) else {
+        return;
+    };
+    let mut harness = support::builder::<SubordinateApp>()
+        .with_size(WINDOW_SIZE)
+        .build_eframe(|cc| SubordinateApp::new(cc, AppOptions::default()).expect("editor starts"));
+    support::run_settled(&mut harness);
+    assert!(harness.state().project_file().is_none());
+    let root = project_of(harness.state()).root_bin.id;
+    harness
+        .state_mut()
+        .apply_bin_action(MediaBinAction::Import {
+            paths: vec![video.clone()],
+            bin: root,
+        });
+    pump(&mut harness, |app| app.session().project().media.len() == 1);
+    assert!(problems(harness.state_mut()).is_empty());
+    assert!(
+        harness.state().project_file().is_none(),
+        "import must not silently save the project"
+    );
+    let media = project_of(harness.state()).media[0].id;
+    let from = harness
+        .ctx
+        .read_response(sub_ui::media_bin::drag_source_id(media))
+        .unwrap()
+        .interact_rect
+        .center();
+    let layout = harness.state_mut().timeline().layout().unwrap();
+    let to = layout.content.left_top() + egui::vec2(0.1, 24.0);
+    harness.hover_at(from);
+    support::run_settled(&mut harness);
+    harness.drag_at(from);
+    support::run_settled(&mut harness);
+    harness.hover_at(to);
+    support::run_settled(&mut harness);
+    harness.drop_at(to);
+    support::run_settled(&mut harness);
+    pump(&mut harness, |app| app.previews().stats().showing > 0);
+    assert!(
+        harness.state().project_file().is_none(),
+        "preview works before Save"
+    );
+
+    // Save immediately after queueing a second import, before the UI collects it.
+    harness
+        .state_mut()
+        .apply_bin_action(MediaBinAction::Import {
+            paths: vec![audio.clone()],
+            bin: root,
+        });
+    let save_dir = std::env::temp_dir().join(format!("sub-ui-first-save-{root}"));
+    std::fs::create_dir_all(&save_dir).unwrap();
+    let saved = save_dir.join("first.sub");
+    harness.state_mut().save_project_as(&saved).unwrap();
+    pump(&mut harness, |app| app.session().project().media.len() == 2);
+    let before_undo = project_of(harness.state());
+    harness.get_by_label("Edit").click();
+    support::run_settled(&mut harness);
+    harness.get_by_label_contains("Undo ").click();
+    support::run_settled(&mut harness);
+    assert_eq!(project_of(harness.state()).media.len(), 1);
+    harness.get_by_label("Edit").click();
+    support::run_settled(&mut harness);
+    harness.get_by_label_contains("Redo ").click();
+    support::run_settled(&mut harness);
+    assert_eq!(*project_of(harness.state()), *before_undo);
+    harness.state_mut().save_project().unwrap();
+    let reopened = sub_model::json::from_json(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+    assert_eq!(reopened, *before_undo);
+    for (item, original) in reopened.media.iter().zip([video, audio]) {
+        assert!(item.path.is_external());
+        assert_eq!(
+            std::fs::canonicalize(item.absolute_path(&save_dir)).unwrap(),
+            std::fs::canonicalize(original).unwrap()
+        );
+    }
+    assert!(problems(harness.state_mut()).is_empty());
 }

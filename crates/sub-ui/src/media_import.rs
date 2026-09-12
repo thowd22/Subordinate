@@ -13,10 +13,9 @@
 //! Nothing here mutates a project: an import that has not been applied as a
 //! command has not happened.
 //!
-//! Media paths are project-relative by model rule, so a file outside the
-//! project folder is refused with `model.invalid_path` rather than being
-//! stored as an absolute path. Copying footage into the project folder before
-//! importing is the user's job, and the failure says so.
+//! Queues can retain portable project-relative paths or explicit external
+//! source references. The editor uses external references so import works
+//! before Save and moving the project file never moves the source footage.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -53,6 +52,8 @@ pub struct ImportOptions {
     /// it defaults to [`Priority::Interactive`]; the strip that follows runs
     /// at [`Priority::Normal`], because the bin can draw a row without it.
     pub priority: Priority,
+    /// Keep source locations independent of a project file, for unsaved editing.
+    pub external_sources: bool,
 }
 
 impl Default for ImportOptions {
@@ -62,6 +63,7 @@ impl Default for ImportOptions {
             thumbnails: ThumbnailOptions::default(),
             waveforms: WaveformOptions::default(),
             priority: Priority::Interactive,
+            external_sources: false,
         }
     }
 }
@@ -200,9 +202,13 @@ pub fn spawn_import_job(
         IMPORT_JOB_KIND,
         options.priority,
         move |ctx: &JobContext| {
-            // The cheapest check first: a file outside the project folder is
-            // refused before a byte of it is read.
-            let path = MediaPath::relative_to(&project_dir, &file)?;
+            // GUI imports retain their source location through the first save
+            // and through undo/redo, including sources on another drive.
+            let path = if options.external_sources {
+                MediaPath::external(&file)?
+            } else {
+                MediaPath::relative_to(&project_dir, &file)?
+            };
             ctx.check()?;
             let hash = ContentHash::of_file(&file)?;
             ctx.progress(1, 3);

@@ -39,7 +39,17 @@ struct Client {
 impl Client {
     /// Starts the bridge, pointed at `directory`.
     fn start(directory: &PathBuf) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_subordinate-mcp"))
+        let executable = std::env::var_os("SUBORDINATE_MCP")
+            .map(PathBuf::from)
+            .or_else(|| {
+                let sibling = std::env::current_exe()
+                    .ok()?
+                    .parent()?
+                    .join(format!("subordinate-mcp{}", std::env::consts::EXE_SUFFIX));
+                sibling.is_file().then_some(sibling)
+            })
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_subordinate-mcp")));
+        let mut child = Command::new(executable)
             .env("SUBORDINATE_ENDPOINT_DIR", directory)
             .env("SUBORDINATE_INSTANCE", INSTANCE)
             .env("SUBORDINATE_MCP_NO_LAUNCH", "1")
@@ -460,4 +470,108 @@ fn installing_and_reloading_a_plugin_tells_the_client_its_tools_changed() {
     server.shutdown().expect("the server stops");
     engine.shutdown().expect("the engine stops");
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// External source references survive the real MCP transport and first save.
+#[test]
+fn unsaved_external_import_survives_undo_save_and_reopen_over_stdio() {
+    fn tool(client: &mut Client, name: &str, arguments: &Value) -> Value {
+        let result = client.request("tools/call", &json!({"name": name, "arguments": arguments}));
+        assert_ne!(result["isError"], json!(true), "{name}: {result}");
+        result["structuredContent"].clone()
+    }
+
+    // Keep Unix socket paths below the macOS limit independently of TMPDIR.
+    #[cfg(unix)]
+    let base = PathBuf::from("/tmp");
+    #[cfg(not(unix))]
+    let base = std::env::temp_dir();
+    let directory = base.join(format!("sub-mcp-import-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("endpoint directory");
+    let media_dir = directory.join("source files");
+    let save_dir = directory.join("saved elsewhere");
+    std::fs::create_dir_all(&media_dir).unwrap();
+    std::fs::create_dir_all(&save_dir).unwrap();
+    let source = media_dir.join("one sample.wav");
+    // A complete one-sample PCM WAV fixture; this test requires no decoder.
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&38_u32.to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16_u32.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&48_000_u32.to_le_bytes());
+    wav.extend_from_slice(&96_000_u32.to_le_bytes());
+    wav.extend_from_slice(&2_u16.to_le_bytes());
+    wav.extend_from_slice(&16_u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&2_u32.to_le_bytes());
+    wav.extend_from_slice(&0_i16.to_le_bytes());
+    std::fs::write(&source, wav).unwrap();
+    let source = sub_model::plain_path(std::fs::canonicalize(source).unwrap());
+    let expected_path = json!({"external": source});
+    let engine = Engine::spawn(Project::new("Before handshake")).unwrap();
+    let endpoint =
+        Endpoint::in_directory(directory.clone(), INSTANCE).expect("a short native endpoint path");
+    let dispatcher = Arc::new(Dispatcher::new(engine.handle().clone()));
+    let server = Server::bind(endpoint, dispatcher).unwrap();
+    let mut client = Client::start(&directory);
+    client.initialize();
+    tool(
+        &mut client,
+        "project_new",
+        &json!({"name": "Unsaved import"}),
+    );
+    let mut item = serde_json::to_value(sub_model::MediaItem::new(
+        sub_model::MediaPath::new("placeholder.wav").unwrap(),
+    ))
+    .unwrap();
+    item["path"] = expected_path.clone();
+    tool(&mut client, "media_import", &json!({"item": item}));
+    let imported = engine.handle().snapshot().media[0].clone();
+    assert_eq!(serde_json::to_value(&imported.path).unwrap(), expected_path);
+    tool(&mut client, "edit_undo", &json!({}));
+    assert!(engine.handle().snapshot().media.is_empty());
+    tool(&mut client, "edit_redo", &json!({}));
+    assert_eq!(engine.handle().snapshot().media[0], imported);
+    tool(
+        &mut client,
+        "sequence_create",
+        &json!({"name": "Main", "settings": SequenceSettings::default()}),
+    );
+    let sequence = engine.handle().snapshot().sequences[0].id;
+    tool(
+        &mut client,
+        "track_add",
+        &json!({"sequence": sequence, "name": "A1", "kind": "audio"}),
+    );
+    let track = engine.handle().snapshot().sequences[0].tracks[0].id;
+    let start = sub_time::RationalTime::new(0, sub_time::Rational::FPS_24);
+    let range = sub_time::TimeRange::new(
+        start,
+        sub_time::RationalTime::new(1, sub_time::Rational::FPS_24),
+    )
+    .unwrap();
+    let clip = sub_model::Clip::new("Sample", imported.id, range);
+    tool(
+        &mut client,
+        "clip_add",
+        &json!({"sequence": sequence, "track": track, "start": start, "clip": clip}),
+    );
+    let expected = engine.handle().snapshot();
+    let saved = save_dir.join("first-save.sub");
+    tool(&mut client, "project_save", &json!({"path": saved}));
+    let written: Value = serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+    assert_eq!(written["project"]["media"][0]["path"], expected_path);
+    tool(&mut client, "project_new", &json!({"name": "Other"}));
+    tool(&mut client, "project_open", &json!({"path": saved}));
+    let reopened = engine.handle().snapshot();
+    assert_eq!(*reopened, *expected);
+    assert_eq!(reopened.media[0].absolute_path(&save_dir), source);
+    assert!(reopened.media[0].absolute_path(&save_dir).is_file());
+    drop(client);
+    server.shutdown().unwrap();
+    engine.shutdown().unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
 }

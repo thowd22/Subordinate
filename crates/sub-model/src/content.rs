@@ -1,10 +1,9 @@
-//! Project-relative media paths and the content hash used to relink them.
+//! Media references and the content hash used to relink them.
 //!
-//! Projects move between machines, so a `.sub` file never stores an absolute
-//! path (docs/PLAN.md §5.6). It stores a [`MediaPath`]: a slash-separated path
-//! relative to the directory holding the project file, plus a [`ContentHash`]
-//! that identifies the bytes so a moved or renamed file can be found again
-//! (TASK-72).
+//! A [`MediaPath`] normally stores a slash-separated project-relative path.
+//! Explicit external references retain an absolute source location, allowing
+//! editing before the first save without copying media. A [`ContentHash`]
+//! identifies the bytes so a moved or renamed file can be found again.
 //!
 //! ```
 //! use sub_model::MediaPath;
@@ -32,29 +31,49 @@ use sub_core::{SubError, SubResult};
 
 use crate::codes;
 
-/// A path to a media file, relative to the directory holding the project file.
+/// A project-relative media path or an explicitly external absolute reference.
 ///
-/// Separators are always `/`, on every platform, so a project authored on
-/// Windows opens unchanged on Linux and macOS. The path is validated on
-/// construction: it is non-empty, is not absolute, carries no drive letter, and
-/// has no `.` or `..` component, so resolving it can never escape the project
-/// folder.
-///
-/// The serde form is the path string itself, validated on the way in by
-/// [`MediaPath::new`].
+/// Relative paths retain their original string serialization and strict
+/// validation. External references serialize as `{ "external": "/path/to/file" }`
+/// and resolve independently of the project folder, including before first save.
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(into = "String", try_from = "String")]
-#[schemars(
-    with = "String",
-    description = "A slash-separated project-relative media path."
+#[serde(into = "MediaPathWire", try_from = "MediaPathWire")]
+#[schemars(with = "MediaPathWire")]
+pub struct MediaPath(MediaPathWire);
+
+/// The explicit external tag prevents an absolute path from being mistaken
+/// for a portable project-relative string.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
-pub struct MediaPath(String);
+#[serde(untagged, deny_unknown_fields)]
+enum MediaPathWire {
+    Relative(String),
+    External { external: String },
+}
+
+impl From<MediaPath> for MediaPathWire {
+    fn from(path: MediaPath) -> Self {
+        path.0
+    }
+}
+
+impl TryFrom<MediaPathWire> for MediaPath {
+    type Error = SubError;
+
+    fn try_from(wire: MediaPathWire) -> SubResult<Self> {
+        match wire {
+            MediaPathWire::Relative(text) => Self::new(text),
+            MediaPathWire::External { external } => Self::external_wire(&external),
+        }
+    }
+}
 
 impl From<MediaPath> for String {
     fn from(path: MediaPath) -> Self {
-        path.0
+        path.as_str().to_owned()
     }
 }
 
@@ -106,7 +125,54 @@ impl MediaPath {
                 return reject("it has a drive or scheme prefix");
             }
         }
-        Ok(Self(text))
+        Ok(Self(MediaPathWire::Relative(text)))
+    }
+
+    /// Creates an explicit absolute reference without copying or canonicalizing
+    /// the source. Windows verbatim disk and UNC prefixes are normalized.
+    /// Deserialization also accepts foreign absolute references for offline relinking;
+    /// this import constructor requires a native absolute path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `model.invalid_path` when the path is not absolute on the current
+    /// platform, is not valid UTF-8, contains NUL, or has no file name.
+    pub fn external(path: &Path) -> SubResult<Self> {
+        let path = plain_path(path.to_path_buf());
+        let reject = |reason: &str| {
+            SubError::new(
+                codes::INVALID_PATH,
+                format!("external media path must be absolute: {reason}"),
+            )
+            .with_detail("path", path.display().to_string())
+        };
+        if !path.is_absolute() {
+            return Err(reject("it is not absolute"));
+        }
+        let text = path
+            .to_str()
+            .ok_or_else(|| reject("it is not valid UTF-8"))?;
+        if text.contains('\0') {
+            return Err(reject("it contains a NUL byte"));
+        }
+        if path.file_name().is_none() {
+            return Err(reject("it has no file name"));
+        }
+        Self::external_wire(text)
+    }
+
+    /// Validates a serialized reference independently of the current platform.
+    /// Foreign media stays addressable for relinking even when it is offline.
+    fn external_wire(text: &str) -> SubResult<Self> {
+        Ok(Self(MediaPathWire::External {
+            external: portable_external_path(text)?,
+        }))
+    }
+
+    /// Whether the source location is independent of the project folder.
+    #[must_use]
+    pub fn is_external(&self) -> bool {
+        matches!(self.0, MediaPathWire::External { .. })
     }
 
     /// Expresses `file` relative to `project_dir`.
@@ -169,23 +235,37 @@ impl MediaPath {
         Self::new(segments.join("/"))
     }
 
-    /// The path as stored: slash-separated and relative.
+    /// The stored path text: slash-separated for relative references, native
+    /// absolute path text for external references.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        match &self.0 {
+            MediaPathWire::Relative(text) | MediaPathWire::External { external: text } => text,
+        }
     }
 
     /// The final component, usually the file name.
     #[must_use]
     pub fn file_name(&self) -> &str {
-        self.0.rsplit('/').next().unwrap_or(&self.0)
+        if self.is_external() {
+            return self
+                .as_str()
+                .trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(self.as_str());
+        }
+        self.as_str().rsplit('/').next().unwrap_or(self.as_str())
     }
 
     /// The absolute path of this file, given the directory holding the project.
     #[must_use]
     pub fn resolve(&self, project_dir: &Path) -> PathBuf {
+        if self.is_external() {
+            return PathBuf::from(self.as_str());
+        }
         let mut path = project_dir.to_path_buf();
-        for segment in self.0.split('/') {
+        for segment in self.as_str().split('/') {
             path.push(segment);
         }
         path
@@ -194,8 +274,75 @@ impl MediaPath {
 
 impl fmt::Display for MediaPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
+}
+
+/// Portable lexical validation for explicitly tagged absolute references.
+/// The text is preserved except for Windows verbatim disk/UNC prefixes; no
+/// filesystem access or interpretation relative to the current drive occurs.
+fn portable_external_path(text: &str) -> SubResult<String> {
+    let reject = |reason: &str| {
+        SubError::new(
+            codes::INVALID_PATH,
+            format!("invalid external media path: {reason}"),
+        )
+        .with_detail("path", text)
+    };
+    if text.contains('\0') {
+        return Err(reject("it contains a NUL byte"));
+    }
+    let portable = text.replace('\\', "/");
+    let normalized = if let Some(verbatim) = portable.strip_prefix("//?/") {
+        if portable
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("//?/UNC/"))
+        {
+            format!("{}{}", &text[..2], &text[8..])
+        } else if drive_absolute(verbatim) {
+            text[4..].to_owned()
+        } else {
+            return Err(reject("unsupported Windows verbatim prefix"));
+        }
+    } else {
+        text.to_owned()
+    };
+    let portable = normalized.replace('\\', "/");
+    let tail = if drive_absolute(&portable) {
+        &portable[3..]
+    } else if let Some(unc) = portable.strip_prefix("//") {
+        let mut parts = unc.splitn(3, '/');
+        let server = parts.next().unwrap_or_default();
+        let share = parts.next().unwrap_or_default();
+        if [server, share]
+            .iter()
+            .any(|part| part.is_empty() || matches!(*part, "." | ".." | "?"))
+        {
+            return Err(reject("UNC references require a server and share"));
+        }
+        parts.next().unwrap_or_default()
+    } else if normalized.starts_with('/') {
+        &portable[1..]
+    } else {
+        return Err(reject(
+            "it is not an absolute Unix, Windows drive, or UNC path",
+        ));
+    };
+    let name = tail
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    if matches!(name, "" | "." | "..") {
+        return Err(reject("it has no file name"));
+    }
+    Ok(normalized)
+}
+
+/// A drive letter followed by both a colon and a root separator.
+fn drive_absolute(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
 }
 
 /// `path` as the filesystem spells it, or `None` when it cannot say.
@@ -381,6 +528,193 @@ mod tests {
         let mut file = File::create(&path).unwrap();
         file.write_all(bytes).unwrap();
         path
+    }
+
+    #[test]
+    fn external_media_round_trips_and_survives_project_relocation() {
+        let source = std::env::temp_dir()
+            .join("outside-project")
+            .join("take.mp4");
+        let path = MediaPath::external(&source).unwrap();
+        assert!(path.is_external());
+        assert_eq!(path.file_name(), "take.mp4");
+        assert_eq!(path.to_string(), path.as_str());
+        let value = serde_json::to_value(&path).unwrap();
+        assert_eq!(value, serde_json::json!({"external": path.as_str()}));
+        let decoded: MediaPath = serde_json::from_value(value).unwrap();
+        assert_eq!(path, decoded);
+        for folder in ["first-project", "saved-elsewhere"] {
+            assert_eq!(
+                decoded.resolve(&std::env::temp_dir().join(folder)),
+                plain_path(source.clone())
+            );
+        }
+        assert!(
+            MediaPath::new(path.as_str()).is_err(),
+            "absolute strings stay invalid"
+        );
+    }
+
+    #[test]
+    fn tagged_references_from_other_platforms_open_for_relinking() {
+        for text in [
+            "/Volumes/Media/take.mp4",
+            r"D:\footage\take.mp4",
+            "D:/footage/take.mp4",
+            r"\\server\share\take.mp4",
+            "//server/share/take.mp4",
+        ] {
+            let wire = serde_json::json!({"external": text});
+            let path: MediaPath = serde_json::from_value(wire.clone()).unwrap();
+            assert!(path.is_external());
+            assert_eq!(path.as_str(), text);
+            assert_eq!(path.file_name(), "take.mp4");
+            assert_eq!(
+                path.resolve(Path::new("unrelated-project")),
+                PathBuf::from(text)
+            );
+            assert_eq!(serde_json::to_value(&path).unwrap(), wire);
+            assert!(MediaPath::new(text).is_err());
+        }
+        #[cfg(unix)]
+        assert!(MediaPath::external(Path::new(r"D:\footage\take.mp4")).is_err());
+        #[cfg(windows)]
+        assert!(MediaPath::external(Path::new("/Volumes/Media/take.mp4")).is_err());
+    }
+
+    #[test]
+    fn tagged_windows_verbatim_paths_normalize_on_every_platform() {
+        for (text, normalized) in [
+            (r"\\?\D:\footage\take.mp4", r"D:\footage\take.mp4"),
+            (r"\\?\UNC\server\share\take.mp4", r"\\server\share\take.mp4"),
+            ("//?/D:/footage/take.mp4", "D:/footage/take.mp4"),
+            ("//?/unc/server/share/take.mp4", "//server/share/take.mp4"),
+        ] {
+            let path: MediaPath =
+                serde_json::from_value(serde_json::json!({"external": text})).unwrap();
+            assert_eq!(path.as_str(), normalized);
+            assert_eq!(path.file_name(), "take.mp4");
+            assert_eq!(
+                serde_json::to_value(path).unwrap(),
+                serde_json::json!({"external": normalized})
+            );
+        }
+    }
+
+    #[test]
+    fn tagged_external_paths_reject_ambiguous_roots_and_device_namespaces() {
+        for text in [
+            r"\footage\take.mp4",
+            r"D:take.mp4",
+            "D:/",
+            "/",
+            r"\\server",
+            r"\\server\share",
+            r"\\.\pipe\take",
+            r"\\?\Volume{bad}\take.mp4",
+            r"\\?\D:take.mp4",
+            "//?/",
+            "/media/..",
+            "//server//take.mp4",
+            "//server/../take.mp4",
+        ] {
+            assert!(
+                serde_json::from_value::<MediaPath>(serde_json::json!({"external": text})).is_err(),
+                "accepted {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn media_path_schema_accepts_the_legacy_string_and_explicit_external_object() {
+        let schema = serde_json::to_value(schemars::schema_for!(MediaPath)).unwrap();
+        let alternatives = schema["anyOf"].as_array().expect("two wire forms");
+        assert_eq!(alternatives.len(), 2);
+        assert_eq!(alternatives[0]["type"], "string");
+        assert_eq!(alternatives[1]["properties"]["external"]["type"], "string");
+        assert_eq!(alternatives[1]["required"], serde_json::json!(["external"]));
+        assert_eq!(alternatives[1]["additionalProperties"], false);
+    }
+
+    #[test]
+    fn relative_media_keeps_its_original_wire_format() {
+        let path = MediaPath::new("footage/take.mp4").unwrap();
+        assert!(!path.is_external());
+        assert_eq!(
+            serde_json::to_string(&path).unwrap(),
+            "\"footage/take.mp4\""
+        );
+        assert_eq!(
+            serde_json::from_str::<MediaPath>("\"footage/take.mp4\"").unwrap(),
+            path
+        );
+    }
+
+    #[test]
+    fn invalid_external_references_are_rejected_on_deserialization() {
+        for text in [
+            "",
+            "take.mp4",
+            "../take.mp4",
+            "C:take.mp4",
+            "https://example.test/take.mp4",
+        ] {
+            assert!(
+                MediaPath::external(Path::new(text)).is_err(),
+                "accepted {text:?}"
+            );
+            assert!(
+                serde_json::from_value::<MediaPath>(serde_json::json!({"external": text})).is_err()
+            );
+        }
+        let source = std::env::temp_dir().join("take.mp4");
+        let source = source.to_str().unwrap();
+        assert!(
+            serde_json::from_value::<MediaPath>(
+                serde_json::json!({"external": format!("{source}\0")})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<MediaPath>(
+                serde_json::json!({"external": source, "extra": true})
+            )
+            .is_err()
+        );
+        assert!(serde_json::from_value::<MediaPath>(serde_json::json!({"external": 42})).is_err());
+        assert!(serde_json::from_value::<MediaPath>(serde_json::json!(source)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_media_rejects_non_utf8_paths() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/media/invalid-\xff.mp4".to_vec(),
+        ));
+        assert!(MediaPath::external(&path).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_media_preserves_other_drives_and_normalizes_verbatim_disk_paths() {
+        let path = MediaPath::external(Path::new(r"D:\footage\take.mp4")).unwrap();
+        assert_eq!(
+            path.resolve(Path::new(r"C:\projects\edit")),
+            PathBuf::from(r"D:\footage\take.mp4")
+        );
+        assert_eq!(
+            MediaPath::external(Path::new(r"\\?\D:\footage\take.mp4")).unwrap(),
+            path
+        );
+        assert!(MediaPath::external(Path::new(r"\footage\take.mp4")).is_err());
+        assert!(
+            MediaPath::relative_to(
+                Path::new(r"C:\projects\edit"),
+                Path::new(r"D:\footage\take.mp4")
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -30,6 +30,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -48,6 +49,7 @@ WINDOW = "Subordinate"
 #: Fractions of the window rectangle for the places with nothing to name.
 LAYOUT = {
     "timeline_drop": [0.55, 0.78],
+    "timeline_header": [0.05, 0.78],
     "ruler": [0.62, 0.66],
 }
 
@@ -167,14 +169,27 @@ def run(run: flowlib.Run) -> None:
     layout.update({k: v for k, v in override.items() if k in LAYOUT})
     offsets.update({k: v for k, v in override.items() if k in OFFSETS})
 
-    with run.step("stage the project folder") as step:
-        staged = flowlib.stage(work, media, cli)
-        step.note(project=str(staged.project), media=staged.media_relative)
+    with run.step("prepare a fresh unsaved project") as step:
+        work = work.resolve()
+        work.mkdir(parents=True, exist_ok=True)
+        project = work / ("flow-" + flowlib.uuid7() + ".sub")
+        media = media.resolve(strict=True)
+        staged = SimpleNamespace(directory=work, project=project, media=media,
+                                 sequence=None, video_track=None,
+                                 frame_rate={"numerator": 24, "denominator": 1})
+        if project.exists():
+            raise AssertionError("the flow must start before the first save")
+        step.note(project=str(project), external_media=str(media),
+                  editor=editor, cli=cli, mcp=mcp,
+                  requested_ref=os.environ.get("FLOW_REQUESTED_REF", "local"),
+                  installed_release=os.environ.get("FLOW_INSTALLED_RELEASE", "unknown"),
+                  tested_ref=os.environ.get("FLOW_TESTED_REF", "unknown"),
+                  provenance="current artifact" if os.environ.get("FLOW_TESTED_REF") else "unverified local/baked binaries")
 
     app_log = out / "editor.log"
     with run.step("launch the editor on the desktop") as step:
         started = session.launch(
-            [editor, str(staged.project)],
+            [editor],
             log=app_log,
             cwd=str(staged.directory),
             env={"SUBORDINATE_LOG": "info,sub_export=debug"},
@@ -205,40 +220,21 @@ def run(run: flowlib.Run) -> None:
             if _items(before):
                 raise AssertionError("the staged project should start with no media")
 
-        with run.step("the editor takes a click") as step:
-            # Before anything that depends on a *dialog*, prove the plain
-            # gesture: `New folder` is a button with a name, and the bin it
-            # creates is in the project a read can see. A failure here is the
-            # pointer not reaching the application; a failure in the next step
-            # with this one green is the file dialog, and the two are worth
-            # telling apart (run 34676801744).
-            state = read("project.get", {})
-            (out / "project-get.json").write_text(json.dumps(state, indent=1)[:200000])
-            # The track header's mute button: small, always fully inside the
-            # timeline panel - so no clipping to reason about - and what it
-            # does is project state a read can see. The flow puts it back
-            # afterwards, so the probe leaves nothing behind.
-            mute = _by_role(session, "M", BUTTON_ROLES, timeout=60)
-            muted = False
-            for point in _candidates(mute, window):
-                # Focused first: a window manager that gives focus on click can
-                # swallow the click that does it.
-                session.activate(window)
-                session.click(point)
-                for _ in range(10):
-                    muted = _muted(read("project.get", {}))
-                    if muted:
-                        break
-                    time.sleep(0.5)
-                step.note(**{f"click_{point}": f"muted={muted}"})
-                if muted:
-                    session.click(point)  # put it back
-                    break
-            else:
-                raise AssertionError(
-                    "the click did not reach the editor: no track was muted by it"
-                )
-            step.note(control=mute.as_dict(), bins=_bins(state))
+        with run.step("fresh timeline context menus create video and audio tracks") as step:
+            if _project(read("project.get", {})).get("sequences"):
+                raise AssertionError("fresh launch must have no sequences")
+            for kind in ("video", "audio"):
+                session.click(window.rect.point(*layout["timeline_header"]), button=3)
+                session.click(session.find(f"Add {kind} track", timeout=20))
+                state = _wait_until(lambda: _project(read("project.get", {})),
+                    lambda p: bool(p.get("sequences")), timeout=30, what="first sequence")
+                tracks = state["sequences"][0]["tracks"]
+                if len(tracks) != 1 or tracks[0]["kind"] != kind:
+                    raise AssertionError(f"fresh {kind} menu created wrong tracks: {tracks}")
+                session.key("ctrl+z")
+                _wait_until(lambda: _project(read("project.get", {})).get("sequences", []),
+                    lambda seqs: not seqs, timeout=30, what="undo back to empty project")
+            step.note(video=True, audio=True, returned_to_empty=True)
 
         with run.step("click Import... in the media bin") as step:
             control, how = locate(session, window, "Import", "Import", offsets)
@@ -287,7 +283,7 @@ def run(run: flowlib.Run) -> None:
                 row.rect.x + min(30, row.rect.width // 4),
                 row.rect.center[1],
             )
-            drop, lane = _lane_point(session, window, layout)
+            drop, lane = window.rect.point(*layout["timeline_drop"]), "empty timeline"
             step.note(
                 row=getattr(row, "as_dict", lambda: row)(),
                 located_by=how,
@@ -303,6 +299,13 @@ def run(run: flowlib.Run) -> None:
                 drop,
                 midway=lambda: session.screenshot("07a-mid-drag.png"),
             )
+            state = _wait_until(lambda: _project(read("project.get", {})),
+                lambda p: bool(p.get("sequences")), timeout=60, what="sequence created by first drop")
+            sequence = state["sequences"][0]
+            staged.sequence = sequence["id"]
+            staged.frame_rate = sequence["settings"]["frame_rate"]
+            if not any(t["kind"] == "video" for t in sequence["tracks"]):
+                raise AssertionError("first drop did not create a video track")
             clips = _wait_until(
                 lambda: _clips(read, staged.sequence),
                 lambda found: len(found) >= 1,
@@ -333,6 +336,23 @@ def run(run: flowlib.Run) -> None:
                 what="two clips after the cut",
             )
             step.note(clips=len(clips))
+
+        with run.step("first save and reopen preserve imported media and edits") as step:
+            session.click(session.find("File", timeout=20))
+            session.click(session.find("Save project as...", timeout=20))
+            dialog = _wait_for_dialog(session, window, timeout=30)
+            _enter_save_path(session, staged.project)
+            _wait_until(lambda: staged.project.exists(), bool, timeout=30, what="first project save")
+            session.click(session.find("File", timeout=20))
+            session.click(session.find("Open project...", timeout=20))
+            dialog = _wait_for_dialog(session, window, timeout=30)
+            _choose_file(session, staged.project, dialog)
+            _wait_until(lambda: _clips(read, staged.sequence), lambda clips: len(clips) >= 2,
+                        timeout=30, what="reopened timeline edits")
+            document = json.loads(staged.project.read_text(encoding="utf-8"))
+            if not any(os.path.samefile(staged.media, path) for path in _external_paths(document)):
+                raise AssertionError("saved project lost external media reference")
+            step.note(project=str(staged.project), media=read("media.list", {}))
 
         output = staged.directory / "clicks-export.mp4"
         with run.step("open the export panel") as step:
@@ -611,14 +631,14 @@ def _windows_dialog(session, window) -> dict | None:
             cls = candidate.class_name() or ""
         except Exception:  # noqa: BLE001
             continue
-        if cls == "#32770" or "Open" in title or "Import" in title:
+        if cls == "#32770" or "Open" in title or "Import" in title or "Save" in title:
             return {"title": title, "class": cls}
     return None
 
 
 def _x11_dialog(session, window) -> dict | None:
     found = subprocess.run(
-        ["xdotool", "search", "--name", "(Import|Open|Select|Choose|File)"],
+        ["xdotool", "search", "--name", "(Import|Open|Save|Select|Choose|File)"],
         capture_output=True,
         text=True,
         check=False,
@@ -651,6 +671,30 @@ def _still_open(window_id) -> bool:
         check=False,
     )
     return found.returncode == 0
+
+
+def _external_paths(value):
+    if isinstance(value, dict):
+        result = [value["external"]] if isinstance(value.get("external"), str) else []
+        return result + [path for child in value.values() for path in _external_paths(child)]
+    if isinstance(value, list):
+        return [path for child in value for path in _external_paths(child)]
+    return []
+
+
+def _project(state):
+    return state.get("project", state)
+
+
+def _enter_save_path(session, path):
+    # Both native choosers accept an absolute path in the filename/location box.
+    if platform.system() != "Windows":
+        session.key("ctrl+l")
+    else:
+        session.key("alt+n")
+    session.key("ctrl+a")
+    session.type_text(str(path))
+    session.key("Return")
 
 
 def _choose_file(session, path: Path, dialog: dict) -> str:
