@@ -623,21 +623,59 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The pipeline is torn down before the answer is returned, so nothing the
 /// probe opened is still held when the export builds its own.
 fn probe_ready(name: &str) -> ElementProbe {
-    if gst::ElementFactory::find(name).is_none() {
-        tracing::debug!(element = name, "encoder element not available");
-        return ElementProbe::missing();
-    }
     let (width, height) = PROBE_CANVAS;
+    match can_encode(name, width, height) {
+        Ok(()) => ElementProbe::ready(),
+        Err(EncodeRefusal::Missing) => {
+            tracing::debug!(element = name, "encoder element not available");
+            ElementProbe::missing()
+        }
+        Err(EncodeRefusal::Refused(reason)) => ElementProbe::not_ready(reason),
+    }
+}
+
+/// Why a one-frame encode did not happen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncodeRefusal {
+    /// The element is not registered on this machine.
+    Missing,
+    /// It is registered, and this is what it said.
+    Refused(String),
+}
+
+impl std::fmt::Display for EncodeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => f.write_str("the element is not installed"),
+            Self::Refused(reason) => f.write_str(reason),
+        }
+    }
+}
+
+/// Encodes one `width` x `height` frame with `name`, here and now.
+///
+/// This is the only question that matters before an export, and it has to be
+/// asked at the canvas the export will use: on the Windows GPU runner every
+/// NVENC element encodes 640x480 happily and then refuses to open a session
+/// for 1920x1080 in the same process, seconds later (TASK-146). One frame
+/// costs a few tens of milliseconds and buys an export that starts with an
+/// encoder that has just proved itself.
+///
+/// # Errors
+///
+/// [`EncodeRefusal::Missing`] when the element is not registered, and
+/// [`EncodeRefusal::Refused`] carrying the element's own reason otherwise.
+pub fn can_encode(name: &str, width: u32, height: u32) -> Result<(), EncodeRefusal> {
+    if gst::ElementFactory::find(name).is_none() {
+        return Err(EncodeRefusal::Missing);
+    }
     let description = format!(
         "videotestsrc num-buffers=1 ! video/x-raw,width={width},height={height},framerate=25/1 \
          ! videoconvert ! {name} name=probe ! fakesink sync=false"
     );
     let pipeline = match gst::parse::launch(&description) {
         Ok(pipeline) => pipeline,
-        Err(err) => {
-            tracing::debug!(element = name, error = %err, "encoder element would not build");
-            return ElementProbe::missing();
-        }
+        Err(err) => return Err(EncodeRefusal::Refused(err.to_string())),
     };
     let outcome = run_probe_pipeline(&pipeline, name);
     let _ = pipeline.set_state(gst::State::Null);
@@ -645,36 +683,39 @@ fn probe_ready(name: &str) -> ElementProbe {
 }
 
 /// Runs one probe pipeline to end of stream, or says what stopped it.
-fn run_probe_pipeline(pipeline: &gst::Element, name: &str) -> ElementProbe {
+fn run_probe_pipeline(pipeline: &gst::Element, name: &str) -> Result<(), EncodeRefusal> {
     if let Err(err) = pipeline.set_state(gst::State::Playing) {
-        return ElementProbe::not_ready(err.to_string());
+        return Err(EncodeRefusal::Refused(err.to_string()));
     }
     let Some(bus) = pipeline.bus() else {
-        return ElementProbe::not_ready("the probe pipeline has no bus".to_owned());
+        return Err(EncodeRefusal::Refused(
+            "the probe pipeline has no bus".to_owned(),
+        ));
     };
     let deadline = Instant::now() + PROBE_TIMEOUT;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             tracing::debug!(element = name, "encoder did not encode a frame in time");
-            return ElementProbe::not_ready(format!(
+            return Err(EncodeRefusal::Refused(format!(
                 "{name} did not encode a frame within {}s",
                 PROBE_TIMEOUT.as_secs()
-            ));
+            )));
         }
+        let nanos = u64::try_from(left.as_nanos()).unwrap_or(u64::MAX);
         let message = bus.timed_pop_filtered(
-            gst::ClockTime::from_nseconds(left.as_nanos().min(u128::from(u64::MAX)) as u64),
+            gst::ClockTime::from_nseconds(nanos),
             &[gst::MessageType::Eos, gst::MessageType::Error],
         );
         let Some(message) = message else {
             continue;
         };
         match message.view() {
-            gst::MessageView::Eos(_) => return ElementProbe::ready(),
+            gst::MessageView::Eos(_) => return Ok(()),
             gst::MessageView::Error(err) => {
                 let reason = err.error().to_string();
                 tracing::debug!(element = name, reason, "encoder cannot encode here");
-                return ElementProbe::not_ready(reason);
+                return Err(EncodeRefusal::Refused(reason));
             }
             _ => continue,
         }
@@ -696,12 +737,35 @@ fn is_deranked(name: &str) -> bool {
     gst::ElementFactory::find(name).is_some_and(|factory| factory.rank() == gst::Rank::NONE)
 }
 
+/// Whether `name` builds and reaches `READY` on this machine.
+fn starts_to_ready(name: &str) -> bool {
+    let Ok(element) = gst::ElementFactory::make(name).build() else {
+        tracing::debug!(element = name, "element not available");
+        return false;
+    };
+    let started = match element.set_state(gst::State::Ready) {
+        Ok(gst::StateChangeSuccess::Async) => element
+            .state(gst::ClockTime::from_seconds(2))
+            .0
+            .is_ok(),
+        Ok(_) => true,
+        Err(err) => {
+            tracing::debug!(element = name, error = %err, "element would not start");
+            false
+        }
+    };
+    let _ = element.set_state(gst::State::Null);
+    started
+}
+
 /// Whether `name` is an element this machine can actually run.
 ///
-/// The same `READY` test the encoder probe uses, for the elements the probe
-/// does not catalogue: muxers, parsers and audio encoders. Results are cached
-/// for the life of the process, because building an element is not free and
-/// the answer cannot change while the process runs.
+/// For the elements the encoder catalogue does not cover — muxers, parsers and
+/// audio encoders — the question is only whether this machine has one that
+/// starts: they are not video encoders and cannot be asked to encode a frame,
+/// so this builds the element, drives it to `READY` and puts it back. Results
+/// are cached for the life of the process, because building an element is not
+/// free and the answer cannot change while the process runs.
 ///
 /// GStreamer must already be initialised; every caller inside this crate
 /// builds a pipeline first, which initialises it.
@@ -713,8 +777,7 @@ pub fn element_is_usable(name: &str) -> bool {
     {
         return usable;
     }
-    let probe = probe_element(name);
-    let usable = probe.present && probe.ready && !probe.deranked;
+    let usable = starts_to_ready(name) && !is_deranked(name);
     if let Ok(mut seen) = cache.lock() {
         seen.insert(name.to_owned(), usable);
     }

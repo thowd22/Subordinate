@@ -42,7 +42,9 @@ use sub_core::{ErrorCode, SubError, SubResult};
 use sub_time::{Rational, RationalTime};
 
 use crate::codes;
-use crate::encoder::{EncoderPreferences, EncoderProbe, VideoCodec, element_is_usable};
+use crate::encoder::{
+    EncoderPreferences, EncoderProbe, EncoderStatus, VideoCodec, can_encode, element_is_usable,
+};
 
 /// Nanoseconds in one second, the unit GStreamer timestamps use.
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
@@ -516,6 +518,7 @@ impl ExportElements {
         settings.validate()?;
         let probe = EncoderProbe::cached()?;
         let video = probe.select(settings.video_codec, preferences)?;
+        let video = verify_at_canvas(probe, settings, preferences, video)?;
         let audio = settings
             .audio_codec
             .map(select_audio_encoder)
@@ -526,6 +529,93 @@ impl ExportElements {
             audio_encoder: audio,
         })
     }
+}
+
+/// Confirms `chosen` can encode this export's canvas, or finds one that can.
+///
+/// The session probe encodes a small frame, and a small frame is not the
+/// question: on the Windows GPU runner every NVENC element encodes 640x480 and
+/// then refuses to open a session for 1920x1080 seconds later in the same
+/// process (TASK-146). So the encoder an export is about to plug encodes one
+/// frame of the *export's* canvas first, which costs a few tens of
+/// milliseconds and is the difference between an export that runs and one that
+/// dies on its first frame.
+///
+/// An encoder the user pinned is never swapped — the pin is the decision the
+/// order withholds — but it is still asked, so the refusal names the element
+/// and says what it answered. The automatic order walks on to the next usable
+/// encoder and says in the log which one it left behind.
+///
+/// # Errors
+///
+/// [`codes::ENCODER_UNAVAILABLE`] when a pinned encoder cannot encode the
+/// canvas, and [`codes::NO_ENCODER`] when none of the codec's encoders can.
+fn verify_at_canvas<'a>(
+    probe: &'a EncoderProbe,
+    settings: &ExportSettings,
+    preferences: &EncoderPreferences,
+    chosen: &'a EncoderStatus,
+) -> SubResult<&'a EncoderStatus> {
+    let (width, height) = (settings.width, settings.height);
+    let refusal = match can_encode(&chosen.element, width, height) {
+        Ok(()) => return Ok(chosen),
+        Err(refusal) => refusal,
+    };
+    if preferences.override_for(settings.video_codec).is_some() {
+        return Err(SubError::new(
+            codes::ENCODER_UNAVAILABLE,
+            format!(
+                "the selected {} encoder {} cannot encode {width}x{height} here",
+                settings.video_codec, chosen.element
+            ),
+        )
+        .with_detail("codec", settings.video_codec.as_str())
+        .with_detail("element", chosen.element.clone())
+        .with_detail("width", width)
+        .with_detail("height", height)
+        .with_detail("reason", refusal.to_string()));
+    }
+    tracing::warn!(
+        element = %chosen.element,
+        width,
+        height,
+        reason = %refusal,
+        "the chosen encoder cannot encode this canvas; trying the next one"
+    );
+    let mut skipped = vec![(chosen.element.clone(), refusal.to_string())];
+    for candidate in probe.usable(settings.video_codec) {
+        if candidate.element == chosen.element {
+            continue;
+        }
+        match can_encode(&candidate.element, width, height) {
+            Ok(()) => {
+                tracing::info!(
+                    element = %candidate.element,
+                    skipped = ?skipped,
+                    "encoding with the first encoder that can take this canvas"
+                );
+                return Ok(candidate);
+            }
+            Err(refusal) => skipped.push((candidate.element.clone(), refusal.to_string())),
+        }
+    }
+    Err(SubError::new(
+        codes::NO_ENCODER,
+        format!(
+            "no {} encoder on this machine can encode {width}x{height}",
+            settings.video_codec
+        ),
+    )
+    .with_detail("codec", settings.video_codec.as_str())
+    .with_detail("width", width)
+    .with_detail("height", height)
+    .with_detail(
+        "tried",
+        skipped
+            .into_iter()
+            .map(|(element, reason)| format!("{element}: {reason}"))
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// The first usable encoder for `codec`.
