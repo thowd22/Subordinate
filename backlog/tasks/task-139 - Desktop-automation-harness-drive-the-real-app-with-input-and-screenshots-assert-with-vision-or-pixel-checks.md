@@ -7,11 +7,7 @@ status: In Progress
 assignee:
   - '@opus-task-139'
 created_date: '2026-09-11 22:18'
-<<<<<<< HEAD
-updated_date: '2026-09-12 06:10'
-=======
 updated_date: '2026-09-12 10:01'
->>>>>>> origin/task/task-139
 labels:
   - ui
   - test
@@ -36,12 +32,9 @@ A small library agents use on the desktop runners: launch the app with a project
 - [x] #2 The flow runs nightly and on release tags via hardware.yml, costs under 0.30 USD per run on spot, and its failures name the step and attach the screenshot
 - [ ] #3 MCP flow on each desktop runner: an agent-style script drives subordinate-mcp only (project.new/open, media import of the baked MKV, timeline.add_clip, timeline split, export.render with the vendor encoder) while the real window is visible; a screenshot after each step is uploaded and the final export validates
 - [ ] #4 Human flow on each desktop runner: input only (click the bin's Import button, choose the baked MKV in the native file dialog, drag the clip onto the timeline, press Ctrl+K at a scrubbed position, click Export in the panel, choose the vendor encoder); project state is asserted through the Command API after each step and screenshots are uploaded; no MCP calls are used to act
-<<<<<<< HEAD
 - [ ] #5 Both flows are separate jobs in hardware.yml, run nightly and on release tags, and a failure names the step and attaches its screenshot
 - [ ] #6 Linux desktop flow compares the viewer's screenshot region against a frame rendered by subordinate-cli for the same playhead (moved from TASK-144 criterion 1)
-=======
 - [x] #5 Both flows are separate jobs in hardware.yml, run nightly and on release tags, and a failure names the step and attaches its screenshot
->>>>>>> origin/task/task-139
 <!-- AC:END -->
 
 ## Implementation Plan
