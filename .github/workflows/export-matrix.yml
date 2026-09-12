@@ -40,6 +40,11 @@ name: Export matrix
 # Never add `push` or `pull_request` here, for the same reasons hardware.yml
 # gives.
 on:
+  # TEMP TASK-143: a brand-new workflow file cannot be dispatched by API until
+  # it is on the default branch, so this branch trigger is how the matrix is
+  # iterated on real hardware. REMOVE BEFORE MERGE.
+  push:
+    branches: [task/task-143]
   workflow_dispatch:
     inputs:
       only:
@@ -144,8 +149,8 @@ jobs:
   build-windows:
     name: Build the Windows CLI (hosted, free)
     if: >-
-      inputs.only == '' || inputs.only == 'nvidia-windows'
-      || inputs.only == 'amd-windows'
+      github.event_name != 'push' && (inputs.only == ''
+      || inputs.only == 'nvidia-windows' || inputs.only == 'amd-windows')  # TEMP TASK-143
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
@@ -347,7 +352,7 @@ jobs:
   # ---------------------------------------------------------------- NVIDIA T4
   nvidia-linux:
     name: NVIDIA T4 (g4dn.xlarge, Ubuntu 24.04)
-    if: inputs.only == '' || inputs.only == 'nvidia-linux'
+    if: github.event_name != 'push' && (inputs.only == '' || inputs.only == 'nvidia-linux')  # TEMP TASK-143
     needs: build-linux
     runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-linux
     timeout-minutes: 30
@@ -454,7 +459,7 @@ jobs:
 
   nvidia-windows:
     name: NVIDIA T4 (g4dn.xlarge, Windows Server 2022)
-    if: inputs.only == '' || inputs.only == 'nvidia-windows'
+    if: github.event_name != 'push' && (inputs.only == '' || inputs.only == 'nvidia-windows')  # TEMP TASK-143
     # Chained rather than parallel: one g4dn of this workflow's at a time.
     needs: [build-windows, nvidia-linux]
     runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-windows
@@ -561,7 +566,7 @@ jobs:
   # directory emptied at the end whatever happened.
   amd-windows:
     name: AMD RX 9070 XT (yodaddy, self-hosted, Windows 11)
-    if: inputs.only == '' || inputs.only == 'amd-windows'
+    if: github.event_name != 'push' && (inputs.only == '' || inputs.only == 'amd-windows')  # TEMP TASK-143
     needs: [build-windows, amd-linux]
     runs-on: [self-hosted, windows, yodaddy, amd-gpu]
     timeout-minutes: 40
@@ -674,7 +679,7 @@ jobs:
   # install would run.
   gui-vs-cli:
     name: GUI export against CLI export (desktop image, Xorg on :0)
-    if: inputs.only == '' || inputs.only == 'gui-vs-cli'
+    if: github.event_name != 'push' && (inputs.only == '' || inputs.only == 'gui-vs-cli')  # TEMP TASK-143
     needs: nvidia-windows
     runs-on: runs-on=${{ github.run_id }}/${{ inputs.desktop_runner || 'runner=gpu-nvidia-desktop-linux' }}
     timeout-minutes: 30
