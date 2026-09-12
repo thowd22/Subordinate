@@ -551,7 +551,7 @@ def build_project(
     }
     project_file = out / f"{sequence_name.lower().replace(' ', '-')}.sub"
     project_file.write_text(json.dumps(document, indent=2, sort_keys=True), encoding="utf-8")
-    return {
+    built = {
         "project": str(project_file),
         "sequence": sequence_name,
         "media": str(linked),
@@ -563,6 +563,10 @@ def build_project(
         "source_audio_streams": len(info.audio),
         "source_audio": [asdict(s) for s in info.audio],
     }
+    # A sidecar beside the project, so `run` can report how many audio streams
+    # the source really carried without probing it a second time.
+    (out / "source.json").write_text(json.dumps(built, indent=2), encoding="utf-8")
+    return built
 
 
 # --------------------------------------------------------------------------
@@ -679,7 +683,7 @@ def render_case(
         case.detail = "the render reported success but wrote no file"
         return case, {"argv": argv, "report": report, "stderr": done.err[-4000:]}, ""
 
-    info = probe(written, gst_prefix)
+    info = probe(written, gst_prefix, timeout=timeout)
     problems: list[str] = []
     if not info.ok:
         problems.append(f"the discoverer refused the file: {one_line(info.error or '')}")
@@ -703,7 +707,7 @@ def render_case(
         problems.append("the preset asks for audio and the file carries none")
     case.duration = round(info.seconds, 3) if info.seconds is not None else None
 
-    counted, how = count_frames(written, gst_prefix)
+    counted, how = count_frames(written, gst_prefix, timeout=timeout)
     case.frames_counted = counted
     if counted is None:
         problems.append(how)
@@ -780,7 +784,16 @@ def matrix(args: argparse.Namespace) -> int:
         name, project = parts[0], Path(parts[1])
         sequence = parts[2] if len(parts) > 2 and parts[2] else None
         frames = int(parts[3]) if len(parts) > 3 and parts[3] else None
-        sources.append(Source(name=name, project=project, sequence=sequence, frames=frames))
+        source = Source(name=name, project=project, sequence=sequence, frames=frames)
+        sidecar = project.parent / "source.json"
+        if sidecar.exists():
+            try:
+                built = json.loads(sidecar.read_text(encoding="utf-8"))
+                source.audio_streams = built.get("source_audio_streams")
+                source.label = f"{built.get('width')}x{built.get('height')} at {built.get('frame_rate')} fps"
+            except (json.JSONDecodeError, OSError):
+                pass
+        sources.append(source)
 
     presets: dict[str, tuple[str, str]] = dict(DEFAULT_PRESETS)
     if args.presets:
@@ -813,6 +826,8 @@ def matrix(args: argparse.Namespace) -> int:
                         )
                     )
                     continue
+                print(f"---- {source.name} / {preset} / {element}", flush=True)
+                started = time.monotonic()
                 case, artifacts, written = render_case(
                     args.cli,
                     source,
@@ -827,7 +842,11 @@ def matrix(args: argparse.Namespace) -> int:
                 )
                 cases.append(case)
                 stem = f"{source.name}-{preset}-{element}"
-                print(f"{case.status.upper():5} {stem}: {case.detail or 'ok'}", flush=True)
+                print(
+                    f"{case.status.upper():5} {stem}"
+                    f" [{time.monotonic() - started:.0f}s]: {case.detail or 'ok'}",
+                    flush=True,
+                )
                 if case.status == "fail":
                     keep = out / "failures" / stem
                     keep.mkdir(parents=True, exist_ok=True)
@@ -999,7 +1018,12 @@ def main() -> int:
         default=[],
         help="sources whose software-encoder cells are skipped on this machine",
     )
-    run_parser.add_argument("--timeout", type=int, default=1800)
+    run_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=600,
+        help="seconds one render, probe or frame count may take before the cell is failed",
+    )
     run_parser.add_argument("--keep-bytes", type=int, default=200_000_000)
     run_parser.add_argument("--gst-debug", default=None)
     run_parser.add_argument("--fail-on-error", action="store_true")

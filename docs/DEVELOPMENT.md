@@ -1262,6 +1262,83 @@ There are no Windows jobs: there is no AMD Windows host anywhere this project
 can reach, and the NVIDIA Windows AMI is TASK-115. The workflow carries a
 commented placeholder rather than a job that would quietly pass on software.
 
+## Export matrix workflow
+
+`.github/workflows/export-matrix.yml` is the other half of the hardware story
+(TASK-143). `hardware.yml` proves *one* encoder per machine; this proves every
+encoder each machine carries, against every preset of that encoder's codec,
+against two sources, and - on the Linux desktop image - through the editor's
+own export runner as well as the CLI's. It runs on `workflow_dispatch` and
+nightly at 05:40 UTC, an hour after `hardware.yml` so the two never bid for the
+same GPU quota.
+
+Every job runs the same driver, `scripts/export-matrix.py`, so the rows are
+comparable between machines:
+
+| Job | Runner | Cost | Encoders it covers |
+| --- | --- | --- | --- |
+| `build-linux` / `build-windows` | hosted | free | build `subordinate-cli` and hand it over as an artifact |
+| `hosted-software` | hosted `ubuntu-24.04` | free | `x264enc`, `x265enc` and any software AV1 encoder, on lavapipe |
+| `amd-linux` | self-hosted `box` | free | the `va` family, the software encoders, and the user's 4K60 footage |
+| `nvidia-linux` | RunsOn `gpu-nvidia-linux` | about 0.13 USD | `nvh264enc`, `nvh265enc`, `nvav1enc` |
+| `nvidia-windows` | RunsOn `gpu-nvidia-windows` | about 0.15 USD | NVENC and Media Foundation on Windows |
+| `amd-windows` | self-hosted `yodaddy` | free | the `amf` family - the only AMF hardware this project can reach |
+| `gui-vs-cli` | RunsOn desktop image | about 0.27 USD | the editor's export runner against the CLI's, `nvh264enc` and `x264enc` |
+
+The three paid jobs are chained with `needs` rather than run side by side: the
+account's G-family quota allows two `g4dn` instances at once and other work
+shares it, so this workflow never asks for more than one.
+
+### What a cell is checked for
+
+A render that exits zero is not a pass. For every cell the driver reads the
+written file back with `gst-discoverer-1.0` - stream layout, picture size,
+duration, audio codec and channels - and then *decodes* it and counts the
+frames that come out, which is the only check that catches an encoder writing a
+plausible header and dropping pictures. The count comes from
+`identity silent=false` under `gst-launch -v`, which prints one `chain` line
+per buffer; `caps=video/x-raw expose-all-streams=false` keeps the audio out of
+it.
+
+Failing outputs and their discoverer reports are uploaded; passing ones are
+deleted, because a 4K60 matrix writes gigabytes of them.
+
+### Things that shape the table
+
+- **The canvas and the frame rate come from the sequence, not the preset**
+  (`settings_for_sequence`). A 4K60 source under `youtube-1080p` is written
+  4K60, and the preset's own size and rate come back as warnings. The summary
+  says so under every table.
+- **The preset's bitrate and CRF reach nothing.** `ExportSettings` carries no
+  quality field, so a preset currently selects the container, the codecs and
+  the audio format and nothing else (TASK-144).
+- **`audio-only` is not in the matrix.** It has no video stream, and `render`
+  refuses it before an encoder is chosen.
+- **Hardware encoders are ranked `NONE`,** so the driver treats "present and
+  READY" as the test for a cell rather than "usable", exactly as
+  `EncoderStatus::is_pinnable` does. It is also why the `gui-vs-cli` job picks
+  the GUI's encoder with `GST_PLUGIN_FEATURE_RANK`: `export.render` takes no
+  encoder parameter, and the automatic order lands on `x264enc` until something
+  lifts NVENC above it.
+- **Only the first audio stream of a multi-track source is exported.** The
+  user's 4K60 footage carries three; `uridecodebin` exposes one audio pad and
+  the mixer writes a single stereo track (TASK-145).
+
+### Sources
+
+`examples/sample-project/demo.sub` with media from `scripts/get-sample-media.sh`,
+and the user's 4K60 three-audio-track footage, which reaches each machine
+differently: box has the full file at `~/test-media/meld-4k60-full.mkv`, the
+RunsOn instances read the two-minute excerpt from the private S3 bucket with
+their instance role (TASK-140), the Linux desktop image has it baked at
+`/opt/subordinate/test-media/`, and yodaddy - which has no AWS role - takes a
+ten-second excerpt cut by the box job and passed through an artifact. Put a
+copy in `C:\SubordinateTest\` on yodaddy and its job prefers that.
+
+Neither source is rendered whole: `--range` caps each cell at a couple of
+seconds. The matrix is about the encoders, not about throughput, which is what
+`hardware.yml` and docs/PERFORMANCE.md measure.
+
 ## Pop-out and second display
 
 Two displays are an MVP requirement, and the two features that serve them --

@@ -308,12 +308,33 @@ jobs:
           if command -v ffmpeg >/dev/null 2>&1; then
             ffmpeg -y -loglevel error -t 10 -i "$full" -map 0 -c copy \
               target/uhd/meld-4k60-excerpt-10s.mkv
-            ls -l target/uhd/meld-4k60-excerpt-10s.mkv
-            echo "excerpt=yes" >>"$GITHUB_OUTPUT"
+            echo "the user's own footage, stream-copied" >target/uhd/excerpt.txt
           else
-            echo "::warning::no ffmpeg on box: no excerpt was cut for the Windows jobs"
-            echo "excerpt=no" >>"$GITHUB_OUTPUT"
+            # box has no ffmpeg, and cutting a Matroska with three audio tracks
+            # through gst-launch means linking sometimes-pads by name and
+            # ending each branch on its own buffer count - fragile enough that
+            # a *stated* stand-in is the honest answer. yodaddy gets a
+            # synthetic clip of the same shape (3840x2160 at 60 fps, three
+            # 48 kHz stereo tracks) and the table says so; copy the real
+            # excerpt to C:\SubordinateTest\ on yodaddy and its job prefers
+            # that instead.
+            echo "::warning::no ffmpeg on box: the Windows jobs get a synthetic 4K60 clip"
+            gst-launch-1.0 -e matroskamux name=m ! filesink location=target/uhd/meld-4k60-excerpt-10s.mkv \
+              videotestsrc num-buffers=600 pattern=smpte \
+                ! video/x-raw,width=3840,height=2160,framerate=60/1 \
+                ! x264enc speed-preset=ultrafast bitrate=20000 ! h264parse ! m. \
+              audiotestsrc num-buffers=470 wave=sine freq=440 \
+                ! audio/x-raw,rate=48000,channels=2 ! opusenc ! m. \
+              audiotestsrc num-buffers=470 wave=sine freq=660 \
+                ! audio/x-raw,rate=48000,channels=2 ! opusenc ! m. \
+              audiotestsrc num-buffers=470 wave=sine freq=880 \
+                ! audio/x-raw,rate=48000,channels=2 ! opusenc ! m.
+            echo "synthetic 4K60 with three audio tracks (box has no ffmpeg)" \
+              >target/uhd/excerpt.txt
           fi
+          ls -l target/uhd/meld-4k60-excerpt-10s.mkv
+          cat target/uhd/excerpt.txt
+          echo "excerpt=yes" >>"$GITHUB_OUTPUT"
           python3 scripts/export-matrix.py project \
             --media "$full" --out target/uhd-project --sequence "UHD" --seconds 5 \
             | tee target/uhd/project.json
@@ -322,21 +343,25 @@ jobs:
         if: steps.uhd.outputs.excerpt == 'yes'
         with:
           name: meld-4k60-excerpt-10s
-          path: target/uhd/meld-4k60-excerpt-10s.mkv
+          path: |
+            target/uhd/meld-4k60-excerpt-10s.mkv
+            target/uhd/excerpt.txt
           retention-days: 1
 
       - name: The matrix
         run: |
-          sources="--source sample::examples/sample-project/demo.sub::$SAMPLE_SEQUENCE::$SAMPLE_FRAMES"
+          # An array, not a string: the sample sequence is called "Main cut"
+          # and word splitting turned that into two arguments (run
+          # 34672568992).
+          sources=(--source "sample::examples/sample-project/demo.sub::$SAMPLE_SEQUENCE::$SAMPLE_FRAMES")
           if [ "${{ steps.uhd.outputs.have }}" = "yes" ]; then
-            sources="$sources --source uhd::target/uhd-project/uhd.sub::UHD::$UHD_FRAMES"
+            sources+=(--source "uhd::target/uhd-project/uhd.sub::UHD::$UHD_FRAMES")
           fi
-          # shellcheck disable=SC2086
           xvfb-run -a python3 scripts/export-matrix.py run \
             --machine "AMD Cezanne APU (box)" \
             --cli ./target/debug/subordinate-cli \
             --out target/export-matrix \
-            $sources
+            "${sources[@]}"
 
       - name: Job summary
         if: always()
@@ -432,19 +457,18 @@ jobs:
 
       - name: The matrix
         run: |
-          sources="--source sample::examples/sample-project/demo.sub::$SAMPLE_SEQUENCE::$SAMPLE_FRAMES"
+          sources=(--source "sample::examples/sample-project/demo.sub::$SAMPLE_SEQUENCE::$SAMPLE_FRAMES")
           if [ "${{ steps.uhd.outputs.have }}" = "yes" ]; then
-            sources="$sources --source uhd::target/uhd-project/uhd.sub::UHD::$UHD_FRAMES"
+            sources+=(--source "uhd::target/uhd-project/uhd.sub::UHD::$UHD_FRAMES")
           fi
           # x265 at 4K on four vCPU is minutes a cell and proves nothing this
           # instance is for; box and the hosted job carry the software rows.
-          # shellcheck disable=SC2086
           xvfb-run -a python3 scripts/export-matrix.py run \
             --machine "NVIDIA T4 (g4dn.xlarge, Linux)" \
             --cli ./dist/subordinate-cli \
             --out target/export-matrix \
             --no-software-for uhd \
-            $sources
+            "${sources[@]}"
 
       - name: Job summary
         if: always()
@@ -623,7 +647,14 @@ jobs:
       - name: The 4K60 source
         id: uhd
         run: |
-          $media = "$env:RUNNER_TEMP\media\meld-4k60-excerpt-10s.mkv"
+          # A real copy on this machine wins over anything shipped in: if the
+          # user drops the excerpt in C:\SubordinateTest\, that is the 4K60
+          # source this job measures.
+          $local = Get-ChildItem C:\SubordinateTest\*.mkv -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+          $media = if ($local) { $local.FullName } else { "$env:RUNNER_TEMP\media\meld-4k60-excerpt-10s.mkv" }
+          "4K60 source: $media"
+          if (Test-Path "$env:RUNNER_TEMP\media\excerpt.txt") { Get-Content "$env:RUNNER_TEMP\media\excerpt.txt" }
           if (-not (Test-Path $media)) {
             Write-Output "::warning::box cut no excerpt for this job; the 4K60 rows will be missing"
             "have=no" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
