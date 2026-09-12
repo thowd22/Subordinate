@@ -181,6 +181,23 @@ jobs:
       # accessibility tree to controls.json and clicks `Import...`. Never
       # fatal - the flow below is the job's verdict - but its artifact is the
       # first thing to read when a name has moved or the a11y bus is not there.
+      # Can this build probe the baked clip at all? The clicks flow's import
+      # answers `media.unsupported`, and that is either the dialog choosing the
+      # wrong file or the probe refusing this one - this is the half that does
+      # not involve a dialog. Never fatal.
+      - name: Probe the baked clip through the Command API (never fatal)
+        continue-on-error: true
+        timeout-minutes: 4
+        env:
+          SUBORDINATE_INSTANCE: desktop-probe
+          SUBORDINATE_ENDPOINT_DIR: /tmp/subordinate-probe-endpoint
+        run: |
+          set -uo pipefail
+          mkdir -p "$FLOW_OUT"
+          timeout 180 python3 scripts/mcp-roundtrip.py --mcp "$FLOW_MCP" --max-chars 4000 \
+            "media.probe={\"path\":\"$FLOW_MEDIA\"}" 2>&1 | tee "$FLOW_OUT/probe.txt"
+          "$FLOW_DISCOVERER" "$FLOW_MEDIA" 2>&1 | head -30 | tee -a "$FLOW_OUT/probe.txt"
+
       # TEMPORARY (TASK-139): which kind of synthetic click the editor takes.
       - name: Input diagnostics (never fatal)
         continue-on-error: true
