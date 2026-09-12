@@ -49,3 +49,7 @@ task/task-153: 17 uncommitted files, 0 commits ahead of main (/home/admin2/Subor
   On resume: for each, `git -C <worktree> status`; if the work looks usable, commit it on its task branch and let a fresh worker continue from it (relaunching the wave with the same task starts from main, so merge or discard first); otherwise `git worktree remove --force` and delete the branch. Those tasks remain To Do on main.
 - The TASK-146 agent (export stall) was asked to commit a WIP state to task/task-146 and stop; read its notes before relaunching.
 - The Windows desktop AMI 1.1.6 build and its smoke job were left running unattended (a shell task, no agent tokens); check the newest subordinate-windows-desktop AMI and update .github/runs-on.yml if it succeeded.
+
+## Final additions before pausing
+- PR #5 (TASK-146, export back-pressure and bus handling, real-encode probing) IS merged into main (add73e4 plus a rustfmt commit 4a07950); TASK-146 criterion 1 is checked, criterion 2 waits for the Windows desktop flow to use the automatic encoder order. CI on main for that merge had not been observed when pausing: check `gh run list --workflow CI --branch main --limit 1` first; the CI guard is not running, so a red main must be fixed by hand.
+- Next release 0.1.4 should carry TASK-145 (AppImage libraries), TASK-146 (export stall) and TASK-150 (audio routing), all on main now.
