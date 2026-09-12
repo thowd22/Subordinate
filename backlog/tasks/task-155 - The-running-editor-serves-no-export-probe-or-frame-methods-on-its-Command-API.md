@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-09-12 04:44'
-updated_date: '2026-09-12 18:09'
+updated_date: '2026-09-12 18:17'
 labels:
   - ui
   - api
@@ -52,6 +52,8 @@ Completed GUI Services registration, shared CLI/GUI serializers, proxy helper an
 Validation: local egui command_api_host regression PASSED with an actual GPU adapter and x264 encoding (no early-return skip): two socket exports, panel/progress/result agreement, continued UI painting, PNG frame, media probe, proxy missing-item refusal, busy rejection, project.new between enqueue and pump, immediate media-ID probe after opening another folder, second export and dispatcher rebuild. Seven host-bridge unit tests passed including concurrent-client reservation. Full sub-command suite passed (92 unit, 7 integration, 7 doc tests; child helper ignored as intended), then focused discovery coverage passed after adding the 93rd unit test. cargo clippy -p sub-ui -p subordinate-cli --all-targets --offline -- -D warnings, cargo fmt --all --check and git diff --check passed. GStreamer environment: source /home/admin2/.cache/subordinate/env-gst.sh. Unix socket suites required execution outside the filesystem/network sandbox; no AWS instances/workflows used.
 
 AC4 remains unchecked only because the desktop-image GUI-versus-CLI export matrix was not run; its requested egui socket regression is implemented and passed locally. Existing session limitation: socket project.open/save does not update EditorSession.project_file (GUI Save/autosave/title), although the host media/export directory now updates immediately and safely. Direct low-level project.replace of an unknown project requires open/save to establish its host file context.
+
+Integration review with TASK-153 found that probing unprobed media for unused-stream warnings could block the UI. Commit e80a30e defers this preparation to the export worker first frame read, preserving the queued project snapshot and directory. The thread-identity/once-only regression and strict UI clippy pass. Combined workspace clippy, Command API/export suites, documentation tests and CLI diagnostics also pass; desktop-image validation remains pending to avoid release/AMI and EC2 work during this low-spend pass.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
