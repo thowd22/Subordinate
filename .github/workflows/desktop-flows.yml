@@ -182,6 +182,13 @@ jobs:
       # to being an honest stock desktop. If the probe below ever answers
       # media.unsupported again, the package regressed - do not re-add the apt
       # line.
+      #
+      # One ordering fact: this runner runs the AppImage **baked into the AMI**,
+      # which infra/images/linux-desktop/ takes from the newest v* release. So
+      # this job only goes green once a release carrying the TASK-145 fix has
+      # been cut and the desktop image rebuilt from it; against an older baked
+      # release the import still answers media.unsupported, and that is the
+      # image being stale rather than the workflow being wrong.
       - name: Desktop portal and accessibility bus (apt)
         run: |
           set -euxo pipefail
