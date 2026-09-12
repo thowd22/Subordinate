@@ -41,6 +41,10 @@ use sub_ui::{AppOptions, SubordinateApp};
 /// track, an overlay track and a music bed.
 const SEQUENCE: &str = "Main cut";
 
+/// That sequence's timebase, which is the rate a written file's duration is
+/// read back as a frame count at.
+const SEQUENCE_RATE: sub_time::Rational = sub_time::Rational::FPS_25;
+
 /// The preset the export is asked for: Matroska, H.264 and FLAC.
 ///
 /// FLAC because the audio is what the CLI equivalence test compares byte for
@@ -212,7 +216,7 @@ fn run_until_settled(harness: &mut Harness<'_, SubordinateApp>) -> u32 {
 
 /// Paints until the window has settled, for a bounded number of frames.
 ///
-/// `Harness::run` gives up after four frames with "exceeded max_steps", and a
+/// `Harness::run` gives up after four frames with "exceeded `max_steps`", and a
 /// cold start now asks for more than four: the export panel's encoder probe
 /// instantiates every catalogued encoder and drives it to READY, and that
 /// catalogue grew by six elements when the exporter learned about AV1 and
@@ -386,117 +390,125 @@ fn the_window_and_the_cli_write_the_same_file_for_each_encoder() {
             .encoders
             .iter()
             .any(|status| status.element == element && status.is_pinnable());
-        if !pinnable {
+        if pinnable {
+            compare_window_and_cli(&path, &cli, element);
+        } else {
             eprintln!("skipping {element}: this machine cannot start it");
-            continue;
         }
-
-        let mut harness = app_harness(&path);
-        settle(&mut harness);
-        let project = harness.state().project().clone();
-        let sequence = sequence_of(&project);
-        let id = sequence.id;
-        let gui_output = path.with_file_name(format!("gui-{element}.mkv"));
-        let cli_output = path.with_file_name(format!("cli-{element}.mkv"));
-
-        {
-            let panel = harness.state_mut().export_panel();
-            panel.select_preset(PRESET).expect("the preset is offered");
-            panel.select_sequence(&project, id);
-            panel.set_range(ExportRange::InToOut);
-            panel.set_in_out(0, FRAMES);
-            panel.set_output(&gui_output);
-            panel
-                .set_encoder_override(Some(element))
-                .expect("the element is catalogued");
-        }
-        let request = harness
-            .state_mut()
-            .export_panel()
-            .request(&project)
-            .expect("the panel builds a request");
-        harness
-            .state_mut()
-            .apply_export(ExportAction::Start(Box::new(request)));
-        run_until_settled(&mut harness);
-        let gui = match harness.state().export_status() {
-            ExportStatus::Finished(report) => report.clone(),
-            ExportStatus::Failed { error, .. } => {
-                panic!(
-                    "the window's export with {element} failed: [{}] {}",
-                    error.code, error.message
-                )
-            }
-            other => {
-                panic!("the window's export with {element} neither finished nor failed: {other:?}")
-            }
-        };
-        assert_eq!(
-            gui.video_encoder, element,
-            "the window exported with {} rather than the pinned {element}",
-            gui.video_encoder
-        );
-
-        let render = std::process::Command::new(&cli)
-            .args([
-                "render",
-                &path.display().to_string(),
-                "--sequence",
-                SEQUENCE,
-                "--preset",
-                PRESET,
-                "--encoder",
-                element,
-                "--range",
-                &format!("0:{FRAMES}"),
-                "--out",
-                &cli_output.display().to_string(),
-                "--compact",
-            ])
-            .output()
-            .expect("subordinate-cli runs");
-        assert!(
-            render.status.success(),
-            "subordinate-cli render with {element} failed: {}",
-            String::from_utf8_lossy(&render.stderr)
-        );
-
-        let gui_info = sub_media::probe::probe(&gui_output).expect("the window's file probes");
-        let cli_info = sub_media::probe::probe(&cli_output).expect("the CLI's file probes");
-        let rate = sequence.settings.frame_rate;
-        let frames = |info: &sub_media::probe::MediaInfo| {
-            info.duration
-                .expect("the file has a duration")
-                .rescaled_to_rounding(rate, sub_time::Rounding::Nearest)
-                .value()
-        };
-        assert_eq!(
-            frames(&gui_info),
-            frames(&cli_info),
-            "{element}: the window wrote {} frames and the CLI wrote {}",
-            frames(&gui_info),
-            frames(&cli_info),
-        );
-        assert_eq!(
-            frames(&gui_info),
-            FRAMES,
-            "{element}: neither path wrote the frames it was asked for"
-        );
-        assert_eq!(
-            gui_info.has_audio(),
-            cli_info.has_audio(),
-            "{element}: only one of the two paths wrote audio"
-        );
-        assert!(
-            gui_info.has_audio(),
-            "{element}: neither path wrote the sequence's audio"
-        );
-        eprintln!(
-            "{element}: window {} frames, CLI {} frames, audio on both",
-            frames(&gui_info),
-            frames(&cli_info),
-        );
     }
+}
+
+/// The window's export of `path` with `element` pinned, against the CLI's.
+///
+/// Panics with what differed, which is what makes it a test: a frame the
+/// window wrote and the CLI did not, or sound in one file and not the other,
+/// is the whole failure mode TASK-135 could not rule out.
+fn compare_window_and_cli(path: &Path, cli: &Path, element: &str) {
+    let gui_output = path.with_file_name(format!("gui-{element}.mkv"));
+    let cli_output = path.with_file_name(format!("cli-{element}.mkv"));
+    let gui = window_export(path, &gui_output, element);
+    assert_eq!(
+        gui.video_encoder, element,
+        "the window exported with {} rather than the pinned {element}",
+        gui.video_encoder
+    );
+    cli_render(cli, path, &cli_output, element);
+
+    let gui_info = sub_media::probe::probe(&gui_output).expect("the window's file probes");
+    let cli_info = sub_media::probe::probe(&cli_output).expect("the CLI's file probes");
+    let (gui_frames, cli_frames) = (frames_of(&gui_info), frames_of(&cli_info));
+    assert_eq!(
+        gui_frames, cli_frames,
+        "{element}: the window wrote {gui_frames} frames and the CLI wrote {cli_frames}",
+    );
+    assert_eq!(
+        gui_frames, FRAMES,
+        "{element}: neither path wrote the frames it was asked for"
+    );
+    assert_eq!(
+        gui_info.has_audio(),
+        cli_info.has_audio(),
+        "{element}: only one of the two paths wrote audio"
+    );
+    assert!(
+        gui_info.has_audio(),
+        "{element}: neither path wrote the sequence's audio"
+    );
+    eprintln!("{element}: window {gui_frames} frames, CLI {cli_frames} frames, audio on both");
+}
+
+/// Exports `frames` of the sample project through the assembled window, with
+/// `element` pinned in the export panel exactly as the encoder picker pins one.
+fn window_export(project: &Path, output: &Path, element: &str) -> sub_export::ExportReport {
+    let mut harness = app_harness(project);
+    settle(&mut harness);
+    let project = harness.state().project().clone();
+    let id = sequence_of(&project).id;
+    {
+        let panel = harness.state_mut().export_panel();
+        panel.select_preset(PRESET).expect("the preset is offered");
+        panel.select_sequence(&project, id);
+        panel.set_range(ExportRange::InToOut);
+        panel.set_in_out(0, FRAMES);
+        panel.set_output(output);
+        panel
+            .set_encoder_override(Some(element))
+            .expect("the element is catalogued");
+    }
+    let request = harness
+        .state_mut()
+        .export_panel()
+        .request(&project)
+        .expect("the panel builds a request");
+    harness
+        .state_mut()
+        .apply_export(ExportAction::Start(Box::new(request)));
+    run_until_settled(&mut harness);
+    match harness.state().export_status() {
+        ExportStatus::Finished(report) => report.clone(),
+        ExportStatus::Failed { error, .. } => {
+            panic!(
+                "the window's export with {element} failed: [{}] {}",
+                error.code, error.message
+            )
+        }
+        other => panic!("the window's export with {element} did not finish: {other:?}"),
+    }
+}
+
+/// The same frames of the same project through `subordinate-cli render`.
+fn cli_render(cli: &Path, project: &Path, output: &Path, element: &str) {
+    let render = std::process::Command::new(cli)
+        .args([
+            "render",
+            &project.display().to_string(),
+            "--sequence",
+            SEQUENCE,
+            "--preset",
+            PRESET,
+            "--encoder",
+            element,
+            "--range",
+            &format!("0:{FRAMES}"),
+            "--out",
+            &output.display().to_string(),
+            "--compact",
+        ])
+        .output()
+        .expect("subordinate-cli runs");
+    assert!(
+        render.status.success(),
+        "subordinate-cli render with {element} failed: {}",
+        String::from_utf8_lossy(&render.stderr)
+    );
+}
+
+/// How many frames of the sample sequence's timebase a probed file lasts.
+fn frames_of(info: &sub_media::probe::MediaInfo) -> i64 {
+    info.duration
+        .expect("the file has a duration")
+        .rescaled_to_rounding(SEQUENCE_RATE, sub_time::Rounding::Nearest)
+        .value()
 }
 
 /// `gst-discoverer-1.0`'s own report on `path`, when the binary is installed.
