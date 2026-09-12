@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-task-139'
 created_date: '2026-09-11 22:18'
-updated_date: '2026-09-12 03:50'
+updated_date: '2026-09-12 09:30'
 labels:
   - ui
   - test
@@ -50,4 +50,18 @@ A small library agents use on the desktop runners: launch the app with a project
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-09-11 user requirement: both the MCP path and real GUI clicking must be exercised on the desktop images; criteria split accordingly.
+
+Delivered on branch task/task-139.
+
+scripts/desktop/ is a Python harness (subdesktop) with one command set on both desktop images - launch, click, key, drag, wait_for_title, wait_for_log, screenshot, plus find/controls and a module CLI - over an X11 backend (xdotool, scrot, AT-SPI) and a Windows backend (pywinauto UI Automation, .NET capture), with README.md, example.py and two flows: flow_mcp.py (acts only through subordinate-mcp) and flow_clicks.py (acts only through input, asserts through read-only Command API calls). .github/workflows/desktop-flows.yml runs the four jobs, two GPU instances at a time for the account quota, and hardware.yml calls it and now also runs on release tags.
+
+What the runners taught, all of it now in docs/DEVELOPMENT.md:
+- The window is on screen before its Command API socket is (run 34671892159).
+- An agent's edit does not wake an idle egui window, so a screenshot taken straight after one shows the project as it was (run 34672010010); every MCP-flow picture is taken after a pointer nudge.
+- The editor's endpoint does not serve export.*: only subordinate-cli serve installs the host-backed families, so the MCP flow saves and renders through a second bridge.
+- The Linux desktop image's pointer cannot reach the whole screen - xdotool stops at x=448 on a 1920-wide screen - which is why clicks appeared to be ignored; the harness measures the reachable rectangle and maximizes into it (runs 34681396173, 34681751826).
+- AccessKit publishes nothing on Linux until org.a11y.Status says accessibility is enabled; the harness sets it (run 34673633121).
+- The dock's tabs are painted, not published, so the export panel's tab is found relative to the Inspector's own text.
+- PACKAGING DEFECT: the v0.1.2 AppImage's libav, va, qsv and msdk plugins fail to load without libva-drm.so.2 and libvdpau.so.1, so media.probe of the baked 4K60 clip answers media.unsupported/MissingPlugins with no window involved (run 34684471869). The clicks job installs the libraries until the package carries them.
+- WINDOWS DEFECT: an export of the baked 4K60 clip stalls after one frame on the Windows desktop runner - editor open or closed, through the bridge or through the GUI's Export button, with the Direct3D decoders ranked out in favour of NVDEC (runs 34672165182, 34673633121, 34674794109, 34682198476). The same project renders in seconds on Linux.
 <!-- SECTION:NOTES:END -->
