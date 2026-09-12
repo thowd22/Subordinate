@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@opus-task-144'
 created_date: '2026-09-12 05:04'
-updated_date: '2026-09-12 05:47'
+updated_date: '2026-09-12 06:10'
 labels:
   - ui
   - media
@@ -33,7 +33,7 @@ TASK-133's agent found that nothing in sub-ui or sub-edit calls sub_media::Decod
 <!-- AC:BEGIN -->
 - [ ] #1 Opening the sample project and scrubbing the timeline shows the correct decoded frame in the viewer and the pop-out; the Xvfb window smoke and the Linux desktop smoke screenshots show real picture content (not black) and the desktop smoke asserts it by comparing against a frame rendered by subordinate-cli
 - [x] #2 Play/JKL playback decodes ahead on worker threads with the audio clock as master; dropped frames are counted; the UI thread never blocks on decode
-- [ ] #3 Scrubbing uses Decoder::set_index / IndexedDecoder so the GOP cache applies; the hardware workflow's scrub_drag number is measured through the same code path the viewer uses
+- [x] #3 Scrubbing uses Decoder::set_index / IndexedDecoder so the GOP cache applies; the hardware workflow's scrub_drag number is measured through the same code path the viewer uses
 - [x] #4 kittest interaction test: scrub to frame N shows the frame whose burned-in timecode is N on a generated fixture
 <!-- AC:END -->
 
@@ -104,6 +104,8 @@ Plus unit tests in `preview.rs` for `plan_step` (a scrub always seeks; playing t
 **Criterion 3 — unchecked.** Its first half is done and visible in the code: scrubbing goes through `DecodeAhead::seek_to` → `Decoder::seek_to` on a decoder that had `set_index` applied at open, which is what switches on the TASK-133 accurate aim and GOP cache, and `plan_step`'s unit test pins that a parked transport seeks for every step rather than short-cutting through the ring. The second half is a hardware measurement: dispatch **`.github/workflows/hardware.yml`, jobs `nvidia-linux` and `amd-linux`**, and read `scrub_drag` off the summary. No code change is needed for the numbers to be the viewer's: the benchmark and the preview now run the same stages — `PtsIndex` built first, `Decoder::set_index`, `Decoder::seek_to` per step, one `Nv12Converter` reused while the geometry holds — and `docs/PERFORMANCE.md` now says so explicitly instead of aspirationally.
 
 **Criterion 4 — checked.**
+
+2026-09-12 supervisor verification: hardware run 34676554315 on main (viewer wired to the indexed decoders): box APU scrub_drag 4K 45.2 fps through vah264dec (seek p50 0 ms, 1.37 pictures per step, 14 of 30 steps from the GOP cache), 1080p 144 fps; the NVIDIA job could not launch (RunsOn 'Set up runner' failure while the other agents held both g4dn slots), but the same code path measured 101 fps 4K on the T4 in run 34673268738. Criterion 3 checked. Criterion 1: CI's window smoke with --require-picture runs on the next green main (fix PR for the export end-to-end test in progress); the desktop-smoke comparison against a CLI-rendered frame is not built and moves to TASK-139.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
