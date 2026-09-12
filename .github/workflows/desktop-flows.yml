@@ -181,6 +181,21 @@ jobs:
       # accessibility tree to controls.json and clicks `Import...`. Never
       # fatal - the flow below is the job's verdict - but its artifact is the
       # first thing to read when a name has moved or the a11y bus is not there.
+      # TEMPORARY (TASK-139): which kind of synthetic click the editor takes.
+      - name: Input diagnostics (never fatal)
+        continue-on-error: true
+        timeout-minutes: 8
+        env:
+          XDG_CURRENT_DESKTOP: GNOME
+          FLOW_OUT: ${{ github.workspace }}/flow-out/input
+          FLOW_WORK: /tmp/desktop-input-probe
+        run: |
+          set -uo pipefail
+          export XDG_RUNTIME_DIR=/tmp/xdg-runtime-$(id -u)
+          mkdir -p "$XDG_RUNTIME_DIR" "$FLOW_OUT"; chmod 700 "$XDG_RUNTIME_DIR"
+          dbus-run-session -- python3 -u scripts/desktop/diagnose_linux_input.py \
+            2>&1 | tee "$FLOW_OUT/input.txt"
+
       - name: Accessibility diagnostics (never fatal)
         continue-on-error: true
         env:

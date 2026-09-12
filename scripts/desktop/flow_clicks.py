@@ -114,6 +114,7 @@ def _candidates(control, window) -> list[tuple[int, int]]:
 TAB_ROLES = ("TabItem", "page tab", "Tab", "tab")
 BUTTON_ROLES = ("Button", "push button")
 COMBO_ROLES = ("ComboBox", "combo box", "Button", "push button")
+TEXT_ROLES = ("Text", "label", "static text")
 
 
 def _by_role(session, name: str, roles, *, timeout: float = 30.0):
@@ -388,10 +389,14 @@ def run(run: flowlib.Run) -> None:
             # rather than chosen in a save dialog. The field itself has no name
             # of its own; the label does, and the field is immediately right of
             # it.
-            label = session.find("File", timeout=60)
+            # By role: `File` is also the menu at the top of the window, and
+            # typing the path into *that* leaves the export writing wherever
+            # the panel last pointed (run 34678850753).
+            label = _by_role(session, "File", TEXT_ROLES, timeout=60)
             session.click((label.rect.x + label.rect.width + 60, label.rect.center[1]))
             session.key("ctrl+a")
             session.type_text(str(output))
+            step.note(field_took_the_path=_shows(session, output.name))
             # `ComboBox::from_label("Encoder")` draws the label beside the
             # button and the *selection* on it, so the button to click is the
             # one reading `Automatic` (export_panel.rs).
@@ -473,6 +478,12 @@ def _open_export_panel(session, window) -> str:
         "the export panel would not open: none of the points tried hit the dock "
         "tab named Export"
     )
+
+
+def _shows(session, needle: str) -> bool:
+    """Whether any control's name carries `needle`, which is how a text field
+    says what is in it."""
+    return any(needle in control.name for control in session.controls())
 
 
 def _range_summary(session) -> str:
