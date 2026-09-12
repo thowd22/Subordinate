@@ -1464,7 +1464,8 @@ impl SubordinateApp {
                 frame.timeline = Some(response);
             }
             Panel::Inspector => {
-                let response = inspector.ui(ui, sequence, timeline.selection(), effect_catalog);
+                let response =
+                    inspector.ui(ui, &project, sequence, timeline.selection(), effect_catalog);
                 if !response.is_empty() {
                     frame.inspector = Some(response);
                 }

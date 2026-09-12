@@ -52,7 +52,7 @@
 //! streaming threads and releases the decoder and the file handle.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -168,6 +168,16 @@ pub struct DecoderOptions {
     /// How many channels each [`AudioBlock`] carries. Ignored when no audio is
     /// decoded.
     pub audio_channels: AudioChannels,
+    /// Which of the file's audio streams is decoded, counted from zero in the
+    /// order the container exposes them, which is the order
+    /// [`crate::probe`] reports (TASK-153).
+    ///
+    /// A camera master or a mix-minus feed carries several audio streams and
+    /// only one of them is the take a clip was cut with, so the choice is the
+    /// caller's rather than always the first. Opening a stream the file does
+    /// not carry fails with `media.no_audio_stream` rather than quietly
+    /// falling back to another one. Ignored when no audio is decoded.
+    pub audio_stream: u16,
     /// Whether hardware decoders are preferred.
     pub hardware: HardwarePreference,
     /// Pixel format frames are delivered in. NV12 is what the compositor
@@ -240,6 +250,7 @@ impl Default for DecoderOptions {
         Self {
             streams: StreamSelection::Video,
             audio_channels: AudioChannels::StereoDownmix,
+            audio_stream: 0,
             hardware: HardwarePreference::Prefer,
             format: FrameFormat::Nv12,
             frame_timeout: Duration::from_secs(10),
@@ -486,6 +497,7 @@ impl Decoder {
     /// # Errors
     ///
     /// As [`Decoder::open`].
+    #[allow(clippy::too_many_lines)] // Keep pipeline setup and startup error cleanup together.
     pub fn open_with(path: &Path, options: DecoderOptions) -> SubResult<Self> {
         gst::init()
             .map_err(|e| SubError::wrap(codes::INIT_FAILED, "GStreamer failed to start", &e))?;
@@ -521,17 +533,23 @@ impl Decoder {
             None
         };
 
-        // A file with several streams of one type exposes several pads; the
-        // first of each type is decoded and any later one is discarded rather
-        // than left dangling.
+        // A file with several streams of one type exposes several pads. The
+        // first video stream is decoded; the audio stream is the one
+        // `DecoderOptions::audio_stream` names, which is how a clip on a
+        // multi-track camera master plays the track it was cut with
+        // (TASK-153). Every other pad is discarded rather than left dangling.
         let saw_video = Arc::new(AtomicBool::new(false));
         let saw_audio = Arc::new(AtomicBool::new(false));
         link_decoded_pads(
             &source,
             &pipeline,
             &LinkTargets {
-                video: video_sink.as_ref().map(|sink| (sink, &saw_video)),
-                audio: audio_sink.as_ref().map(|sink| (sink, &saw_audio)),
+                video: video_sink
+                    .as_ref()
+                    .map(|sink| LinkTarget::new(sink, &saw_video, 0)),
+                audio: audio_sink
+                    .as_ref()
+                    .map(|sink| LinkTarget::new(sink, &saw_audio, u32::from(options.audio_stream))),
             },
         )?;
 
@@ -1274,8 +1292,13 @@ fn open_audio_branch(
         })),
         None if options.streams == StreamSelection::AudioOnly => Err(SubError::new(
             codes::NO_AUDIO_STREAM,
-            "the file carries no audio stream to decode",
-        )),
+            if options.audio_stream == 0 {
+                "the file carries no audio stream to decode"
+            } else {
+                "the file carries no audio stream at the index this decode asked for"
+            },
+        )
+        .with_detail("audio_stream", options.audio_stream.to_string())),
         None => Ok(None),
     }
 }
@@ -1345,11 +1368,42 @@ fn build_audio_branch(pipeline: &gst::Pipeline) -> SubResult<gst::Element> {
     Ok(sink)
 }
 
-/// The branches a decoded pad can be linked into, each with the flag that
-/// records whether that branch has already claimed a stream.
+/// One branch a decoded pad can be linked into: where it enters, whether it
+/// has already claimed a stream, and which stream of its media type it wants.
+struct LinkTarget<'a> {
+    /// The branch's first element, whose sink pad a decoded pad links to.
+    sink: &'a gst::Element,
+    /// Set once this branch has claimed its stream.
+    taken: &'a Arc<AtomicBool>,
+    /// Which stream of this media type the branch takes, counted from zero in
+    /// the order decodebin exposes them, which is the container's own order
+    /// and so the order the probe reported (TASK-153).
+    index: u32,
+}
+
+impl<'a> LinkTarget<'a> {
+    fn new(sink: &'a gst::Element, taken: &'a Arc<AtomicBool>, index: u32) -> Self {
+        Self { sink, taken, index }
+    }
+}
+
+/// The branches a decoded pad can be linked into.
 struct LinkTargets<'a> {
-    video: Option<(&'a gst::Element, &'a Arc<AtomicBool>)>,
-    audio: Option<(&'a gst::Element, &'a Arc<AtomicBool>)>,
+    video: Option<LinkTarget<'a>>,
+    audio: Option<LinkTarget<'a>>,
+}
+
+/// A branch as the pad-added handler holds it, with the counter that says how
+/// many streams of its media type have been exposed so far.
+struct PendingBranch {
+    /// The pad a decoded pad links to.
+    entry: gst::Pad,
+    /// Set once this branch has claimed its stream.
+    taken: Arc<AtomicBool>,
+    /// Which stream of this media type the branch takes.
+    index: u32,
+    /// How many streams of this media type have been offered so far.
+    seen: AtomicU32,
 }
 
 /// Links each decoded pad into the branch that wants it, discarding the pads
@@ -1368,14 +1422,18 @@ fn link_decoded_pads(
             .ok_or_else(|| SubError::new(codes::DECODE_FAILED, "a decode branch has no sink pad"))
     }
 
-    let video = targets
-        .video
-        .map(|(sink, taken)| Ok::<_, SubError>((entry_pad(sink)?, Arc::clone(taken))))
-        .transpose()?;
-    let audio = targets
-        .audio
-        .map(|(sink, taken)| Ok::<_, SubError>((entry_pad(sink)?, Arc::clone(taken))))
-        .transpose()?;
+    /// Resolves one branch into the form the pad-added handler holds.
+    fn pending(target: &LinkTarget<'_>) -> SubResult<PendingBranch> {
+        Ok(PendingBranch {
+            entry: entry_pad(target.sink)?,
+            taken: Arc::clone(target.taken),
+            index: target.index,
+            seen: AtomicU32::new(0),
+        })
+    }
+
+    let video = targets.video.as_ref().map(pending).transpose()?;
+    let audio = targets.audio.as_ref().map(pending).transpose()?;
 
     let weak_pipeline = pipeline.downgrade();
     source.connect_pad_added(move |_, pad| {
@@ -1385,19 +1443,23 @@ fn link_decoded_pads(
             Some(name) if name.starts_with("audio/") => audio.as_ref(),
             _ => None,
         };
-        let Some((entry, taken)) = target else {
+        let Some(branch) = target else {
             if let Some(pipeline) = weak_pipeline.upgrade() {
                 discard_pad(&pipeline, pad);
             }
             return;
         };
-        if taken.swap(true, Ordering::SeqCst) {
+        // Every stream of this type is counted, so the one the branch asked
+        // for is recognised by its position even though the pads arrive one
+        // at a time; the others are disposed of rather than left dangling.
+        let position = branch.seen.fetch_add(1, Ordering::SeqCst);
+        if position != branch.index || branch.taken.swap(true, Ordering::SeqCst) {
             if let Some(pipeline) = weak_pipeline.upgrade() {
                 discard_pad(&pipeline, pad);
             }
             return;
         }
-        if let Err(err) = pad.link(entry) {
+        if let Err(err) = pad.link(&branch.entry) {
             tracing::warn!(%err, media = ?media, "decoded pad could not be linked");
         }
     });

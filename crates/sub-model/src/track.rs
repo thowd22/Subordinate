@@ -36,6 +36,13 @@ impl TrackKind {
     }
 }
 
+/// Whether a clip takes the first audio stream of its source, which is the
+/// default and is what the project file leaves out.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde skip predicates borrow the field.
+fn is_first_audio_stream(stream: &u16) -> bool {
+    *stream == 0
+}
+
 /// A reference to a slice of a [`MediaItem`](crate::MediaItem) placed on a
 /// track.
 ///
@@ -66,6 +73,16 @@ pub struct Clip {
     pub transform: Transform,
     /// Clip audio level in decibels. Unity by default.
     pub gain: GainDb,
+    /// Which of the source's audio streams this clip takes, counted from zero
+    /// in the order the probe reported them (TASK-153).
+    ///
+    /// A camera master or a mix-minus feed carries several audio streams and a
+    /// clip plays exactly one of them; the first is the default, which is what
+    /// every clip written before this field existed meant, so the field is
+    /// left out of the project file when it is zero and reads back as zero
+    /// when it is absent.
+    #[serde(default, skip_serializing_if = "is_first_audio_stream")]
+    pub audio_stream: u16,
     /// How long the clip ramps up from nothing at its head. Zero by default.
     pub fade_in: RationalTime,
     /// How long the clip ramps down to nothing at its tail. Zero by default.
@@ -97,6 +114,7 @@ impl Clip {
             opacity: Opacity::OPAQUE,
             transform: Transform::IDENTITY,
             gain: GainDb::UNITY,
+            audio_stream: 0,
             fade_in: zero,
             fade_out: zero,
             markers: Vec::new(),
@@ -502,6 +520,39 @@ mod tests {
         assert!(!track.solo);
         assert!(!track.locked);
         assert_eq!(track.gain, GainDb::UNITY);
+    }
+
+    #[test]
+    fn a_clip_takes_the_first_audio_stream_unless_it_names_another() {
+        let mut clip = Clip::new("shot 1", MediaId::new(), range(48, 24));
+        assert_eq!(clip.audio_stream, 0);
+
+        let text = serde_json::to_string(&clip).unwrap();
+        assert!(
+            !text.contains("audio_stream"),
+            "the default stream is left out of the file: {text}"
+        );
+
+        clip.audio_stream = 2;
+        let text = serde_json::to_string(&clip).unwrap();
+        assert!(text.contains("\"audio_stream\":2"), "{text}");
+        let loaded: Clip = serde_json::from_str(&text).unwrap();
+        assert_eq!(loaded.audio_stream, 2);
+        loaded.validate().unwrap();
+    }
+
+    #[test]
+    fn a_clip_written_before_stream_selection_existed_takes_the_first_stream() {
+        let clip = Clip::new("shot 1", MediaId::new(), range(48, 24));
+        let mut value = serde_json::to_value(&clip).unwrap();
+        let fields = value.as_object_mut().unwrap();
+        assert!(
+            fields.remove("audio_stream").is_none(),
+            "the default clip writes no stream field"
+        );
+
+        let loaded: Clip = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.audio_stream, 0);
     }
 
     #[test]

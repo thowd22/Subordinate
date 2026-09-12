@@ -449,3 +449,49 @@ fn an_audio_only_decoder_has_no_frames_to_pull() {
     let err = decoder.next_frame().expect_err("no video branch was built");
     assert_eq!(err.code.as_str(), "media.no_video_stream");
 }
+
+#[test]
+fn every_audio_stream_is_probed_and_the_requested_stream_is_decoded() {
+    if !encoders_available() {
+        return;
+    }
+    let path = std::env::temp_dir().join(format!("sub-multi-audio-{}.mkv", std::process::id()));
+    run_to_eos(&format!(
+        "matroskamux name=m ! filesink location={} \
+         videotestsrc num-buffers=25 ! video/x-raw,format=I420,width=64,height=64,framerate=25/1 ! x264enc speed-preset=ultrafast ! h264parse ! m. \
+         audiotestsrc wave=silence num-buffers=10 samplesperbuffer=4800 ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! flacenc ! m. \
+         audiotestsrc wave=sine volume=0.8 num-buffers=10 samplesperbuffer=4800 ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! flacenc ! m.",
+        launch_path(&path)
+    ));
+    let info = sub_media::probe(&path).expect("probe multi-stream file");
+    assert_eq!(info.audio.len(), 2);
+    let peaks: Vec<f32> = (0..2)
+        .map(|audio_stream| {
+            let mut decoder = open(
+                &path,
+                DecoderOptions {
+                    audio_stream,
+                    ..audio_options(AudioChannels::StereoDownmix)
+                },
+            );
+            drain_audio(&mut decoder)
+                .into_iter()
+                .flat_map(|(_, samples)| samples)
+                .map(f32::abs)
+                .fold(0.0, f32::max)
+        })
+        .collect();
+    assert!(peaks[0] < 0.001, "stream one is silence: {peaks:?}");
+    assert!(peaks[1] > 0.7, "stream two is the tone: {peaks:?}");
+    let Err(error) = Decoder::open_with(
+        &path,
+        DecoderOptions {
+            audio_stream: 2,
+            ..audio_options(AudioChannels::StereoDownmix)
+        },
+    ) else {
+        panic!("missing stream must fail")
+    };
+    assert_eq!(error.code.as_str(), "media.no_audio_stream");
+    std::fs::remove_file(path).unwrap();
+}

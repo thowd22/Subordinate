@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 use sub_core::{SubError, SubResult, codes};
 use sub_export::sequence::{
     FrameSpan, SequenceFrames, clips_with_effects, lift_render_error, open_streams,
-    sequence_frames, settings_for_sequence,
+    sequence_frames, settings_for_sequence, unused_audio_streams_for_export,
 };
 use sub_export::{
     AudioFrameSource, EncoderPreferences, ExportElements, ExportEvent, ExportJob, ExportSettings,
@@ -172,6 +172,13 @@ pub fn run_with(options: &Options, on_event: &mut dyn FnMut(&ExportEvent)) -> Su
             "clip '{clip}' carries plugin effects, which a headless render does not run yet",
         ));
     }
+    // A source with several audio streams is cut on one of them; the others
+    // are named here rather than dropped in silence (TASK-153).
+    warnings.extend(unused_audio_streams_for_export(
+        &project,
+        &sequence,
+        &project_dir,
+    ));
     // The same adapters the editor window exports through (TASK-135): one
     // bridge from a sequence to an export, so a GUI export and this render
     // write the same file.

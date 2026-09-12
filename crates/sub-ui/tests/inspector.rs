@@ -96,9 +96,13 @@ fn harness(scene: Scene) -> Harness<'static, Scene> {
         // The panel reads the sequence and the commands write to the project,
         // so the sequence is taken first and the edit applied afterwards.
         let sequence = scene.project.sequences[0].clone();
-        let response = scene
-            .panel
-            .ui(ui, &sequence, &scene.selection, &scene.catalog);
+        let response = scene.panel.ui(
+            ui,
+            &scene.project,
+            &sequence,
+            &scene.selection,
+            &scene.catalog,
+        );
         apply_edit(&mut scene.history, &mut scene.project, &response)
             .expect("the inspector's edit applies");
     })
@@ -317,9 +321,13 @@ fn the_command_the_panel_issues_names_the_selected_clip_and_only_the_edited_fiel
         (&mut scene, &mut raised, &mut begins, &mut commits),
         |ui, (scene, raised, begins, commits)| {
             let sequence = scene.project.sequences[0].clone();
-            let response = scene
-                .panel
-                .ui(ui, &sequence, &scene.selection, &scene.catalog);
+            let response = scene.panel.ui(
+                ui,
+                &scene.project,
+                &sequence,
+                &scene.selection,
+                &scene.catalog,
+            );
             raised.extend(response.commands.iter().copied());
             if let Some(label) = response.begin.clone() {
                 begins.push(label);
@@ -404,7 +412,7 @@ fn the_inspector_matches_its_snapshot_over_the_sample_project() {
     let catalog = catalog();
     let mut panel = InspectorPanel::new();
     let mut harness = support::panel_harness(|ui| {
-        panel.ui(ui, &sequence, &selection, &catalog);
+        panel.ui(ui, &project, &sequence, &selection, &catalog);
     });
     harness.run();
     support::snapshot(&mut harness, "inspector_clip_parameters");
@@ -635,7 +643,10 @@ fn the_effect_commands_the_panel_issues_name_the_clip_and_the_effect() {
     let mut harness =
         support::panel_harness_state((&mut scene, &mut raised), |ui, (scene, raised)| {
             let sequence = scene.project.sequences[0].clone();
-            let response = scene.panel.ui(ui, &sequence, &scene.selection, &catalog);
+            let response =
+                scene
+                    .panel
+                    .ui(ui, &scene.project, &sequence, &scene.selection, &catalog);
             raised.extend(response.effects.iter().cloned());
             apply_edit(&mut scene.history, &mut scene.project, &response)
                 .expect("the inspector's edit applies");
@@ -749,9 +760,45 @@ fn the_effect_list_matches_its_snapshot_over_the_sample_project() {
     let mut panel = InspectorPanel::new();
     let mut harness = support::panel_harness(|ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {
-            panel.ui(ui, &sequence, &selection, &catalog);
+            panel.ui(ui, &project, &sequence, &selection, &catalog);
         });
     });
     harness.run();
     support::snapshot(&mut harness, "inspector_clip_effects");
+}
+
+#[test]
+fn choosing_an_audio_stream_is_visible_and_undoable() {
+    let mut scene = scene(1, 1);
+    scene.project.media[0].info = Some(sub_model::StreamInfo {
+        audio: vec![
+            sub_model::media::AudioStream {
+                channels: 2,
+                sample_rate: 48_000
+            };
+            3
+        ],
+        ..Default::default()
+    });
+    let mut harness = harness(scene);
+    harness.run();
+    assert!(shows(&harness, "Source carries 3 audio streams"));
+    harness.get_by_label("Audio stream").click();
+    harness.run();
+    harness.get_by_label("Stream 3").click();
+    harness.run();
+    assert_eq!(harness.state().clips()[0].audio_stream, 2);
+    assert_eq!(harness.state().history.undo_entries().count(), 1);
+    let Scene {
+        history, project, ..
+    } = harness.state_mut();
+    history.undo(project).unwrap();
+    assert_eq!(
+        project.sequences[0].tracks[0]
+            .clips()
+            .next()
+            .unwrap()
+            .audio_stream,
+        0
+    );
 }
