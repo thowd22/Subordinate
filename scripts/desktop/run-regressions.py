@@ -40,12 +40,15 @@ with tempfile.TemporaryDirectory(prefix="sub-reg-") as scratch:
     gst_launch = str(artifact / "runtime" / "bin" / "gst-launch-1.0.exe") if os.name == "nt" else "gst-launch-1.0"
     subprocess.run([gst_launch, "-q", "-e", "videotestsrc", "num-buffers=125", "!",
         "video/x-raw,width=1920,height=1080,framerate=25/1", "!", "x264enc", "speed-preset=ultrafast",
-        "!", "h264parse", "!", "mp4mux", "!", "filesink", "location=" + str(fixtures / "bars_1080p_h264.mp4")],
+        "!", "h264parse", "!", "mp4mux", "!", "filesink", "location=" + (fixtures / "bars_1080p_h264.mp4").as_posix()],
         env=env, check=True, timeout=90)
     entries = []
     for name, kind, width, height, seconds, fps in [
             ("bars_1080p_h264.mp4", "video", 1920, 1080, 5, 25),
             ("tone_48k_stereo.wav", "audio", 0, 0, 1, 0)]:
+        fixture_file = fixtures / name
+        if not fixture_file.is_file() or fixture_file.stat().st_size == 0:
+            raise SystemExit(f"Fixture generation did not produce {fixture_file}")
         entries.append({"name": name, "kind": kind, "width": width, "height": height,
             "duration_ns": seconds * 1000000000, "fps_num": fps, "fps_den": 1,
             "vfr": False, "lossy": kind == "video", "generated": True,
