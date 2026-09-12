@@ -263,7 +263,8 @@ def run(run: flowlib.Run) -> None:
             step.note(dialog=dialog)
 
         with run.step("choose the clip in the native file dialog") as step:
-            _choose_file(session, staged.media)
+            how = _choose_file(session, staged.media)
+            step.note(chose_by=how)
             listed = _wait_until(
                 lambda: _items(read("media.list", {})),
                 lambda items: len(items) == 1,
@@ -398,8 +399,12 @@ def run(run: flowlib.Run) -> None:
             session.key("ctrl+a")
             session.type_text(str(output))
             session.key("Return")
-            took = _shows(session, output.name)
-            step.note(file_label=text.as_dict(), typed_at=point, field_took_the_path=took)
+            # A text field's *content* is its accessibility value, not its
+            # name, and pywinauto reads names - so what says the path landed is
+            # the panel itself: the reason it prints under a disabled Export
+            # button, `choose a file to write`, goes away when it has one.
+            took = _wait_for(lambda: not _shows(session, "choose a file to write"), 15)
+            step.note(file_label=text.as_dict(), typed_at=point, export_ready=took)
             if not took:
                 raise AssertionError(
                     f"the output field did not take {output}: the panel still shows "
@@ -412,12 +417,11 @@ def run(run: flowlib.Run) -> None:
             session.click(picker)
             choice = session.find(encoder, timeout=30)
             session.click(choice)
-            pinned = _shows(session, encoder)
-            step.note(encoder=encoder, picker=picker.as_dict(), encoder_pinned=pinned)
-            if not pinned:
-                raise AssertionError(
-                    f"the encoder picker still reads {_selected_encoder(session)!r}"
-                )
+            # What the picker now reads is drawn on the combo, not published
+            # as a name, so the proof that the pin took is the element the
+            # export actually ran on - asserted from the editor's own log when
+            # the file is written, below.
+            step.note(encoder=encoder, picker=picker.as_dict())
 
         with run.step("click Export and wait for the file") as step:
             session.click(_by_role(session, "Export", BUTTON_ROLES, timeout=30))
@@ -494,6 +498,16 @@ def _shows(session, needle: str) -> bool:
     """Whether any control's name carries `needle`, which is how a text field
     says what is in it."""
     return any(needle in control.name for control in session.controls())
+
+
+def _wait_for(predicate, timeout: float) -> bool:
+    """Poll a predicate until it holds or the time runs out."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def _field_row(session) -> str:
@@ -626,18 +640,30 @@ def _x11_dialog(session, window) -> dict | None:
     return None
 
 
-def _choose_file(session, path: Path) -> None:
-    """Type the file's path into whichever native chooser came up."""
-    if platform.system() == "Windows":
-        # The common item dialog opens with the File name box focused.
-        session.type_text(str(path))
-        session.key("Return")
-    else:
+def _choose_file(session, path: Path) -> str:
+    """Choose `path` in whichever native chooser came up, and say how.
+
+    The GTK chooser the XDG portal puts up publishes its own widgets over
+    AT-SPI, so the file can be picked by the name it has on disk - a
+    double-click on the row - which is both what a person does and proof the
+    right file was chosen. Typing the path into the location bar is the
+    fallback, and it is what the Windows common item dialog takes (its File
+    name box has the focus when it opens).
+    """
+    if platform.system() != "Windows":
+        try:
+            row = session.find(path.name, timeout=15)
+            session.click(row, double=True)
+            time.sleep(2)
+            return f"double-clicked the row named {path.name!r}"
+        except DesktopError:
+            pass
         # GTK's chooser: Ctrl+L opens the location bar, and the path goes in it.
         session.key("ctrl+l")
-        session.type_text(str(path))
-        session.key("Return")
+    session.type_text(str(path))
+    session.key("Return")
     time.sleep(2)
+    return "typed the path"
 
 
 # ------------------------------------------------------------------- reading
