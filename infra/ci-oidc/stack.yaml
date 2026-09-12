@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  The identity GitHub Actions uses in this account (TASK-137): an OIDC trust
+  for one repository, and one role that may start the image pipelines and read
+  their state. Nothing else.
+
+  Deliberately narrow. Changing what an image contains - the component, the
+  recipe, the instance type - stays a local `deploy.sh` from a machine with
+  admin credentials, so a workflow file on a branch can never rewrite the
+  images CI runs on. It can only ask for a rebuild of the recipe that is
+  already deployed.
+
+  Deploy with:
+    aws cloudformation deploy --region us-east-1 \
+      --stack-name subordinate-ci-oidc \
+      --template-file infra/ci-oidc/stack.yaml \
+      --capabilities CAPABILITY_NAMED_IAM \
+      --parameter-overrides Repository=thowd22/Subordinate
+
+  Then set the repository variable the workflow reads:
+    gh variable set AWS_IMAGEBUILDER_ROLE_ARN --body "<RoleArn output>"
+
+Parameters:
+  Repository:
+    Type: String
+    Default: thowd22/Subordinate
+    Description: owner/name of the only repository allowed to assume the role.
+  PipelinePrefix:
+    Type: String
+    Default: subordinate-
+    Description: >-
+      Image pipelines this role may start, by name prefix. Image Builder ARNs
+      lower-case the name, so the prefix is matched against that.
+
+Resources:
+  # GitHub rotates the OIDC signing keys and AWS now validates the chain
+  # against its own trust store, so no thumbprint is pinned here: the value is
+  # ignored for token.actions.githubusercontent.com. It is present because the
+  # API still requires the field.
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  ImageBuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: subordinate-ci-imagebuilder
+      Description: Lets the Desktop AMI workflow run an image pipeline and read its state.
+      MaxSessionDuration: 7200
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${Repository}:*'
+      Policies:
+        - PolicyName: start-image-pipelines
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - imagebuilder:StartImagePipelineExecution
+                Resource: !Sub 'arn:aws:imagebuilder:${AWS::Region}:${AWS::AccountId}:image-pipeline/${PipelinePrefix}*'
+              # Reads are how the workflow waits for the AMI id. They are
+              # region-wide because an image build version ARN carries the
+              # recipe name, not the pipeline's.
+              - Effect: Allow
+                Action:
+                  - imagebuilder:GetImage
+                  - imagebuilder:GetImagePipeline
+                  - imagebuilder:ListImageBuildVersions
+                  - imagebuilder:ListImagePipelineImages
+                Resource: '*'
+
+Outputs:
+  RoleArn:
+    Description: Set this as the AWS_IMAGEBUILDER_ROLE_ARN repository variable.
+    Value: !GetAtt ImageBuilderRole.Arn
+  ProviderArn:
+    Value: !Ref GitHubOidcProvider

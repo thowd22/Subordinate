@@ -20,6 +20,29 @@
 # All GPU runners need the EC2 G-family vCPU quotas in us-east-1 above zero
 # (L-DB2E81BA on-demand, L-3819A6DF spot) - see TASK-113.
 
+# Custom AMIs. `name` would pick the lexicographically highest match, which is
+# wrong here: an Image Builder AMI name carries a build date, so a rebuild that
+# turns out to be broken would be adopted the moment it exists. The id is
+# pinned instead and bumped by hand after the new image has passed the
+# `nvidia-desktop-linux` job in .github/workflows/gpu-smoke.yml.
+#
+# Schema: https://runs-on.com/configuration/repo-config/
+images:
+  # Built by infra/images/linux-desktop (TASK-137) from RunsOn's own
+  # ubuntu24-gpu-x64 base, so the runner user, the Actions agent and the
+  # RunsOn bootstrap are all still the ones RunsOn put there. What is added is
+  # a desktop: headless Xorg on the NVIDIA driver at :0 (one virtual
+  # 1920x1080 screen), openbox, xdotool/scrot/ImageMagick, the Subordinate
+  # AppImage with its bundled GStreamer 1.28, subordinate-mcp, and the 4K60
+  # test clip at /opt/subordinate/test-media/.
+  #
+  # Rebuild it after every release: `infra/images/linux-desktop/deploy.sh --run
+  # --wait`. See docs/DEVELOPMENT.md "Desktop GPU runner (Linux)".
+  subordinate-desktop-linux:
+    platform: linux
+    arch: x64
+    ami: ami-05c99b3a15c9d2fef
+
 runners:
   # NVIDIA T4 (16 GB), 4 vCPU / 16 GB RAM.
   # us-east-1 on-demand $0.526/h, spot typically $0.16-0.25/h.
@@ -35,6 +58,26 @@ runners:
     spot: price-capacity-optimized
     retry: when-interrupted
     volume: 80gb:gp3:125mbs:3000iops
+    ssh: false
+
+  # The same T4 instance, but on the desktop image: a real Xorg session on the
+  # NVIDIA driver at :0, with Subordinate, subordinate-mcp and the test media
+  # already installed. This is the runner for anything that has to drive the
+  # real window - screenshots, clicking, pop-out placement - rather than
+  # render into an offscreen surface. Same price as gpu-nvidia-linux
+  # (us-east-1 on-demand $0.526/h); the image is bigger, so the volume is too.
+  #
+  # Jobs must set DISPLAY=:0 and XAUTHORITY=/run/subordinate/Xauthority
+  # themselves: the Actions runner is started by the RunsOn bootstrap and never
+  # reads a login profile, so /etc/profile.d cannot reach it.
+  gpu-nvidia-desktop-linux:
+    family: ["g4dn.xlarge"]
+    cpu: [4, 4]
+    ram: [16, 16]
+    image: subordinate-desktop-linux
+    spot: price-capacity-optimized
+    retry: when-interrupted
+    volume: 120gb:gp3:125mbs:3000iops
     ssh: false
 
   # AMD Radeon Pro V520 (8 GB), 4 vCPU / 16 GB RAM.
