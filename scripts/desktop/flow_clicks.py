@@ -92,6 +92,22 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name) or default
 
 
+def _candidates(control, window) -> list[tuple[int, int]]:
+    """The points a control might really be at, best guess first.
+
+    UI Automation answers in screen coordinates and AT-SPI is asked for
+    `DESKTOP_COORDS`, so the first candidate is the rectangle as given. The
+    second treats it as window-relative, which is what a toolkit that has not
+    been told where its window is reports, and the flow records which of the
+    two opened the dialog rather than guessing in silence.
+    """
+    if isinstance(control, tuple):
+        return [control]
+    first = control.rect.center
+    second = (window.rect.x + first[0], window.rect.y + first[1])
+    return [first] if second == first else [first, second]
+
+
 #: The same role under each platform's spelling. UI Automation says
 #: `TabItem` and `Button`; AT-SPI says `page tab` and `push button`.
 TAB_ROLES = ("TabItem", "page tab", "Tab", "tab")
@@ -189,8 +205,23 @@ def run(run: flowlib.Run) -> None:
         with run.step("click Import... in the media bin") as step:
             control, how = locate(session, window, "Import", "Import", offsets)
             step.note(control=getattr(control, "as_dict", lambda: control)(), located_by=how)
-            session.click(control)
-            dialog = _wait_for_dialog(session, window, timeout=60)
+            dialog = None
+            for attempt, point in enumerate(_candidates(control, window)):
+                session.click(point)
+                try:
+                    dialog = _wait_for_dialog(session, window, timeout=30)
+                except DesktopError as error:
+                    step.note(**{f"attempt_{attempt}": f"{point} -> {error}"[:200]})
+                    continue
+                step.note(**{f"attempt_{attempt}": f"{point} -> opened {dialog}"})
+                break
+            if dialog is None:
+                raise DesktopError(
+                    "the Import button opened no file dialog. On Linux the editor's "
+                    "file dialog is rfd's XDG portal backend, with zenity as its own "
+                    "fallback: the session needs xdg-desktop-portal with a backend, "
+                    "or zenity, and a session bus."
+                )
             step.note(dialog=dialog)
 
         with run.step("choose the clip in the native file dialog") as step:
@@ -242,16 +273,19 @@ def run(run: flowlib.Run) -> None:
             step.note(clips=len(clips))
 
         with run.step("scrub the playhead, then press Ctrl+K") as step:
-            ruler = _ruler_point(session, window, layout)
+            # Well inside the clip that was just dropped, which is what makes
+            # the cut below a cut: `Ctrl+K` on a clip's own first frame, or
+            # anywhere outside it, is refused rather than performed
+            # (crates/sub-ui/src/split.rs). The two clips this leaves are
+            # therefore the proof that the pointer scrubbed to a position
+            # inside the clip - the transport's own `playback.status` is not,
+            # because the window's playhead is not the engine's transport
+            # (run 34676433658 read position 0 with the viewer showing
+            # 00:00:09:02).
+            ruler = _ruler_point(session, window, layout, after=drop[0])
             step.note(ruler={"x": ruler[0], "y": ruler[1]})
             session.click(ruler)
-            position = _wait_until(
-                lambda: read("playback.status", {}),
-                lambda status: _units(status) > 0,
-                timeout=30,
-                what="a playhead somewhere other than zero",
-            )
-            step.note(scrubbed_to=position)
+            step.note(transport=read("playback.status", {}))
             session.key("ctrl+k")
             clips = _wait_until(
                 lambda: _clips(read, staged.sequence),
@@ -360,20 +394,22 @@ def _lane_point(session, window, layout) -> tuple[tuple[int, int], str]:
     """
     try:
         header = session.find("V1", timeout=20)
-        x = window.rect.x + int(window.rect.width * 0.5)
+        # A third of the way along, so there is room to the right of it for
+        # the scrub and the cut.
+        x = window.rect.x + int(window.rect.width * 0.35)
         return (x, header.rect.center[1]), "the V1 header's row"
     except DesktopError:
         return window.rect.point(*layout["timeline_drop"]), "a fraction of the window"
 
 
-def _ruler_point(session, window, layout) -> tuple[int, int]:
-    """Where to click to scrub: the ruler, which is just above the first lane."""
+def _ruler_point(session, window, layout, *, after: int) -> tuple[int, int]:
+    """Where to click to scrub: the ruler, a little right of where the clip starts."""
+    x = after + 120
     try:
         header = session.find("V1", timeout=10)
-        x = window.rect.x + int(window.rect.width * 0.35)
         return (x, header.rect.y - 24)
     except DesktopError:
-        return window.rect.point(*layout["ruler"])
+        return (x, window.rect.point(*layout["ruler"])[1])
 
 
 # ----------------------------------------------------------------- the dialog
@@ -486,20 +522,6 @@ def _tracks(state) -> list:
             if found:
                 return found
     return []
-
-
-def _units(status) -> int:
-    """The playhead's unit count, however the transport reports it."""
-    if isinstance(status, dict):
-        for key in ("position", "playhead", "time"):
-            value = status.get(key)
-            if isinstance(value, dict) and "value" in value:
-                return int(value["value"])
-        for value in status.values():
-            found = _units(value)
-            if found:
-                return found
-    return 0
 
 
 def _wait_until(read, predicate, *, timeout: float, what: str):
