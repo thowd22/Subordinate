@@ -100,12 +100,20 @@ fn the_guide_names_no_tool_that_does_not_exist() {
 
 #[test]
 fn the_guide_documents_the_variables_the_bridge_reads() {
-    const KNOWN: [&str; 5] = [
+    /// The editor's own switch for whether it serves an endpoint at all
+    /// (`sub_ui::app::NO_COMMAND_API_ENV`). Nothing in this binary reads it,
+    /// but the guide has to say it exists: it is the other half of which
+    /// editor a session reaches. Spelled out here because `sub-ui` is a GUI
+    /// crate this bridge does not depend on.
+    const EDITOR_NO_COMMAND_API: &str = "SUBORDINATE_NO_COMMAND_API";
+
+    const KNOWN: [&str; 6] = [
         INSTANCE_ENV,
         DIRECTORY_ENV,
         CLI_ENV,
         NO_LAUNCH_ENV,
         FILTER_ENV,
+        EDITOR_NO_COMMAND_API,
     ];
 
     let spans = code_spans();

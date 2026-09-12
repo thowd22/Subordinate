@@ -129,7 +129,18 @@ fn tool_calls_reach_a_running_editor_and_come_back_as_content() {
     assert_eq!(bridge.tools().method("plugin_list"), Some("plugin.list"));
     let info = bridge.get_info();
     assert!(info.capabilities.tools.is_some());
-    assert!(info.instructions.is_some());
+    // The instructions say which of the two the session got, so an agent —
+    // and a smoke job — can tell an edit that lands in a window from one that
+    // lands nowhere (TASK-141).
+    let instructions = info.instructions.expect("instructions");
+    assert!(
+        instructions.contains("Connected to the editor already running at"),
+        "{instructions}",
+    );
+    assert!(
+        instructions.contains(&server.endpoint().address().to_wire()),
+        "the note names the address it is talking to: {instructions}",
+    );
 
     // A mutating tool is an undoable command in the engine.
     let created =
@@ -231,6 +242,11 @@ fn with_no_editor_running_the_bridge_launches_a_headless_one() {
     assert!(backend.launched_server());
 
     let bridge = bridge(backend);
+    let instructions = bridge.get_info().instructions.expect("instructions");
+    assert!(
+        instructions.contains("No editor was listening"),
+        "a launched engine is not the user's window, and says so: {instructions}",
+    );
     let revision = run(&bridge, call("project_revision", &json!({}))).expect("the tool exists");
     assert_eq!(revision.is_error, Some(false));
     assert_eq!(

@@ -1,7 +1,11 @@
 //! The Subordinate GUI binary.
 //!
 //! Launches the egui application from `sub-ui` together with the engine
-//! thread and the local Command API socket.
+//! thread and the local Command API socket: the window binds the per-user
+//! endpoint at startup, so `subordinate-mcp`, `subordinate-cli` and plugins
+//! drive the project this window has open rather than a headless engine of
+//! their own (`sub_ui::command_api`). `--instance` and `--no-command-api`
+//! change which endpoint that is, or whether there is one.
 //!
 //! Two flags exist for CI, and neither needs a human at the keyboard:
 //!
@@ -42,6 +46,11 @@ Usage: subordinate [OPTIONS] [PROJECT]
                            screen and print a ready line (CI)
   --popout-position X,Y    place the pop-out window there, in points
   --hold-seconds N         close the windows after N seconds
+  --instance NAME          serve the Command API on this instance instead of
+                           'default', so a second editor has an endpoint of
+                           its own
+  --no-command-api         do not serve the Command API at all; no agent, CLI
+                           or plugin can reach this window
   -h, --help               show this help";
 
 fn main() -> ExitCode {
@@ -88,6 +97,16 @@ fn parse_args(arguments: &[String], mut options: AppOptions) -> Result<AppOption
                 options.open_popout = true;
                 options.hold = Some(options.hold.unwrap_or(UI_SMOKE_HOLD));
             }
+            "--instance" => {
+                let value = rest
+                    .next()
+                    .ok_or_else(|| "--instance needs a name".to_owned())?;
+                if value.is_empty() {
+                    return Err("--instance needs a name".to_owned());
+                }
+                options.instance = Some(value.clone());
+            }
+            "--no-command-api" => options.serve_command_api = false,
             "--popout-position" => {
                 let value = rest
                     .next()
@@ -190,6 +209,25 @@ mod tests {
     fn the_hold_can_be_shortened_or_lengthened() {
         let options = parse(&["--ui-smoke", "--hold-seconds", "2.5"]).expect("a hold is valid");
         assert_eq!(options.hold, Some(Duration::from_secs_f32(2.5)));
+    }
+
+    #[test]
+    fn the_editor_serves_the_command_api_unless_it_is_told_not_to() {
+        let options = parse(&["--instance", "scratch"]).expect("--instance is valid");
+        assert_eq!(options.instance.as_deref(), Some("scratch"));
+        // The real binary starts from AppOptions::from_env, which serves;
+        // the flag is what turns that off.
+        let serving = AppOptions {
+            serve_command_api: true,
+            ..AppOptions::default()
+        };
+        let off = parse_args(&["--no-command-api".to_owned()], serving)
+            .expect("--no-command-api is valid");
+        assert!(!off.serve_command_api);
+        assert_eq!(
+            parse(&["--instance"]).expect_err("a name is required"),
+            "--instance needs a name",
+        );
     }
 
     #[test]

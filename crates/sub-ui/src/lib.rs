@@ -8,6 +8,7 @@
 
 pub mod app;
 pub mod audio_settings;
+pub mod command_api;
 pub mod diagnostics;
 pub mod dock;
 pub mod effects;
@@ -48,6 +49,7 @@ pub use app::{
     edit_mode_for, run,
 };
 pub use audio_settings::{AudioSettingsAction, AudioSettingsPanel, device_label, status_line};
+pub use command_api::CommandApi;
 pub use diagnostics::DiagnosticsPanel;
 pub use dock::{DockLayout, LAYOUT_FILE_NAME, LAYOUT_VERSION, LoadedLayout, Panel, layout_menu_ui};
 pub use export_panel::{

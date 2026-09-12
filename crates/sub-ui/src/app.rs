@@ -39,10 +39,12 @@ use std::time::{Duration, Instant};
 use sub_audio::mixer::{MixGraphBuilder, MixerConfig, MixerControl, mixer};
 use sub_audio::scrub::{ScrubControl, ScrubSettings, scrub};
 use sub_audio::{AudioOutput, CpalBackend, MeterBank, OutputOptions};
+use sub_command::endpoint::{Address, DEFAULT_INSTANCE, Endpoint};
 use sub_core::JobService;
 use sub_export::PresetLibrary;
 
 use crate::audio_settings::{AudioSettingsAction, AudioSettingsPanel};
+use crate::command_api::CommandApi;
 use crate::diagnostics::DiagnosticsPanel;
 use crate::dock::{DockLayout, Panel, layout_menu_ui};
 use crate::effects::EffectCatalog;
@@ -127,6 +129,26 @@ struct FrameEdits {
     export: Option<ExportAction>,
 }
 
+/// The environment variable naming the Command API instance this editor
+/// serves. `subordinate-mcp` reads the same one from the other side.
+pub const INSTANCE_ENV: &str = "SUBORDINATE_INSTANCE";
+
+/// The environment variable overriding where this editor's socket and lock
+/// file live. `subordinate-mcp` reads the same one from the other side.
+pub const ENDPOINT_DIR_ENV: &str = "SUBORDINATE_ENDPOINT_DIR";
+
+/// The environment variable that stops the editor serving the Command API
+/// (`1`, `true`, `yes`, `on`).
+pub const NO_COMMAND_API_ENV: &str = "SUBORDINATE_NO_COMMAND_API";
+
+/// Whether an environment variable spells "yes".
+fn is_yes(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 /// The line the window smoke run prints once every window has a picture.
 ///
 /// CI waits for it before it takes a screenshot, so it is part of the
@@ -169,6 +191,21 @@ pub struct AppOptions {
     /// photographed and guarantees the process ends even if CI's capture step
     /// never gets that far.
     pub hold: Option<Duration>,
+    /// Whether the window serves the Command API on a local socket, so the
+    /// MCP bridge, the CLI and plugins drive *this* editor
+    /// (see [`crate::command_api`]).
+    ///
+    /// The editor binary turns it on ([`AppOptions::from_env`]); it is off by
+    /// default so that an app embedded in a test does not reach for the
+    /// per-user endpoint a real editor may be holding.
+    pub serve_command_api: bool,
+    /// The instance name the endpoint is derived from. `None` is
+    /// `sub_command::endpoint::DEFAULT_INSTANCE`, which is the one every
+    /// client looks for first.
+    pub instance: Option<String>,
+    /// Where the socket and the lock file live, overriding the per-user
+    /// runtime directory. Tests set it; a user has no reason to.
+    pub endpoint_dir: Option<PathBuf>,
 }
 
 impl AppOptions {
@@ -181,7 +218,34 @@ impl AppOptions {
             smoke_frames: std::env::var("SUB_SMOKE_FRAMES")
                 .ok()
                 .and_then(|value| value.trim().parse().ok()),
+            // The editor is what an agent drives, so a run started from the
+            // command line serves its endpoint unless it is told not to. The
+            // three variables are the ones `subordinate-mcp` reads from the
+            // other side, so pointing a bridge and an editor at the same
+            // private endpoint is one pair of settings, not two.
+            serve_command_api: !std::env::var(NO_COMMAND_API_ENV).is_ok_and(|value| is_yes(&value)),
+            instance: std::env::var(INSTANCE_ENV)
+                .ok()
+                .filter(|value| !value.is_empty()),
+            endpoint_dir: std::env::var_os(ENDPOINT_DIR_ENV)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
             ..Self::default()
+        }
+    }
+
+    /// The endpoint these options name, when one is to be served.
+    ///
+    /// # Errors
+    ///
+    /// `command.invalid_instance` for an instance name that cannot go in a
+    /// socket path or a pipe name, and `command.endpoint_unavailable` when
+    /// this machine offers no per-user runtime directory.
+    pub fn endpoint(&self) -> SubResult<Endpoint> {
+        let instance = self.instance.as_deref().unwrap_or(DEFAULT_INSTANCE);
+        match &self.endpoint_dir {
+            Some(directory) => Endpoint::in_directory(directory.clone(), instance),
+            None => Endpoint::for_instance(instance),
         }
     }
 
@@ -402,6 +466,11 @@ pub struct SubordinateApp {
     recovery: RecoveryPrompt,
     /// The restore list in the File menu.
     snapshots: SnapshotMenu,
+    /// The local socket this window serves the Command API on, when it serves
+    /// one. `None` when the endpoint was switched off or could not even be
+    /// named; a refused bind is a [`CommandApi`] that is not serving, which is
+    /// a different thing (see [`crate::command_api`]).
+    command_api: Option<CommandApi>,
 }
 
 impl SubordinateApp {
@@ -502,10 +571,12 @@ impl SubordinateApp {
             shortcuts_window: ShortcutsWindow::new(),
             recovery: RecoveryPrompt::new(),
             snapshots: SnapshotMenu::new(),
+            command_api: None,
         };
         if let Some(path) = startup_project {
             app.open_startup_project(&path);
         }
+        app.start_command_api();
         Ok(app)
     }
 
@@ -530,6 +601,38 @@ impl SubordinateApp {
                 ProjectState::Failed
             }
         };
+    }
+
+    /// Starts serving the Command API, when this run is to serve it.
+    ///
+    /// The bind itself happens on a thread of its own — nothing here may stall
+    /// the first frame — so this only names the endpoint and asks for it; the
+    /// once-a-frame [`CommandApi::sync`] collects the outcome. An endpoint
+    /// this machine cannot even name is logged and the editor runs without an
+    /// agent surface, exactly as a refused bind does.
+    fn start_command_api(&mut self) {
+        if !self.options.serve_command_api {
+            log::info!("this editor does not serve the Command API");
+            return;
+        }
+        match self.options.endpoint() {
+            Ok(endpoint) => {
+                let mut api = CommandApi::new(endpoint);
+                api.serve(&self.session);
+                self.command_api = Some(api);
+            }
+            Err(error) => log::warn!(
+                "the Command API has no endpoint on this machine: [{}] {}",
+                error.code,
+                error.message
+            ),
+        }
+    }
+
+    /// The Command API endpoint this window serves, when it serves one.
+    #[must_use]
+    pub const fn command_api(&self) -> Option<&CommandApi> {
+        self.command_api.as_ref()
     }
 
     /// Opens a project file, offering to recover a newer autosave first.
@@ -1844,21 +1947,49 @@ impl SubordinateApp {
     /// `scripts/ui-smoke.sh` waits for this line before it captures, so the
     /// wording and the fields are a contract; see [`UI_SMOKE_READY`].
     fn announce_ready(&mut self) {
-        if self.announced_ready || !self.windows_are_up() {
+        if self.announced_ready || !self.windows_are_up() || !self.command_api_settled() {
             return;
         }
         self.announced_ready = true;
         log::info!(
             "{UI_SMOKE_READY}: frames={} popout={} popout_frames={} project={} sequences={} \
-             tracks={} revision={}",
+             tracks={} revision={} command_api={}",
             self.frames_painted,
             self.popout.is_open(),
             self.popout.shared().frames_painted(),
             self.project_state.label(),
             self.session.project().sequences.len(),
             self.sequence.tracks.len(),
-            self.session.revision()
+            self.session.revision(),
+            self.command_api_label(),
         );
+    }
+
+    /// Whether the Command API has finished starting, one way or the other.
+    ///
+    /// The ready line waits for it: a CI step that connects the moment the
+    /// line appears would otherwise race the bind.
+    fn command_api_settled(&self) -> bool {
+        self.command_api
+            .as_ref()
+            .is_none_or(|api| api.is_serving() || api.refusal().is_some())
+    }
+
+    /// What the ready line says about the agent surface: the address it is
+    /// listening on, the code that refused it, or `off`.
+    fn command_api_label(&self) -> String {
+        match &self.command_api {
+            None => "off".to_owned(),
+            Some(api) => api.address().map_or_else(
+                || {
+                    api.refusal().map_or_else(
+                        || "starting".to_owned(),
+                        |error| format!("refused:{}", error.code),
+                    )
+                },
+                Address::to_wire,
+            ),
+        }
     }
 }
 
@@ -1878,6 +2009,16 @@ impl eframe::App for SubordinateApp {
             Ok(true) => log::debug!("fullscreen display saved"),
             Ok(false) => {}
             Err(error) => log::warn!("fullscreen: [{}] {}", error.code, error.message),
+        }
+    }
+
+    /// Releases the Command API endpoint as the window closes, so a clean
+    /// exit leaves no socket and no lock file behind for the next editor — or
+    /// for a bridge — to find.
+    fn on_exit(&mut self) {
+        if let Some(api) = &mut self.command_api {
+            api.shutdown();
+            log::info!("the Command API endpoint has been released");
         }
     }
 
@@ -1916,6 +2057,12 @@ impl eframe::App for SubordinateApp {
                 self.shortcuts_window.toggle();
             }
         });
+        // The socket is collected before the session is polled, so a bind that
+        // finished since the last frame is serving by the time anything reads
+        // it, and a project opened last frame has taken its endpoint with it.
+        if let Some(api) = &mut self.command_api {
+            api.sync(&self.session);
+        }
         // Anything the Command API, the MCP bridge or a plugin applied since
         // the last frame arrives here, so an edit made from outside the window
         // shows up in the panels without anyone telling them.

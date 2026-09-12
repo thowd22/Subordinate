@@ -180,6 +180,32 @@ impl Bridge {
         &self.watch
     }
 
+    /// What this session is driving, in one sentence for the client.
+    ///
+    /// It matters to an agent which it is: an edit made against the running
+    /// editor appears in the window the user is watching, and an edit made
+    /// against a headless engine this bridge started appears nowhere and goes
+    /// away with the session. The same fact is logged when the connection is
+    /// made (`crate::backend::Backend::connect`).
+    #[must_use]
+    pub fn connection_note(&self) -> String {
+        let address = self.backend.address().to_wire();
+        if self.backend.launched_server() {
+            format!(
+                "No editor was listening, so this session drives a headless engine of its own \
+                 (subordinate-cli serve) at {address}: nothing it edits is on anyone's screen, \
+                 and the project is gone when the session ends unless it is saved. Start the \
+                 editor before the session to work in the window the user is looking at.",
+            )
+        } else {
+            format!(
+                "Connected to the editor already running at {address}: every edit made here is \
+                 applied to the project that window has open, lands in its undo history and is \
+                 visible on screen at once.",
+            )
+        }
+    }
+
     /// Runs one tool call, blocking on the Command API round trip.
     ///
     /// A destructive tool called without a confirmation does not reach the
@@ -467,7 +493,7 @@ impl ServerHandler for Bridge {
                 .build(),
         );
         info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-        info.instructions = Some(INSTRUCTIONS.to_owned());
+        info.instructions = Some(format!("{INSTRUCTIONS} {}", self.connection_note()));
         info
     }
 

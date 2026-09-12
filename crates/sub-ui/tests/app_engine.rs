@@ -13,6 +13,10 @@
 //!   Edit menu, both visible through `project.get`.
 //! - An edit applied through the Command API — which is the path the MCP
 //!   bridge takes — shows up in the running window on the next frame.
+//! - The same thing over the socket the window itself binds: a client
+//!   connects to the editor's endpoint the way `subordinate-mcp` does, adds a
+//!   clip, the timeline panel has it on the next frame, and Undo in the window
+//!   takes it away again (TASK-141).
 //! - The window opens the sample project through that engine, which is what
 //!   the Xvfb window smoke photographs.
 //!
@@ -28,6 +32,9 @@ use eframe::egui::{self, Key, Modifiers};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use sub_command::dispatch::PROJECT_GET;
+use sub_command::endpoint::Endpoint;
+use sub_command::transport::Client;
+use sub_edit::AddClip;
 use sub_edit::commands::RenameSequence;
 use sub_model::{Project, TrackItem, TrackKind};
 use sub_time::RationalTime;
@@ -59,15 +66,19 @@ fn project_copy(name: &str) -> PathBuf {
 /// (and out of the accessibility tree the test clicks through).
 const WINDOW_SIZE: egui::Vec2 = egui::vec2(1400.0, 900.0);
 
-/// The assembled editor, opened on `project`.
-fn app_harness(project: &Path) -> Harness<'static, SubordinateApp> {
-    let options = AppOptions {
-        project: Some(project.to_path_buf()),
-        ..AppOptions::default()
-    };
+/// The assembled editor, built with the options it is given.
+fn app_harness_with(options: AppOptions) -> Harness<'static, SubordinateApp> {
     support::builder::<SubordinateApp>()
         .with_size(WINDOW_SIZE)
         .build_eframe(move |cc| SubordinateApp::new(cc, options).expect("the editor starts"))
+}
+
+/// The assembled editor, opened on `project`.
+fn app_harness(project: &Path) -> Harness<'static, SubordinateApp> {
+    app_harness_with(AppOptions {
+        project: Some(project.to_path_buf()),
+        ..AppOptions::default()
+    })
 }
 
 /// The project as the Command API reports it: the revision, and the project
@@ -251,6 +262,138 @@ fn the_window_opens_the_sample_project_through_the_engine() {
         through_api.sequences.first().map(|s| s.id),
         harness.state().project().sequences.first().map(|s| s.id),
         "the window and the Command API are looking at one project"
+    );
+}
+
+/// The clips the timeline panel has indexed for the lane at `track`, which is
+/// what it paints — the panel's own layout, rebuilt from the engine's
+/// revision, rather than the model read a second time.
+fn clips_on_lane(app: &mut SubordinateApp, track: usize) -> Vec<sub_model::ClipId> {
+    app.timeline().layouts()[track]
+        .placements()
+        .iter()
+        .map(|placement| placement.clip)
+        .collect()
+}
+
+/// Runs frames until the window has bound its endpoint, failing the test with
+/// whatever refused it otherwise.
+fn wait_for_endpoint(harness: &mut Harness<'static, SubordinateApp>) -> Endpoint {
+    for _ in 0..200 {
+        harness.run();
+        let api = harness
+            .state()
+            .command_api()
+            .expect("this window serves one");
+        assert!(
+            api.refusal().is_none(),
+            "the window would not bind its endpoint: {:?}",
+            api.refusal(),
+        );
+        if api.is_serving() {
+            return api.endpoint().clone();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("the window never bound its Command API endpoint");
+}
+
+#[test]
+fn a_client_on_the_editors_socket_adds_a_clip_the_window_shows_and_undoes() {
+    if !support::can_render() {
+        return;
+    }
+    let path = project_copy("socket");
+    // An endpoint of this test's own: the per-user one belongs to whatever
+    // editor the developer has open, and two test binaries must not fight over
+    // one socket either.
+    let directory = path.parent().expect("a folder").join("endpoint");
+    let mut harness = app_harness_with(AppOptions {
+        project: Some(path.clone()),
+        serve_command_api: true,
+        instance: Some("app-socket".to_owned()),
+        endpoint_dir: Some(directory),
+        ..AppOptions::default()
+    });
+    let endpoint = wait_for_endpoint(&mut harness);
+
+    // Everything from here is what `subordinate-mcp` does: find the editor
+    // through the lock file its endpoint publishes and speak JSON-RPC to it.
+    let mut client = Client::connect(&endpoint).expect("a client reaches the window");
+
+    let (_, project) = project_through_api(harness.state());
+    let sequence = project.sequences.first().expect("a sequence");
+    let rate = sequence.settings.frame_rate;
+    let lane = sequence
+        .tracks
+        .iter()
+        .position(|track| track.kind == TrackKind::Video)
+        .expect("a video track");
+    let track = sequence.tracks[lane].id;
+    let before = clips_on_lane(harness.state_mut(), lane);
+    // A copy of a clip the fixture already has, so the media it names is
+    // certainly in the project, landed after everything on the track.
+    let mut clip = sequence.tracks[lane]
+        .items
+        .iter()
+        .find_map(TrackItem::as_clip)
+        .expect("a clip to copy")
+        .clone();
+    clip.id = sub_model::ClipId::new();
+    let added = clip.id;
+    let (last_start, last_duration) = *video_spans(&project).last().expect("a clip");
+    let start = RationalTime::new(last_start + last_duration, rate);
+
+    let answer = client
+        .invoke(
+            "clip.add",
+            Some(
+                serde_json::to_value(AddClip {
+                    sequence: sequence.id,
+                    track,
+                    start,
+                    clip,
+                })
+                .expect("the parameters serialise"),
+            ),
+        )
+        .expect("clip.add applies");
+    assert!(
+        answer["revision"].as_u64().expect("a revision") > 0,
+        "the socket call reached the engine: {answer}",
+    );
+
+    // The window was told nothing: it reads the change off the event
+    // subscription it already has, on its next frame.
+    harness.run();
+    let after = clips_on_lane(harness.state_mut(), lane);
+    assert_eq!(
+        after.len(),
+        before.len() + 1,
+        "the timeline panel indexed the clip the agent added",
+    );
+    assert!(after.contains(&added), "and it is that clip");
+
+    // The agent's edit is on the window's own undo stack, so the Edit menu
+    // reverses it exactly as it reverses a gesture made with the mouse.
+    harness.get_by_label("Edit").click();
+    harness.run();
+    harness.get_by_label_contains("Undo ").click();
+    harness.run();
+    harness.run();
+    assert_eq!(
+        clips_on_lane(harness.state_mut(), lane),
+        before,
+        "Undo in the window took the agent's clip away",
+    );
+    let (_, undone) = project_through_api(harness.state());
+    assert!(
+        !undone.sequences[0].tracks[lane]
+            .items
+            .iter()
+            .filter_map(TrackItem::as_clip)
+            .any(|clip| clip.id == added),
+        "and the engine agrees",
     );
 }
 
