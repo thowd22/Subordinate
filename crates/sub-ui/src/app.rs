@@ -208,6 +208,17 @@ pub struct AppOptions {
     /// default so that an app embedded in a test does not reach for the
     /// per-user endpoint a real editor may be holding.
     pub serve_command_api: bool,
+    /// Whether the window may open the machine's audio output device.
+    ///
+    /// The editor binary turns it on ([`AppOptions::from_env`]); like
+    /// [`AppOptions::serve_command_api`] it is off by default so that an app
+    /// embedded in a test does not reach for a device the machine may or may
+    /// not have. That is not only politeness: the output clock is the playback
+    /// master (docs/PLAN.md §5.4), so whether a device opens decides which
+    /// master the transport follows, and a test that meant to exercise the
+    /// monotonic fallback would otherwise be exercising whatever the runner
+    /// happens to have plugged in.
+    pub open_audio_output: bool,
     /// The instance name the endpoint is derived from. `None` is
     /// `sub_command::endpoint::DEFAULT_INSTANCE`, which is the one every
     /// client looks for first.
@@ -233,6 +244,8 @@ impl AppOptions {
             // other side, so pointing a bridge and an editor at the same
             // private endpoint is one pair of settings, not two.
             serve_command_api: !std::env::var(NO_COMMAND_API_ENV).is_ok_and(|value| is_yes(&value)),
+            // A real editor is the one thing here that should be heard.
+            open_audio_output: true,
             instance: std::env::var(INSTANCE_ENV)
                 .ok()
                 .filter(|value| !value.is_empty()),
@@ -944,6 +957,9 @@ impl SubordinateApp {
         if !settings.enabled {
             return;
         }
+        if !self.options.open_audio_output {
+            return;
+        }
         if !self.audio.is_open()
             && let Err(error) = self.audio.start()
         {
@@ -1262,8 +1278,14 @@ impl SubordinateApp {
     /// Only 1x is played out: shuttling and reverse have no audio until
     /// scrubbing lands (TASK-54), so at those speeds the stream is closed and
     /// the fallback master drives the picture. A device that will not open is
-    /// logged once and playback carries on silently rather than stopping.
+    /// logged once and playback carries on silently rather than stopping, and
+    /// a window that was told not to open one
+    /// ([`AppOptions::open_audio_output`]) plays on the fallback master from
+    /// the start.
     fn follow_audio(&mut self) {
+        if !self.options.open_audio_output {
+            return;
+        }
         if self.scheduler.speed() != ShuttleSpeed::Forward1x {
             self.stop_audio();
             return;
@@ -1349,6 +1371,15 @@ impl SubordinateApp {
             // egui, so a preview that is still catching up asks for the next
             // frame itself. This is the only thing that waits on decode, and
             // it waits by painting again rather than by blocking.
+            //
+            // `busy` is decode that can still make progress — a decoder
+            // opening for a clip under the playhead, or a ring that has yet
+            // to deliver the frame asked for. A clip already showing the
+            // frame the playhead is on, one whose file has run out, and one
+            // whose media is offline are all *not* busy, so a settled window
+            // asks for nothing and idles at zero. `request_repaint_after`
+            // rather than `request_repaint` keeps even the catching-up case a
+            // poll on a timer instead of a spin on a core.
             ctx.request_repaint_after(PREVIEW_POLL_INTERVAL);
         }
         if self.needs_composite || pictures.changed() {

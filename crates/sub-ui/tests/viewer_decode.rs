@@ -242,8 +242,16 @@ impl BurnIn {
     }
 
     /// How far apart two windows must be to show different digits.
+    ///
+    /// Twice [`Self::same_digit`], which is the property the reading actually
+    /// needs: a canvas within the tolerance of the second it shows is then
+    /// still at least that tolerance away from every other second, so the
+    /// nearest match cannot be the wrong one. A flat fraction of the window
+    /// instead measures the *font* — how many pixels apart `timeoverlay` draws
+    /// a 2 from a 3 — which is not the same on every platform (Windows: 3769
+    /// of 155,520, a whisker under the window's fortieth).
     fn different_digit(&self) -> usize {
-        self.ink.len() / 40
+        self.same_digit() * 2
     }
 }
 
@@ -299,8 +307,13 @@ impl BurnInKey {
         scored.sort_unstable();
         let (best, second) = scored[0];
         let (runner_up, _) = scored[1];
+        // The nearest learnt second has to be within the tolerance and every
+        // other one outside it: that, and not a fixed distance, is what makes
+        // the reading unambiguous. `learn` has already checked that the
+        // learnt seconds are twice the tolerance apart, so a canvas this
+        // close to one of them cannot be that close to another.
         assert!(
-            best <= window.same_digit() && runner_up >= window.different_digit(),
+            best <= window.same_digit() && runner_up > window.same_digit(),
             "{what}: the burnt-in timecode could not be read off the viewer: \
              best '{second}' at {best} pixels, next at {runner_up}"
         );
@@ -658,9 +671,21 @@ fn playing_follows_the_playhead_out_of_the_decode_ahead_ring() {
             }
         }
     }
+    // Which master the transport was following is the first thing to know
+    // when this fails: a window that opened an output device follows its
+    // clock, and one that did not follows the monotonic fallback. These
+    // harnesses ask for no device (`AppOptions::open_audio_output`), so this
+    // should say "no".
+    let audio_open = harness.state_mut().audio().is_open();
+    let master = harness
+        .state_mut()
+        .audio()
+        .clock()
+        .and_then(|clock| clock.position());
     assert!(
         landings >= 3,
-        "playback never moved the playhead past frame {last}"
+        "playback never moved the playhead past frame {last} \
+         (audio output open: {audio_open}, master: {master:?})"
     );
 
     // Pause, and check the picture on screen really is the frame it stopped

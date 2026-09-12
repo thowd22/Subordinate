@@ -240,6 +240,13 @@ struct ClipPreview {
     view: Option<wgpu::TextureView>,
     /// Whether the worker has reached the end of the file for this position.
     eos: bool,
+    /// Whether the picture that answered the current target landed past it.
+    ///
+    /// The worker only walks forwards, so once it has handed over a picture
+    /// later than the frame asked for, no amount of polling will produce that
+    /// frame: only the next target's seek can go back for it. Cleared
+    /// whenever the target changes.
+    overshot: bool,
     /// Pictures popped that the playhead had already passed.
     skipped: u64,
     /// Which pass over the layers last wanted this clip, for eviction.
@@ -259,6 +266,7 @@ impl ClipPreview {
             converter: None,
             view: None,
             eos: false,
+            overshot: false,
             skipped: 0,
             last_seen: seen,
         }
@@ -281,6 +289,9 @@ impl ClipPreview {
             return Ok(());
         }
         self.wanted = Some(frame);
+        // A fresh target: whatever the last one settled for says nothing about
+        // this one, which a seek can still go back for.
+        self.overshot = false;
         let step = plan_step(
             self.current_frame,
             frame,
@@ -329,6 +340,9 @@ impl ClipPreview {
             self.current = Some(picture);
             self.current_frame = landed;
             if reached {
+                // Landing past the target rather than on it is the end of
+                // what this target can be answered with.
+                self.overshot = landed.is_some_and(|frame| frame > wanted);
                 break;
             }
         }
@@ -342,6 +356,24 @@ impl ClipPreview {
             (None, _) => true,
             _ => false,
         }
+    }
+
+    /// Whether polling this clip again can still bring a better picture.
+    ///
+    /// This, not [`Self::on_target`], is what the window waits on. Off target
+    /// is not the same thing as *pending*: a worker that has hit the end of
+    /// the file, and one that has already answered this target with a picture
+    /// past it, will never deliver the frame asked for however many times they
+    /// are polled — only the next target's seek can go back for it. Waiting on
+    /// those is an unbounded repaint loop: a core burnt in the real window,
+    /// and a harness that never stops painting in a test.
+    ///
+    /// Being off target is otherwise pending, which is the ordinary case and
+    /// the one that must keep painting: a seek posted for a step backwards
+    /// leaves the picture from *before* the step on screen, ahead of the
+    /// target, until the worker answers.
+    const fn pending(&self) -> bool {
+        !self.on_target() && !self.eos && !self.overshot
     }
 
     /// Uploads the current picture if it is not already on the GPU, and hands
@@ -529,14 +561,17 @@ impl PreviewService {
         self.playing = playing;
     }
 
-    /// Whether the last pass had the picture every layer under the playhead
-    /// wanted.
+    /// Whether the last pass left nothing worth waiting for.
     ///
-    /// False while a decoder is opening, while a seek is still in flight, and
-    /// for a layer whose file is offline. A caller with no pointer — a test,
-    /// or a host asked to photograph the window — waits on this rather than on
-    /// a sleep, and a window that is settled is one showing the frame it is
-    /// on.
+    /// False while a decoder is opening for a clip under the playhead and
+    /// while a seek or a ring is still on its way to the frame that was asked
+    /// for. True as soon as every layer is showing the best picture it will
+    /// ever show at this playhead: the frame it was asked for, or — for a
+    /// clip whose file has run out, whose media is offline and for one whose
+    /// decoder would not open — nothing more to come. A caller with no
+    /// pointer — a test, or a host asked to photograph the window — waits on
+    /// this rather than on a sleep, and anything that waited on the strict
+    /// reading instead would wait forever on a file that cannot answer.
     #[must_use]
     pub const fn settled(&self) -> bool {
         self.settled
@@ -648,6 +683,8 @@ impl PreviewService {
             };
             if !preview.on_target() {
                 self.late = self.late.saturating_add(1);
+            }
+            if preview.pending() {
                 self.settled = false;
                 out.busy = true;
             }
@@ -660,10 +697,10 @@ impl PreviewService {
                     }
                     out.frames.insert(clip, frame);
                 }
-                Ok(None) => {
-                    self.settled = false;
-                    out.busy = true;
-                }
+                // No picture to upload yet. Whether that is worth another
+                // frame is `pending`'s answer above, not this one's: a clip
+                // whose file has run out has no picture and never will.
+                Ok(None) => {}
                 Err(error) => {
                     log::warn!(
                         "the preview could not upload a picture: [{}] {}",
@@ -681,10 +718,14 @@ impl PreviewService {
             }
         }
 
+        // Only a decoder this pass asked for is worth repainting on: a slot
+        // still opening for a clip the playhead has left contributes no layer
+        // whenever it lands, so waiting on it would be a repaint loop with
+        // nothing on the other end of it.
         out.busy |= self
             .clips
             .values()
-            .any(|slot| matches!(slot, ClipSlot::Opening { .. }));
+            .any(|slot| matches!(slot, ClipSlot::Opening { last_seen, .. } if *last_seen == pass));
         self.showing = out.frames.len();
         self.evict(pass);
         out

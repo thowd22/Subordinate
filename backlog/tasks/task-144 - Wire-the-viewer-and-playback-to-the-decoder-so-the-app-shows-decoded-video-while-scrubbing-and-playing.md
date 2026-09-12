@@ -8,6 +8,7 @@ assignee:
   - '@opus-task-144'
 created_date: '2026-09-12 05:04'
 updated_date: '2026-09-12 06:10'
+updated_date: '2026-09-12 07:21'
 labels:
   - ui
   - media
@@ -106,6 +107,22 @@ Plus unit tests in `preview.rs` for `plan_step` (a scrub always seeks; playing t
 **Criterion 4 — checked.**
 
 2026-09-12 supervisor verification: hardware run 34676554315 on main (viewer wired to the indexed decoders): box APU scrub_drag 4K 45.2 fps through vah264dec (seek p50 0 ms, 1.37 pictures per step, 14 of 30 steps from the GOP cache), 1080p 144 fps; the NVIDIA job could not launch (RunsOn 'Set up runner' failure while the other agents held both g4dn slots), but the same code path measured 101 fps 4K on the T4 in run 34673268738. Criterion 3 checked. Criterion 1: CI's window smoke with --require-picture runs on the next green main (fix PR for the export end-to-end test in progress); the desktop-smoke comparison against a CLI-rendered frame is not built and moves to TASK-139.
+## Follow-up fix: PR #4 `fix/export-test-after-preview` (CI green on all three OSes)
+
+Merging this task turned CI on `main` red on ubuntu, windows and macOS (run 34676536332): `crates/sub-ui/tests/export_end_to_end.rs` line 213 panicked with `Harness::run exceeded max_steps (4) ... Repaint causes: crates/sub-ui/src/app.rs:1352`. Fixed on branch `fix/export-test-after-preview` (PR #4, run 34679730198 green: ubuntu-26.04, windows-latest, macos-latest).
+
+**Root cause.** `composite` asks for a repaint while the preview is busy, and `Harness::run` paints at most four frames of a UI that keeps asking. Opening a decoder — PTS index plus pipeline on a worker — is far more than four frames, and the test called `harness.run()` straight after opening the sample project.
+
+**The window's side (`crates/sub-ui/src/preview.rs`).** `busy` meant "not showing the exact frame asked for", which is not the same as *pending*. A worker that has hit the end of the file, a clip with an empty index, a decoder still opening for a clip the playhead has left, and one that has already answered the current target with a picture past it will never deliver that frame however often they are polled — waiting on them was an unbounded 125 fps repaint loop in the real window as much as in a test. New `ClipPreview::pending` ("can another poll bring a better picture?") now drives `busy` and `settled`; `on_target` keeps its strict reading for the `late` counter. The distinction that matters: an in-flight backward seek leaves the picture from *before* the step on screen, ahead of the target, and that is pending, not a stall — so `poll` records `overshot` only when the picture it stops on landed past the target, and `request` clears it whenever the target changes.
+
+**The tests' side.** New `support::run_settled` paints real frames in a bounded loop until `PreviewService::settled`, the way this task's own `viewer_decode` and TASK-136's `media_import_app` already wait, then runs the layout to a stop. Every `harness.run()` in the three suites that assemble the whole window — `export_end_to_end`, `app_engine`, `media_import_app` — goes through it; a window over a project with no media settles on its first frame. The other `harness.run()` callers paint a single panel, never the app, and cannot be affected.
+
+**Two defects in this task's own `viewer_decode` suite, found because CI had never reached it.** `cargo test` stops at the first failing binary, so with `export_end_to_end` failing the suite had never run on a hosted runner (and no CI run exists for branch `task/task-144`).
+
+- *macOS — 'playback never moved the playhead past frame 0'.* The note in this task says the playback half runs on the monotonic fallback master because "the kittest harness opens no audio device". That is true of a Linux runner, which has none, and not of a macOS one; whether a device opens decides which master the transport follows. `AppOptions::open_audio_output` now says whether a window may open one, exactly as `serve_command_api` says whether it may bind the endpoint: off by default so an embedded test window never reaches for the machine's device, and on for the editor binary through `from_env`. The assertion also reports which master it had.
+- *Windows — 'seconds 2 and 3 are only 3769 pixels apart'.* `BurnInKey::learn` demanded a fortieth of the window (3888 of 155,520) between two timecode seconds, and `timeoverlay` draws a 2 and a 3 a whisker closer than that on Windows. A fixed fraction measures the font; the property the reading needs is that a canvas within the tolerance of one second is outside the tolerance of every other, so the bar is now twice `same_digit` and `read_second` asks for exactly that.
+
+Verified locally before each push: the failure reproduces with `harness.run()` restored, and `cargo test --workspace`, `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -D warnings` are clean.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

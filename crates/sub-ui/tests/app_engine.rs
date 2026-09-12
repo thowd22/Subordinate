@@ -138,7 +138,7 @@ fn a_cut_made_on_the_timeline_is_undone_from_the_edit_menu() {
     }
     let path = project_copy("cut");
     let mut harness = app_harness(&path);
-    harness.run();
+    support::run_settled(&mut harness);
 
     let (revision_before, project_before) = project_through_api(harness.state());
     assert_eq!(
@@ -152,10 +152,10 @@ fn a_cut_made_on_the_timeline_is_undone_from_the_edit_menu() {
     // timeline panel, which plans it, and the window applies the plan.
     let cut_at = inside_first_clip(&project_before);
     harness.state_mut().viewer().state.seek_to(cut_at);
-    harness.run();
+    support::run_settled(&mut harness);
     harness.key_press_modifiers(Modifiers::COMMAND, Key::K);
-    harness.run();
-    harness.run();
+    support::run_settled(&mut harness);
+    support::run_settled(&mut harness);
 
     let (revision_after, project_after) = project_through_api(harness.state());
     let spans_after = video_spans(&project_after);
@@ -174,10 +174,10 @@ fn a_cut_made_on_the_timeline_is_undone_from_the_edit_menu() {
     // The Edit menu names the step it would reverse, which is how the test
     // finds it without knowing where the menu was drawn.
     harness.get_by_label("Edit").click();
-    harness.run();
+    support::run_settled(&mut harness);
     harness.get_by_label_contains("Undo ").click();
-    harness.run();
-    harness.run();
+    support::run_settled(&mut harness);
+    support::run_settled(&mut harness);
 
     let (_, project_undone) = project_through_api(harness.state());
     assert_eq!(
@@ -194,7 +194,7 @@ fn an_edit_made_through_the_command_api_reaches_the_window() {
     }
     let path = project_copy("mcp");
     let mut harness = app_harness(&path);
-    harness.run();
+    support::run_settled(&mut harness);
 
     let sequence = harness
         .state()
@@ -214,7 +214,7 @@ fn an_edit_made_through_the_command_api_reaches_the_window() {
 
     // The window has not been told anything; it reads the change off its
     // event subscription on the next frame.
-    harness.run();
+    support::run_settled(&mut harness);
     assert_eq!(
         harness.state().sequence().name,
         "Renamed by an agent",
@@ -239,7 +239,7 @@ fn the_window_opens_the_sample_project_through_the_engine() {
     }
     let path = project_copy("open");
     let mut harness = app_harness(&path);
-    harness.run();
+    support::run_settled(&mut harness);
 
     assert_eq!(
         harness.state().project_state(),
@@ -280,7 +280,7 @@ fn clips_on_lane(app: &mut SubordinateApp, track: usize) -> Vec<sub_model::ClipI
 /// whatever refused it otherwise.
 fn wait_for_endpoint(harness: &mut Harness<'static, SubordinateApp>) -> Endpoint {
     for _ in 0..200 {
-        harness.run();
+        support::run_settled(harness);
         let api = harness
             .state()
             .command_api()
@@ -365,7 +365,7 @@ fn a_client_on_the_editors_socket_adds_a_clip_the_window_shows_and_undoes() {
 
     // The window was told nothing: it reads the change off the event
     // subscription it already has, on its next frame.
-    harness.run();
+    support::run_settled(&mut harness);
     let after = clips_on_lane(harness.state_mut(), lane);
     assert_eq!(
         after.len(),
@@ -377,10 +377,10 @@ fn a_client_on_the_editors_socket_adds_a_clip_the_window_shows_and_undoes() {
     // The agent's edit is on the window's own undo stack, so the Edit menu
     // reverses it exactly as it reverses a gesture made with the mouse.
     harness.get_by_label("Edit").click();
-    harness.run();
+    support::run_settled(&mut harness);
     harness.get_by_label_contains("Undo ").click();
-    harness.run();
-    harness.run();
+    support::run_settled(&mut harness);
+    support::run_settled(&mut harness);
     assert_eq!(
         clips_on_lane(harness.state_mut(), lane),
         before,
@@ -430,7 +430,7 @@ fn an_inspector_drag_edits_the_viewer_live_and_lands_as_one_undo_step() {
     }
     let path = project_copy("inspector");
     let mut harness = app_harness(&path);
-    harness.run();
+    support::run_settled(&mut harness);
 
     // The inspector edits whatever the timeline has selected, so the clip is
     // selected the way a click on the timeline selects it.
@@ -440,7 +440,7 @@ fn an_inspector_drag_edits_the_viewer_live_and_lands_as_one_undo_step() {
         .timeline()
         .selection_mut()
         .toggle(ClipRef::new(track, clip));
-    harness.run();
+    support::run_settled(&mut harness);
     let before = opacity_micros(harness.state().sequence(), clip);
 
     // The Opacity slider's track. A slider publishes two nodes under the same
@@ -452,14 +452,14 @@ fn an_inspector_drag_edits_the_viewer_live_and_lands_as_one_undo_step() {
         .rect();
     let handle = egui::pos2(rect.right() - 4.0, rect.center().y);
     harness.hover_at(handle);
-    harness.run();
+    support::run_settled(&mut harness);
     harness.drag_at(handle);
-    harness.run();
+    support::run_settled(&mut harness);
 
     // A quarter of the way along the track, with the button still down.
     let target = egui::pos2(rect.left() + rect.width() * 0.25, rect.center().y);
     harness.hover_at(target);
-    harness.run();
+    support::run_settled(&mut harness);
 
     // Live: the sequence the compositor draws from carries the new value
     // already, and so does the project on the engine, because the window
@@ -488,8 +488,8 @@ fn an_inspector_drag_edits_the_viewer_live_and_lands_as_one_undo_step() {
     assert!(mid_drag.in_group, "the gesture's history group is open");
 
     harness.drop_at(target);
-    harness.run();
-    harness.run();
+    support::run_settled(&mut harness);
+    support::run_settled(&mut harness);
 
     let committed = harness
         .state()
@@ -509,10 +509,10 @@ fn an_inspector_drag_edits_the_viewer_live_and_lands_as_one_undo_step() {
 
     // One undo from the Edit menu puts the whole gesture back.
     harness.get_by_label("Edit").click();
-    harness.run();
+    support::run_settled(&mut harness);
     harness.get_by_label_contains("Undo ").click();
-    harness.run();
-    harness.run();
+    support::run_settled(&mut harness);
+    support::run_settled(&mut harness);
     assert_eq!(
         opacity_micros(harness.state().sequence(), clip),
         before,
