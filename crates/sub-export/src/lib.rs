@@ -54,6 +54,7 @@ pub use pipeline::{
     AUDIO_CODECS, AudioCodec, AudioFrameSource, BYTES_PER_PIXEL, CONTAINERS, Container,
     ExportElements, ExportPipeline, ExportReport, ExportSettings, MAX_CRF, PcmAudioSource,
     SolidFrames, VideoFrameSource, VideoQuality, export, export_with,
+    DEFAULT_STALL_TIMEOUT_MS,
 };
 pub use presets::{
     AudioPreset, PRESETS_FILE_NAME, Preset, PresetLibrary, VideoPreset, config_dir, presets_path,
@@ -91,7 +92,9 @@ pub mod codes {
     /// The pipeline refused a buffer, which is how a failing encoder surfaces
     /// in the middle of an export.
     pub const PUSH_FAILED: ErrorCode = ErrorCode::from_static("export.push_failed");
-    /// The pipeline never reached end of stream inside its time budget.
+    /// The export stopped making progress, or ran past the hard limit the
+    /// request set. The `reason` detail says which, and `element` names the
+    /// element the pipeline was waiting on.
     pub const EXPORT_TIMEOUT: ErrorCode = ErrorCode::from_static("export.timeout");
     /// A preset file is not TOML of the preset shape, or a preset's field is
     /// missing, empty, out of range or contradictory. The `field` detail names

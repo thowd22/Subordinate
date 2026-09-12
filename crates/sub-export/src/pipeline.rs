@@ -81,8 +81,19 @@ fn video_queue_bytes(settings: &ExportSettings) -> u64 {
     APPSRC_MAX_BYTES.max(frame.saturating_mul(APPSRC_MIN_FRAMES))
 }
 
-/// How long [`ExportPipeline::finish`] waits for the muxer before giving up.
-const EOS_TIMEOUT_SECONDS: u64 = 120;
+/// How long [`ExportPipeline::finish`] waits for an export that is making no
+/// progress at all before it gives up, when the request does not say.
+///
+/// This is patience for a *stalled* export, never a budget for a slow one: a
+/// libaom AV1 encode of a minute a frame resets the window with every frame it
+/// produces and runs as long as it needs to.
+pub const DEFAULT_STALL_TIMEOUT_MS: u64 = 120_000;
+
+/// How often the end-of-stream wait looks for progress while the bus is quiet.
+const PROGRESS_POLL: Duration = Duration::from_millis(250);
+
+/// The shortest a bus poll ever blocks, so a tiny limit cannot spin the wait.
+const MIN_POLL: Duration = Duration::from_millis(1);
 
 /// How long a push waits for the pipeline to make room before giving up.
 ///
@@ -321,6 +332,28 @@ pub struct ExportSettings {
     /// encoder's own default.
     #[serde(default)]
     pub audio_bitrate_kbps: Option<u32>,
+    /// How long the export may make no progress at all before it is
+    /// abandoned, in milliseconds.
+    ///
+    /// The window is measured from the last sign of life — a byte written, a
+    /// buffer leaving an `appsrc`, the pipeline's position moving — not from
+    /// the start of the export, so an encoder that is slow but working is
+    /// never abandoned.
+    #[serde(default = "default_stall_timeout_ms")]
+    pub stall_timeout_ms: u64,
+    /// A hard limit on the whole end-of-stream wait, in milliseconds, or
+    /// `None` for no limit.
+    ///
+    /// This is the budget a caller sets when it would rather have an error
+    /// than a long wait; it belongs to the request, and there is no limit
+    /// unless the request asks for one.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// The stall window a request that does not name one is given.
+fn default_stall_timeout_ms() -> u64 {
+    DEFAULT_STALL_TIMEOUT_MS
 }
 
 impl ExportSettings {
@@ -339,6 +372,8 @@ impl ExportSettings {
             channels: 2,
             video_quality: None,
             audio_bitrate_kbps: None,
+            stall_timeout_ms: DEFAULT_STALL_TIMEOUT_MS,
+            timeout_ms: None,
         }
     }
 
@@ -392,6 +427,32 @@ impl ExportSettings {
         self
     }
 
+    /// The same settings with `millis` of patience for an export that is
+    /// making no progress at all.
+    #[must_use]
+    pub fn with_stall_timeout_ms(mut self, millis: u64) -> Self {
+        self.stall_timeout_ms = millis;
+        self
+    }
+
+    /// The same settings with a hard limit of `millis` on the end-of-stream
+    /// wait, or no limit at all.
+    #[must_use]
+    pub fn with_timeout_ms(mut self, millis: Option<u64>) -> Self {
+        self.timeout_ms = millis;
+        self
+    }
+
+    /// The stall window as a [`Duration`].
+    pub fn stall_timeout(&self) -> Duration {
+        Duration::from_millis(self.stall_timeout_ms)
+    }
+
+    /// The hard limit as a [`Duration`], when the request set one.
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout_ms.map(Duration::from_millis)
+    }
+
     /// Bytes in one RGBA frame of this canvas.
     pub fn frame_bytes(&self) -> usize {
         self.width as usize * self.height as usize * BYTES_PER_PIXEL
@@ -437,6 +498,21 @@ impl ExportSettings {
                 "an audio bitrate is strictly positive",
             )
             .with_detail("audio_bitrate_kbps", 0));
+    }
+
+        if self.stall_timeout_ms == 0 {
+            return Err(SubError::new(
+                codes::INVALID_SETTINGS,
+                "an export needs a non-zero stall timeout",
+            )
+            .with_detail("stall_timeout_ms", self.stall_timeout_ms));
+        }
+        if self.timeout_ms == Some(0) {
+            return Err(SubError::new(
+                codes::INVALID_SETTINGS,
+                "an export time limit, when set, has to be non-zero",
+            )
+            .with_detail("timeout_ms", 0));
         }
         if !self.container.accepts_video(self.video_codec) {
             return Err(SubError::new(
@@ -1068,6 +1144,14 @@ impl ExportPipeline {
     }
 
     /// Waits for end of stream, failing on the first error the bus carries.
+    ///
+    /// The wait is about progress, not about elapsed time: the bus is polled
+    /// in short slices, and every slice that shows the export moving — a byte
+    /// on disk, a buffer leaving an `appsrc`, the pipeline's position
+    /// advancing — restarts the patience window. An encoder that takes a
+    /// minute a frame therefore runs to the end; only an export that has
+    /// genuinely stopped runs out of patience, and a request that asked for a
+    /// hard limit gets that limit as well.
     fn wait_for_eos(&self) -> SubResult<()> {
         let Some(bus) = self.pipeline.bus() else {
             return Err(SubError::new(
@@ -1075,29 +1159,52 @@ impl ExportPipeline {
                 "the export pipeline has no bus",
             ));
         };
-        let Some(message) = bus.timed_pop_filtered(
-            gst::ClockTime::from_seconds(EOS_TIMEOUT_SECONDS),
-            &[gst::MessageType::Eos, gst::MessageType::Error],
-        ) else {
-            return Err(SubError::new(
-                codes::EXPORT_TIMEOUT,
-                "the export pipeline never finished writing",
-            )
-            .with_detail("path", self.path.display().to_string())
-            .with_detail("timeout_seconds", EOS_TIMEOUT_SECONDS));
-        };
-        match message.view() {
-            gst::MessageView::Eos(_) => Ok(()),
-            gst::MessageView::Error(err) => {
-                Err(
-                    element_error(codes::PIPELINE_FAILED, "the export pipeline failed", err)
-                        .with_detail("path", self.path.display().to_string()),
-                )
-            }
-            _ => Err(SubError::new(
-                codes::PIPELINE_FAILED,
-                "the export pipeline posted something other than end of stream",
-            )),
+        let stall = self.settings.stall_timeout();
+        let limit = self.settings.timeout();
+        let started = Instant::now();
+        let mut last_progress = started;
+        let mut mark = self.progress_mark();
+        loop {
+            let slice = poll_slice(stall, limit, started.elapsed());
+            let message = bus.timed_pop_filtered(
+                gst::ClockTime::from_nseconds(clock_nanos(slice)),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            );
+            let Some(message) = message else {
+                let now = Instant::now();
+                let current = self.progress_mark();
+                if current == mark {
+                    if let Some(verdict) = timeout_verdict(
+                        now.duration_since(last_progress),
+                        stall,
+                        now.duration_since(started),
+                        limit,
+                    ) {
+                        return Err(self.timeout_error(
+                            verdict,
+                            &mark,
+                            now.duration_since(started),
+                        ));
+                    }
+                } else {
+                    mark = current;
+                    last_progress = now;
+                }
+                continue;
+            };
+            return match message.view() {
+                gst::MessageView::Eos(_) => Ok(()),
+                gst::MessageView::Error(err) => {
+                    Err(
+                        element_error(codes::PIPELINE_FAILED, "the export pipeline failed", err)
+                            .with_detail("path", self.path.display().to_string()),
+                    )
+                }
+                _ => Err(SubError::new(
+                    codes::PIPELINE_FAILED,
+                    "the export pipeline posted something other than end of stream",
+                )),
+            };
         }
     }
 
@@ -1158,6 +1265,55 @@ impl ExportPipeline {
         None
     }
 
+    /// Everything that says the export is still moving, sampled at once.
+    ///
+    /// Any one of these changing means work is being done: the muxer has
+    /// written more of the file, an encoder has taken another buffer out of an
+    /// `appsrc`, or the pipeline's position has advanced.
+    fn progress_mark(&self) -> ProgressMark {
+        ProgressMark {
+            bytes_written: self.bytes_written(),
+            video_queued: queued_bytes(&self.video_src),
+            audio_queued: self.audio_src.as_ref().map_or(0, queued_bytes),
+            position_nanos: self
+                .pipeline
+                .query_position::<gst::ClockTime>()
+                .map(gst::ClockTime::nseconds),
+        }
+    }
+
+    /// The [`codes::EXPORT_TIMEOUT`] error for an export that ran out of time,
+    /// naming the element it was waiting on.
+    fn timeout_error(&self, verdict: Timeout, mark: &ProgressMark, elapsed: Duration) -> SubError {
+        let element = waiting_on(
+            mark,
+            &self.elements.video_encoder,
+            self.elements.audio_encoder.as_deref(),
+            self.settings.container.muxer(),
+        );
+        let message = match verdict {
+            Timeout::Stalled => {
+                format!("the export stopped making progress while waiting for {element}")
+            }
+            Timeout::Expired => {
+                format!("the export ran out of its time limit while waiting for {element}")
+            }
+        };
+        let error = SubError::new(codes::EXPORT_TIMEOUT, message)
+            .with_detail("reason", verdict.as_str())
+            .with_detail("element", element)
+            .with_detail("path", self.path.display().to_string())
+            .with_detail("stall_timeout_ms", self.settings.stall_timeout_ms)
+            .with_detail("elapsed_ms", elapsed_ms(elapsed))
+            .with_detail("video_frames", self.video_frames)
+            .with_detail("bytes_written", mark.bytes_written);
+        let error = match self.settings.timeout_ms {
+            Some(millis) => error.with_detail("timeout_ms", millis),
+            None => error,
+        };
+        with_bus_error(&self.pipeline, error)
+    }
+
     /// The error a refused push turns into, enriched with whatever the bus
     /// says went wrong underneath.
     fn push_failed(&self, stream: &'static str, flow: gst::FlowError) -> SubError {
@@ -1170,6 +1326,114 @@ impl ExportPipeline {
         .with_detail("path", self.path.display().to_string());
         with_bus_error(&self.pipeline, error)
     }
+}
+
+/// What the export had done the last time it was looked at.
+///
+/// Two equal marks a patience window apart are what a stalled export looks
+/// like; any field moving means the encoders and the muxer are still working,
+/// however slowly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProgressMark {
+    /// Bytes the muxer has written to the file.
+    bytes_written: u64,
+    /// Bytes still queued in the video `appsrc`.
+    video_queued: u64,
+    /// Bytes still queued in the audio `appsrc`, zero without an audio branch.
+    audio_queued: u64,
+    /// The pipeline's position, when it answers a position query.
+    position_nanos: Option<u64>,
+}
+
+/// Why an export ran out of time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Timeout {
+    /// Nothing moved for the whole stall window: the export has stopped.
+    Stalled,
+    /// The request's own hard limit ran out while the export was still going.
+    Expired,
+}
+
+impl Timeout {
+    /// The stable `reason` detail the error carries.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stalled => "stalled",
+            Self::Expired => "time_limit",
+        }
+    }
+}
+
+/// Whether a wait that has seen no progress for `since_progress`, and has been
+/// running for `elapsed` in total, is over.
+///
+/// The hard limit is checked first so a request that set one gets the error it
+/// asked for rather than a stall report, and both are exclusive of nothing:
+/// reaching the window is reaching it.
+fn timeout_verdict(
+    since_progress: Duration,
+    stall: Duration,
+    elapsed: Duration,
+    limit: Option<Duration>,
+) -> Option<Timeout> {
+    if limit.is_some_and(|limit| elapsed >= limit) {
+        return Some(Timeout::Expired);
+    }
+    if since_progress >= stall {
+        return Some(Timeout::Stalled);
+    }
+    None
+}
+
+/// The element an export that stopped was waiting on.
+///
+/// A branch whose `appsrc` is still holding buffers is waiting on the encoder
+/// that has not taken them; when both branches are drained, what is left is
+/// the muxer that has not finished the file.
+fn waiting_on(
+    mark: &ProgressMark,
+    video_encoder: &str,
+    audio_encoder: Option<&str>,
+    muxer: &str,
+) -> String {
+    if mark.video_queued > 0 {
+        return video_encoder.to_owned();
+    }
+    if mark.audio_queued > 0
+        && let Some(encoder) = audio_encoder
+    {
+        return encoder.to_owned();
+    }
+    muxer.to_owned()
+}
+
+/// How many bytes an `appsrc` is still holding for its branch.
+fn queued_bytes(src: &AppSrc) -> u64 {
+    src.property::<u64>("current-level-bytes")
+}
+
+/// How long the next bus poll may block.
+///
+/// Short enough to notice progress promptly, never longer than the patience
+/// window, and never past a hard limit the request set: a limit that is only
+/// noticed a poll interval late is not the limit that was asked for.
+fn poll_slice(stall: Duration, limit: Option<Duration>, elapsed: Duration) -> Duration {
+    let mut slice = PROGRESS_POLL.min(stall);
+    if let Some(limit) = limit {
+        slice = slice.min(limit.saturating_sub(elapsed));
+    }
+    slice.max(MIN_POLL)
+}
+
+/// `duration` in whole milliseconds, for an error detail.
+fn elapsed_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// `duration` as the nanoseconds a [`gst::ClockTime`] takes, saturating rather
+/// than wrapping on a window nobody will ever wait out.
+fn clock_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// Deletes a part-written export, reporting whether anything was there.
@@ -1647,9 +1911,10 @@ mod tests {
         AUDIO_CODECS, AudioCodec, AudioFrameSource, CONTAINERS, ChromaFormat, Container,
         ExportSettings, PcmAudioSource, SolidFrames, VideoFrameSource, audio_nanos,
         chroma_caps_for, codes, declared_sink_formats, element_is_usable, video_parser,
-        MAX_CRF, VideoQuality,
+        MAX_CRF, VideoQuality, DEFAULT_STALL_TIMEOUT_MS, ProgressMark, Timeout, poll_slice, timeout_verdict, waiting_on,
     };
     use gstreamer as gst;
+    use std::time::Duration;
     use sub_time::Rational;
 
     /// The formats a list of names stands for, as an element would declare
@@ -2001,5 +2266,192 @@ mod tests {
                 "{name} prefers I420 within the family",
             );
         }
+    }
+    /// A mark with `video` and `audio` bytes still queued and nothing written.
+    fn mark(video: u64, audio: u64) -> ProgressMark {
+        ProgressMark {
+            bytes_written: 0,
+            video_queued: video,
+            audio_queued: audio,
+            position_nanos: None,
+        }
+    }
+
+    #[test]
+    fn a_slow_export_is_never_abandoned_while_it_is_still_moving() {
+        let stall = Duration::from_mins(2);
+        // An export a full hour old that produced something a second ago is
+        // working, however long the whole encode is taking.
+        assert_eq!(
+            timeout_verdict(
+                Duration::from_secs(1),
+                stall,
+                Duration::from_hours(1),
+                None
+            ),
+            None
+        );
+        // Only the time since the last sign of life is counted.
+        assert_eq!(
+            timeout_verdict(
+                Duration::from_secs(119),
+                stall,
+                Duration::from_hours(24),
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_export_that_stopped_is_given_up_on_after_the_stall_window() {
+        let stall = Duration::from_secs(30);
+        assert_eq!(
+            timeout_verdict(stall, stall, Duration::from_secs(30), None),
+            Some(Timeout::Stalled)
+        );
+        assert_eq!(
+            timeout_verdict(
+                Duration::from_secs(31),
+                stall,
+                Duration::from_secs(400),
+                None
+            ),
+            Some(Timeout::Stalled)
+        );
+    }
+
+    #[test]
+    fn a_hard_limit_ends_even_an_export_that_is_making_progress() {
+        let stall = Duration::from_mins(2);
+        let limit = Some(Duration::from_secs(10));
+        assert_eq!(
+            timeout_verdict(
+                Duration::from_millis(1),
+                stall,
+                Duration::from_secs(9),
+                limit
+            ),
+            None,
+            "inside the limit the export runs"
+        );
+        assert_eq!(
+            timeout_verdict(
+                Duration::from_millis(1),
+                stall,
+                Duration::from_secs(10),
+                limit
+            ),
+            Some(Timeout::Expired),
+            "the request's own limit is what ran out, not patience"
+        );
+    }
+
+    #[test]
+    fn the_poll_never_blocks_past_the_patience_window_or_a_hard_limit() {
+        let stall = Duration::from_mins(2);
+        assert_eq!(
+            poll_slice(stall, None, Duration::ZERO),
+            Duration::from_millis(250),
+            "with no limit the wait polls at its own interval"
+        );
+        assert_eq!(
+            poll_slice(Duration::from_millis(50), None, Duration::ZERO),
+            Duration::from_millis(50),
+            "patience shorter than the interval shortens the poll"
+        );
+        assert_eq!(
+            poll_slice(
+                stall,
+                Some(Duration::from_millis(80)),
+                Duration::from_millis(20)
+            ),
+            Duration::from_millis(60),
+            "the poll ends when the request's limit does"
+        );
+        assert_eq!(
+            poll_slice(
+                stall,
+                Some(Duration::from_millis(10)),
+                Duration::from_secs(9)
+            ),
+            Duration::from_millis(1),
+            "a limit already spent still leaves a poll that cannot spin"
+        );
+    }
+
+    #[test]
+    fn the_timeout_names_the_element_the_export_was_waiting_on() {
+        assert_eq!(
+            waiting_on(&mark(4_096, 0), "av1enc", Some("avenc_aac"), "matroskamux"),
+            "av1enc",
+            "video buffers nobody has taken name the video encoder"
+        );
+        assert_eq!(
+            waiting_on(&mark(0, 512), "av1enc", Some("avenc_aac"), "matroskamux"),
+            "avenc_aac"
+        );
+        assert_eq!(
+            waiting_on(&mark(0, 0), "av1enc", Some("avenc_aac"), "matroskamux"),
+            "matroskamux",
+            "with both branches drained the muxer is what has not finished"
+        );
+        assert_eq!(
+            waiting_on(&mark(0, 512), "av1enc", None, "mp4mux"),
+            "mp4mux",
+            "a video-only export has no audio encoder to blame"
+        );
+    }
+
+    #[test]
+    fn timeouts_default_to_patience_and_no_limit_and_come_from_the_request() {
+        let base = settings(Rational::FPS_24);
+        assert_eq!(base.stall_timeout_ms, DEFAULT_STALL_TIMEOUT_MS);
+        assert_eq!(base.timeout_ms, None);
+        assert_eq!(base.timeout(), None);
+
+        let asked = base
+            .clone()
+            .with_stall_timeout_ms(5_000)
+            .with_timeout_ms(Some(60_000));
+        assert_eq!(asked.stall_timeout(), Duration::from_secs(5));
+        assert_eq!(asked.timeout(), Some(Duration::from_mins(1)));
+        asked.validate().expect("a request may set its own limits");
+
+        assert_eq!(
+            base.clone()
+                .with_stall_timeout_ms(0)
+                .validate()
+                .unwrap_err()
+                .code
+                .as_str(),
+            "export.invalid_settings"
+        );
+        assert_eq!(
+            base.with_timeout_ms(Some(0))
+                .validate()
+                .unwrap_err()
+                .code
+                .as_str(),
+            "export.invalid_settings"
+        );
+    }
+
+    #[test]
+    fn a_request_written_before_the_timeouts_existed_still_deserialises() {
+        let json = serde_json::json!({
+            "width": 16,
+            "height": 16,
+            "frame_rate": { "numerator": 24, "denominator": 1 },
+            "container": "mkv",
+            "video_codec": "h264",
+            "audio_codec": null,
+            "sample_rate": 48_000,
+            "channels": 2,
+        });
+        let settings: ExportSettings =
+            serde_json::from_value(json).expect("the old shape still parses");
+        assert_eq!(settings.stall_timeout_ms, DEFAULT_STALL_TIMEOUT_MS);
+        assert_eq!(settings.timeout_ms, None);
     }
 }
