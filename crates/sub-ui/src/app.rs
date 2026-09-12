@@ -57,6 +57,7 @@ use crate::keymap::LoadedKeymap;
 use crate::media_bin::{BinSelection, BinStatus, MediaBinAction, MediaBinPanel};
 use crate::media_import::{FinishedImport, ImportOutcome, ImportQueue};
 use crate::popout::{PopoutViewer, popout_menu_ui};
+use crate::preview::PreviewService;
 use crate::recovery::{RecoveryOutcome, RecoveryPrompt, SnapshotMenu};
 use crate::relink_dialog::RelinkDialog;
 use crate::sequence_tabs::{SequenceTabAction, SequenceTabs, SequenceViewState};
@@ -84,6 +85,14 @@ const MAX_BIN_PROBLEMS: usize = 8;
 /// How often the window repaints itself while an export runs, so the progress
 /// bar and the ETA keep moving without an input event to wake egui.
 const EXPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How long the window waits before looking at the preview decoders again.
+///
+/// A decode worker landing a picture between paints cannot wake egui, so a
+/// preview that is still catching up asks for the next frame itself. Short
+/// enough that a scrub feels immediate, long enough that a parked playhead over
+/// a slow file is not a spin.
+const PREVIEW_POLL_INTERVAL: Duration = Duration::from_millis(8);
 
 /// The File menu's open entry.
 pub const OPEN_LABEL: &str = "Open project...";
@@ -451,6 +460,11 @@ pub struct SubordinateApp {
     /// Which display the pop-out goes fullscreen on, as read from the user's
     /// `fullscreen.json` and written back when it changes.
     fullscreen: FullscreenState,
+    /// The decoded pictures behind the viewer: one decode pipeline per clip
+    /// under the playhead, opened and driven off this thread. This is what
+    /// makes the viewer show real media rather than the bare canvas
+    /// (docs/PLAN.md §4).
+    previews: PreviewService,
     /// The compositor output as egui knows it, and the canvas it was
     /// registered at, so a resolution change re-registers rather than
     /// stretching a texture that no longer exists.
@@ -565,6 +579,7 @@ impl SubordinateApp {
             effect_catalog: EffectCatalog::new(),
             layout: layout.layout,
             fullscreen: fullscreen.state,
+            previews: PreviewService::new(),
             preview: None,
             needs_composite: true,
             keymap,
@@ -798,6 +813,9 @@ impl SubordinateApp {
             self.compositor = Compositor::for_sequence(self.render.clone(), &sequence);
         }
         if switched {
+            // The pipelines open belong to the clips of the sequence being
+            // left; the new one's clips open their own.
+            self.previews.clear();
             // Where this tab was last being looked at, or its origin the first
             // time it is shown.
             let state = active
@@ -956,6 +974,25 @@ impl SubordinateApp {
     /// The viewer panel, which owns the playhead.
     pub fn viewer(&mut self) -> &mut ViewerPanel {
         &mut self.viewer
+    }
+
+    /// The compositor whose output the viewer paints.
+    ///
+    /// Public for the same reason the viewer is: a host — or a test driving
+    /// the window without a pointer — has to be able to look at the picture
+    /// the window is showing, and [`Compositor::read_rgba`] is the only way to
+    /// read a texture the GPU owns.
+    pub const fn compositor(&self) -> &Compositor {
+        &self.compositor
+    }
+
+    /// The decode pipelines behind the viewer's picture.
+    ///
+    /// Public so a caller with no pointer can tell whether the preview has
+    /// caught up with the playhead — [`crate::preview::PreviewStats::late`] against a settled
+    /// picture — rather than guessing with a sleep.
+    pub const fn previews(&self) -> &PreviewService {
+        &self.previews
     }
 
     /// The media bin panel, which owns what looking at the bin means and what
@@ -1273,21 +1310,52 @@ impl SubordinateApp {
         self.scheduler.resync_master();
     }
 
-    /// Composites the sequence at the playhead, if the playhead has moved,
-    /// and returns the picture the viewer should sample.
+    /// Composites the sequence at the playhead and returns the picture the
+    /// viewer should sample.
     ///
-    /// The playback clock now moves the playhead, but nothing feeds decoded
-    /// pictures to the compositor yet: the frame source stays empty until the
-    /// decode path is wired to it, so every clip resolves to "no picture
-    /// ready" and the composite is the bare black canvas. The output texture
-    /// is registered with egui once and re-registered only when the canvas
-    /// size changes, because [`Compositor::render`] otherwise keeps drawing
-    /// into the same texture.
-    fn composite(&mut self) -> ViewerFrame {
-        if self.needs_composite {
-            let mut empty = |_: &ResolvedClip<'_>| -> Option<SourceFrame> { None };
+    /// The layers come from [`crate::preview::PreviewService`]: one decode
+    /// pipeline per clip under the playhead, each on a worker of its own, each
+    /// seeked by the playhead while scrubbing and fed by its decode-ahead ring
+    /// while the transport runs. Nothing here waits for a decoder — a clip
+    /// with no picture ready contributes no layer, exactly as a gap does — so
+    /// this stays a compositor pass and an upload however slow the media is.
+    ///
+    /// A composite is redone when the playhead has moved *or* a clip has
+    /// delivered a new picture, which is what puts a frame on screen when a
+    /// worker finishes between paints. The output texture is registered with
+    /// egui once and re-registered only when the canvas size changes, because
+    /// [`Compositor::render`] otherwise keeps drawing into the same texture.
+    fn composite(&mut self, ctx: &egui::Context) -> ViewerFrame {
+        let playhead = self.viewer.state.playhead();
+        let project = self.session.project_arc();
+        let project_dir = self.project_dir();
+        self.previews.set_playing(self.scheduler.is_playing());
+        self.previews.set_media_use(self.viewer.media_use());
+        self.previews.set_cache_dir(
+            self.session
+                .project_file()
+                .and_then(|file| sub_edit::autosave::sidecar_dir(file).ok()),
+        );
+        let pictures = self.previews.pictures(
+            &self.render,
+            &self.jobs,
+            &project,
+            project_dir.as_deref(),
+            &self.sequence,
+            playhead,
+        );
+        if pictures.busy() {
+            // A worker landing a picture between paints has no way to wake
+            // egui, so a preview that is still catching up asks for the next
+            // frame itself. This is the only thing that waits on decode, and
+            // it waits by painting again rather than by blocking.
+            ctx.request_repaint_after(PREVIEW_POLL_INTERVAL);
+        }
+        if self.needs_composite || pictures.changed() {
+            let mut source =
+                |layer: &ResolvedClip<'_>| -> Option<SourceFrame> { pictures.get(layer.clip_id()) };
             self.compositor
-                .render(&self.sequence, self.viewer.state.playhead(), &mut empty);
+                .render(&self.sequence, playhead, &mut source);
             self.needs_composite = false;
         }
         let resolution = self.compositor.resolution();
@@ -1940,6 +2008,11 @@ impl SubordinateApp {
     pub fn windows_are_up(&self) -> bool {
         self.frames_painted > 0
             && (!self.popout.is_open() || self.popout.shared().frames_painted() > 0)
+            // And the picture in them is the one the playhead is on. A window
+            // photographed before its decoders landed shows the bare canvas
+            // and proves nothing about the media; a project whose clips are
+            // offline, or which has none, settles immediately.
+            && self.previews.settled()
     }
 
     /// Prints the ready line once every window has a picture.
@@ -1951,9 +2024,10 @@ impl SubordinateApp {
             return;
         }
         self.announced_ready = true;
+        let stats = self.previews.stats();
         log::info!(
             "{UI_SMOKE_READY}: frames={} popout={} popout_frames={} project={} sequences={} \
-             tracks={} revision={} command_api={}",
+             tracks={} revision={} command_api={} picture={} canvas={}",
             self.frames_painted,
             self.popout.is_open(),
             self.popout.shared().frames_painted(),
@@ -1962,7 +2036,36 @@ impl SubordinateApp {
             self.sequence.tracks.len(),
             self.session.revision(),
             self.command_api_label(),
+            stats.showing,
+            self.canvas_label(),
         );
+        for (clip, error) in self.previews.failures() {
+            log::warn!(
+                "clip {clip} has no preview picture: [{}] {}",
+                error.code,
+                error.message
+            );
+        }
+    }
+
+    /// What the compositor's canvas actually holds, for the ready line.
+    ///
+    /// `lit` when the canvas carries a pixel that is not black and `black`
+    /// when it does not — which is what an unattended run's screenshot is
+    /// worth looking at for. The canvas is read back off the GPU, which is
+    /// megabytes of copy, so it is only asked for on a run that exists to be
+    /// photographed: one told how long to hold its windows up, or how many
+    /// frames to paint.
+    fn canvas_label(&self) -> &'static str {
+        if self.options.hold.is_none() && self.options.smoke_frames.is_none() {
+            return "unread";
+        }
+        let canvas = self.compositor.read_rgba();
+        if canvas.chunks_exact(4).any(|pixel| pixel[..3] != [0, 0, 0]) {
+            "lit"
+        } else {
+            "black"
+        }
     }
 
     /// Whether the Command API has finished starting, one way or the other.
@@ -2126,7 +2229,7 @@ impl eframe::App for SubordinateApp {
         }
         self.relink_ui(ui.ctx());
 
-        let preview = self.composite();
+        let preview = self.composite(ui.ctx());
         // The pop-out runs before the dock, so the panel knows on this frame
         // whether the picture is its to paint.
         if self.run_popout(ui.ctx(), preview) {
