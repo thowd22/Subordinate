@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-task-97'
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-11 15:30'
+updated_date: '2026-09-12 15:32'
 labels:
   - mcp
 milestone: m-6
@@ -58,6 +58,8 @@ Verification: cargo fmt --all --check clean; cargo clippy -p subordinate-mcp --a
 AC #2 is not checked: verifying Claude Code's elicitation dialog needs an interactive MCP client and a running editor, neither of which this environment has. The server side of that dialog is covered by tests/confirmations.rs, which asserts the wire shape of the elicitation/create request the client would render.
 
 cargo clippy --workspace --all-targets -- -D warnings also passes (6m12s, exit 0) with the machine's GStreamer environment exported.
+
+2026-09-12 supervisor handoff: criterion 2 (Claude Code's elicitation dialog) is a manual check: register subordinate-mcp in a Claude Code session (docs/mcp-guide.md .mcp.json snippet), call a destructive tool without confirm, and observe the dialog.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

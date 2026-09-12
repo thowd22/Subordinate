@@ -830,6 +830,7 @@ mod tests {
                 "youtube-4k",
                 "mezzanine",
                 "h265-archive",
+                "av1-archive",
                 "audio-only"
             ]
         );
@@ -888,6 +889,19 @@ mod tests {
         let video = preset.video.as_ref().expect("has video");
         assert_eq!(video.codec, VideoCodec::H265);
         assert!(matches!(video.quality, VideoQuality::Crf { .. }));
+    }
+
+    #[test]
+    fn the_av1_preset_is_av1_in_matroska() {
+        let library = PresetLibrary::builtin();
+        let preset = library.require("av1-archive").expect("shipped");
+        assert_eq!(preset.container, Container::Mkv);
+        let video = preset.video.as_ref().expect("has video");
+        assert_eq!(video.codec, VideoCodec::Av1);
+        assert_eq!(
+            preset.audio.as_ref().expect("has audio").codec,
+            AudioCodec::Opus
+        );
     }
 
     #[test]

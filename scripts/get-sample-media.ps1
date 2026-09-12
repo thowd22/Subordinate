@@ -127,13 +127,20 @@ function Get-Sha256 {
 # hosted runner can still meet a transient 5xx or a reset connection, and the
 # built-in retry backs off too fast to clear one. Keep in sync with the shell
 # script.
+#
+# The retry is this loop's and nothing else's: `-MaximumRetryCount` and
+# `-RetryIntervalSec` arrived with PowerShell 7, and Windows PowerShell 5.1 -
+# which is what `shell: powershell` is, and what a self-hosted Windows runner
+# without pwsh has - refuses the whole call with "a parameter cannot be found
+# that matches parameter name 'MaximumRetryCount'". That turned every attempt
+# into an immediate failure and the script gave up after five of them
+# (TASK-143, yodaddy, run 34679496173).
 function Save-Url {
     param([string]$Target, [string]$Url)
     $delay = 5
     for ($attempt = 1; $attempt -le 5; $attempt++) {
         try {
-            Invoke-WebRequest -Uri $Url -OutFile $Target -UserAgent $userAgent `
-                -MaximumRetryCount 2 -RetryIntervalSec 3
+            Invoke-WebRequest -Uri $Url -OutFile $Target -UserAgent $userAgent
             return
         } catch {
             if (Test-Path $Target) { Remove-Item -Force $Target }

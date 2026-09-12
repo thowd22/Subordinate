@@ -99,7 +99,7 @@ pub enum EncoderVendor {
     VideoToolbox,
     /// Windows Media Foundation, the Windows fallback.
     MediaFoundation,
-    /// Software: `x264enc` and `x265enc`.
+    /// Software: `x264enc`, `x265enc` and the AV1 encoders.
     Software,
 }
 
@@ -161,13 +161,19 @@ const fn candidate(element: &'static str, codec: VideoCodec, vendor: EncoderVend
 /// Media Foundation, then software. Selection filters this list by codec and
 /// keeps the order, so the list is the order.
 ///
+/// Every codec is catalogued for every backend that has an element for it, so
+/// an encoder a machine really carries can always be pinned: without an entry
+/// [`EncoderPreferences::set_override`] refuses the element outright, which is
+/// what kept AMF's AV1 encoder and Media Foundation's HEVC encoder untestable
+/// (TASK-143). AV1 has three software encoders rather than one because no
+/// single one of them is in a stock install everywhere: `svtav1enc` first
+/// because it is the fastest of the three at a given quality.
+///
 /// NVENC has three element families in GStreamer 1.28 and the catalogue knows
 /// all of them: `nvh264enc` drives it through CUDA, `nvd3d11h264enc` through a
 /// Direct3D 11 device, and `nvautogpuh264enc` picks whichever the pipeline is
 /// already using. The CUDA one is first because it is the one that exists on
-/// every platform; the Direct3D ones exist only on Windows, where they are the
-/// path that works when an application already holds a graphics device
-/// (TASK-146).
+/// every platform; the Direct3D ones exist only on Windows (TASK-146).
 const CATALOGUE: &[Candidate] = &[
     candidate("nvh264enc", VideoCodec::H264, EncoderVendor::Nvenc),
     candidate("nvh265enc", VideoCodec::H265, EncoderVendor::Nvenc),
@@ -178,8 +184,10 @@ const CATALOGUE: &[Candidate] = &[
     candidate("nvautogpuh265enc", VideoCodec::H265, EncoderVendor::Nvenc),
     candidate("vah264enc", VideoCodec::H264, EncoderVendor::Va),
     candidate("vah265enc", VideoCodec::H265, EncoderVendor::Va),
+    candidate("vaav1enc", VideoCodec::Av1, EncoderVendor::Va),
     candidate("amfh264enc", VideoCodec::H264, EncoderVendor::Amf),
     candidate("amfh265enc", VideoCodec::H265, EncoderVendor::Amf),
+    candidate("amfav1enc", VideoCodec::Av1, EncoderVendor::Amf),
     candidate("vtenc_h264", VideoCodec::H264, EncoderVendor::VideoToolbox),
     candidate("vtenc_h265", VideoCodec::H265, EncoderVendor::VideoToolbox),
     candidate(
@@ -187,8 +195,16 @@ const CATALOGUE: &[Candidate] = &[
         VideoCodec::H264,
         EncoderVendor::MediaFoundation,
     ),
+    candidate(
+        "mfh265enc",
+        VideoCodec::H265,
+        EncoderVendor::MediaFoundation,
+    ),
     candidate("x264enc", VideoCodec::H264, EncoderVendor::Software),
     candidate("x265enc", VideoCodec::H265, EncoderVendor::Software),
+    candidate("svtav1enc", VideoCodec::Av1, EncoderVendor::Software),
+    candidate("av1enc", VideoCodec::Av1, EncoderVendor::Software),
+    candidate("rav1enc", VideoCodec::Av1, EncoderVendor::Software),
 ];
 
 /// What probing one element found.
@@ -824,13 +840,19 @@ mod tests {
                 "nvautogpuh265enc",
                 "vah264enc",
                 "vah265enc",
+                "vaav1enc",
                 "amfh264enc",
                 "amfh265enc",
+                "amfav1enc",
                 "vtenc_h264",
                 "vtenc_h265",
                 "mfh264enc",
+                "mfh265enc",
                 "x264enc",
                 "x265enc",
+                "svtav1enc",
+                "av1enc",
+                "rav1enc",
             ]
         );
     }
@@ -859,10 +881,21 @@ mod tests {
                 "vah265enc",
                 "amfh265enc",
                 "vtenc_h265",
+                "mfh265enc",
                 "x265enc"
             ]
         );
-        assert_eq!(encoder_names(VideoCodec::Av1), vec!["nvav1enc"]);
+        assert_eq!(
+            encoder_names(VideoCodec::Av1),
+            vec![
+                "nvav1enc",
+                "vaav1enc",
+                "amfav1enc",
+                "svtav1enc",
+                "av1enc",
+                "rav1enc"
+            ]
+        );
     }
 
     #[test]

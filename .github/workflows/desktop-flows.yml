@@ -168,24 +168,34 @@ jobs:
       # settled; they are installed here so the flow can be iterated on
       # without a 40-minute AMI rebuild per attempt.
       #
-      # libva-drm2 is a third, and it is a **packaging defect** rather than a
-      # test dependency: the v0.1.2 AppImage's `libav`, `va`, `qsv` and `msdk`
-      # plugins all fail to load with "libva-drm.so.2: cannot open shared
-      # object file", which the plugin scanner prints and nothing else
+      # This job used to install libva-drm2, libva2, libva-x11-2 and libvdpau1
+      # here as well, and that was a **packaging defect** being papered over,
+      # not a test dependency: the v0.1.2 AppImage's `libav`, `va`, `qsv` and
+      # `msdk` plugins all failed to load with "libva-drm.so.2: cannot open
+      # shared object file", which the plugin scanner prints and nothing else
       # notices - until an import of the baked 4K60 clip answers
       # `media.unsupported` with `MissingPlugins` (run 34684471869 reproduced
-      # it through `media.probe`, with no window involved). The AppImage
-      # should carry that library or not link those plugins against it; until
-      # then this job supplies it - and libvdpau1, libva2 and libva-x11-2,
-      # which the same plugin asks for next (run 34684749594).
+      # it through `media.probe`, with no window involved; run 34684749594
+      # found the next three). TASK-145 fixed it in the package: the AppImage
+      # now carries fallback copies of those four dispatchers and AppRun links
+      # in whichever ones a host turns out not to have, so this image is back
+      # to being an honest stock desktop. If the probe below ever answers
+      # media.unsupported again, the package regressed - do not re-add the apt
+      # line.
+      #
+      # One ordering fact: this runner runs the AppImage **baked into the AMI**,
+      # which infra/images/linux-desktop/ takes from the newest v* release. So
+      # this job only goes green once a release carrying the TASK-145 fix has
+      # been cut and the desktop image rebuilt from it; against an older baked
+      # release the import still answers media.unsupported, and that is the
+      # image being stale rather than the workflow being wrong.
       - name: Desktop portal and accessibility bus (apt)
         run: |
           set -euxo pipefail
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             dbus-x11 libdbus-1-3 at-spi2-core python3-pyatspi \
-            xdg-desktop-portal xdg-desktop-portal-gtk zenity \
-            libva-drm2 libva2 libva-x11-2 libvdpau1
+            xdg-desktop-portal xdg-desktop-portal-gtk zenity
           dpkg -l | grep -E 'xdg-desktop-portal|at-spi2-core|pyatspi' || true
 
       # The example flow, which is also the diagnosis when the clicks flow

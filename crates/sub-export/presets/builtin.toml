@@ -69,6 +69,21 @@ sample_rate = 48000
 channels = 2
 
 [[preset]]
+id = "av1-archive"
+name = "AV1 archive"
+container = "mkv"
+video_codec = "av1"
+width = 1920
+height = 1080
+frame_rate_numerator = 30
+frame_rate_denominator = 1
+video_crf = 30
+audio_codec = "opus"
+audio_bitrate_kbps = 160
+sample_rate = 48000
+channels = 2
+
+[[preset]]
 id = "audio-only"
 name = "Audio only"
 container = "mp4"

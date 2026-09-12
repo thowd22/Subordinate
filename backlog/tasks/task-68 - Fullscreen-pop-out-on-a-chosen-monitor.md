@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-task-68'
 created_date: '2026-09-08 21:05'
-updated_date: '2026-09-11 03:54'
+updated_date: '2026-09-12 15:32'
 labels:
   - ui
 milestone: m-5
@@ -57,6 +57,8 @@ Verification (this environment is Linux WSL, no sudo, no GPU; wgpu ran on the so
 - cargo clippy --workspace --all-targets -- -D warnings: clean (exit 0).
 - cargo test -p sub-ui: 30 test targets, all ok, including the new tests/viewer_fullscreen.rs (picker rows, toggle, Escape), 11 new unit tests in fullscreen.rs and 4 new ones in popout.rs. The committed pop-out snapshot (viewer_popout_window) rendered and matched here, which is the 'frame on black' evidence for what the fullscreen window paints.
 - AC#3 (Wayland, X11, Windows and macOS, verified on each) cannot be verified here: no second head and no GPU runner. It belongs with TASK-118, which already owns pop-out and second-display verification on hardware; the criterion is left unchecked.
+
+2026-09-12 supervisor handoff: only the monitor-picker verification on a real two-display desktop remains; run it on the user's Windows desktop runner yodaddy (two monitors) via a small dispatch job or the RDP procedure in docs/DEVELOPMENT.md.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

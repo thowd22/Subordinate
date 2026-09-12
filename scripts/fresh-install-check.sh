@@ -235,6 +235,71 @@ else
     echo "$probed clips present; the export below decodes every one of them"
 fi
 
+# ------------------------------------------------- an ordinary H.264 file ----
+# The sample media is WebM (VP9/Opus), which the bundled `vpx` and `opus`
+# plugins read without gst-libav ever being loaded. The file a user actually
+# hands the editor is H.264 with AAC audio, and AAC decode is gst-libav's
+# avdec_aac -- so a package whose `libav` module is blacklisted passes every
+# check above and still answers media.unsupported on the first real clip. That
+# is exactly what shipped in v0.1.2/v0.1.3: libavcodec links the VA-API and
+# VDPAU dispatchers, the AppImage did not carry them, and a desktop without
+# libva-drm.so.2 lost software H.264/AAC decode (TASK-139, TASK-145).
+#
+# No such file is downloadable here -- the sample media is all WebM -- so the
+# package makes one with its own encoders and reads it back with its own
+# discoverer. x264enc, voaacenc and matroskamux are all required entries in
+# the plugin allowlist, so a package that cannot write this file is broken in
+# its own right.
+banner "read an H.264/AAC MKV written by this package"
+mkv=$out_dir/h264-aac.mkv
+can_write_mkv=1
+sub_tool gst-launch-1.0 --version >/dev/null 2>&1 || can_write_mkv=0
+# x264enc, voaacenc and matroskamux are all required entries in the AppImage's
+# plugin allowlist, so this never skips there. Another package's runtime may
+# genuinely not have them, and "this machine cannot write the file" is not the
+# same finding as "this machine cannot read it".
+for element in x264enc voaacenc matroskamux; do
+    sub_tool gst-inspect-1.0 --exists "$element" >/dev/null 2>&1 || can_write_mkv=0
+done
+if [ "$can_write_mkv" -eq 1 ]; then
+    sub_tool gst-launch-1.0 -q \
+        videotestsrc num-buffers=50 \
+        ! video/x-raw,width=320,height=240,framerate=25/1 \
+        ! x264enc key-int-max=25 speed-preset=ultrafast ! h264parse ! mux. \
+        audiotestsrc num-buffers=50 ! audio/x-raw,rate=48000,channels=2 \
+        ! audioconvert ! voaacenc ! aacparse ! mux. \
+        matroskamux name=mux ! filesink location="$mkv" \
+        >"$out_dir/mkv-write.log" 2>&1 ||
+        {
+            tail -n20 "$out_dir/mkv-write.log"
+            fail "the package could not write an H.264/AAC MKV with its own encoders" h264
+        }
+    [ -s "$mkv" ] || fail "the H.264/AAC MKV came out empty" h264
+    echo "wrote $mkv ($(wc -c <"$mkv" | tr -d ' ') bytes) with the package's own x264enc and voaacenc"
+
+    if [ "$has_discoverer" -eq 1 ]; then
+        sub_tool gst-discoverer-1.0 "$mkv" >"$out_dir/probe-h264-aac.txt" 2>&1 ||
+            fail "the bundled discoverer could not read an H.264/AAC MKV" h264
+        cat "$out_dir/probe-h264-aac.txt"
+        if grep -qi 'error' "$out_dir/probe-h264-aac.txt"; then
+            fail "the bundled discoverer reported an error on the H.264/AAC MKV" h264
+        fi
+        grep -qi 'H.264' "$out_dir/probe-h264-aac.txt" ||
+            fail "the discoverer did not recognise the H.264 video stream" h264
+        # "MPEG-4 AAC" needs gst-libav's avdec_aac to be loadable: this line is
+        # the one that fails when the VA-API dispatchers are missing.
+        grep -qi 'AAC' "$out_dir/probe-h264-aac.txt" ||
+            fail "the discoverer did not recognise the AAC audio stream (is libav blacklisted?)" h264
+        echo "the package reads H.264 video and AAC audio back out of it"
+    fi
+    fact h264_aac_mkv "written and probed"
+else
+    # Not fatal for a package that cannot write one; the AppImage always can,
+    # and packaging/validate.sh fails if it ever stops shipping gst-launch-1.0.
+    fact h264_aac_mkv "skipped (no gst-launch-1.0, x264enc, voaacenc or matroskamux)"
+    echo "this package cannot write an H.264/AAC MKV itself; skipping that file"
+fi
+
 # --------------------------------------------------------------- export -----
 banner "export with the best available encoder"
 # sub_export's own selection order (crates/sub-export/src/encoder.rs): hardware
@@ -332,8 +397,13 @@ req_initialized='{"jsonrpc":"2.0","method":"notifications/initialized"}'
 req_new='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_new","arguments":{"name":"Fresh install"}}}'
 req_sequence='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sequence_create","arguments":{"name":"Installed by MCP","settings":'$settings'}}}'
 req_timeline='{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"timeline_get_state","arguments":{}}}'
+# The call TASK-139 watched answer media.unsupported/MissingPlugins on a
+# desktop, with no window involved: an agent asking the installed package about
+# an ordinary H.264/AAC file. It goes through the package's own engine rather
+# than through a GStreamer tool, which is the path a user's import takes.
+req_probe='{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"media_probe","arguments":{"path":"'$mkv'"}}}'
 printf '%s\n' "$req_initialize" "$req_initialized" "$req_new" "$req_sequence" \
-    "$req_timeline" >"$mcp_in"
+    "$req_timeline" "$req_probe" >"$mcp_in"
 
 SUBORDINATE_INSTANCE=fresh-install-check
 SUBORDINATE_LOG=info
@@ -374,6 +444,10 @@ mcp_session() {
     mcp_await 3 || return 0
     printf '%s\n' "$req_timeline"
     mcp_await 4 || return 0
+    if [ -s "$mkv" ]; then
+        printf '%s\n' "$req_probe"
+        mcp_await 5 || return 0
+    fi
 }
 
 mcp_status=0
@@ -411,6 +485,29 @@ check_mcp 4 timeline.get_state
 # answer that happens not to be an error.
 grep -q 'Installed by MCP' "$mcp_out" ||
     fail "timeline.get_state did not return the sequence sequence.create had just made" mcp
+
+if [ -s "$mkv" ]; then
+    check_mcp 5 media.probe
+    probe_reply=$(grep -E '"id":[[:space:]]*5[,}]' "$mcp_out" | head -n1)
+    case "$probe_reply" in
+    *media.unsupported* | *MissingPlugins* | *missing_plugins*)
+        fail "media.probe called an H.264/AAC MKV unsupported: $(echo "$probe_reply" | cut -c1-300)" mcp
+        ;;
+    esac
+    # The answer is a MediaInfo, whose stream `codec` is the GStreamer media
+    # type. Matching on those rather than on JSON punctuation, because the
+    # report arrives as an escaped string inside the MCP content block.
+    case "$probe_reply" in
+    *video/x-h264*) ;;
+    *) fail "media.probe found no H.264 video stream: $(echo "$probe_reply" | cut -c1-300)" mcp ;;
+    esac
+    case "$probe_reply" in
+    *audio/mpeg*) ;;
+    *) fail "media.probe found no AAC audio stream (is libav blacklisted?): $(echo "$probe_reply" | cut -c1-300)" mcp ;;
+    esac
+    fact mcp_media_probe "H.264/AAC MKV probed through the bridge"
+    echo "an agent asked the installed package about an H.264/AAC file and got a MediaInfo back"
+fi
 fact mcp "round-trip ok (project.new, sequence.create, timeline.get_state)"
 echo "the installed package's own MCP bridge drove the installed package's own engine"
 

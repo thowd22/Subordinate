@@ -1,0 +1,39 @@
+# Host libraries the AppImage carries a *fallback* copy of.
+#
+# One soname per line. Blank lines and `#` comments are ignored.
+#
+# These are not ordinary bundled libraries. Everything in this list is on
+# build-appimage.sh's excludelist -- a library that talks to driver or daemon
+# state, which the host must own -- and yet the bundled GStreamer links against
+# it directly, so a host without it blacklists the plugin:
+#
+#   libva.so.2      the VA-API dispatcher
+#   libva-drm.so.2  its DRM backend
+#   libva-x11.so.2  its X11 backend
+#   libvdpau.so.1   the VDPAU dispatcher
+#
+# gst-libav's libavcodec, libavformat, libavutil, libavfilter, libswscale,
+# libswresample and libpostproc all have these four in DT_NEEDED, as do the
+# va, qsv and msdk plugins. On the Ubuntu 24.04 desktop image none of the four
+# was installed, so `libav` was blacklisted with the hardware plugins and
+# media.probe of an ordinary H.264/AAC MKV answered media.unsupported --
+# software decode broken by a missing hardware library (TASK-139, TASK-145).
+#
+# They cannot simply be copied into usr/lib. libva and libvdpau are
+# dispatchers: they dlopen the host's driver and bind it by a version-stamped
+# init symbol (`__vaDriverInit_1_<minor>`). A bundled libva ahead of the host's
+# would be asked to load a driver built against a newer one and would refuse,
+# turning working VA-API into software encode -- which is why the excludelist
+# exists. So build-appimage.sh stages these in usr/lib/fallback/, off the
+# library path, and AppRun links only the ones the host does not have into a
+# shim directory it puts on LD_LIBRARY_PATH. The host wins wherever it has an
+# answer; the bundle answers only where the host has nothing.
+#
+# Add a soname here when the plugin-load check (packaging/linux/check-plugins.sh)
+# fails on a clean container for want of a library the host stack is entitled
+# not to have. Do not add drivers, GL, libc or the display/audio stack.
+
+libva.so.2
+libva-drm.so.2
+libva-x11.so.2
+libvdpau.so.1

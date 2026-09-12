@@ -27,6 +27,8 @@ metainfo=$linux_dir/$app_id.metainfo.xml
 desktop=$linux_dir/subordinate.desktop
 plugins=$linux_dir/gst-plugins.txt
 apprun=$linux_dir/AppRun
+fallback_libs=$linux_dir/fallback-libs.txt
+check_plugins=$linux_dir/check-plugins.sh
 
 appdir=
 while [ $# -gt 0 ]; do
@@ -58,6 +60,7 @@ echo "workspace version $version"
 
 # --- the files exist at the paths the scripts install from ------------------
 for file in "$manifest" "$metainfo" "$desktop" "$plugins" "$apprun" \
+    "$fallback_libs" "$check_plugins" \
     "$linux_dir/subordinate.svg" "$linux_dir/build-appimage.sh" \
     "$flatpak_dir/build-flatpak.sh"; do
     [ -f "$file" ] && pass "present ${file#"$repo_root/"}" || fail "missing ${file#"$repo_root/"}"
@@ -66,6 +69,10 @@ done
 # --- shell scripts ----------------------------------------------------------
 # AppRun runs on hosts with no bash, so it is checked with POSIX sh.
 check "AppRun is valid POSIX sh" sh -n "$apprun"
+# check-plugins.sh runs inside the same bare containers the package does, which
+# have no bash either.
+check "check-plugins.sh is valid POSIX sh" sh -n "$check_plugins"
+[ -x "$check_plugins" ] || fail "check-plugins.sh is not executable"
 for script in "$linux_dir/build-appimage.sh" "$flatpak_dir/build-flatpak.sh" \
     "${BASH_SOURCE[0]}"; do
     check "bash -n ${script#"$repo_root/"}" bash -n "$script"
@@ -73,8 +80,17 @@ for script in "$linux_dir/build-appimage.sh" "$flatpak_dir/build-flatpak.sh" \
 done
 [ -x "$apprun" ] || fail "AppRun is not executable"
 if command -v shellcheck >/dev/null 2>&1; then
-    check "shellcheck packaging scripts" shellcheck -S warning \
-        "$apprun" "$linux_dir/build-appimage.sh" "$flatpak_dir/build-flatpak.sh"
+    # Printed on failure: "FAIL: shellcheck packaging scripts" on its own says
+    # nothing, and the CI runner's shellcheck is newer than most developers'.
+    if shellcheck -S warning "$apprun" "$check_plugins" \
+        "$linux_dir/build-appimage.sh" "$flatpak_dir/build-flatpak.sh" \
+        >/tmp/shellcheck.$$ 2>&1; then
+        pass "shellcheck packaging scripts ($(shellcheck --version | sed -n 's/^version: //p'))"
+    else
+        fail "shellcheck packaging scripts ($(shellcheck --version | sed -n 's/^version: //p'))"
+        sed -n '1,60p' /tmp/shellcheck.$$
+    fi
+    rm -f /tmp/shellcheck.$$
 else
     skip "shellcheck not installed"
 fi
@@ -143,6 +159,34 @@ for must in nvcodec va coreelements app playback libav x264 voaacenc isomp4 matr
         fail "plugin allowlist does not mark $must as required"
 done
 pass "plugin allowlist ($(echo "$entries" | wc -l) modules, hardware plugins required)"
+
+# --- fallback libraries -----------------------------------------------------
+# Every soname here has to be on build-appimage.sh's excludelist: the whole
+# point is that these are host-owned libraries staged out of the way, chosen
+# per machine by AppRun, not bundled ones. A soname that stopped being excluded
+# would silently start shadowing the host's driver stack.
+fallback_entries=$(sed 's/#.*//' "$fallback_libs" | tr -d ' \t' | grep -v '^$')
+[ -n "$fallback_entries" ] || fail "fallback-libs.txt lists no libraries"
+bad_fallback=$(echo "$fallback_entries" | grep -vE '^lib[A-Za-z0-9._+-]+\.so\.[0-9]+$' || true)
+[ -z "$bad_fallback" ] ||
+    fail "malformed fallback sonames: $(echo "$bad_fallback" | tr '\n' ' ')"
+# The four the libav, va, qsv and msdk plugins all link (TASK-145).
+for must in libva.so.2 libva-drm.so.2 libva-x11.so.2 libvdpau.so.1; do
+    echo "$fallback_entries" | grep -qx "$must" ||
+        fail "fallback-libs.txt does not carry $must"
+done
+exclude_re=$(sed -n "s/^exclude_re='\(.*\)'$/\1/p" "$linux_dir/build-appimage.sh")
+if [ -z "$exclude_re" ]; then
+    fail "build-appimage.sh no longer defines exclude_re where validate.sh can read it"
+else
+    for soname in $fallback_entries; do
+        [[ $soname =~ $exclude_re ]] ||
+            fail "$soname is in fallback-libs.txt but not on build-appimage.sh's excludelist"
+    done
+fi
+grep -q 'usr/lib/fallback' "$apprun" ||
+    fail "AppRun never looks at usr/lib/fallback, so the fallback libraries are dead weight"
+pass "fallback library list ($(echo "$fallback_entries" | wc -l) sonames, all excluded from the bundle)"
 
 # --- AppRun -----------------------------------------------------------------
 # Without these three the bundled plugins are invisible and the editor falls
@@ -258,6 +302,20 @@ if [ -n "$appdir" ]; then
         fail "staged AppDir has no icon"
     [ -x "$appdir/usr/lib/gstreamer-1.0/gst-plugin-scanner" ] ||
         fail "staged AppDir has no gst-plugin-scanner"
+    # The three tools SUB_APPIMAGE_TOOL exposes. gst-launch is not a luxury:
+    # the fresh-machine check writes an H.264/AAC file with it, which is the
+    # only file in that run that makes the package load gst-libav.
+    for tool in gst-inspect-1.0 gst-discoverer-1.0 gst-launch-1.0; do
+        [ -x "$appdir/usr/bin/$tool" ] ||
+            fail "staged AppDir has no $tool (the package cannot be checked from outside)"
+    done
+    # Staged beside the library path, never on it: see fallback-libs.txt.
+    for soname in $fallback_entries; do
+        [ -f "$appdir/usr/lib/fallback/$soname" ] ||
+            fail "staged AppDir carries no fallback copy of $soname"
+        [ -e "$appdir/usr/lib/$soname" ] &&
+            fail "staged AppDir bundles $soname in usr/lib, where it would shadow the host's"
+    done
     while read -r plugin; do
         [ -f "$appdir/usr/lib/gstreamer-1.0/libgst$plugin.so" ] ||
             fail "staged AppDir is missing the required plugin $plugin"

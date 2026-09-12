@@ -71,13 +71,19 @@ fn diag_reports_the_encoder_probe_in_selection_order() {
             "nvav1enc",
             "vah264enc",
             "vah265enc",
+            "vaav1enc",
             "amfh264enc",
             "amfh265enc",
+            "amfav1enc",
             "vtenc_h264",
             "vtenc_h265",
             "mfh264enc",
+            "mfh265enc",
             "x264enc",
             "x265enc",
+            "svtav1enc",
+            "av1enc",
+            "rav1enc",
         ]
     );
     for encoder in encoders {

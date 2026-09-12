@@ -193,7 +193,7 @@ then watch the render.
 ![The export panel](../crates/sub-ui/tests/snapshots/export_panel_settings.png)
 
 The shipped presets are `youtube-1080p`, `youtube-4k`, `mezzanine` (visually
-lossless, software), `h265-archive` and `audio-only`. Presets are data, not
+lossless, software), `h265-archive`, `av1-archive` and `audio-only`. Presets are data, not
 code: a TOML file in the config directory adds presets and replaces built-ins by
 id, and exporter plugins contribute presets that sit in the same list.
 
@@ -373,11 +373,11 @@ available. The first one in this order that gets there wins:
 | Platform | Order |
 | --- | --- |
 | NVIDIA | `nvh264enc`, `nvh265enc`, `nvav1enc` (plugin `nvcodec`) |
-| AMD/Intel on Linux | `vah264enc`, `vah265enc` (plugin `va`) |
-| AMD on Windows | `amfh264enc`, `amfh265enc` (plugin `amfcodec`) |
+| AMD/Intel on Linux | `vah264enc`, `vah265enc`, `vaav1enc` (plugin `va`) |
+| AMD on Windows | `amfh264enc`, `amfh265enc`, `amfav1enc` (plugin `amfcodec`) |
 | macOS | `vtenc_h264`, `vtenc_h265` (plugin `applemedia`) |
-| Windows fallback | `mfh264enc` (Media Foundation) |
-| Anywhere | `x264enc` / `x265enc` (software) |
+| Windows fallback | `mfh264enc`, `mfh265enc` (Media Foundation) |
+| Anywhere | `x264enc` / `x265enc`, and for AV1 `svtav1enc`, `av1enc` or `rav1enc` (software) |
 
 So a machine with no hardware encoder still exports — on the CPU, slower. If
 nothing at all is available the export fails with
