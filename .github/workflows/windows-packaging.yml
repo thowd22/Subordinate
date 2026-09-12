@@ -113,6 +113,7 @@ jobs:
           }
           $root = "$env:ProgramFiles\Subordinate"
           foreach ($f in "bin\subordinate.exe", "bin\subordinate-cli.exe",
+                         "bin\subordinate-mcp.exe",
                          "bin\gst-discoverer-1.0.exe", "bin\gstreamer-1.0-0.dll",
                          "libexec\gstreamer-1.0\gst-plugin-scanner.exe",
                          "lib\gstreamer-1.0\gstx264.dll", "lib\gstreamer-1.0\gstnvcodec.dll") {

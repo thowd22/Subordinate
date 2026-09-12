@@ -122,9 +122,12 @@ Write-Host "PATH is now: $env:PATH"
 
 $editor = Join-Path $Bin 'subordinate.exe'
 $cli = Join-Path $Bin 'subordinate-cli.exe'
+# The MCP bridge is installed by the MSI beside the editor (TASK-142); an agent
+# on a machine that only ever ran the installer has no other way to get one.
+$mcp = Join-Path $Bin 'subordinate-mcp.exe'
 $inspect = Join-Path $Bin 'gst-inspect-1.0.exe'
 $discoverer = Join-Path $Bin 'gst-discoverer-1.0.exe'
-foreach ($exe in $editor, $cli, $inspect, $discoverer) {
+foreach ($exe in $editor, $cli, $mcp, $inspect, $discoverer) {
     if (-not (Test-Path $exe)) { Stop-WithFailure "not installed: $exe" install }
 }
 Add-Fact package "MSI installed at $Bin"
@@ -250,6 +253,82 @@ if ($hasDiscoverer) {
     if ($report -notmatch 'audio') { Stop-WithFailure 'the export carries no audio stream' validate }
     Write-Host 'and the bundled gst-discoverer-1.0 reads it back from outside: video and audio'
 }
+
+# ------------------------------------------------------------------- MCP ----
+# The Windows half of the MCP stage in fresh-install-check.sh: the installed
+# bridge, spoken to over its stdin and stdout, one JSON-RPC message per line.
+# No editor is running, so the bridge starts the subordinate-cli.exe it finds
+# beside itself -- which is what proves the MSI ships a bridge and a CLI that
+# can find each other. A scratch SUBORDINATE_INSTANCE keeps the endpoint off
+# the default one a user's editor would own.
+Write-Banner 'drive the package from an agent (MCP)'
+$mcpIn = Join-Path $Out 'mcp-in.jsonl'
+$mcpOut = Join-Path $Out 'mcp-out.jsonl'
+$mcpErr = Join-Path $Out 'mcp-err.txt'
+# project.new leaves a project with no sequences, and timeline.get_state
+# answers a domain error on one of those, so the round trip creates a sequence
+# in between: a mutation goes in and the timeline that comes back is the one it
+# produced.
+$settings = '{"resolution":{"width":1920,"height":1080},"frame_rate":{"numerator":30,"denominator":1},"sample_rate":48000,"color":{"space":"rec709","transfer":"bt709","primaries":"bt709"}}'
+$requests = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fresh-install-check","version":"1"}}}'
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_new","arguments":{"name":"Fresh install"}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sequence_create","arguments":{"name":"Installed by MCP","settings":' + $settings + '}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"timeline_get_state","arguments":{}}}'
+)
+Set-Content -Encoding ASCII -Path $mcpIn -Value ($requests -join "`r`n")
+$env:SUBORDINATE_INSTANCE = 'fresh-install-check'
+$env:SUBORDINATE_LOG = 'info'
+# Piping through cmd keeps stdin, stdout and stderr straight without
+# Start-Process redirection games; the bridge exits when stdin reaches EOF.
+cmd /c "type `"$mcpIn`" | `"$mcp`" > `"$mcpOut`" 2> `"$mcpErr`""
+$mcpExit = $LASTEXITCODE
+Write-Host '--- subordinate-mcp stderr (last 20 lines)'
+Get-Content $mcpErr -Tail 20 -ErrorAction SilentlyContinue | Write-Host
+Write-Host '--- subordinate-mcp stdout'
+$lines = @(Get-Content $mcpOut -ErrorAction SilentlyContinue)
+foreach ($line in $lines) {
+    if ($line.Length -gt 400) { Write-Host ($line.Substring(0, 400) + ' ...') } else { Write-Host $line }
+}
+if ($mcpExit -ne 0) { Stop-WithFailure "the installed MCP bridge exited $mcpExit" mcp }
+
+# One reply per request id, each a result rather than an error. `isError` is
+# how MCP reports a tool that ran and refused, which a bare exit status does
+# not show.
+$seen = @{}
+foreach ($line in $lines) {
+    if (-not $line.Trim()) { continue }
+    $message = $line | ConvertFrom-Json
+    # Set-StrictMode makes a missing property an error, and a notification has
+    # no id at all, so ask before reading.
+    if ($message.PSObject.Properties.Name -contains 'id' -and $null -ne $message.id) {
+        $seen[[int]$message.id] = $message
+    }
+}
+$named = @{ 1 = 'initialize'; 2 = 'project.new'; 3 = 'sequence.create'; 4 = 'timeline.get_state' }
+foreach ($id in 1, 2, 3, 4) {
+    if (-not $seen.ContainsKey($id)) {
+        Stop-WithFailure "the bridge never answered $($named[$id]) (request $id)" mcp
+    }
+    if ($seen[$id].PSObject.Properties.Name -contains 'error') {
+        Stop-WithFailure "$($named[$id]) failed: $($seen[$id].error | ConvertTo-Json -Compress)" mcp
+    }
+    if ($seen[$id].PSObject.Properties.Name -notcontains 'result') {
+        Stop-WithFailure "$($named[$id]) answered neither a result nor an error" mcp
+    }
+    if ($seen[$id].result.PSObject.Properties.Name -contains 'isError' -and $seen[$id].result.isError) {
+        Stop-WithFailure "$($named[$id]) answered a tool error: $($seen[$id].result | ConvertTo-Json -Depth 6 -Compress)" mcp
+    }
+    Write-Host "$($named[$id]) round-tripped"
+}
+# The timeline that came back has to be the one the mutation made, not an empty
+# answer that happens not to be an error.
+if (-not (Select-String -Path $mcpOut -Pattern 'Installed by MCP' -Quiet)) {
+    Stop-WithFailure 'timeline.get_state did not return the sequence sequence.create had just made' mcp
+}
+Add-Fact mcp 'round-trip ok (project.new, sequence.create, timeline.get_state)'
+Write-Host "the installed package's own MCP bridge drove the installed package's own engine"
 
 # ------------------------------------------------------------------ the UI --
 if ($NoGui) {
