@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-task-146'
 created_date: '2026-09-12 10:03'
-updated_date: '2026-09-12 10:15'
+updated_date: '2026-09-12 15:37'
 labels:
   - export
   - bug
@@ -39,3 +39,23 @@ TASK-139's Windows desktop clicks flow starts a real nvh264enc export of the bak
 4. Diagnose from the logs, fix in product code, and cover it with a test: the software-encoder render of a multi-audio-track clip runs on hosted Windows, and the hardware step renders the 4K60 three-audio-track excerpt with NVENC.
 5. Prove it with a Windows GPU run that writes the full frame count and validates with the discoverer; remove the temporary workflow and record run ids.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Delivered on branch task/task-146 (PR #5). The stall was two faults stacked on one another, and only the first is ours.
+
+THE STALL (ours, fixed). nvh264enc could not open an encode session on the Windows GPU runner: it reached READY, was given caps, answered NV_ENC_ERR_INVALID_VERSION to NvEncOpenEncodeSessionEx, rejected the caps and put not-negotiated on the bus - and nothing in the export path ever read the bus. appsrc's blocking push waits on a condition variable that only a flush wakes, so the render wrote one frame, held the sixth push for the rest of the job, and reported neither an error nor a file. That is exactly the '1/48 frames 2% 1 fps and then nothing' TASK-139 saw. The exporter now applies its own back-pressure: block is off, a push waits for room in 20 ms slices and reads the bus between them. A failed element becomes the error it posted (naming the element), a branch that stops for no stated reason ends the export with export.timeout after a minute, and a branch that is merely slow is still waited for.
+
+THE ENCODER (not ours, worked around). Ruled out on the runner, each with its own experiment: the decoder (NVDEC and NVENC in one gst-launch process encode the clip happily), the wgpu backend (Vulkan and D3D12 both fail), the RGBA readback (gst-launch encodes RGBA with nvh264enc on that machine), the probe's READY cycle, and a second element instance. What is left: subordinate-cli encodes 640x480 with nvh264enc and then cannot open a session for 1920x1080 two seconds later in the same process, while gst-launch encodes 1920x1080 there all day. All three NVENC families behave the same - nvh264enc, nvd3d11h264enc, nvautogpuh264enc - and the Direct3D ones are ranked NONE on that image anyway. mfh264enc, which on an NVIDIA GPU is NVENC behind MediaFoundation, exports the 1080p canvas at 32 fps and is what the automatic order now picks there.
+
+SO THE PROBE WAS ANSWERING THE WRONG QUESTION. It drove each element to READY, which a hardware encoder reaches long before it opens a session. It now encodes a real frame, and the encoder an export is about to plug encodes one frame of the export's own canvas before the pipeline is built - a small frame is not the question either. A pinned encoder that cannot is refused by name and reason; the automatic order walks on to the first that can and says in the log what it left behind.
+
+Also landed: NVENC's Direct3D and auto-GPU elements are catalogued; the video branch's queue holds four frames of its own canvas rather than one (a 4K RGBA frame is 33 177 600 bytes against a 32 MiB cap, so a UHD export used to take turns with its encoder instead of overlapping); scripts/make-test-project.py writes a project over a media file, which is how a GPU job with no window and no bridge gets something to render; and hardware.yml gains the Windows GPU pair its own comment had been asking for since TASK-116, with an `only` input so one job can be dispatched without spending the account's whole quota.
+
+STILL BROKEN, AND NOT BY US: mfh264enc takes about twenty frames of a 4K canvas and then stops taking buffers. It is now an export.timeout with the encoder named rather than a hang, and the hardware job tries it every night in a never-fatal step so the day a driver fixes it the log says so.
+
+Runs. Reproduction and diagnosis on a temporary workflow, all on gpu-nvidia-windows: 34687961764, 34689029628 (the stall caught in the act: 'pushing a video frame frame=6' and no completion, with nvh264enc's not-negotiated on the bus), 34691187378 (the same failures now reported in a second each, job 13m -> 4m31s), 34692603346, 34693482616, 34693730695, 34694572372, 34695454830, 34696234254, 34697380510, 34698326407 (the automatic order falls through to mfh264enc and writes 48 frames), 34699837364 (4K60 with three audio tracks completes on x264enc: 48/48). The temporary workflow is removed.
+
+Proof on the permanent job: hardware.yml run 34700901130, job 103574215608, `only=nvidia-windows`, green in 5m31s. '1080p export: 48 frames on mfh264enc' after 'the chosen encoder cannot encode this canvas; trying the next one element=nvh264enc', and 'UHD export: 48 frames, 38400 audio frames' from the 4K60 canvas with three audio tracks; both read back with the discoverer.
+<!-- SECTION:NOTES:END -->
