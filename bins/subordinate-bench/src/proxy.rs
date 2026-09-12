@@ -202,6 +202,7 @@ fn measure(source: &Source, options: &Options) -> SubResult<Outcome> {
         warmup: run::Options::default().warmup,
         hardware: options.hardware,
         use_gpu: options.use_gpu,
+        legacy_scrub: false,
         stall_threshold_nanos: Some(interval),
     };
     let context = if options.use_gpu {

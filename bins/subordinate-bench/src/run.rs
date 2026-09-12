@@ -42,6 +42,11 @@ pub struct Options {
     pub hardware: HardwarePreference,
     /// Whether the texture stage runs at all.
     pub use_gpu: bool,
+    /// Whether the seek path is measured as it was before TASK-133: no cache
+    /// of the pictures a step decoded, and no allowance for the cost of a
+    /// flush when a step chooses between decoding on and seeking. It is what
+    /// a before-and-after on one machine is taken with.
+    pub legacy_scrub: bool,
     /// How long a playback step may take before it counts as a stall, in
     /// nanoseconds. `None` counts no stalls, which is what the colour-bar
     /// scenarios want: they measure a rate, not real-time playback.
@@ -57,6 +62,7 @@ impl Default for Options {
             warmup: 3,
             hardware: HardwarePreference::Prefer,
             use_gpu: true,
+            legacy_scrub: false,
             stall_threshold_nanos: None,
         }
     }
@@ -98,6 +104,9 @@ pub fn run(options: &Options) -> SubResult<Report> {
                 report
                     .scenarios
                     .push(Scenario::skipped(name, ScenarioKind::Scrub, &reason));
+                report
+                    .scenarios
+                    .push(Scenario::skipped(name, ScenarioKind::ScrubDrag, &reason));
                 continue;
             }
         };
@@ -111,6 +120,9 @@ pub fn run(options: &Options) -> SubResult<Report> {
             options,
             context.as_ref(),
         )?);
+        report
+            .scenarios
+            .push(measure_scrub_drag(&path, name, options, context.as_ref())?);
     }
     Ok(report)
 }
@@ -199,10 +211,44 @@ pub fn measure_playback(
     Ok(scenario)
 }
 
+/// Opens a decoder for a seek scenario, with the PTS index the product scrubs
+/// against.
+///
+/// The viewer scrubs against an index -- it is built in the background as soon
+/// as a clip is imported -- so the harness measures the seek path the way the
+/// product uses it: the index says which keyframe a target needs and how many
+/// pictures each way of reaching it costs, so a step flushes the pipeline only
+/// when that is genuinely the cheaper of the two, and a step that must seek
+/// opens its segment at the target rather than back at the keyframe
+/// (TASK-133). Building it is a parse pass, not a decode, and it happens
+/// before anything is timed. A file this machine cannot index is still
+/// measured, without one.
+fn open_for_seeking(
+    path: &Path,
+    name: &str,
+    options: &Options,
+) -> SubResult<(Decoder, Option<Arc<PtsIndex>>)> {
+    let mut decoder = Decoder::open_with(path, decoder_options(options))?;
+    let index = match PtsIndex::build(path) {
+        Ok(index) => {
+            let index = Arc::new(index);
+            decoder.set_index(Arc::clone(&index));
+            Some(index)
+        }
+        Err(error) => {
+            tracing::warn!(fixture = name, %error, "scrubbing without a PTS index");
+            None
+        }
+    };
+    Ok((decoder, index))
+}
+
 /// Seek across the whole file and put every landed frame on the GPU.
 ///
-/// This is what dragging the scrub bar costs: each step is a frame-accurate
-/// seek followed by the same upload the viewer does.
+/// This is the worst case the seek path has: the targets alternate between the
+/// head and the tail of the file, so every step lands in a GOP the decoder is
+/// not in and no step can be reached by decoding forward or out of the cache.
+/// What a hand actually does with a scrub bar is [`measure_scrub_drag`].
 pub fn measure_scrub(
     path: &Path,
     name: &str,
@@ -210,22 +256,7 @@ pub fn measure_scrub(
     options: &Options,
     context: Option<&RenderContext>,
 ) -> SubResult<Scenario> {
-    let mut decoder = Decoder::open_with(path, decoder_options(options))?;
-    // The viewer scrubs against a PTS index -- it is built in the background as
-    // soon as a clip is imported -- so the harness measures the seek path the
-    // way the product uses it: the index says which keyframe a target needs, so
-    // a step never flushes the pipeline when the target is in the GOP the
-    // decoder is already in, and a step that must seek aims at the keyframe
-    // itself rather than at wherever the demuxer's snap falls (TASK-133).
-    // Building it is a parse pass, not a decode, and it happens before anything
-    // is timed. A file this machine cannot index is still measured, without
-    // one.
-    match PtsIndex::build(path) {
-        Ok(index) => decoder.set_index(Arc::new(index)),
-        Err(error) => {
-            tracing::warn!(fixture = name, %error, "scrubbing without a PTS index");
-        }
-    }
+    let (mut decoder, _index) = open_for_seeking(path, name, options)?;
     let mut uploader = Uploader::new(context);
     let mut scenario = new_scenario(name, ScenarioKind::Scrub);
 
@@ -246,6 +277,7 @@ pub fn measure_scrub(
     let mut forward = Samples::new();
     let mut frames_decoded = 0_u64;
     let mut seeks_issued = 0_u64;
+    let mut cache_hits = 0_u64;
     let started = Instant::now();
     for target in targets {
         let step_started = Instant::now();
@@ -260,6 +292,7 @@ pub fn measure_scrub(
             forward.push(timing.decode_forward_nanos);
             frames_decoded = frames_decoded.saturating_add(timing.frames_decoded);
             seeks_issued = seeks_issued.saturating_add(timing.seeks_issued);
+            cache_hits = cache_hits.saturating_add(timing.cache_hits);
         }
         upload.push(upload_nanos);
         total.push(nanos_between(step_started, Instant::now()));
@@ -283,9 +316,150 @@ pub fn measure_scrub(
     scenario.decode_forward = forward.summary();
     scenario.frames_decoded = Some(frames_decoded);
     scenario.seeks_issued = Some(seeks_issued);
+    scenario.cache_hits = Some(cache_hits);
     finish(&mut scenario, frames, wall);
     Ok(scenario)
 }
+
+/// Drag the playhead across the clip and put every frame it lands on on the
+/// GPU.
+///
+/// This is the scrub the exit criterion is about: a hand moving a playhead,
+/// which walks forward a few pictures at a time and takes a step back every
+/// few moves. Both halves of that movement are what TASK-133 changed --
+/// forward steps are reached by decoding on from the last picture instead of
+/// flushing the pipeline, and the backward ones out of the decoder's cache of
+/// what it has already decoded -- so this scenario is where the per-step
+/// picture and seek counts should be near one and near zero.
+///
+/// It needs the PTS index, because a drag is measured in pictures rather than
+/// in instants and only the index says where the pictures are; a file this
+/// machine cannot index records a skipped scenario.
+pub fn measure_scrub_drag(
+    path: &Path,
+    name: &str,
+    options: &Options,
+    context: Option<&RenderContext>,
+) -> SubResult<Scenario> {
+    let (mut decoder, index) = open_for_seeking(path, name, options)?;
+    let Some(index) = index else {
+        return Ok(Scenario::skipped(
+            name,
+            ScenarioKind::ScrubDrag,
+            "a drag is measured in pictures, and this file could not be indexed",
+        ));
+    };
+    let Some(targets) = drag_targets(&index, options.seeks) else {
+        return Ok(Scenario::skipped(
+            name,
+            ScenarioKind::ScrubDrag,
+            "the clip holds too few pictures to drag across",
+        ));
+    };
+    let mut uploader = Uploader::new(context);
+    let mut scenario = new_scenario(name, ScenarioKind::ScrubDrag);
+
+    // The warm-up drags across the head of the file, where the timed drag does
+    // not go: it pays for the first allocations without seeding the cache with
+    // the pictures the timed steps are about to ask for.
+    if let Some(warmup) = drag_targets(&index, options.warmup) {
+        for target in warmup {
+            if let Some(frame) = decoder.seek_to(target)? {
+                uploader.upload(&frame)?;
+            }
+        }
+    }
+
+    let mut decode = Samples::new();
+    let mut upload = Samples::new();
+    let mut total = Samples::new();
+    let mut seek = Samples::new();
+    let mut forward = Samples::new();
+    let mut frames_decoded = 0_u64;
+    let mut seeks_issued = 0_u64;
+    let mut cache_hits = 0_u64;
+    let started = Instant::now();
+    for target in targets {
+        let step_started = Instant::now();
+        let Some(frame) = decoder.seek_to(target)? else {
+            continue;
+        };
+        let seeked = Instant::now();
+        let upload_nanos = uploader.upload(&frame)?;
+        decode.push(nanos_between(step_started, seeked));
+        if let Some(timing) = decoder.last_seek_timing() {
+            seek.push(timing.seek_nanos);
+            forward.push(timing.decode_forward_nanos);
+            frames_decoded = frames_decoded.saturating_add(timing.frames_decoded);
+            seeks_issued = seeks_issued.saturating_add(timing.seeks_issued);
+            cache_hits = cache_hits.saturating_add(timing.cache_hits);
+        }
+        upload.push(upload_nanos);
+        total.push(nanos_between(step_started, Instant::now()));
+        describe(&mut scenario, &frame);
+    }
+    let wall = nanos_between(started, Instant::now());
+
+    if total.is_empty() {
+        return Ok(Scenario::skipped(
+            name,
+            ScenarioKind::ScrubDrag,
+            "no step landed on a frame",
+        ));
+    }
+    let frames = u64::try_from(total.len()).unwrap_or(u64::MAX);
+    scenario.decoder = decoder.decoder_element();
+    scenario.decode = decode.summary();
+    scenario.upload = context.and(upload.summary());
+    scenario.decode_to_texture = context.and(total.summary());
+    scenario.seek = seek.summary();
+    scenario.decode_forward = forward.summary();
+    scenario.frames_decoded = Some(frames_decoded);
+    scenario.seeks_issued = Some(seeks_issued);
+    scenario.cache_hits = Some(cache_hits);
+    finish(&mut scenario, frames, wall);
+    Ok(scenario)
+}
+
+/// Pictures a drag of `count` steps lands on, or `None` when the clip is too
+/// short to drag across.
+///
+/// The walk is what a hand does: forward [`DRAG_FORWARD`] pictures at a time,
+/// then back [`DRAG_BACK`] every [`DRAG_PERIOD`] moves, which nets a little
+/// over one picture of travel a step. It starts at
+/// [`DRAG_START_NUMERATOR`]/[`DRAG_START_DENOMINATOR`] of the way into the
+/// file so that the warm-up, which drags across the head, is not what the
+/// timed steps are reading back. Positions are picture numbers turned into
+/// their own exact timestamps, so every target names a picture that exists and
+/// nothing here is a float.
+pub fn drag_targets(index: &PtsIndex, count: u64) -> Option<Vec<RationalTime>> {
+    if count == 0 || index.len() < DRAG_FORWARD * 2 {
+        return None;
+    }
+    let last = index.len() - 1;
+    let mut frame = last * DRAG_START_NUMERATOR / DRAG_START_DENOMINATOR;
+    let mut targets = Vec::new();
+    for step in 0..count {
+        targets.push(index.pts(frame.min(last))?);
+        if step % DRAG_PERIOD == DRAG_PERIOD - 1 {
+            frame = frame.saturating_sub(DRAG_BACK);
+        } else {
+            frame = (frame + DRAG_FORWARD).min(last);
+        }
+    }
+    Some(targets)
+}
+
+/// Pictures a drag moves forward in one step.
+const DRAG_FORWARD: usize = 3;
+/// Pictures it moves back when it doubles back.
+const DRAG_BACK: usize = 4;
+/// How many steps it takes between those doublings back.
+const DRAG_PERIOD: u64 = 4;
+/// Where the timed drag starts, as a fraction of the clip.
+const DRAG_START_NUMERATOR: usize = 2;
+/// The denominator of that fraction.
+const DRAG_START_DENOMINATOR: usize = 5;
 
 /// Where a scrub of `count` steps lands inside a clip of `duration_nanos`.
 ///
@@ -331,10 +505,25 @@ fn describe(scenario: &mut Scenario, frame: &VideoFrame) {
 /// How the harness opens every decoder: NV12, video only, so the frames go
 /// straight into the compositor's upload path.
 fn decoder_options(options: &Options) -> DecoderOptions {
+    let defaults = DecoderOptions::default();
     DecoderOptions {
         hardware: options.hardware,
         format: FrameFormat::Nv12,
-        ..DecoderOptions::default()
+        // The pre-TASK-133 planner is exactly these two switched off: with no
+        // slack a step decodes on only when that decodes no more pictures than
+        // the seek would have, which is the old "inside the current GOP" rule,
+        // and with no budget nothing a step decodes is kept.
+        forward_decode_slack: if options.legacy_scrub {
+            0
+        } else {
+            defaults.forward_decode_slack
+        },
+        gop_cache_bytes: if options.legacy_scrub {
+            0
+        } else {
+            defaults.gop_cache_bytes
+        },
+        ..defaults
     }
 }
 

@@ -3,9 +3,9 @@ id: TASK-133
 title: '4K H.264 scrub is seek-bound: 8.3 fps with NVDEC versus a 30 fps target'
 status: In Progress
 assignee:
-  - '@opus-task-133'
+  - '@opus-task-133-2'
 created_date: '2026-09-11 14:48'
-updated_date: '2026-09-11 19:57'
+updated_date: '2026-09-12 04:03'
 labels:
   - media
   - performance
@@ -42,6 +42,15 @@ The first hardware baseline (TASK-116, run 34611438521 on a T4 with GStreamer 1.
 6. Measure locally with software decode on the 1080p and 4K fixtures before and after; record the split, pictures decoded and fps in the notes.
 7. Verify: cargo fmt --all --check, cargo clippy --workspace --all-targets -D warnings, cargo test -p sub-media -p subordinate-bench including the frame-accurate seek fixture suite (AC #3 evidence).
 8. AC #2's hardware half still needs the NVIDIA runner this environment does not have; check it only if the software half proves out and the hardware half can be argued, otherwise leave it unchecked with the numbers in notes.
+
+## Third pass (requeued after the T4 split at 86 ms seek / 5 ms decode-forward)
+9. The measured split now says the flushing seek itself is the cost on NVDEC (86.3 ms p50, 3.3 pictures a step) while the box APU still decodes half a GOP (11.3 ms seek, 63.5 ms forward, 14.2 pictures). One change answers both: stop issuing the flushing seek at all for the steps a scrub actually makes.
+10. Keep the decoded pictures of the run the decoder is in. Decoder gets a byte-bounded FrameCache keyed by PTS (its own synthetic MediaId), filled by seek_to with every picture it pulls; a step whose target the index resolves to a cached PTS returns a clone of that picture and never touches the pipeline, so a backward step inside the GOP is a cache hit instead of a flush. VideoFrame::try_clone re-maps the same GStreamer buffer, so the clone costs a map and no pixels.
+11. Widen the no-seek rule from 'inside the current GOP' to 'cheaper than seeking': with an index, compare the pictures a decode-forward would decode (target frame - position frame) against the pictures the seek would decode anyway (target frame - its keyframe) plus a slack of a few pictures for the flush itself (DecoderOptions::forward_decode_slack, default 12). A target inside the current GOP always wins that comparison, so the existing behaviour is a special case; a target a picture or two past the next keyframe now decodes forward instead of flushing.
+12. next_frame and DecodeAhead are untouched: only seek_to fills or reads the cache, so playback keeps its decode-ahead ring and its buffer pool behaviour.
+13. Measure what a scrub actually is. The existing scrub scenario alternates head and tail, so every step is a fresh GOP and a flush is unavoidable; it stays, as the worst case. A second scenario (ScenarioKind::ScrubDrag) drags the playhead a frame at a time with the small back-and-forth a hand makes, which is the workload the criterion is about, and perf.json gains frames-decoded, seeks-issued and cache-hits per step for both.
+14. Verify locally (software, 4K and 1080p), then dispatch hardware.yml from the branch and read the box (vah264dec) and T4 (nvh264dec) numbers. Record every run id in the notes and update docs/PERFORMANCE.md.
+15. Frame accuracy is the gate: seek_fixtures (burnt-in timecode) and index_fixtures must pass unchanged, plus fmt, clippy and the workspace tests.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes

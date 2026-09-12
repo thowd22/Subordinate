@@ -61,6 +61,7 @@ use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
 use gstreamer_video::{VideoFormat, VideoFrameExt, VideoInfo};
 use sub_core::{ResultExt, SubError, SubResult};
+use sub_model::MediaId;
 use sub_time::{RationalTime, Rounding};
 
 use crate::audio::{
@@ -68,6 +69,7 @@ use crate::audio::{
     layout_from_roles, roles_from_positions,
 };
 use crate::codes;
+use crate::frame_cache::{FrameCache, FrameKey};
 use crate::index::PtsIndex;
 use crate::probe::NANOSECONDS;
 
@@ -188,7 +190,50 @@ pub struct DecoderOptions {
     /// two seconds covers the one-second GOPs cameras and the fixtures use, and
     /// a caller that knows its sources can widen or narrow it.
     pub forward_decode_window: Duration,
+    /// How many pictures beyond what a flushing seek would decode anyway a
+    /// step will decode rather than flush the pipeline (TASK-133).
+    ///
+    /// A seek is not free even when it lands on the right keyframe: it drops
+    /// what is in flight, makes the demuxer start again and makes the decoder
+    /// build its reference state from scratch, which on the measured hardware
+    /// decoders costs between ten and ninety milliseconds before a single
+    /// picture exists. This is that cost expressed in the only currency the
+    /// planner has, pictures: a target the decoder could reach by decoding at
+    /// most this many pictures more than the seek itself would have decoded is
+    /// reached by decoding forward. It only has meaning with a [`PtsIndex`],
+    /// which is what can count pictures without decoding them.
+    pub forward_decode_slack: u32,
+    /// Byte budget for the pictures [`Decoder::seek_to`] keeps, so that a step
+    /// back over ground the scrub has just covered is answered from memory
+    /// rather than by a flushing seek (TASK-133).
+    ///
+    /// Dragging a playhead is not a walk in one direction: it moves forward a
+    /// frame at a time and back a frame or two, and every one of those
+    /// backward steps used to be a flush and a re-decode. The pictures a step
+    /// pulls are kept here under a least-recently-used budget, so the back of
+    /// that movement costs a lookup. Zero switches the cache off. Only
+    /// [`Decoder::seek_to`] fills or reads it: playback goes through
+    /// [`Decoder::next_frame`] and is left exactly as it was.
+    pub gop_cache_bytes: usize,
 }
+
+/// Byte budget [`DecoderOptions::gop_cache_bytes`] uses by default.
+///
+/// 64 MiB is five 4K NV12 pictures or twenty-two at 1080p: the few frames
+/// either side of the playhead that a hand's back-and-forth actually revisits,
+/// and small enough that a project with several clips open does not pay for it
+/// in gigabytes. The pictures are mapped GStreamer buffers, so the budget also
+/// bounds how much of a decoder's buffer pool a scrub can hold.
+pub const DEFAULT_GOP_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Pictures [`DecoderOptions::forward_decode_slack`] allows by default.
+///
+/// Twelve is the flush priced in pictures across the decoders this is measured
+/// on: about fifty milliseconds of 4K software decode, about twenty of NVDEC.
+/// It is deliberately of the same order as the cheapest flush measured (eleven
+/// milliseconds on the box APU) rather than the dearest, so the rule never
+/// trades a large decode for a small flush.
+pub const DEFAULT_FORWARD_DECODE_SLACK: u32 = 12;
 
 impl Default for DecoderOptions {
     fn default() -> Self {
@@ -199,6 +244,8 @@ impl Default for DecoderOptions {
             format: FrameFormat::Nv12,
             frame_timeout: Duration::from_secs(10),
             forward_decode_window: Duration::from_secs(2),
+            forward_decode_slack: DEFAULT_FORWARD_DECODE_SLACK,
+            gop_cache_bytes: DEFAULT_GOP_CACHE_BYTES,
         }
     }
 }
@@ -263,6 +310,26 @@ impl VideoFrame {
         let stride = *strides.get(plane as usize)?;
         u32::try_from(stride).ok()
     }
+
+    /// Another handle on the same picture, or `None` when the buffer cannot be
+    /// mapped a second time.
+    ///
+    /// No pixels are copied: a GStreamer buffer is reference counted and can
+    /// carry more than one read-only mapping, so this is a reference and a map.
+    /// It is what lets [`Decoder::seek_to`] both keep a picture in its cache
+    /// and hand one to its caller (TASK-133), and what makes a cached picture
+    /// cost a lookup rather than a decode.
+    pub fn try_clone(&self) -> Option<Self> {
+        let buffer = self.frame.buffer().to_owned();
+        let info = self.frame.info().clone();
+        let frame = gstreamer_video::VideoFrame::from_buffer_readable(buffer, &info).ok()?;
+        Some(Self {
+            frame,
+            format: self.format,
+            pts: self.pts,
+            duration: self.duration,
+        })
+    }
 }
 
 impl std::fmt::Debug for VideoFrame {
@@ -304,6 +371,11 @@ pub struct SeekTiming {
     /// the GOP. More than one means the first seek overshot its target and the
     /// backoff retry ran.
     pub seeks_issued: u64,
+    /// One when the step was answered out of the decoder's picture cache and
+    /// the pipeline was not touched at all, zero otherwise. A step that hits
+    /// decodes nothing and seeks nothing, so both halves above are the lookup
+    /// and the map alone.
+    pub cache_hits: u64,
 }
 
 impl SeekTiming {
@@ -347,6 +419,14 @@ pub struct Decoder {
     prerolled: bool,
     last_seek: Option<SeekTiming>,
     index: Option<Arc<PtsIndex>>,
+    /// Pictures [`Decoder::seek_to`] has already decoded, under a byte budget.
+    /// The media ID is this decoder's own: the cache belongs to the handle, so
+    /// nothing else can collide with its keys or evict its entries.
+    cache: FrameCache<VideoFrame>,
+    media: MediaId,
+    /// How many pictures past what a seek would decode a step may decode
+    /// instead of flushing.
+    forward_slack: u32,
 }
 
 /// The audio half of a decode: the second `appsink`, the shape it negotiated,
@@ -520,6 +600,9 @@ impl Decoder {
             prerolled: false,
             last_seek: None,
             index: None,
+            cache: FrameCache::new(options.gop_cache_bytes),
+            media: MediaId::new(),
+            forward_slack: options.forward_decode_slack,
         })
     }
 
@@ -601,11 +684,21 @@ impl Decoder {
     /// a target expressed at a frame rate matches a nanosecond timestamp with
     /// no tolerance and no float.
     ///
-    /// A target that is ahead of the current position but within
-    /// [`DecoderOptions::forward_decode_window`] is reached by decoding forward
-    /// alone: no seek is issued, because the target is in the GOP the decoder
-    /// is already inside and re-seeking would decode the same pictures twice.
-    /// [`Decoder::seek_count`] reports how many seeks were actually issued.
+    /// Most steps of a scrub need no seek at all, which is what makes dragging
+    /// a playhead cheap (TASK-133):
+    ///
+    /// * A target **already decoded** is handed back out of this decoder's
+    ///   picture cache. Nothing is seeked and nothing is decoded, which is what
+    ///   a step back over ground the drag has just covered costs.
+    /// * A target **ahead** of the position is reached by decoding on from the
+    ///   last picture whenever that decodes no more pictures than the seek
+    ///   would have decoded from its keyframe anyway, plus
+    ///   [`DecoderOptions::forward_decode_slack`] for the flush itself. With no
+    ///   index the rule is the cruder [`DecoderOptions::forward_decode_window`]
+    ///   instead.
+    ///
+    /// [`Decoder::seek_count`] reports how many seeks were actually issued and
+    /// [`Decoder::cache_stats`] how many steps the cache answered.
     ///
     /// A negative target is treated as the start of the stream.
     ///
@@ -623,11 +716,23 @@ impl Decoder {
         let mut timing = SeekTiming::default();
         let seeks_before = self.seeks;
         let mut mark = Instant::now();
+        // A picture this decoder has already handed out is the cheapest answer
+        // there is: no seek, no decode and no flush, which is what makes the
+        // backward half of dragging a playhead free (TASK-133).
+        if let Some(frame) = self.cached_frame(target) {
+            timing.cache_hits = 1;
+            timing.charge(mark, false);
+            self.last_seek = Some(timing);
+            return Ok(Some(frame));
+        }
         let (mut aim, mode) = self.seek_aim(target);
         if plan_seek(
             self.position,
             target,
-            self.forward_window,
+            ForwardBudget {
+                window: self.forward_window,
+                slack: self.forward_slack,
+            },
             self.index.as_deref(),
         ) == SeekPlan::Reseek
         {
@@ -686,6 +791,10 @@ impl Decoder {
                 return Ok(None);
             };
             timing.frames_decoded += 1;
+            // Every picture this step pulls is kept, the ones before the
+            // target included: they are exactly the ground a backward step is
+            // about to ask for again.
+            let frame = self.remember(frame);
             if frame.pts() < target {
                 // Between the keyframe and the target: decoded only to build
                 // the reference chain the target frame needs.
@@ -710,6 +819,54 @@ impl Decoder {
             self.last_seek = Some(timing);
             return Ok(Some(frame));
         }
+    }
+
+    /// The picture a step for `target` wants, if this decoder has already
+    /// decoded it and still holds it.
+    ///
+    /// Only an index can answer: a target names an instant, and which picture
+    /// covers that instant is exactly what an index knows and a cache keyed by
+    /// presentation timestamp does not. Without one a step decodes, as it
+    /// always did.
+    ///
+    /// A hit deliberately leaves the pipeline where it is. The position this
+    /// decoder reports is where its *decoder* stands, not where the scrub was
+    /// last looking, so the next forward step still decodes forward from the
+    /// last picture the pipeline produced instead of flushing back to it.
+    fn cached_frame(&mut self, target: RationalTime) -> Option<VideoFrame> {
+        let wanted = self
+            .index
+            .as_deref()
+            .and_then(|index| wanted_pts(index, target))?;
+        let frame = self.cache.get(FrameKey::new(self.media, wanted))?;
+        frame.try_clone()
+    }
+
+    /// Keeps a picture a step decoded and returns another handle on it.
+    ///
+    /// The cache holds one mapping and the caller gets the other; neither is a
+    /// copy of the pixels. A budget of zero, or a buffer that cannot be mapped
+    /// twice, hands the picture straight back and keeps nothing -- and so does
+    /// a decoder with no index, which could never look a picture up again and
+    /// would only be holding a decoder's buffers hostage.
+    fn remember(&mut self, frame: VideoFrame) -> VideoFrame {
+        if self.cache.budget() == 0 || self.index.is_none() {
+            return frame;
+        }
+        let Some(copy) = frame.try_clone() else {
+            return frame;
+        };
+        let key = FrameKey::new(self.media, frame.pts());
+        self.cache.insert(key, frame);
+        copy
+    }
+
+    /// What the picture cache has been doing: hits, misses and what it holds.
+    ///
+    /// A scrub that is working shows a hit for every step back over ground it
+    /// has just covered.
+    pub fn cache_stats(&self) -> crate::frame_cache::FrameCacheStats {
+        self.cache.stats()
     }
 
     /// Drives seek planning from a PTS index of this file.
@@ -1394,6 +1551,44 @@ enum SeekPlan {
     Reseek,
 }
 
+/// What a step is allowed to decode rather than flush.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ForwardBudget {
+    /// The time window used when nothing is known about where pictures are.
+    window: RationalTime,
+    /// Pictures a step may decode beyond what the seek would have decoded
+    /// anyway; see [`DecoderOptions::forward_decode_slack`].
+    slack: u32,
+}
+
+/// What each way of reaching a target costs in pictures decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ForwardCost {
+    /// Pictures between the current position and the target.
+    forward: usize,
+    /// Pictures between the target's keyframe and the target, which a seek has
+    /// to decode whatever else it does.
+    after_seek: usize,
+}
+
+/// Prices both ways of reaching `target` from `position`, or `None` when the
+/// index cannot place one of them: a target past the last picture, a position
+/// that is not one of this file's timestamps, or no keyframe before the
+/// target.
+fn forward_cost(
+    index: &PtsIndex,
+    position: RationalTime,
+    target: RationalTime,
+) -> Option<ForwardCost> {
+    let here = index.frame_at(position)?;
+    let wanted = index.frame_at_or_after(target)?;
+    let keyframe = index.keyframe_at_or_before(wanted)?;
+    Some(ForwardCost {
+        forward: wanted.saturating_sub(here),
+        after_seek: wanted.saturating_sub(keyframe),
+    })
+}
+
 /// Decides whether a target can be reached by decoding forward, and where a
 /// seek that cannot should aim.
 ///
@@ -1407,16 +1602,24 @@ enum SeekPlan {
 /// one with shorter GOPs it decodes through whole GOPs a seek would have
 /// skipped.
 ///
-/// With an index the guess is not needed (docs/PLAN.md §5.2, TASK-133). The
-/// index says which keyframe the target needs, so the answer is exact: decode
-/// forward exactly when that keyframe is at or before the current position --
-/// the decoder is already inside the GOP the target lives in, and re-seeking
-/// would decode those same pictures again -- and otherwise seek. No step then
-/// decodes more than the one GOP the target sits in.
+/// With an index the guess is not needed (docs/PLAN.md §5.2, TASK-133), and
+/// the two ways of reaching a target can be priced against each other in the
+/// same currency. A decode-forward decodes the pictures between the position
+/// and the target. A seek decodes the pictures between the target's keyframe
+/// and the target -- it cannot start the decoder anywhere else -- and pays for
+/// the flush on top, which is what [`DecoderOptions::forward_decode_slack`]
+/// prices in pictures. So: decode forward whenever it decodes no more than the
+/// seek would have, plus that slack.
+///
+/// A target inside the GOP the decoder is already in always wins that
+/// comparison, because its keyframe is at or before the position; the earlier
+/// rule is the special case this one generalises. What is new is the step that
+/// lands a picture or two past the next keyframe, which used to flush the
+/// pipeline to save a decode it was already cheaper than.
 fn plan_seek(
     position: Option<RationalTime>,
     target: RationalTime,
-    window: RationalTime,
+    budget: ForwardBudget,
     index: Option<&PtsIndex>,
 ) -> SeekPlan {
     let Some(position) = position else {
@@ -1425,15 +1628,16 @@ fn plan_seek(
     if target <= position {
         return SeekPlan::Reseek;
     }
-    if let Some(keyframe) = index.and_then(|index| keyframe_before(index, target)) {
-        return if keyframe <= position {
+    if let Some(cost) = index.and_then(|index| forward_cost(index, position, target)) {
+        let allowed = cost.after_seek.saturating_add(budget.slack as usize);
+        return if cost.forward <= allowed {
             SeekPlan::DecodeForward
         } else {
             SeekPlan::Reseek
         };
     }
     match target.checked_sub(position) {
-        Some(ahead) if ahead <= window => SeekPlan::DecodeForward,
+        Some(ahead) if ahead <= budget.window => SeekPlan::DecodeForward,
         _ => SeekPlan::Reseek,
     }
 }
@@ -1521,14 +1725,6 @@ fn inside_the_file(index: Option<&PtsIndex>, target: RationalTime) -> bool {
 /// index cannot answer.
 fn wanted_pts(index: &PtsIndex, target: RationalTime) -> Option<RationalTime> {
     index.pts(index.frame_at_or_after(target)?)
-}
-
-/// Timestamp of the keyframe a decode that must produce the frame at or after
-/// `target` has to start from, or `None` when the index cannot answer: the
-/// target is past the last picture, or no keyframe precedes it.
-fn keyframe_before(index: &PtsIndex, target: RationalTime) -> Option<RationalTime> {
-    let frame = index.frame_at_or_after(target)?;
-    index.pts(index.keyframe_at_or_before(frame)?)
 }
 
 /// How far before its target a seek that overshot aims on its next attempt.
@@ -1830,6 +2026,15 @@ mod tests {
         assert_eq!(FrameFormat::I420.plane_count(), 3);
     }
 
+    /// The planner's budget with the shipped slack, so a test that means to
+    /// exercise the time window only has to name the window.
+    fn budget(window: RationalTime) -> super::ForwardBudget {
+        super::ForwardBudget {
+            window,
+            slack: super::DEFAULT_FORWARD_DECODE_SLACK,
+        }
+    }
+
     #[test]
     fn a_forward_target_inside_the_window_decodes_forward_instead_of_seeking() {
         let window = super::duration_time(Duration::from_secs(2));
@@ -1838,7 +2043,7 @@ mod tests {
         for ahead in [1_i64, 40_000_000, 2_000_000_000] {
             let target = nanoseconds(u64::try_from(1_000_000_000 + ahead).expect("positive"));
             assert_eq!(
-                super::plan_seek(Some(position), target, window, None),
+                super::plan_seek(Some(position), target, budget(window), None),
                 super::SeekPlan::DecodeForward,
                 "{ahead} ns ahead is inside the GOP window"
             );
@@ -1859,7 +2064,7 @@ mod tests {
             nanoseconds(600_000_000_000),
         ] {
             assert_eq!(
-                super::plan_seek(Some(position), target, window, None),
+                super::plan_seek(Some(position), target, budget(window), None),
                 super::SeekPlan::Reseek,
                 "{} ns must re-seek",
                 target.value()
@@ -1871,7 +2076,7 @@ mod tests {
     fn the_first_seek_of_a_fresh_decoder_always_seeks() {
         let window = super::duration_time(Duration::from_secs(2));
         assert_eq!(
-            super::plan_seek(None, nanoseconds(0), window, None),
+            super::plan_seek(None, nanoseconds(0), budget(window), None),
             super::SeekPlan::Reseek,
             "nothing has been decoded, so there is nothing to decode forward from"
         );
@@ -1887,13 +2092,13 @@ mod tests {
         let window = super::duration_time(Duration::from_secs(2));
         let just_before = nanoseconds(10_009_999_999);
         assert_eq!(
-            super::plan_seek(Some(just_before), target, window, None),
+            super::plan_seek(Some(just_before), target, budget(window), None),
             super::SeekPlan::DecodeForward,
             "the target is 10.01 s, which is still ahead of 10.009999999 s"
         );
         let just_after = nanoseconds(10_010_000_001);
         assert_eq!(
-            super::plan_seek(Some(just_after), target, window, None),
+            super::plan_seek(Some(just_after), target, budget(window), None),
             super::SeekPlan::Reseek,
             "10.010000001 s is already past the target, so it must rewind"
         );
@@ -1919,7 +2124,7 @@ mod tests {
         // the decoder is nowhere yet, so it has to seek whichever GOP that is.
         for target in [520_000_000_u64, 399_999_999, 400_000_000] {
             assert_eq!(
-                super::plan_seek(None, nanoseconds(target), window, Some(&index)),
+                super::plan_seek(None, nanoseconds(target), budget(window), Some(&index)),
                 super::SeekPlan::Reseek,
                 "nothing has been decoded, so {target} ns needs a seek"
             );
@@ -2039,7 +2244,12 @@ mod tests {
         let position = nanoseconds(440_000_000);
         for target in [480_000_000_u64, 520_000_000, 560_000_000] {
             assert_eq!(
-                super::plan_seek(Some(position), nanoseconds(target), window, Some(&index)),
+                super::plan_seek(
+                    Some(position),
+                    nanoseconds(target),
+                    budget(window),
+                    Some(&index)
+                ),
                 super::SeekPlan::DecodeForward,
                 "{target} ns is in the GOP the decoder is already inside"
             );
@@ -2047,21 +2257,77 @@ mod tests {
     }
 
     #[test]
-    fn an_indexed_forward_step_into_the_next_gop_seeks_to_its_keyframe() {
+    fn an_indexed_step_just_past_the_next_keyframe_decodes_forward_anyway() {
         let index = gop_index();
-        // A window wide enough that the time rule would decode forward through
-        // the rest of this GOP and all of the next: the index knows better.
-        let window = super::duration_time(Duration::from_secs(2));
-        let position = nanoseconds(440_000_000);
+        let window = super::duration_time(Duration::from_millis(1));
+        // Frame 11 is where the decoder stands; frame 16 is in the next GOP.
+        // Reaching it by decoding forward costs five pictures, where the seek
+        // would decode one -- and pay for a flush, which the slack prices at
+        // twelve. Decoding forward is the cheaper of the two.
         assert_eq!(
             super::plan_seek(
-                Some(position),
+                Some(nanoseconds(440_000_000)),
                 nanoseconds(640_000_000),
-                window,
+                budget(window),
+                Some(&index)
+            ),
+            super::SeekPlan::DecodeForward,
+            "five pictures is cheaper than a flush plus one"
+        );
+    }
+
+    #[test]
+    fn an_indexed_step_further_than_the_flush_is_worth_re_seeks() {
+        let index = gop_index();
+        let window = super::duration_time(Duration::from_secs(2));
+        // Frame 1 to frame 24: twenty-three pictures forward, against the four
+        // the seek decodes after its keyframe plus the twelve the flush is
+        // priced at. The seek wins, so no step decodes the whole file to avoid
+        // one.
+        assert_eq!(
+            super::plan_seek(
+                Some(nanoseconds(40_000_000)),
+                nanoseconds(960_000_000),
+                budget(window),
                 Some(&index)
             ),
             super::SeekPlan::Reseek,
-            "no step decodes through more than the GOP its target sits in"
+            "a decode-forward that long is dearer than the flush it avoids"
+        );
+    }
+
+    #[test]
+    fn the_slack_is_what_decides_a_step_over_a_keyframe() {
+        let index = gop_index();
+        let window = super::duration_time(Duration::from_millis(1));
+        // The same step as above, with no slack at all: the picture count
+        // alone then says seek, which is what the rule did before the flush
+        // had a price.
+        let strict = super::ForwardBudget { window, slack: 0 };
+        assert_eq!(
+            super::plan_seek(
+                Some(nanoseconds(440_000_000)),
+                nanoseconds(640_000_000),
+                strict,
+                Some(&index)
+            ),
+            super::SeekPlan::Reseek
+        );
+    }
+
+    #[test]
+    fn the_planner_prices_both_ways_of_reaching_a_target_in_pictures() {
+        let index = gop_index();
+        // Frame 11 to frame 16: five pictures forward, one after the seek's
+        // keyframe at frame 15.
+        let cost = super::forward_cost(&index, nanoseconds(440_000_000), nanoseconds(640_000_000))
+            .expect("both ends are in the index");
+        assert_eq!(cost.forward, 5);
+        assert_eq!(cost.after_seek, 1);
+        // A target past the last picture cannot be priced.
+        assert_eq!(
+            super::forward_cost(&index, nanoseconds(440_000_000), nanoseconds(2_000_000_000)),
+            None
         );
     }
 
@@ -2073,14 +2339,14 @@ mod tests {
         // decides.
         let past_the_end = nanoseconds(2_000_000_000);
         assert_eq!(
-            super::plan_seek(None, past_the_end, window, Some(&index)),
+            super::plan_seek(None, past_the_end, budget(window), Some(&index)),
             super::SeekPlan::Reseek
         );
         assert_eq!(
             super::plan_seek(
                 Some(nanoseconds(1_999_000_000)),
                 past_the_end,
-                window,
+                budget(window),
                 Some(&index)
             ),
             super::SeekPlan::DecodeForward
@@ -2097,7 +2363,7 @@ mod tests {
             super::plan_seek(
                 Some(nanoseconds(440_000_000)),
                 nanoseconds(400_000_000),
-                window,
+                budget(window),
                 Some(&index)
             ),
             super::SeekPlan::Reseek
