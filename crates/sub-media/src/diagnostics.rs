@@ -217,6 +217,7 @@ const CATALOGUE: &[Expected] = &[
     decoder("vaav1dec", Vendor::Va),
     encoder("vah264enc", Vendor::Va),
     encoder("vah265enc", Vendor::Va),
+    encoder("vaav1enc", Vendor::Va),
     encoder("amfh264enc", Vendor::Amf),
     encoder("amfh265enc", Vendor::Amf),
     encoder("amfav1enc", Vendor::Amf),
@@ -230,6 +231,11 @@ const CATALOGUE: &[Expected] = &[
     decoder("avdec_h265", Vendor::X264),
     encoder("x264enc", Vendor::X264),
     encoder("x265enc", Vendor::X264),
+    // AV1 in software has no single element a stock install always carries,
+    // so all three the exporter can plug are listed (TASK-143).
+    encoder("svtav1enc", Vendor::X264),
+    encoder("av1enc", Vendor::X264),
+    encoder("rav1enc", Vendor::X264),
 ];
 
 /// What the registry says about one element.
