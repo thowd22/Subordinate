@@ -1180,6 +1180,7 @@ fn encoder_input_caps(name: &str) -> Option<gst::Caps> {
     let factory = gst::ElementFactory::find(name)?;
     let accepted = factory
         .static_pad_templates()
+        .into_iter()
         .find(|template| template.direction() == gst::PadDirection::Sink)
         .map(|template| template.caps())?;
     let wanted = gst::Caps::builder("video/x-raw")
