@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - codex
 created_date: '2026-09-12 21:44'
-updated_date: '2026-09-12 22:33'
+updated_date: '2026-09-12 23:23'
 labels: []
 dependencies: []
 priority: high
@@ -44,4 +44,6 @@ Review also fixed proxies created before first Save: proxies of external sources
 Hosted Linux, Windows and macOS full workspace tests passed at 88b3b03, exercising the new ordinary UI/MCP regressions. Final proxy-followup commit 4b602fd passed Linux CI and Windows tests/lints. Focused box/yodaddy artifact provisioning run 34721910424 remains pending its cold hosted builds.
 
 First focused artifact run exposed missing wasm32-wasip2 target on the new hosted builders (sub-plugin guest build failed before runner tests). Added the target to both builders, matching ordinary CI; focused retry pending.
+
+All hosted Linux/Windows/macOS CI checks pass at 33e8ac0. Box passed all four relocated regressions. Windows artifact built successfully; yodaddy exposed gst-launch executable lookup failure before tests. Fixed explicit bundled Windows executable path and added verified prior-run artifact replay so harness-only retries do not recompile the application.
 <!-- SECTION:NOTES:END -->

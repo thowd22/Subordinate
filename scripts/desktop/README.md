@@ -254,3 +254,16 @@ artifact, check out its commit, set `GITHUB_SHA` to that full commit and run
 Windows, use the artifact's `python/python.exe` and bundled runtime paths as
 shown in the workflow). The script verifies the binaries and creates all
 required first-use fixtures automatically.
+
+To retry a harness-only change without compiling the application again, reuse
+a completed Desktop flows run:
+
+```sh
+gh workflow run desktop-flows.yml --ref my-branch \
+  -f only=regressions -f artifact_run_id=34723105729
+```
+
+Reuse supports `regressions`, `box`, or `yodaddy`. The workflow reads the source
+run's commit from GitHub, checks the downloaded binary manifest against it, and
+reports both the harness and binary commits. Use a fresh build when application
+or Rust test code changes; replay intentionally tests the selected older build.

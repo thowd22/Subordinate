@@ -11,8 +11,10 @@ import wave
 
 artifact = Path(sys.argv[1]).resolve()
 manifest = json.loads((artifact / "build-info.json").read_text(encoding="utf-8"))
-if manifest["sha"] != os.environ["GITHUB_SHA"]:
-    raise SystemExit("artifact commit differs from the requested checkout")
+expected_sha = os.environ.get("SUB_REGRESSION_ARTIFACT_SHA") or os.environ["GITHUB_SHA"]
+if manifest["sha"] != expected_sha:
+    raise SystemExit("artifact commit differs from the requested build")
+print(f"Harness commit: {os.environ['GITHUB_SHA']}; binary commit: {expected_sha}", flush=True)
 for entry in manifest["executables"].values():
     path = artifact / entry["file"]
     if hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
@@ -35,7 +37,8 @@ with tempfile.TemporaryDirectory(prefix="sub-reg-") as scratch:
         wav.setsampwidth(2)
         wav.setframerate(48000)
         wav.writeframes(bytes(48000 * 2 * 2))
-    subprocess.run(["gst-launch-1.0", "-q", "-e", "videotestsrc", "num-buffers=125", "!",
+    gst_launch = str(artifact / "runtime" / "bin" / "gst-launch-1.0.exe") if os.name == "nt" else "gst-launch-1.0"
+    subprocess.run([gst_launch, "-q", "-e", "videotestsrc", "num-buffers=125", "!",
         "video/x-raw,width=1920,height=1080,framerate=25/1", "!", "x264enc", "speed-preset=ultrafast",
         "!", "h264parse", "!", "mp4mux", "!", "filesink", "location=" + str(fixtures / "bars_1080p_h264.mp4")],
         env=env, check=True, timeout=90)

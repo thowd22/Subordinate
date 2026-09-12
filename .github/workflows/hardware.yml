@@ -667,6 +667,9 @@ jobs:
     name: Desktop flows
     needs: nvidia-linux
     if: always() && (inputs.only == '' || inputs.only == 'desktop-flows')
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/desktop-flows.yml
 
 
