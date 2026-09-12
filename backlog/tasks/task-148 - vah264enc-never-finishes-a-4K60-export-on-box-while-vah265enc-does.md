@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-12 05:32'
-updated_date: '2026-09-12 10:28'
+updated_date: '2026-09-12 11:12'
 labels:
   - export
   - gpu
@@ -49,4 +49,8 @@ Run 34675906145 caught where it stops. The CLI prints a progress line per frame,
   subordinate-cli render <4k60 project>.sub --sequence UHD --preset youtube-1080p --encoder vah264enc --range 0:60 --out /tmp/x.mp4
 
 with GST_DEBUG=2,va*:6,vah264enc:7 on box.
+
+Software H.264 at the same canvas is fine: x264enc writes the same sixty 4K60 frames on box over all three H.264 presets and validates clean (run 34685591190). So it is the hardware H.264 encoders specifically - vah264enc and amfh264enc - and not H.264 at 4K in general, which narrows it to whatever those two have in common that x264enc does not: a DMA or surface-backed buffer pool between the compositor readback and the encoder.
+
+Run 34688535274 adds a third encoder with the identical signature: mfh264enc, Media Foundation on yodaddy, stops at frame 22 of 60 for youtube-1080p and youtube-4k and at frame 1 for mezzanine - the same frames as amfh264enc on the same machine - while mfh265enc writes the same sixty 4K frames and validates clean. Three hardware H.264 encoders now: VA-API on Linux/Mesa, AMF on Windows, Media Foundation on Windows. Three different vendor stacks, two operating systems, one failure, always H.264, always 4K, always around frame 22 or frame 1. x264enc at the same canvas on both machines is fine.
 <!-- SECTION:NOTES:END -->

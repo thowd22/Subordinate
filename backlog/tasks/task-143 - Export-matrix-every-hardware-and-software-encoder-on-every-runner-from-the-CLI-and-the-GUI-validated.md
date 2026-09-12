@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-task-143'
 created_date: '2026-09-12 03:58'
-updated_date: '2026-09-12 09:20'
+updated_date: '2026-09-12 11:12'
 labels:
   - export
   - gpu
@@ -29,7 +29,7 @@ Export has been verified one encoder at a time (hardware workflow: nvh264enc on 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 hardware.yml (or export-matrix.yml called from it) runs the matrix on demand and nightly; the job summary is a table of machine x encoder x preset x source with pass/fail and file size, and artifacts hold every failing output and its discoverer report
+- [x] #1 hardware.yml (or export-matrix.yml called from it) runs the matrix on demand and nightly; the job summary is a table of machine x encoder x preset x source with pass/fail and file size, and artifacts hold every failing output and its discoverer report
 - [ ] #2 Every encoder that the machine's gst-inspect reports present either passes or has a filed bug task with the error; the 4K60 excerpt exports with hardware encoders on box, the T4 and yodaddy
 - [ ] #3 GUI-path exports (sub-ui export runner on the Linux desktop image) match CLI exports on frame count and audio for at least nvh264enc and x264enc
 <!-- AC:END -->
@@ -74,4 +74,10 @@ Run 34683736400, yodaddy (AMD RX 9070 XT, Windows 11, GStreamer 1.28.6): the AMF
 Twenty-nine of its thirty cells were marked failed by the driver rather than by the export, for two reasons now fixed: gst-launch treats a backslash as an escape, so the Windows path in the frame counter location= arrived mangled and the counter fell through to a decode the machine has no AAC decoder for; and the generated project left media info null, which routes a clip audio to symphonia rather than GStreamer (decode_audio asks the model, not the file), and symphonia has no Opus decoder, so every uhd cell died before an encoder was reached. TASK-150 is filed for the routing; the generator fills info in now and box stand-in clip carries AAC.
 
 Getting there needed three more yodaddy fixes worth recording: the machine has no Python and what python resolves to is the Microsoft Store stub, so the job unpacks the embeddable distribution under RUNNER_TEMP; get-sample-media.ps1 used Invoke-WebRequest -MaximumRetryCount, which is PowerShell 7 only and made every download fail instantly under Windows PowerShell 5.1; and GStreamer had to go on each step own PATH rather than only the runner GITHUB_PATH.
+
+Run 34688535274, yodaddy: the AMF row complete. 24 of 30 cells pass, including amfav1enc and mfh265enc - two encoders the exporter could not have been asked for before this branch catalogued them - and including the user 4K60 footage through amfh265enc and amfav1enc. The six failures are all one bug, TASK-148, and that bug got much more interesting: mfh264enc stalls at exactly the same frame as amfh264enc, and both at the same place vah264enc stalls on box. Three hardware H.264 encoders, three vendor stacks, two operating systems, one failure shape - and x264enc writes the same frames on both machines without trouble.
+
+Run 34685591190, box, with the probed-info project: 17 of 20 again, the same three TASK-148 cells, and the GUI-versus-CLI comparison still matches on both encoders.
+
+Still blocked on the NVIDIA rows. RunsOn has been failing to resolve gpu-nvidia-linux for every job in the repository since about 05:00 UTC - hardware.yml on main fails identically (runs 34676554315), as do the TASK-139 dispatches - and four attempts here (34676733798, 34678136543, 34680820309, 34684146860) all ended "failed to resolve runner spec: runner spec gpu-nvidia-linux not found" with a fallback to a CPU instance. .github/runs-on.yml on main is valid and unchanged since TASK-138 merged, and the same label worked at 03:32 UTC, so this is the RunsOn stack or its repository-config resolution and not anything on this branch. Each failed attempt cost a minute of an m7i-flex.large; total GPU spend on this task is under 0.05 USD.
 <!-- SECTION:NOTES:END -->
