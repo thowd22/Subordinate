@@ -1,15 +1,20 @@
 //! Encoder capability probe and selection order (docs/PLAN.md §5.5).
 //!
-//! Which encoder an export should use is a per-machine question: the element
-//! may not be registered at all, or it may be registered by a plugin whose
-//! driver is missing, in which case the factory builds but the element never
-//! reaches `READY`. The probe answers both by actually instantiating every
-//! catalogued encoder and asking it to go to `READY`, then selection walks the
-//! plan's order per codec and takes the first encoder that got there.
+//! Which encoder an export should use is a per-machine question, and a
+//! per-*process* one: the element may not be registered at all, or it may be
+//! registered by a plugin whose driver is missing, or it may start perfectly
+//! and then refuse the first caps it is given because it cannot open a session
+//! here (TASK-146). The probe answers all three the only way that is honest —
+//! by encoding one real frame with every catalogued encoder — and selection
+//! then walks the plan's order per codec and takes the first encoder that
+//! managed it.
 //!
-//! The scan costs real element instantiation, so it is cached for the life of
-//! the process ([`EncoderProbe::cached`]) and shown in the diagnostics panel
-//! next to the registry report from `sub_media::HardwareDiagnostics`.
+//! The scan costs a frame of encoding per element, so it is cached for the
+//! life of the process ([`EncoderProbe::cached`]) and shown in the diagnostics
+//! panel next to the registry report from `sub_media::HardwareDiagnostics`.
+//! Because the answer can depend on what else the process has already opened,
+//! a caller that is about to export should let the probe run at the point the
+//! export would: after the GPU device exists, not before.
 //!
 //! ```no_run
 //! # fn main() -> sub_core::SubResult<()> {
@@ -25,6 +30,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -162,10 +168,20 @@ const fn candidate(element: &'static str, codec: VideoCodec, vendor: EncoderVend
 /// (TASK-143). AV1 has three software encoders rather than one because no
 /// single one of them is in a stock install everywhere: `svtav1enc` first
 /// because it is the fastest of the three at a given quality.
+///
+/// NVENC has three element families in GStreamer 1.28 and the catalogue knows
+/// all of them: `nvh264enc` drives it through CUDA, `nvd3d11h264enc` through a
+/// Direct3D 11 device, and `nvautogpuh264enc` picks whichever the pipeline is
+/// already using. The CUDA one is first because it is the one that exists on
+/// every platform; the Direct3D ones exist only on Windows (TASK-146).
 const CATALOGUE: &[Candidate] = &[
     candidate("nvh264enc", VideoCodec::H264, EncoderVendor::Nvenc),
     candidate("nvh265enc", VideoCodec::H265, EncoderVendor::Nvenc),
     candidate("nvav1enc", VideoCodec::Av1, EncoderVendor::Nvenc),
+    candidate("nvd3d11h264enc", VideoCodec::H264, EncoderVendor::Nvenc),
+    candidate("nvd3d11h265enc", VideoCodec::H265, EncoderVendor::Nvenc),
+    candidate("nvautogpuh264enc", VideoCodec::H264, EncoderVendor::Nvenc),
+    candidate("nvautogpuh265enc", VideoCodec::H265, EncoderVendor::Nvenc),
     candidate("vah264enc", VideoCodec::H264, EncoderVendor::Va),
     candidate("vah265enc", VideoCodec::H265, EncoderVendor::Va),
     candidate("vaav1enc", VideoCodec::Av1, EncoderVendor::Va),
@@ -196,7 +212,7 @@ const CATALOGUE: &[Candidate] = &[
 pub struct ElementProbe {
     /// Whether the element factory is registered and could be instantiated.
     pub present: bool,
-    /// Whether the instantiated element reached `READY`.
+    /// Whether the element encoded a frame here.
     pub ready: bool,
     /// Whether this machine has ranked the factory `NONE`.
     pub deranked: bool,
@@ -210,7 +226,7 @@ impl ElementProbe {
         Self::default()
     }
 
-    /// The element is registered and reached `READY`.
+    /// The element is registered and encoded a frame here.
     pub fn ready() -> Self {
         Self {
             present: true,
@@ -267,7 +283,7 @@ pub struct EncoderStatus {
     pub hardware: bool,
     /// Whether the factory is registered and could be instantiated.
     pub present: bool,
-    /// Whether the element reached `READY`, which is what makes it usable.
+    /// Whether the element encoded a frame here, which is what makes it usable.
     pub ready: bool,
     /// Whether this machine ranks the factory `NONE`. Such an element is kept
     /// out of the automatic order but still honoured when it is pinned.
@@ -411,7 +427,7 @@ static CACHED: OnceLock<Result<EncoderProbe, SubError>> = OnceLock::new();
 
 impl EncoderProbe {
     /// Probes this machine, instantiating every catalogued encoder and driving
-    /// it to `READY`.
+    /// one frame with it.
     ///
     /// # Errors
     ///
@@ -597,27 +613,129 @@ fn probe_element(name: &str) -> ElementProbe {
     probe
 }
 
-/// Drives `name` to `READY` without looking at its rank.
+/// The canvas the readiness probe encodes.
+///
+/// Above every catalogued encoder's minimum — NVENC on a T4 refuses anything
+/// narrower than 129 pixels — and small enough that a frame of it costs
+/// nothing anywhere.
+const PROBE_CANVAS: (u32, u32) = (640, 480);
+
+/// How long one element is given to encode that frame before it is written
+/// off as unusable here.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Whether `name` can actually encode on this machine, in this process.
+///
+/// This encodes one real frame rather than driving the element to `READY`,
+/// because `READY` is not the question an export needs answered. A hardware
+/// encoder opens its encode session when it is given caps, not when it is
+/// started, and that is where it fails: on the Windows GPU runner every NVENC
+/// element in the catalogue reaches `READY` and then answers
+/// `NV_ENC_ERR_INVALID_VERSION` to `NvEncOpenEncodeSessionEx` and rejects the
+/// caps, which the old probe reported as `ready` and the export discovered a
+/// frame later (TASK-146). One frame through `videotestsrc ! videoconvert !
+/// <encoder> ! fakesink` asks the question the export is about to ask.
+///
+/// The pipeline is torn down before the answer is returned, so nothing the
+/// probe opened is still held when the export builds its own.
 fn probe_ready(name: &str) -> ElementProbe {
-    let element = match gst::ElementFactory::make(name).build() {
-        Ok(element) => element,
-        Err(err) => {
-            tracing::debug!(element = name, error = %err, "encoder element not available");
-            return ElementProbe::missing();
+    let (width, height) = PROBE_CANVAS;
+    match can_encode(name, width, height) {
+        Ok(()) => ElementProbe::ready(),
+        Err(EncodeRefusal::Missing) => {
+            tracing::debug!(element = name, "encoder element not available");
+            ElementProbe::missing()
         }
-    };
-    let outcome = match element.set_state(gst::State::Ready) {
-        Ok(gst::StateChangeSuccess::Async) => {
-            match element.state(gst::ClockTime::from_seconds(2)).0 {
-                Ok(_) => ElementProbe::ready(),
-                Err(err) => ElementProbe::not_ready(err.to_string()),
-            }
+        Err(EncodeRefusal::Refused(reason)) => ElementProbe::not_ready(reason),
+    }
+}
+
+/// Why a one-frame encode did not happen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncodeRefusal {
+    /// The element is not registered on this machine.
+    Missing,
+    /// It is registered, and this is what it said.
+    Refused(String),
+}
+
+impl std::fmt::Display for EncodeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => f.write_str("the element is not installed"),
+            Self::Refused(reason) => f.write_str(reason),
         }
-        Ok(_) => ElementProbe::ready(),
-        Err(err) => ElementProbe::not_ready(err.to_string()),
+    }
+}
+
+/// Encodes one `width` x `height` frame with `name`, here and now.
+///
+/// This is the only question that matters before an export, and it has to be
+/// asked at the canvas the export will use: on the Windows GPU runner every
+/// NVENC element encodes 640x480 happily and then refuses to open a session
+/// for 1920x1080 in the same process, seconds later (TASK-146). One frame
+/// costs a few tens of milliseconds and buys an export that starts with an
+/// encoder that has just proved itself.
+///
+/// # Errors
+///
+/// [`EncodeRefusal::Missing`] when the element is not registered, and
+/// [`EncodeRefusal::Refused`] carrying the element's own reason otherwise.
+pub fn can_encode(name: &str, width: u32, height: u32) -> Result<(), EncodeRefusal> {
+    if gst::ElementFactory::find(name).is_none() {
+        return Err(EncodeRefusal::Missing);
+    }
+    let description = format!(
+        "videotestsrc num-buffers=1 ! video/x-raw,width={width},height={height},framerate=25/1 \
+         ! videoconvert ! {name} name=probe ! fakesink sync=false"
+    );
+    let pipeline = match gst::parse::launch(&description) {
+        Ok(pipeline) => pipeline,
+        Err(err) => return Err(EncodeRefusal::Refused(err.to_string())),
     };
-    let _ = element.set_state(gst::State::Null);
+    let outcome = run_probe_pipeline(&pipeline, name);
+    let _ = pipeline.set_state(gst::State::Null);
     outcome
+}
+
+/// Runs one probe pipeline to end of stream, or says what stopped it.
+fn run_probe_pipeline(pipeline: &gst::Element, name: &str) -> Result<(), EncodeRefusal> {
+    if let Err(err) = pipeline.set_state(gst::State::Playing) {
+        return Err(EncodeRefusal::Refused(err.to_string()));
+    }
+    let Some(bus) = pipeline.bus() else {
+        return Err(EncodeRefusal::Refused(
+            "the probe pipeline has no bus".to_owned(),
+        ));
+    };
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            tracing::debug!(element = name, "encoder did not encode a frame in time");
+            return Err(EncodeRefusal::Refused(format!(
+                "{name} did not encode a frame within {}s",
+                PROBE_TIMEOUT.as_secs()
+            )));
+        }
+        let nanos = u64::try_from(left.as_nanos()).unwrap_or(u64::MAX);
+        let message = bus.timed_pop_filtered(
+            gst::ClockTime::from_nseconds(nanos),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+        let Some(message) = message else {
+            continue;
+        };
+        match message.view() {
+            gst::MessageView::Eos(_) => return Ok(()),
+            gst::MessageView::Error(err) => {
+                let reason = err.error().to_string();
+                tracing::debug!(element = name, reason, "encoder cannot encode here");
+                return Err(EncodeRefusal::Refused(reason));
+            }
+            _ => continue,
+        }
+    }
 }
 
 /// Whether `name` has been deranked to `NONE`, by
@@ -635,12 +753,35 @@ fn is_deranked(name: &str) -> bool {
     gst::ElementFactory::find(name).is_some_and(|factory| factory.rank() == gst::Rank::NONE)
 }
 
+/// Whether `name` builds and reaches `READY` on this machine.
+fn starts_to_ready(name: &str) -> bool {
+    let Ok(element) = gst::ElementFactory::make(name).build() else {
+        tracing::debug!(element = name, "element not available");
+        return false;
+    };
+    let started = match element.set_state(gst::State::Ready) {
+        Ok(gst::StateChangeSuccess::Async) => element
+            .state(gst::ClockTime::from_seconds(2))
+            .0
+            .is_ok(),
+        Ok(_) => true,
+        Err(err) => {
+            tracing::debug!(element = name, error = %err, "element would not start");
+            false
+        }
+    };
+    let _ = element.set_state(gst::State::Null);
+    started
+}
+
 /// Whether `name` is an element this machine can actually run.
 ///
-/// The same `READY` test the encoder probe uses, for the elements the probe
-/// does not catalogue: muxers, parsers and audio encoders. Results are cached
-/// for the life of the process, because building an element is not free and
-/// the answer cannot change while the process runs.
+/// For the elements the encoder catalogue does not cover — muxers, parsers and
+/// audio encoders — the question is only whether this machine has one that
+/// starts: they are not video encoders and cannot be asked to encode a frame,
+/// so this builds the element, drives it to `READY` and puts it back. Results
+/// are cached for the life of the process, because building an element is not
+/// free and the answer cannot change while the process runs.
 ///
 /// GStreamer must already be initialised; every caller inside this crate
 /// builds a pipeline first, which initialises it.
@@ -652,8 +793,7 @@ pub fn element_is_usable(name: &str) -> bool {
     {
         return usable;
     }
-    let probe = probe_element(name);
-    let usable = probe.present && probe.ready && !probe.deranked;
+    let usable = starts_to_ready(name) && !is_deranked(name);
     if let Ok(mut seen) = cache.lock() {
         seen.insert(name.to_owned(), usable);
     }
@@ -694,6 +834,10 @@ mod tests {
                 "nvh264enc",
                 "nvh265enc",
                 "nvav1enc",
+                "nvd3d11h264enc",
+                "nvd3d11h265enc",
+                "nvautogpuh264enc",
+                "nvautogpuh265enc",
                 "vah264enc",
                 "vah265enc",
                 "vaav1enc",
@@ -719,6 +863,8 @@ mod tests {
             encoder_names(VideoCodec::H264),
             vec![
                 "nvh264enc",
+                "nvd3d11h264enc",
+                "nvautogpuh264enc",
                 "vah264enc",
                 "amfh264enc",
                 "vtenc_h264",
@@ -730,6 +876,8 @@ mod tests {
             encoder_names(VideoCodec::H265),
             vec![
                 "nvh265enc",
+                "nvd3d11h265enc",
+                "nvautogpuh265enc",
                 "vah265enc",
                 "amfh265enc",
                 "vtenc_h265",
@@ -793,7 +941,7 @@ mod tests {
             probe.select(VideoCodec::Av1, &prefs).unwrap().element,
             "nvav1enc"
         );
-        assert_eq!(probe.usable(VideoCodec::H264).len(), 6);
+        assert_eq!(probe.usable(VideoCodec::H264).len(), 8);
     }
 
     #[test]
@@ -821,13 +969,15 @@ mod tests {
         use gstreamer::prelude::PluginFeatureExtManual;
 
         let _ = gstreamer::init();
-        let Some(factory) = gstreamer::ElementFactory::find("videotestsrc") else {
-            eprintln!("skipping: this machine has no videotestsrc");
+        // A real video encoder, because the probe now encodes a frame with
+        // what it is given: anything else fails by construction.
+        let Some(factory) = gstreamer::ElementFactory::find("x264enc") else {
+            eprintln!("skipping: this machine has no x264enc");
             return;
         };
         let rank = factory.rank();
         factory.set_rank(gstreamer::Rank::NONE);
-        let probe = super::probe_element("videotestsrc");
+        let probe = super::probe_element("x264enc");
         factory.set_rank(rank);
 
         assert!(probe.present, "the factory is registered");

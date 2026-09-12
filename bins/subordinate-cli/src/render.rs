@@ -160,13 +160,19 @@ pub fn run_with(options: &Options, on_event: &mut dyn FnMut(&ExportEvent)) -> Su
     let frames = frame_count(range)?;
     let span = FrameSpan::new(range.0, frames);
 
+    // The GPU device first, then the encoder probe. Whether an encoder can
+    // open a session is a question about *this process*, not only about this
+    // machine: on Windows the NVENC elements answer it differently once a
+    // graphics device is open, so the probe has to be asked with the process
+    // in the state the export will find it (TASK-146).
+    let context = RenderContext::headless().map_err(|error| lift_render_error(&error))?;
+
     let mut preferences = EncoderPreferences::new();
     if let Some(element) = &options.encoder {
         preferences.set_override(settings.video_codec, element)?;
     }
     let elements = ExportElements::resolve(&settings, &preferences)?;
 
-    let context = RenderContext::headless().map_err(|error| lift_render_error(&error))?;
     for clip in clips_with_effects(&sequence) {
         warnings.push(format!(
             "clip '{clip}' carries plugin effects, which a headless render does not run yet",

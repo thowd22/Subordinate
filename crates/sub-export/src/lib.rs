@@ -35,8 +35,8 @@ pub use sequence::{
 };
 
 pub use encoder::{
-    CODECS, ElementProbe, EncoderPreferences, EncoderProbe, EncoderStatus, EncoderVendor,
-    VideoCodec, element_is_usable, encoder_names,
+    CODECS, ElementProbe, EncodeRefusal, EncoderPreferences, EncoderProbe, EncoderStatus,
+    EncoderVendor, VideoCodec, can_encode, element_is_usable, encoder_names,
 };
 pub use job::{
     DEFAULT_PROGRESS_INTERVAL, EXPORT_JOB_KIND, EncoderStats, ExportEvent, ExportJob,

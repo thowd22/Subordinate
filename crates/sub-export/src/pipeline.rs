@@ -32,6 +32,7 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -41,7 +42,9 @@ use sub_core::{ErrorCode, SubError, SubResult};
 use sub_time::{Rational, RationalTime};
 
 use crate::codes;
-use crate::encoder::{EncoderPreferences, EncoderProbe, VideoCodec, element_is_usable};
+use crate::encoder::{
+    EncoderPreferences, EncoderProbe, EncoderStatus, VideoCodec, can_encode, element_is_usable,
+};
 
 /// Nanoseconds in one second, the unit GStreamer timestamps use.
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
@@ -49,14 +52,46 @@ const NANOS_PER_SECOND: u128 = 1_000_000_000;
 /// Bytes of RGBA per pixel, matching `sub_render::readback::BYTES_PER_PIXEL`.
 pub const BYTES_PER_PIXEL: usize = 4;
 
-/// How many bytes each `appsrc` queues before a push blocks.
+/// How many bytes each `appsrc` queues before a push waits for room.
 ///
 /// The driver pushes video and audio in lockstep, so neither branch runs far
 /// ahead of the other and the cap only bounds the encoder's backlog.
 const APPSRC_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
+/// How many whole frames the video branch must be able to hold, whatever the
+/// canvas.
+///
+/// A 4K RGBA frame is 33 177 600 bytes, so [`APPSRC_MAX_BYTES`] holds exactly
+/// one of them and never two: every push after the first would have to wait
+/// for the queue to empty, which serialises the compositor against the encoder
+/// and gives an asynchronous encoder no run of frames to work on. The cap is
+/// raised to hold this many instead, which is what lets the two overlap.
+const APPSRC_MIN_FRAMES: u64 = 4;
+
+/// The queue cap for a video branch on `settings`' canvas.
+fn video_queue_bytes(settings: &ExportSettings) -> u64 {
+    let frame = settings.frame_bytes() as u64;
+    APPSRC_MAX_BYTES.max(frame.saturating_mul(APPSRC_MIN_FRAMES))
+}
+
 /// How long [`ExportPipeline::finish`] waits for the muxer before giving up.
 const EOS_TIMEOUT_SECONDS: u64 = 120;
+
+/// How long a push waits for the pipeline to make room before giving up.
+///
+/// A branch that stops draining is either an encoder that is simply slow or
+/// one that has failed, and the difference is on the bus: the wait is long
+/// enough that a 4K frame on a busy software encoder is never mistaken for a
+/// stall, and the bus is read on every slice so a real failure is reported the
+/// moment it is posted rather than after the whole budget.
+pub const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long each slice of that wait is.
+///
+/// Short enough that an export that *was* stalled resumes promptly and that an
+/// error reaches the caller within a frame's time, long enough that waiting
+/// costs no measurable CPU.
+const PUSH_POLL: Duration = Duration::from_millis(20);
 
 /// The file format the export is wrapped in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -499,6 +534,7 @@ impl ExportElements {
         settings.validate()?;
         let probe = EncoderProbe::cached()?;
         let video = probe.select(settings.video_codec, preferences)?;
+        let video = verify_at_canvas(probe, settings, preferences, video)?;
         let audio = settings
             .audio_codec
             .map(select_audio_encoder)
@@ -509,6 +545,93 @@ impl ExportElements {
             audio_encoder: audio,
         })
     }
+}
+
+/// Confirms `chosen` can encode this export's canvas, or finds one that can.
+///
+/// The session probe encodes a small frame, and a small frame is not the
+/// question: on the Windows GPU runner every NVENC element encodes 640x480 and
+/// then refuses to open a session for 1920x1080 seconds later in the same
+/// process (TASK-146). So the encoder an export is about to plug encodes one
+/// frame of the *export's* canvas first, which costs a few tens of
+/// milliseconds and is the difference between an export that runs and one that
+/// dies on its first frame.
+///
+/// An encoder the user pinned is never swapped — the pin is the decision the
+/// order withholds — but it is still asked, so the refusal names the element
+/// and says what it answered. The automatic order walks on to the next usable
+/// encoder and says in the log which one it left behind.
+///
+/// # Errors
+///
+/// [`codes::ENCODER_UNAVAILABLE`] when a pinned encoder cannot encode the
+/// canvas, and [`codes::NO_ENCODER`] when none of the codec's encoders can.
+fn verify_at_canvas<'a>(
+    probe: &'a EncoderProbe,
+    settings: &ExportSettings,
+    preferences: &EncoderPreferences,
+    chosen: &'a EncoderStatus,
+) -> SubResult<&'a EncoderStatus> {
+    let (width, height) = (settings.width, settings.height);
+    let refusal = match can_encode(&chosen.element, width, height) {
+        Ok(()) => return Ok(chosen),
+        Err(refusal) => refusal,
+    };
+    if preferences.override_for(settings.video_codec).is_some() {
+        return Err(SubError::new(
+            codes::ENCODER_UNAVAILABLE,
+            format!(
+                "the selected {} encoder {} cannot encode {width}x{height} here",
+                settings.video_codec, chosen.element
+            ),
+        )
+        .with_detail("codec", settings.video_codec.as_str())
+        .with_detail("element", chosen.element.clone())
+        .with_detail("width", width)
+        .with_detail("height", height)
+        .with_detail("reason", refusal.to_string()));
+    }
+    tracing::warn!(
+        element = %chosen.element,
+        width,
+        height,
+        reason = %refusal,
+        "the chosen encoder cannot encode this canvas; trying the next one"
+    );
+    let mut skipped = vec![(chosen.element.clone(), refusal.to_string())];
+    for candidate in probe.usable(settings.video_codec) {
+        if candidate.element == chosen.element {
+            continue;
+        }
+        match can_encode(&candidate.element, width, height) {
+            Ok(()) => {
+                tracing::info!(
+                    element = %candidate.element,
+                    skipped = ?skipped,
+                    "encoding with the first encoder that can take this canvas"
+                );
+                return Ok(candidate);
+            }
+            Err(refusal) => skipped.push((candidate.element.clone(), refusal.to_string())),
+        }
+    }
+    Err(SubError::new(
+        codes::NO_ENCODER,
+        format!(
+            "no {} encoder on this machine can encode {width}x{height}",
+            settings.video_codec
+        ),
+    )
+    .with_detail("codec", settings.video_codec.as_str())
+    .with_detail("width", width)
+    .with_detail("height", height)
+    .with_detail(
+        "tried",
+        skipped
+            .into_iter()
+            .map(|(element, reason)| format!("{element}: {reason}"))
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// The first usable encoder for `codec`.
@@ -548,6 +671,7 @@ pub struct ExportPipeline {
     video_frames: u64,
     audio_frames: u64,
     finished: bool,
+    push_timeout: Duration,
 }
 
 impl std::fmt::Debug for ExportPipeline {
@@ -632,7 +756,18 @@ impl ExportPipeline {
             video_frames: 0,
             audio_frames: 0,
             finished: false,
+            push_timeout: PUSH_TIMEOUT,
         })
+    }
+
+    /// How long a push waits for a branch to make room before it gives up.
+    ///
+    /// [`PUSH_TIMEOUT`] by default. A test that wants to see a stalled branch
+    /// reported rather than waited on shortens it; nothing else needs to.
+    #[must_use]
+    pub fn with_push_timeout(mut self, timeout: Duration) -> Self {
+        self.push_timeout = timeout;
+        self
     }
 
     /// The settings the pipeline was built for.
@@ -686,8 +821,11 @@ impl ExportPipeline {
     ///
     /// - [`codes::INVALID_SETTINGS`] when `pixels` is not one whole frame of
     ///   the export canvas.
-    /// - [`codes::PUSH_FAILED`] when the pipeline will not take it, which is
-    ///   how a failing encoder surfaces mid-export.
+    /// - [`codes::PIPELINE_FAILED`] when an element failed while the branch
+    ///   was full, which is how a failing encoder surfaces mid-export.
+    /// - [`codes::EXPORT_TIMEOUT`] when the branch stops taking buffers for
+    ///   [`PUSH_TIMEOUT`] with nothing on the bus to say why.
+    /// - [`codes::PUSH_FAILED`] when the pipeline refuses the buffer outright.
     pub fn push_video_frame(&mut self, pixels: &[u8]) -> SubResult<()> {
         let expected = self.settings.frame_bytes();
         if pixels.len() != expected {
@@ -708,9 +846,12 @@ impl ExportPipeline {
             index,
             index + 1,
         )?;
+        tracing::trace!(frame = index, bytes = pixels.len(), "pushing a video frame");
+        self.wait_for_room(&self.video_src, "video", pixels.len() as u64)?;
         self.video_src
             .push_buffer(buffer)
             .map_err(|flow| self.push_failed("video", flow))?;
+        tracing::trace!(frame = index, "the video branch took the frame");
         self.video_frames += 1;
         Ok(())
     }
@@ -721,7 +862,8 @@ impl ExportPipeline {
     ///
     /// - [`codes::INVALID_SETTINGS`] when the export has no audio stream or
     ///   `samples` is not a whole number of interleaved frames.
-    /// - [`codes::PUSH_FAILED`] when the pipeline will not take it.
+    /// - [`codes::PIPELINE_FAILED`], [`codes::EXPORT_TIMEOUT`] and
+    ///   [`codes::PUSH_FAILED`], as [`ExportPipeline::push_video_frame`].
     pub fn push_audio(&mut self, samples: &[f32]) -> SubResult<()> {
         let channels = usize::from(self.settings.channels);
         let Some(src) = self.audio_src.as_ref() else {
@@ -748,6 +890,7 @@ impl ExportPipeline {
         for sample in samples {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
+        let bytes_len = bytes.len() as u64;
         let buffer = timed_buffer(
             bytes,
             start,
@@ -755,8 +898,11 @@ impl ExportPipeline {
             self.audio_frames,
             self.audio_frames + frames,
         )?;
+        tracing::trace!(from = self.audio_frames, frames, "pushing audio frames");
+        self.wait_for_room(src, "audio", bytes_len)?;
         src.push_buffer(buffer)
             .map_err(|flow| self.push_failed("audio", flow))?;
+        tracing::trace!(from = self.audio_frames, frames, "the audio branch took them");
         self.audio_frames += frames;
         Ok(())
     }
@@ -848,6 +994,63 @@ impl ExportPipeline {
                 "the export pipeline posted something other than end of stream",
             )),
         }
+    }
+
+    /// Waits until `src` has room for `bytes`, or says why it never will.
+    ///
+    /// This is the export's back-pressure, and it is the exporter's rather
+    /// than `appsrc`'s on purpose (TASK-146). A branch stops draining for two
+    /// very different reasons — an encoder that is busy, and an encoder that
+    /// has failed — and only the bus can tell them apart. `appsrc`'s own
+    /// blocking push cannot read the bus, so a failure there is a stall that
+    /// never ends; here the bus is read on every slice, so a failed element
+    /// becomes the error it posted, a branch that is merely slow is waited
+    /// for, and a branch that is stuck for no stated reason ends the export
+    /// with [`codes::EXPORT_TIMEOUT`] instead of hanging the caller.
+    ///
+    /// A buffer larger than the whole queue is let through when the queue is
+    /// empty: a canvas whose frame does not fit the cap must still export.
+    fn wait_for_room(&self, src: &AppSrc, stream: &'static str, bytes: u64) -> SubResult<()> {
+        let deadline = Instant::now() + self.push_timeout;
+        loop {
+            let queued = src.current_level_bytes();
+            if queued == 0 || queued.saturating_add(bytes) <= src.max_bytes() {
+                return Ok(());
+            }
+            if let Some(error) = self.bus_error() {
+                return Err(error
+                    .with_detail("stream", stream)
+                    .with_detail("path", self.path.display().to_string()));
+            }
+            if Instant::now() >= deadline {
+                return Err(SubError::new(
+                    codes::EXPORT_TIMEOUT,
+                    format!("the export's {stream} branch stopped taking buffers"),
+                )
+                .with_detail("stream", stream)
+                .with_detail("video_encoder", self.elements.video_encoder.clone())
+                .with_detail("audio_encoder", self.elements.audio_encoder.clone())
+                .with_detail("queued_bytes", queued)
+                .with_detail("timeout_seconds", self.push_timeout.as_secs())
+                .with_detail("path", self.path.display().to_string()));
+            }
+            std::thread::sleep(PUSH_POLL);
+        }
+    }
+
+    /// The first error on the bus, as the error the export reports.
+    fn bus_error(&self) -> Option<SubError> {
+        let bus = self.pipeline.bus()?;
+        while let Some(message) = bus.pop_filtered(&[gst::MessageType::Error]) {
+            if let gst::MessageView::Error(err) = message.view() {
+                return Some(element_error(
+                    codes::PIPELINE_FAILED,
+                    "the export pipeline failed",
+                    err,
+                ));
+            }
+        }
+        None
     }
 
     /// The error a refused push turns into, enriched with whatever the bus
@@ -1024,7 +1227,10 @@ pub fn export_with(
     pipeline.finish()
 }
 
-/// Builds `appsrc ! videoconvert ! encoder ! parser ! muxer`.
+/// Builds `appsrc ! videoconvert ! capsfilter ! encoder ! parser ! muxer`.
+///
+/// The `capsfilter` is what makes `videoconvert` do the colour conversion
+/// rather than the encoder; see [`encoder_input_caps`].
 fn build_video_branch(
     pipeline: &gst::Pipeline,
     muxer: &gst::Element,
@@ -1034,7 +1240,13 @@ fn build_video_branch(
     let src = make_element("appsrc")?;
     let convert = make_element("videoconvert")?;
     let encoder = make_coded_element(&elements.video_encoder, codes::ENCODER_UNAVAILABLE)?;
-    let mut chain = vec![src.clone(), convert, encoder];
+    let mut chain = vec![src.clone(), convert];
+    if let Some(caps) = encoder_input_caps(&elements.video_encoder) {
+        let filter = make_element("capsfilter")?;
+        filter.set_property("caps", &caps);
+        chain.push(filter);
+    }
+    chain.push(encoder);
     let parser = video_parser(settings.video_codec);
     if element_is_usable(parser) {
         chain.push(make_element(parser)?);
@@ -1045,8 +1257,59 @@ fn build_video_branch(
         .downcast::<AppSrc>()
         .map_err(|_| SubError::new(codes::PIPELINE_FAILED, "appsrc has the wrong type"))?;
     src.set_caps(Some(&video_caps(settings)));
-    configure_appsrc(&src);
+    configure_appsrc(&src, video_queue_bytes(settings));
     Ok(src)
+}
+
+/// The planar formats an export asks its video encoder for, best first.
+///
+/// Every codec this exporter targets is encoded from one of these, and every
+/// encoder in the catalogue takes at least one of them.
+const ENCODER_FORMATS: [&str; 2] = ["NV12", "I420"];
+
+/// What the video branch pins between `videoconvert` and `name`, if anything.
+///
+/// The compositor reads back RGBA and several hardware encoders advertise RGBA
+/// on their sink pad, so without this `videoconvert` hands the encoder RGBA
+/// and the encoder does the colour conversion itself — down a vendor path that
+/// is not the one anybody tests. On the Windows NVENC build that path cannot
+/// even open an encode session: `nvh264enc` answers
+/// `NV_ENC_ERR_INVALID_VERSION` and rejects the caps, while the very same
+/// element encodes NV12 on the same machine (TASK-146). Pinning a planar
+/// format puts the conversion in `videoconvert`, where it is one known step on
+/// every platform.
+///
+/// The caps are the intersection of [`ENCODER_FORMATS`] with what the encoder
+/// actually accepts, so an encoder that takes neither is left to negotiate as
+/// it always did rather than being made unlinkable.
+fn encoder_input_caps(name: &str) -> Option<gst::Caps> {
+    let factory = gst::ElementFactory::find(name)?;
+    let accepted = factory
+        .static_pad_templates()
+        .into_iter()
+        .find(|template| template.direction() == gst::PadDirection::Sink)
+        .map(|template| template.caps())?;
+    let wanted = gst::Caps::builder("video/x-raw")
+        .field("format", gst::List::new(ENCODER_FORMATS))
+        .build();
+    let common = wanted.intersect(&accepted);
+    (!common.is_empty()).then(|| {
+        // The intersection carries whatever else the template says — widths,
+        // features, memory kinds. Only the format is being chosen here, so the
+        // filter is rebuilt from the formats that survived.
+        let formats: Vec<&str> = ENCODER_FORMATS
+            .into_iter()
+            .filter(|format| {
+                let one = gst::Caps::builder("video/x-raw")
+                    .field("format", *format)
+                    .build();
+                !one.intersect(&accepted).is_empty()
+            })
+            .collect();
+        gst::Caps::builder("video/x-raw")
+            .field("format", gst::List::new(formats))
+            .build()
+    })
 }
 
 /// Builds `appsrc ! audioconvert ! audioresample ! encoder ! parser ! muxer`.
@@ -1071,7 +1334,7 @@ fn build_audio_branch(
         .downcast::<AppSrc>()
         .map_err(|_| SubError::new(codes::PIPELINE_FAILED, "appsrc has the wrong type"))?;
     src.set_caps(Some(&audio_caps(settings)));
-    configure_appsrc(&src);
+    configure_appsrc(&src, APPSRC_MAX_BYTES);
     Ok(src)
 }
 
@@ -1131,13 +1394,20 @@ fn audio_caps(settings: &ExportSettings) -> gst::Caps {
 }
 
 /// The shared `appsrc` configuration: timestamps come from the buffers the
-/// exporter stamps, the source is not live, and a full queue blocks the push
-/// instead of growing without bound.
-fn configure_appsrc(src: &AppSrc) {
+/// exporter stamps, the source is not live, and the queue is capped so a
+/// branch cannot grow without bound.
+///
+/// `block` is deliberately **off**. `appsrc`'s own blocking push waits on a
+/// condition variable that only a flush or a state change wakes, so a branch
+/// that stops draining — an encoder that cannot open a session and rejects the
+/// caps, a muxer waiting for a stream that is not coming — stops the export
+/// dead with the failure sitting unread on the bus (TASK-146). The exporter
+/// waits for room itself instead, in slices, reading the bus between them.
+fn configure_appsrc(src: &AppSrc, max_bytes: u64) {
     src.set_format(gst::Format::Time);
     src.set_is_live(false);
-    src.set_property("block", true);
-    src.set_max_bytes(APPSRC_MAX_BYTES);
+    src.set_property("block", false);
+    src.set_max_bytes(max_bytes);
     src.set_do_timestamp(false);
     src.set_property_from_str("stream-type", "stream");
 }
@@ -1172,7 +1442,8 @@ fn pipeline_error(message: &str, source: &dyn std::error::Error) -> SubError {
 mod tests {
     use super::{
         AUDIO_CODECS, AudioCodec, AudioFrameSource, CONTAINERS, Container, ExportSettings,
-        PcmAudioSource, SolidFrames, VideoFrameSource, audio_nanos, video_parser,
+        PcmAudioSource, SolidFrames, VideoFrameSource, audio_nanos, element_is_usable, gst,
+        video_parser,
     };
     use sub_time::Rational;
 
@@ -1314,6 +1585,43 @@ mod tests {
         let duration = settings.duration(48);
         assert_eq!(duration.value(), 48);
         assert_eq!(duration.rate(), Rational::FPS_23_976);
+    }
+
+    #[test]
+    fn a_video_encoder_is_asked_for_a_planar_format_rather_than_rgba() {
+        if gst::init().is_err() || !element_is_usable("x264enc") {
+            eprintln!("skipping: no GStreamer or no x264enc here");
+            return;
+        }
+        let caps = super::encoder_input_caps("x264enc").expect("x264enc takes a planar format");
+        let text = caps.to_string();
+        assert!(text.contains("video/x-raw"), "{text}");
+        assert!(
+            text.contains("NV12") || text.contains("I420"),
+            "the filter names the planar formats: {text}"
+        );
+        assert!(
+            !text.contains("RGBA"),
+            "RGBA is exactly what the filter keeps out: {text}"
+        );
+    }
+
+    #[test]
+    fn an_element_that_takes_no_planar_video_is_left_to_negotiate() {
+        if gst::init().is_err() {
+            eprintln!("skipping: no GStreamer here");
+            return;
+        }
+        assert!(
+            super::encoder_input_caps("does-not-exist-at-all").is_none(),
+            "an element that is not installed pins nothing"
+        );
+        if element_is_usable("opusenc") {
+            assert!(
+                super::encoder_input_caps("opusenc").is_none(),
+                "an audio element takes no raw video, so nothing is pinned"
+            );
+        }
     }
 
     #[test]

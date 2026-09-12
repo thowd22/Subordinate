@@ -1236,15 +1236,39 @@ does:
   project that has already changed (run 34672010010). Every picture in the MCP
   flow is therefore taken after `session.nudge()`, a pointer move that changes
   nothing.
-* **A Windows export of the 4K60 clip stalls after one frame.** The pipeline
-  starts and names its encoder (`nvh264enc`), the decoder is plugged, one frame
-  is written and then nothing moves - with the editor open or closed, through
-  the bridge or through the GUI's own Export button, and with the Direct3D
-  decoders ranked out in favour of NVDEC (runs 34672165182, 34673633121,
-  34674794109 and 34682198476). The same project renders in seconds on the
-  Linux desktop runner. Both Windows flows therefore fail at their export step,
-  with the screenshot and the editor's log attached; everything before it -
-  every edit, every gesture, every assertion - passes.
+* **A Windows export of the 4K60 clip used to stall after one frame** (runs
+  34672165182, 34673633121, 34674794109, 34682198476), and what was really
+  happening is worth keeping (TASK-146, runs 34689029628 to 34699837364):
+
+  * `nvh264enc` could not open an encode session at all. It reached `READY`,
+    was given caps, answered `NV_ENC_ERR_INVALID_VERSION` to
+    `NvEncOpenEncodeSessionEx`, rejected the caps and put `not-negotiated` on
+    the bus - **and the export never looked at the bus**. `appsrc`'s blocking
+    push waits on a condition variable that only a flush wakes, so the render
+    wrote one frame, held the sixth push for the rest of the job, and reported
+    neither an error nor a file. That is the stall, and it was ours: the
+    exporter now waits for room itself, in slices, reading the bus between
+    them, so a failed element becomes the error it posted and a branch that
+    stops for no stated reason ends the export with `export.timeout`.
+  * The NVENC failure itself is not ours and is not the decoder, the wgpu
+    backend, the RGBA readback or the encoder probe - each was ruled out on the
+    runner. `gst-launch-1.0 videotestsrc ! nvh264enc` encodes 1920x1080 on that
+    machine, in RGBA or NV12, alongside NVDEC, twice in one process; and
+    `subordinate-cli` encodes 640x480 with the same element and then cannot
+    open a session for 1920x1080 two seconds later. All three NVENC families
+    behave the same way - `nvh264enc`, `nvd3d11h264enc`, `nvautogpuh264enc` -
+    and the Direct3D ones are ranked `NONE` on that image anyway.
+  * `mfh264enc` - Media Foundation, which on an NVIDIA GPU is NVENC behind a
+    different API - exports the 1080p canvas at 32 fps, and is what the
+    automatic order now picks there. It takes about twenty frames of a 4K
+    canvas and then stops taking buffers, which is now an `export.timeout`
+    rather than a hang.
+  * So the readiness probe was answering the wrong question. It drove each
+    element to `READY`, which a hardware encoder reaches long before it opens a
+    session. It now encodes a real frame, and the encoder an export is about to
+    plug encodes one frame of the *export's own canvas* before the pipeline is
+    built - a small frame is not the question either. A pinned encoder that
+    cannot is refused by name and reason; the automatic order walks on.
 * **The editor's endpoint does not serve `export.*`.** Only
   `subordinate-cli serve` installs the host-backed families
   (`docs/schema/host-api.json`); the editor serves the engine's own methods and
@@ -1316,7 +1340,7 @@ criteria are proved (TASK-116). It runs on `workflow_dispatch` and once a night
 at 04:30 UTC, and never on a push or a pull request: the NVIDIA job costs
 money and `box` is a machine in someone's home.
 
-Four jobs:
+Six jobs:
 
 | Job | Runner | Cost | What it proves |
 | --- | --- | --- | --- |
@@ -1324,6 +1348,17 @@ Four jobs:
 | `nvidia-linux` | RunsOn `gpu-nvidia-linux` | about 0.04 USD | NVENC render, 4K hardware-decode scrub, 1080p compositor readback |
 | `amd-linux` | self-hosted `box` | free | the same through VA-API (`vah264enc`, `vah264dec`) |
 | `popout-two-output-linux` | self-hosted `box` | free | the pop-out viewer as a real OS window on a second output, drawn by RADV (TASK-118) |
+| `build-windows` | hosted `windows-latest` | free | builds `subordinate-cli` (debug) and uploads it as `hardware-windows-binaries` |
+| `nvidia-windows` | RunsOn `gpu-nvidia-windows` | about 0.15 USD | exports the baked 4K60 three-audio-track clip: to a 1080p canvas on whichever encoder the machine can really use, and to its own 4K60 canvas with the three audio tracks mixed in (TASK-146) |
+
+The Windows job fetches the clip from the private test-media bucket with the
+RunsOn instance role (no credentials are configured; the bucket policy names
+that role, TASK-140) and builds its projects with
+`scripts/make-test-project.py`, which is how a GPU job with no window and no
+bridge gets a project to render. Its UHD step pins `x264enc` deliberately: the
+export path is what that step checks, and no hardware encoder on that image can
+carry a 4K canvas - a following step tries the automatic order anyway, never
+fatally, so the day one can the log says so.
 
 Nothing is compiled on the GPU instance. A cold `cargo build -p
 subordinate-cli` there took 10m52s on 4 vCPU and burned the whole job budget

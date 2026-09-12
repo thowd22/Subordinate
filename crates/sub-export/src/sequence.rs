@@ -324,9 +324,20 @@ impl SequenceFrames {
                 entry.insert(Decoder::open_with(&path, options)?)
             }
         };
+        tracing::trace!(
+            clip = %layer.clip_id(),
+            source_time = %layer.source_time,
+            "decoding an export layer"
+        );
         let Some(picture) = decoder.seek_to(layer.source_time)? else {
             return Ok(None);
         };
+        tracing::trace!(
+            clip = %layer.clip_id(),
+            width = picture.width(),
+            height = picture.height(),
+            "decoded an export layer"
+        );
         let geometry = Nv12Geometry::new(
             picture.width(),
             picture.height(),
@@ -365,7 +376,16 @@ impl VideoFrameSource for SequenceFrames {
             )
         })?;
         let time = RationalTime::new(self.span.start + offset, self.sequence.settings.frame_rate);
+        // Debug rather than trace: one line a frame either side of the
+        // composite is what tells a stalled decode apart from a stalled
+        // readback in a log taken off a runner.
+        tracing::debug!(frame = self.index, time = %time, "compositing an export frame");
         self.pixels = self.composite(time)?;
+        tracing::debug!(
+            frame = self.index,
+            bytes = self.pixels.len(),
+            "composited an export frame"
+        );
         self.index += 1;
         Ok(Some(&self.pixels))
     }
@@ -429,7 +449,13 @@ impl SequenceAudio {
     /// the mixer raise.
     pub fn render(&mut self) -> SubResult<&mut PcmAudioSource> {
         if self.rendered.is_none() {
-            self.rendered = Some(self.mix()?);
+            // The whole span is decoded, resampled and mixed here, on the
+            // first read: minutes of work for a long export, and the one place
+            // an export looks stalled while it is only busy.
+            tracing::debug!(span = ?self.span, "mixing the export's audio");
+            let mix = self.mix()?;
+            tracing::debug!(samples = mix.remaining(), "mixed the export's audio");
+            self.rendered = Some(mix);
         }
         Ok(self
             .rendered
