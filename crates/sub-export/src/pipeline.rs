@@ -708,9 +708,11 @@ impl ExportPipeline {
             index,
             index + 1,
         )?;
+        tracing::trace!(frame = index, bytes = pixels.len(), "pushing a video frame");
         self.video_src
             .push_buffer(buffer)
             .map_err(|flow| self.push_failed("video", flow))?;
+        tracing::trace!(frame = index, "the video branch took the frame");
         self.video_frames += 1;
         Ok(())
     }
@@ -755,8 +757,10 @@ impl ExportPipeline {
             self.audio_frames,
             self.audio_frames + frames,
         )?;
+        tracing::trace!(from = self.audio_frames, frames, "pushing audio frames");
         src.push_buffer(buffer)
             .map_err(|flow| self.push_failed("audio", flow))?;
+        tracing::trace!(from = self.audio_frames, frames, "the audio branch took them");
         self.audio_frames += frames;
         Ok(())
     }

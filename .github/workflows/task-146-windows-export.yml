@@ -1,0 +1,274 @@
+name: TEMP TASK-146 Windows export stall
+
+# TEMPORARY. Reproduces the NVENC export stall of TASK-146 on a plain
+# gpu-nvidia-windows runner, with the logs that say where it stalls. Removed
+# before the task finishes; the lasting coverage is the hardware workflow.
+
+on:
+  push:
+    branches: [task/task-146]
+  workflow_dispatch:
+
+concurrency:
+  group: task-146-windows
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  GST_VERSION: "1.28.6"
+  MEDIA_BUCKET: subordinate-test-media-731537225673
+  MEDIA_KEY: meld-4k60-excerpt-2min.mkv
+
+jobs:
+  build:
+    name: Build the CLI (hosted Windows)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-windows-latest
+          prefix-key: v1-rust
+          save-if: false
+          cache-workspace-crates: true
+
+      - name: Exclude build directories from Windows Defender
+        shell: pwsh
+        run: |
+          foreach ($p in @("${{ github.workspace }}", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup")) {
+            try { Add-MpPreference -ExclusionPath $p -ErrorAction Stop } catch { "could not exclude $p" }
+          }
+
+      - name: Install GStreamer (Windows, official installer)
+        shell: pwsh
+        run: |
+          $ver = $env:GST_VERSION
+          $exe = "gstreamer-1.0-msvc-x86_64-$ver.exe"
+          $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc/$exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          $dir = "C:\gstreamer\1.0\msvc_x86_64"
+          Start-Process -Wait -FilePath ".\$exe" -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/TYPE=devel","/ALLUSERS","/DIR=$dir"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$dir\lib\pkgconfig" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      # Debug, as hardware.yml builds it: the render is encoder-bound and a
+      # release build drags thin-LTO wasmtime through for nothing.
+      - name: Build subordinate-cli
+        run: cargo build -p subordinate-cli
+
+      # Catches a bad project document on a free runner rather than on the GPU
+      # one, and is itself the software-encoder half of the same render.
+      - name: Render a small project on this runner
+        shell: pwsh
+        timeout-minutes: 12
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = "$env:RUNNER_TEMP\hosted"
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          gst-launch-1.0 matroskamux name=mux "!" filesink location="$work/clip.mkv" `
+            videotestsrc num-buffers=180 "!" "video/x-raw,width=1280,height=720,framerate=60/1" `
+            "!" videoconvert "!" x264enc bitrate=4000 key-int-max=30 "!" h264parse "!" mux. `
+            audiotestsrc num-buffers=180 "!" audioconvert "!" avenc_aac "!" mux.
+          if ($LASTEXITCODE -ne 0) { throw "could not make the test clip ($LASTEXITCODE)" }
+          python scripts/make-test-project.py --cli target/debug/subordinate-cli.exe `
+            --media "$work\clip.mkv" --out "$work\hosted.sub" `
+            --resolution 1280x720 --frame-rate 60 --audio-tracks 3 --frames 120
+          & target/debug/subordinate-cli.exe inspect "$work\hosted.sub" | Out-Null
+          $env:SUBORDINATE_LOG = 'info,sub_export=debug'
+          & target/debug/subordinate-cli.exe render "$work\hosted.sub" --preset youtube-1080p `
+            --out "$work\hosted.mp4" --range 0:48 --encoder x264enc --verify --pretty
+          if ($LASTEXITCODE -ne 0) { throw "hosted render failed ($LASTEXITCODE)" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-windows-${{ github.run_id }}
+          path: target/debug/subordinate-cli.exe
+          retention-days: 3
+
+  windows-gpu:
+    name: NVIDIA T4 (g4dn.xlarge, Windows Server 2022)
+    needs: build
+    runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-windows
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-windows-${{ github.run_id }}
+          path: bin
+
+      - name: Install NVIDIA driver (AWS public bucket, no reboot)
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bucket = "https://ec2-windows-nvidia-drivers.s3.amazonaws.com"
+          [xml]$list = (Invoke-WebRequest -UseBasicParsing "$bucket/?list-type=2&prefix=latest/").Content
+          $key = $list.ListBucketResult.Contents |
+                 Where-Object { $_.Key -like "*.exe" } |
+                 Sort-Object Key -Descending | Select-Object -First 1 -ExpandProperty Key
+          if (-not $key) { throw "no .exe under s3://ec2-windows-nvidia-drivers/latest/" }
+          $exe = Join-Path $env:RUNNER_TEMP (Split-Path $key -Leaf)
+          curl.exe -sS -L -o "$exe" "$bucket/$key"
+          if ($LASTEXITCODE -ne 0) { throw "driver download failed ($LASTEXITCODE)" }
+          $p = Start-Process -Wait -PassThru -FilePath $exe -ArgumentList "-s","-n"
+          if ($p.ExitCode -notin 0,1,1641,3010) { throw "driver install failed ($($p.ExitCode))" }
+          & "$env:SystemRoot\System32\nvidia-smi.exe"
+
+      - name: Install GStreamer (Windows, official installer)
+        run: |
+          $ver = $env:GST_VERSION
+          $exe = "gstreamer-1.0-msvc-x86_64-$ver.exe"
+          $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc/$exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          $dir = "C:\gstreamer\1.0\msvc_x86_64"
+          Start-Process -Wait -FilePath ".\$exe" -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/TYPE=runtime","/ALLUSERS","/DIR=$dir"
+          "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      # The bucket policy names the RunsOn instance role, so no credentials are
+      # configured here: the instance profile is the identity (TASK-140).
+      - name: Fetch the 4K60 excerpt from S3
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path C:\SubordinateTest | Out-Null
+          $aws = 'C:\Program Files\Amazon\AWSCLIV2\aws.exe'
+          if (-not (Test-Path $aws)) { $aws = (Get-Command aws.exe -ErrorAction SilentlyContinue).Source }
+          if (-not $aws) { throw "no AWS CLI on this image" }
+          & $aws s3 cp "s3://$env:MEDIA_BUCKET/$env:MEDIA_KEY" "C:\SubordinateTest\$env:MEDIA_KEY" --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "could not fetch the clip ($LASTEXITCODE)" }
+          Get-Item "C:\SubordinateTest\$env:MEDIA_KEY" | Format-List Name, Length
+
+      - name: What the machine and the clip are
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $out = "$env:RUNNER_TEMP\probe"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          gst-inspect-1.0 --version
+          foreach ($e in @("nvh264enc","nvh264dec","d3d11h264dec","d3d12h264dec","x264enc","mfh264enc","avdec_h264","avenc_aac")) {
+            gst-inspect-1.0 --exists $e
+            if ($LASTEXITCODE -eq 0) { "present  $e" } else { "absent   $e" }
+          }
+          & .\bin\subordinate-cli.exe diag --pretty 2>&1 | Tee-Object "$out\diag.json"
+          gst-discoverer-1.0 "C:\SubordinateTest\$env:MEDIA_KEY" 2>&1 | Tee-Object "$out\discoverer.txt"
+
+      - name: Build the render projects
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $media = "C:\SubordinateTest\$env:MEDIA_KEY"
+          $cli = (Resolve-Path .\bin\subordinate-cli.exe).Path
+          $python = (Get-Command python -ErrorAction SilentlyContinue).Source
+          if (-not $python) { $python = (Get-Command py -ErrorAction SilentlyContinue).Source }
+          if (-not $python) { throw "no Python on this image" }
+          & $python --version
+          # As the desktop flow's project is: the starter canvas (1080p24) and
+          # one video clip, no audio clip at all.
+          & $python scripts/make-test-project.py --cli $cli --media $media `
+            --out C:\SubordinateTest\flow-like.sub --frames 2880
+          # What the task asks for: the source's own canvas and three audio
+          # tracks over the same file.
+          & $python scripts/make-test-project.py --cli $cli --media $media `
+            --out C:\SubordinateTest\uhd-3audio.sub --resolution 3840x2160 `
+            --frame-rate 60 --audio-tracks 3 --frames 7200
+
+      - name: Render experiments
+        continue-on-error: true
+        timeout-minutes: 40
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $out = "$env:RUNNER_TEMP\probe"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $cli = (Resolve-Path .\bin\subordinate-cli.exe).Path
+
+          function Probe([string]$name, [string]$exe, [string[]]$argv, [hashtable]$vars, [int]$seconds) {
+            "::group::$name"
+            foreach ($k in $vars.Keys) { Set-Item -Path "env:$k" -Value $vars[$k] }
+            $log = "$out\$name.log"
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $p = Start-Process -PassThru -NoNewWindow -FilePath $exe -ArgumentList $argv `
+                   -RedirectStandardError "$log.err" -RedirectStandardOutput "$log.out"
+            if (-not $p.WaitForExit($seconds * 1000)) {
+              try { $p.Kill($true) } catch { }
+              "::warning::$name STALLED after $seconds s"
+              $verdict = "STALLED"
+            } else {
+              $verdict = "exit=$($p.ExitCode)"
+            }
+            $sw.Stop()
+            Get-Content "$log.err" -Tail 60 -ErrorAction SilentlyContinue
+            Get-Content "$log.out" -Tail 20 -ErrorAction SilentlyContinue
+            "$name : $verdict in {0:N0}s" -f $sw.Elapsed.TotalSeconds
+            foreach ($k in $vars.Keys) { Remove-Item -Path "env:$k" -ErrorAction SilentlyContinue }
+            "::endgroup::"
+          }
+
+          $media = "C:\SubordinateTest\$env:MEDIA_KEY"
+          $trace = 'info,sub_export=trace,sub_media=debug,sub_render=debug'
+
+          # 1. NVENC on its own, nothing of ours involved.
+          Probe "gst-nvenc-only" "gst-launch-1.0" @(
+            "videotestsrc","num-buffers=48","!","video/x-raw,width=1920,height=1080,framerate=24/1",
+            "!","videoconvert","!","nvh264enc","!","h264parse","!","mp4mux","!",
+            "filesink","location=$out/nvenc-only.mp4") @{ GST_DEBUG = "2" } 120
+
+          # 2. The clip decoded by NVDEC on its own.
+          Probe "gst-nvdec-only" "gst-launch-1.0" @(
+            "filesrc","location=$media","!","matroskademux","name=d","d.video_0","!",
+            "h264parse","!","nvh264dec","!","identity","eos-after=300","!","fakesink"
+            ) @{ GST_DEBUG = "2" } 180
+
+          # 3. The failing case: the flow's own project, 1080p24 canvas over the
+          #    4K60 source, video only, NVENC.
+          Probe "render-flowlike-nvenc" $cli @(
+            "render","C:\SubordinateTest\flow-like.sub","--preset","youtube-1080p",
+            "--out","$out\flow-like-nvenc.mp4","--range","0:48","--encoder","nvh264enc"
+            ) @{ SUBORDINATE_LOG = $trace; GST_DEBUG = "3,appsrc:6,nvh264enc:5,nvh264dec:5,nvdec:5,cudaupload:5,mp4mux:5,qtmux:5,videoconvert:4"; GST_DEBUG_FILE = "$out\render-flowlike-nvenc.gst.log"; GST_DEBUG_NO_COLOR = "1" } 240
+
+          # 4. The same render with a software encoder: NVENC or not?
+          Probe "render-flowlike-x264" $cli @(
+            "render","C:\SubordinateTest\flow-like.sub","--preset","youtube-1080p",
+            "--out","$out\flow-like-x264.mp4","--range","0:48","--encoder","x264enc"
+            ) @{ SUBORDINATE_LOG = $trace; GST_DEBUG = "3,appsrc:6,x264enc:5,mp4mux:5"; GST_DEBUG_FILE = "$out\render-flowlike-x264.gst.log"; GST_DEBUG_NO_COLOR = "1" } 240
+
+          # 5. The same again with the Direct3D decoders ranked out, which is
+          #    what the desktop flow's console session does.
+          Probe "render-flowlike-nvenc-ranked" $cli @(
+            "render","C:\SubordinateTest\flow-like.sub","--preset","youtube-1080p",
+            "--out","$out\flow-like-ranked.mp4","--range","0:48","--encoder","nvh264enc"
+            ) @{ SUBORDINATE_LOG = $trace; GST_PLUGIN_FEATURE_RANK = "d3d11h264dec:0,d3d12h264dec:0,d3d11h265dec:0,d3d12h265dec:0"; GST_DEBUG = "3,appsrc:6,nvh264enc:5,nvh264dec:5,mp4mux:5"; GST_DEBUG_FILE = "$out\render-flowlike-ranked.gst.log"; GST_DEBUG_NO_COLOR = "1" } 240
+
+          # 6. What the task asks for: 4K60 canvas, three audio tracks, NVENC.
+          Probe "render-uhd-3audio-nvenc" $cli @(
+            "render","C:\SubordinateTest\uhd-3audio.sub","--preset","youtube-1080p",
+            "--out","$out\uhd-3audio.mp4","--range","0:48","--encoder","nvh264enc","--verify"
+            ) @{ SUBORDINATE_LOG = $trace; GST_DEBUG = "3,appsrc:6,nvh264enc:5,nvh264dec:5,mp4mux:5,avenc_aac:5,audioconvert:4"; GST_DEBUG_FILE = "$out\render-uhd-3audio.gst.log"; GST_DEBUG_NO_COLOR = "1" } 420
+
+      - name: Trim the GStreamer logs
+        if: always()
+        continue-on-error: true
+        run: |
+          $out = "$env:RUNNER_TEMP\probe"
+          foreach ($f in Get-ChildItem "$out\*.gst.log" -ErrorAction SilentlyContinue) {
+            "{0}  {1:N1} MB" -f $f.Name, ($f.Length / 1MB)
+            if ($f.Length -gt 40MB) {
+              $head = Get-Content $f.FullName -TotalCount 20000
+              $tail = Get-Content $f.FullName -Tail 20000
+              Set-Content "$($f.FullName).trimmed" ($head + @("...TRIMMED...") + $tail)
+              Remove-Item $f.FullName
+            }
+          }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: task-146-probe-${{ github.run_id }}
+          path: ${{ runner.temp }}/probe
+          retention-days: 5
