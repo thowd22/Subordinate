@@ -208,21 +208,26 @@ jobs:
       # comes back is the one they produced, while the editor window is up on
       # :0 beside it.
       #
-      # `project.new` alone cannot demonstrate a read: the project it creates
-      # is empty, so `timeline.get_state` on it fails - correctly - with
-      # `core.invalid_argument: the project has no sequences` (verified, run
-      # 34661369585). The new project is therefore opened over with the
-      # committed sample project, which has one, and that is what is read back.
+      # `project.new` on its own cannot demonstrate a read: the project it
+      # creates is empty, and `timeline.get_state` then fails - correctly -
+      # with `the project has no sequences` (run 34661369585). Opening the
+      # committed sample project instead fails just as correctly with `the
+      # project has more than one sequence, so one must be named` (run
+      # 34663392571). So the chain makes exactly one sequence and reads that
+      # one: new project, create a sequence in it, read the timeline back.
       - name: MCP round-trip while the window is up
         run: |
           set -o pipefail
           out="${{ steps.editor.outputs.out }}"
-          project="$PWD/crates/sub-model/tests/fixtures/sample-project.sub"
+          settings='{"resolution":{"width":1920,"height":1080},'
+          settings+='"frame_rate":{"numerator":24000,"denominator":1001},'
+          settings+='"sample_rate":48000,'
+          settings+='"color":{"space":"rec709","transfer":"bt709","primaries":"bt709"}}'
           # timeout, because a stdio bridge that never answers would otherwise
           # hold a GPU instance open until the job's own 30-minute limit.
           timeout 180 python3 scripts/mcp-roundtrip.py --mcp /usr/local/bin/subordinate-mcp \
             'project.new={"name":"Desktop smoke"}' \
-            "project.open={\"path\":\"$project\"}" \
+            "sequence.create={\"name\":\"Main\",\"settings\":$settings}" \
             'timeline.get_state={}' \
             | tee "$out/mcp.txt"
           grep -q '^timeline.get_state: ' "$out/mcp.txt"
