@@ -240,6 +240,13 @@ struct ClipPreview {
     view: Option<wgpu::TextureView>,
     /// Whether the worker has reached the end of the file for this position.
     eos: bool,
+    /// Whether the picture that answered the current target landed past it.
+    ///
+    /// The worker only walks forwards, so once it has handed over a picture
+    /// later than the frame asked for, no amount of polling will produce that
+    /// frame: only the next target's seek can go back for it. Cleared
+    /// whenever the target changes.
+    overshot: bool,
     /// Pictures popped that the playhead had already passed.
     skipped: u64,
     /// Which pass over the layers last wanted this clip, for eviction.
@@ -259,6 +266,7 @@ impl ClipPreview {
             converter: None,
             view: None,
             eos: false,
+            overshot: false,
             skipped: 0,
             last_seen: seen,
         }
@@ -281,6 +289,9 @@ impl ClipPreview {
             return Ok(());
         }
         self.wanted = Some(frame);
+        // A fresh target: whatever the last one settled for says nothing about
+        // this one, which a seek can still go back for.
+        self.overshot = false;
         let step = plan_step(
             self.current_frame,
             frame,
@@ -329,6 +340,9 @@ impl ClipPreview {
             self.current = Some(picture);
             self.current_frame = landed;
             if reached {
+                // Landing past the target rather than on it is the end of
+                // what this target can be answered with.
+                self.overshot = landed.is_some_and(|frame| frame > wanted);
                 break;
             }
         }
@@ -348,26 +362,18 @@ impl ClipPreview {
     ///
     /// This, not [`Self::on_target`], is what the window waits on. Off target
     /// is not the same thing as *pending*: a worker that has hit the end of
-    /// the file, and one that has already stepped past the frame that was
-    /// asked for, will never deliver that frame however many times they are
-    /// polled. Waiting on those is an unbounded repaint loop — a core burnt in
-    /// the real window, and a harness that never stops painting in a test —
-    /// so what is on screen is taken as the best this clip will show until
-    /// the playhead moves and a fresh seek is posted.
+    /// the file, and one that has already answered this target with a picture
+    /// past it, will never deliver the frame asked for however many times they
+    /// are polled — only the next target's seek can go back for it. Waiting on
+    /// those is an unbounded repaint loop: a core burnt in the real window,
+    /// and a harness that never stops painting in a test.
+    ///
+    /// Being off target is otherwise pending, which is the ordinary case and
+    /// the one that must keep painting: a seek posted for a step backwards
+    /// leaves the picture from *before* the step on screen, ahead of the
+    /// target, until the worker answers.
     const fn pending(&self) -> bool {
-        if self.on_target() {
-            return false;
-        }
-        if self.eos {
-            return false;
-        }
-        match (self.wanted, self.current_frame) {
-            // The decoder walks forwards; a picture past the wanted one only
-            // comes back by seeking, which the next `request` does.
-            (Some(wanted), Some(current)) => current < wanted,
-            // Nothing delivered yet: the ring is still filling.
-            _ => true,
-        }
+        !self.on_target() && !self.eos && !self.overshot
     }
 
     /// Uploads the current picture if it is not already on the GPU, and hands
