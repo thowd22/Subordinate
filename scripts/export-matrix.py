@@ -778,12 +778,17 @@ def one_line(text: str) -> str:
                 document = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            # A SubError prints as {code, message, details, cause}: the code
+            # and message say what the exporter refused, and `cause` carries
+            # the flattened GStreamer error underneath it, which is the half a
+            # bug report needs.
             error = document.get("error", document)
             code = error.get("code", "")
             message = error.get("message", "")
             details = error.get("details", {}) or {}
             reason = details.get("reason") or details.get("detail") or ""
-            joined = " ".join(part for part in (code, message, reason) if part)
+            cause = error.get("cause") or ""
+            joined = " ".join(part for part in (code, message, reason, cause) if part)
             if joined:
                 return joined[:400].replace("|", "/")
     lines = [line.strip() for line in text.splitlines() if line.strip()]

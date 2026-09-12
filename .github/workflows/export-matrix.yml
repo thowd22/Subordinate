@@ -102,7 +102,7 @@ jobs:
   # and hand them over as artifacts, exactly as hardware.yml does.
   build-linux:
     name: Build the Linux CLI (hosted, free)
-    if: inputs.only == '' || inputs.only != 'gui-vs-cli'
+    if: inputs.only != 'gui-vs-cli'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -484,7 +484,10 @@ jobs:
 
   nvidia-windows:
     name: NVIDIA T4 (g4dn.xlarge, Windows Server 2022)
-    if: github.event_name != 'push' && (inputs.only == '' || inputs.only == 'nvidia-windows')  # TEMP TASK-143
+    # TEMP TASK-143: the push guard comes out before this merges.
+    if: >-
+      ${{ !cancelled() && github.event_name != 'push'
+      && (inputs.only == '' || inputs.only == 'nvidia-windows') }}
     # Chained rather than parallel: one g4dn of this workflow's at a time.
     needs: [build-windows, nvidia-linux]
     runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-windows
@@ -591,7 +594,10 @@ jobs:
   # directory emptied at the end whatever happened.
   amd-windows:
     name: AMD RX 9070 XT (yodaddy, self-hosted, Windows 11)
-    if: github.event_name != 'push' && (inputs.only == '' || inputs.only == 'amd-windows')  # TEMP TASK-143
+    # TEMP TASK-143: the push guard comes out before this merges.
+    if: >-
+      ${{ !cancelled() && github.event_name != 'push'
+      && (inputs.only == '' || inputs.only == 'amd-windows') }}
     needs: [build-windows, amd-linux]
     runs-on: [self-hosted, windows, yodaddy, amd-gpu]
     timeout-minutes: 40
@@ -711,7 +717,10 @@ jobs:
   # install would run.
   gui-vs-cli:
     name: GUI export against CLI export (desktop image, Xorg on :0)
-    if: github.event_name != 'push' && (inputs.only == '' || inputs.only == 'gui-vs-cli')  # TEMP TASK-143
+    # TEMP TASK-143: the push guard comes out before this merges.
+    if: >-
+      ${{ !cancelled() && github.event_name != 'push'
+      && (inputs.only == '' || inputs.only == 'gui-vs-cli') }}
     needs: nvidia-windows
     runs-on: runs-on=${{ github.run_id }}/${{ inputs.desktop_runner || 'runner=gpu-nvidia-desktop-linux' }}
     timeout-minutes: 30
