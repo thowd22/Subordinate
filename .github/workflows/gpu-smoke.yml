@@ -106,9 +106,15 @@ jobs:
           systemctl is-active subordinate-xorg.service
           systemctl is-active subordinate-wm.service
           /usr/local/bin/subordinate-wait-for-display
-          xdpyinfo -display :0 | grep -E 'name of display|dimensions|depth of root'
-          xdpyinfo -display :0 | grep -q '1920x1080' \
-            || { echo "::error::the virtual screen is not 1920x1080"; exit 1; }
+          # Captured rather than piped into grep twice: `xdpyinfo | grep -q`
+          # leaves xdpyinfo with a SIGPIPE, which any shell with pipefail on
+          # reports as a failure of a check that actually passed.
+          info=$(xdpyinfo -display :0)
+          echo "$info" | grep -E 'name of display|dimensions|depth of root' || true
+          case "$info" in
+            *1920x1080*) ;;
+            *) echo "::error::the virtual screen is not 1920x1080"; exit 1 ;;
+          esac
 
       # --ui-smoke opens the committed sample project, pops the viewer out and
       # holds both windows up while it prints a ready line naming what it

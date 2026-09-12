@@ -498,8 +498,15 @@ phases:
               done
               export DISPLAY=:0 XAUTHORITY=/run/subordinate/Xauthority
               /usr/local/bin/subordinate-wait-for-display
-              xdpyinfo | grep -E 'dimensions|depth of root'
-              xdpyinfo | grep -q '1920x1080'
+              # Not `xdpyinfo | grep -q`: grep leaves as soon as it matches,
+              # xdpyinfo takes SIGPIPE, and `pipefail` turns that into exit
+              # 141 - a passing check that fails the build.
+              info=$(xdpyinfo)
+              echo "$info" | grep -E 'dimensions|depth of root' || true
+              case "$info" in
+                  *1920x1080*) ;;
+                  *) echo "the virtual screen is not 1920x1080" >&2; exit 1 ;;
+              esac
 
       - name: EditorStarts
         action: ExecuteBash
@@ -517,6 +524,7 @@ phases:
           commands:
             - |
               set -euxo pipefail
-              media=$(ls /opt/subordinate/test-media/* | head -n1)
-              /usr/local/bin/subordinate-gst-discoverer "$media" | tee /tmp/probe.txt
-              grep -qi 'h.26[45]\|video' /tmp/probe.txt
+              media=$(find /opt/subordinate/test-media -type f | head -n1)
+              /usr/local/bin/subordinate-gst-discoverer "$media" >/tmp/probe.txt 2>&1 || true
+              cat /tmp/probe.txt
+              grep -qi 'video' /tmp/probe.txt
