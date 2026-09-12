@@ -210,6 +210,22 @@ fn run_until_settled(harness: &mut Harness<'_, SubordinateApp>) -> u32 {
     }
 }
 
+/// Paints until the window has settled, for a bounded number of frames.
+///
+/// `Harness::run` gives up after four frames with "exceeded max_steps", and a
+/// cold start now asks for more than four: the export panel's encoder probe
+/// instantiates every catalogued encoder and drives it to READY, and that
+/// catalogue grew by six elements when the exporter learned about AV1 and
+/// about Media Foundation's HEVC encoder (TASK-143). Stepping a fixed number
+/// of frames is what `run_until_settled` below already does, for the same
+/// reason: this window legitimately asks to be repainted while work it started
+/// is still running.
+fn settle(harness: &mut Harness<'_, SubordinateApp>) {
+    for _ in 0..30 {
+        harness.step();
+    }
+}
+
 #[test]
 fn the_window_exports_the_sample_project_to_a_playable_file() {
     if !support::can_render() {
@@ -219,7 +235,7 @@ fn the_window_exports_the_sample_project_to_a_playable_file() {
         return;
     };
     let mut harness = app_harness(&path);
-    harness.run();
+    settle(&mut harness);
     let project = harness.state().project().clone();
     if !can_encode(sequence_of(&project)) {
         return;
@@ -376,7 +392,7 @@ fn the_window_and_the_cli_write_the_same_file_for_each_encoder() {
         }
 
         let mut harness = app_harness(&path);
-        harness.run();
+        settle(&mut harness);
         let project = harness.state().project().clone();
         let sequence = sequence_of(&project);
         let id = sequence.id;
