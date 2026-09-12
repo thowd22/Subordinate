@@ -236,7 +236,7 @@ jobs:
           #    4K60 source, video only, NVENC.
           Probe "render-flowlike-nvenc" $cli @(
             "render","C:\SubordinateTest\flow-like.sub","--preset","youtube-1080p",
-            "--out","$out\flow-like-nvenc.mp4","--range","0:48","--encoder","nvh264enc"
+            "--out","$out\flow-like-nvenc.mp4","--range","0:48","--encoder","nvh264enc","--verify"
             ) @{ SUBORDINATE_LOG = $trace; GST_DEBUG = "3,appsrc:6,nvh264enc:5,nvh264dec:5,nvdec:5,cudaupload:5,mp4mux:5,qtmux:5,videoconvert:4"; GST_DEBUG_FILE = "$out\render-flowlike-nvenc.gst.log"; GST_DEBUG_NO_COLOR = "1" } 240
 
           # 4. The same render with a software encoder: NVENC or not?
@@ -253,6 +253,14 @@ jobs:
             "videotestsrc","num-buffers=24","!","video/x-raw,width=1280,height=720,framerate=24/1",
             "!","videoconvert","!","nvh264enc","!","fakesink"
             ) @{ GST_DEBUG = "3,nvencoder:5" } 180
+
+          # 5a. The same encoder fed RGBA rather than NV12, which is what a
+          #     compositor readback is and what the encoder advertises it takes.
+          Probe "gst-nvenc-rgba" "gst-launch-1.0" @(
+            "videotestsrc","num-buffers=24","!",
+            "video/x-raw,format=RGBA,width=1920,height=1080,framerate=24/1",
+            "!","nvh264enc","!","h264parse","!","mp4mux","!",
+            "filesink","location=$outSlash/nvenc-rgba.mp4") @{ GST_DEBUG = "3,nvencoder:5" } 180
 
           # 5b. NVDEC and NVENC in one gst-launch process: does the encode
           #     session fail only when a decoder has already taken CUDA?

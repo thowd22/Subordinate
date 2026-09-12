@@ -1121,7 +1121,10 @@ pub fn export_with(
     pipeline.finish()
 }
 
-/// Builds `appsrc ! videoconvert ! encoder ! parser ! muxer`.
+/// Builds `appsrc ! videoconvert ! capsfilter ! encoder ! parser ! muxer`.
+///
+/// The `capsfilter` is what makes `videoconvert` do the colour conversion
+/// rather than the encoder; see [`encoder_input_caps`].
 fn build_video_branch(
     pipeline: &gst::Pipeline,
     muxer: &gst::Element,
@@ -1131,7 +1134,13 @@ fn build_video_branch(
     let src = make_element("appsrc")?;
     let convert = make_element("videoconvert")?;
     let encoder = make_coded_element(&elements.video_encoder, codes::ENCODER_UNAVAILABLE)?;
-    let mut chain = vec![src.clone(), convert, encoder];
+    let mut chain = vec![src.clone(), convert];
+    if let Some(caps) = encoder_input_caps(&elements.video_encoder) {
+        let filter = make_element("capsfilter")?;
+        filter.set_property("caps", &caps);
+        chain.push(filter);
+    }
+    chain.push(encoder);
     let parser = video_parser(settings.video_codec);
     if element_is_usable(parser) {
         chain.push(make_element(parser)?);
@@ -1144,6 +1153,56 @@ fn build_video_branch(
     src.set_caps(Some(&video_caps(settings)));
     configure_appsrc(&src);
     Ok(src)
+}
+
+/// The planar formats an export asks its video encoder for, best first.
+///
+/// Every codec this exporter targets is encoded from one of these, and every
+/// encoder in the catalogue takes at least one of them.
+const ENCODER_FORMATS: [&str; 2] = ["NV12", "I420"];
+
+/// What the video branch pins between `videoconvert` and `name`, if anything.
+///
+/// The compositor reads back RGBA and several hardware encoders advertise RGBA
+/// on their sink pad, so without this `videoconvert` hands the encoder RGBA
+/// and the encoder does the colour conversion itself — down a vendor path that
+/// is not the one anybody tests. On the Windows NVENC build that path cannot
+/// even open an encode session: `nvh264enc` answers
+/// `NV_ENC_ERR_INVALID_VERSION` and rejects the caps, while the very same
+/// element encodes NV12 on the same machine (TASK-146). Pinning a planar
+/// format puts the conversion in `videoconvert`, where it is one known step on
+/// every platform.
+///
+/// The caps are the intersection of [`ENCODER_FORMATS`] with what the encoder
+/// actually accepts, so an encoder that takes neither is left to negotiate as
+/// it always did rather than being made unlinkable.
+fn encoder_input_caps(name: &str) -> Option<gst::Caps> {
+    let factory = gst::ElementFactory::find(name)?;
+    let accepted = factory
+        .static_pad_templates()
+        .find(|template| template.direction() == gst::PadDirection::Sink)
+        .map(|template| template.caps())?;
+    let wanted = gst::Caps::builder("video/x-raw")
+        .field("format", gst::List::new(ENCODER_FORMATS))
+        .build();
+    let common = wanted.intersect(&accepted);
+    (!common.is_empty()).then(|| {
+        // The intersection carries whatever else the template says — widths,
+        // features, memory kinds. Only the format is being chosen here, so the
+        // filter is rebuilt from the formats that survived.
+        let formats: Vec<&str> = ENCODER_FORMATS
+            .into_iter()
+            .filter(|format| {
+                let one = gst::Caps::builder("video/x-raw")
+                    .field("format", *format)
+                    .build();
+                !one.intersect(&accepted).is_empty()
+            })
+            .collect();
+        gst::Caps::builder("video/x-raw")
+            .field("format", gst::List::new(formats))
+            .build()
+    })
 }
 
 /// Builds `appsrc ! audioconvert ! audioresample ! encoder ! parser ! muxer`.
@@ -1276,7 +1335,8 @@ fn pipeline_error(message: &str, source: &dyn std::error::Error) -> SubError {
 mod tests {
     use super::{
         AUDIO_CODECS, AudioCodec, AudioFrameSource, CONTAINERS, Container, ExportSettings,
-        PcmAudioSource, SolidFrames, VideoFrameSource, audio_nanos, video_parser,
+        PcmAudioSource, SolidFrames, VideoFrameSource, audio_nanos, element_is_usable, gst,
+        video_parser,
     };
     use sub_time::Rational;
 
@@ -1418,6 +1478,43 @@ mod tests {
         let duration = settings.duration(48);
         assert_eq!(duration.value(), 48);
         assert_eq!(duration.rate(), Rational::FPS_23_976);
+    }
+
+    #[test]
+    fn a_video_encoder_is_asked_for_a_planar_format_rather_than_rgba() {
+        if gst::init().is_err() || !element_is_usable("x264enc") {
+            eprintln!("skipping: no GStreamer or no x264enc here");
+            return;
+        }
+        let caps = super::encoder_input_caps("x264enc").expect("x264enc takes a planar format");
+        let text = caps.to_string();
+        assert!(text.contains("video/x-raw"), "{text}");
+        assert!(
+            text.contains("NV12") || text.contains("I420"),
+            "the filter names the planar formats: {text}"
+        );
+        assert!(
+            !text.contains("RGBA"),
+            "RGBA is exactly what the filter keeps out: {text}"
+        );
+    }
+
+    #[test]
+    fn an_element_that_takes_no_planar_video_is_left_to_negotiate() {
+        if gst::init().is_err() {
+            eprintln!("skipping: no GStreamer here");
+            return;
+        }
+        assert!(
+            super::encoder_input_caps("does-not-exist-at-all").is_none(),
+            "an element that is not installed pins nothing"
+        );
+        if element_is_usable("opusenc") {
+            assert!(
+                super::encoder_input_caps("opusenc").is_none(),
+                "an audio element takes no raw video, so nothing is pinned"
+            );
+        }
     }
 
     #[test]
