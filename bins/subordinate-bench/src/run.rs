@@ -359,14 +359,13 @@ pub fn measure_scrub_drag(
     let mut uploader = Uploader::new(context);
     let mut scenario = new_scenario(name, ScenarioKind::ScrubDrag);
 
-    // The warm-up drags across the head of the file, where the timed drag does
-    // not go: it pays for the first allocations without seeding the cache with
-    // the pictures the timed steps are about to ask for.
-    if let Some(warmup) = drag_targets(&index, options.warmup) {
-        for target in warmup {
-            if let Some(frame) = decoder.seek_to(target)? {
-                uploader.upload(&frame)?;
-            }
+    // The warm-up drags across the head of the file, which the timed drag
+    // never reaches: it pays for the first allocations and the decoder's first
+    // seek without leaving the pictures the timed steps are about to ask for
+    // sitting in the cache, which would count as hits they did not earn.
+    for target in drag_walk(&index, options.warmup, 0) {
+        if let Some(frame) = decoder.seek_to(target)? {
+            uploader.upload(&frame)?;
         }
     }
 
@@ -436,18 +435,30 @@ pub fn drag_targets(index: &PtsIndex, count: u64) -> Option<Vec<RationalTime>> {
     if count == 0 || index.len() < DRAG_FORWARD * 2 {
         return None;
     }
-    drag_frames(count, index.len() - 1)
+    let last = index.len() - 1;
+    let start = (last * DRAG_START_NUMERATOR / DRAG_START_DENOMINATOR).min(last);
+    Some(drag_walk(index, count, start))
+}
+
+/// The same walk from a picture this names, for the warm-up, which drags
+/// across the head of the file rather than over the timed steps' ground.
+fn drag_walk(index: &PtsIndex, count: u64, start: usize) -> Vec<RationalTime> {
+    if index.is_empty() {
+        return Vec::new();
+    }
+    drag_frames(count, index.len() - 1, start)
         .into_iter()
-        .map(|frame| index.pts(frame))
+        .filter_map(|frame| index.pts(frame))
         .collect()
 }
 
-/// The walk itself: picture numbers, given the last one the clip holds.
+/// The walk itself: picture numbers, given where it starts and the last
+/// picture the clip holds.
 ///
 /// Separated from the index so the shape of a drag can be asserted without a
 /// file to index.
-fn drag_frames(count: u64, last: usize) -> Vec<usize> {
-    let mut frame = (last * DRAG_START_NUMERATOR / DRAG_START_DENOMINATOR).min(last);
+fn drag_frames(count: u64, last: usize, start: usize) -> Vec<usize> {
+    let mut frame = start.min(last);
     let mut frames = Vec::new();
     for step in 0..count {
         frames.push(frame);
@@ -659,7 +670,7 @@ mod tests {
     fn a_drag_walks_forward_and_doubles_back_inside_the_clip() {
         // Three pictures forward, four back every fourth move: a little over a
         // picture of travel a step, which is a hand on a scrub bar.
-        let frames = drag_frames(12, 99);
+        let frames = drag_frames(12, 99, 39);
         assert_eq!(&frames[..6], &[39, 42, 45, 48, 44, 47]);
         assert!(frames.iter().all(|frame| *frame <= 99));
         assert!(
@@ -671,8 +682,11 @@ mod tests {
     #[test]
     fn a_drag_stays_inside_a_clip_too_short_to_travel_across() {
         // Nothing may run off either end, however many steps are asked for.
-        let frames = drag_frames(20, 3);
+        let frames = drag_frames(20, 3, 7);
         assert!(frames.iter().all(|frame| *frame <= 3));
+        // And a warm-up at the head never walks into the timed drag's ground.
+        let head = drag_frames(3, 99, 0);
+        assert_eq!(head, vec![0, 3, 6]);
     }
 
     #[test]

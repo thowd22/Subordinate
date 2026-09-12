@@ -221,13 +221,20 @@ Measured on the same WSL2 machine, release, software decode, `--no-gpu
 
 | Fixture | Scenario | sustained before | after | pictures/step | seeks/step |
 | --- | --- | --- | --- | --- | --- |
-| `bars_1080p_h264.mp4` | `scrub_drag` | 83.4 fps | **809.5 fps** | 2.65 → 1.15 | 0.35 → 0.00 |
-| `bars_2160p_h264.mp4` | `scrub_drag` | 31.5 fps | **130.7 fps** | 2.60 → 1.55 | 0.40 → 0.05 |
-| `bars_2160p_h264.mp4` | `scrub` | 18.1 fps | 18.0 fps | 3.00 | 0.90 |
+| `bars_1080p_h264.mp4` | `scrub_drag` | 82.6 fps | **314.3 fps** | 2.65 → 1.55 | 0.35 → 0.05 |
+| `bars_2160p_h264.mp4` | `scrub_drag` | 33.9 fps | **137.6 fps** | 2.60 → 1.55 | 0.40 → 0.05 |
+| `bars_2160p_h264.mp4` | `scrub` | 18.0 fps | 17.9 fps | 3.00 | 0.90 |
 
-Repeats agree: the 4K drag measured 29.9 fps legacy and 130.9 fps after on a
-second pass, so the change is far outside this machine's run-to-run spread. Of
-the 20 timed 4K drag steps, 8 are answered from the cache and one seeks.
+Repeats agree — the 4K drag measured 29.9 to 33.9 fps before and 130.7 to
+137.6 fps after across runs — so the change is far outside this machine's
+run-to-run spread. Of the 20 timed drag steps, 8 are answered from the cache
+and one seeks, on both fixtures.
+
+The drag's warm-up deliberately runs across the *head* of the clip while the
+timed steps start two fifths of the way in: a warm-up over the same ground
+would leave the pictures the first timed steps ask for sitting in the cache and
+count as hits they did not earn. It is worth about 500 fps of flattery at
+1080p, which is why it is not done that way.
 
 The jump scrub does not move, and should not: every one of its steps lands in
 a GOP the decoder is not in, which is a flush whatever the planner knows. That
