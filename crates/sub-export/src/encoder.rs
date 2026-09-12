@@ -154,10 +154,22 @@ const fn candidate(element: &'static str, codec: VideoCodec, vendor: EncoderVend
 /// docs/PLAN.md §5.5: NVIDIA, then VA-API, then AMF, then VideoToolbox, then
 /// Media Foundation, then software. Selection filters this list by codec and
 /// keeps the order, so the list is the order.
+///
+/// NVENC has three element families in GStreamer 1.28 and the catalogue knows
+/// all of them: `nvh264enc` drives it through CUDA, `nvd3d11h264enc` through a
+/// Direct3D 11 device, and `nvautogpuh264enc` picks whichever the pipeline is
+/// already using. The CUDA one is first because it is the one that exists on
+/// every platform; the Direct3D ones exist only on Windows, where they are the
+/// path that works when an application already holds a graphics device
+/// (TASK-146).
 const CATALOGUE: &[Candidate] = &[
     candidate("nvh264enc", VideoCodec::H264, EncoderVendor::Nvenc),
     candidate("nvh265enc", VideoCodec::H265, EncoderVendor::Nvenc),
     candidate("nvav1enc", VideoCodec::Av1, EncoderVendor::Nvenc),
+    candidate("nvd3d11h264enc", VideoCodec::H264, EncoderVendor::Nvenc),
+    candidate("nvd3d11h265enc", VideoCodec::H265, EncoderVendor::Nvenc),
+    candidate("nvautogpuh264enc", VideoCodec::H264, EncoderVendor::Nvenc),
+    candidate("nvautogpuh265enc", VideoCodec::H265, EncoderVendor::Nvenc),
     candidate("vah264enc", VideoCodec::H264, EncoderVendor::Va),
     candidate("vah265enc", VideoCodec::H265, EncoderVendor::Va),
     candidate("amfh264enc", VideoCodec::H264, EncoderVendor::Amf),
@@ -710,6 +722,10 @@ mod tests {
                 "nvh264enc",
                 "nvh265enc",
                 "nvav1enc",
+                "nvd3d11h264enc",
+                "nvd3d11h265enc",
+                "nvautogpuh264enc",
+                "nvautogpuh265enc",
                 "vah264enc",
                 "vah265enc",
                 "amfh264enc",
@@ -729,6 +745,8 @@ mod tests {
             encoder_names(VideoCodec::H264),
             vec![
                 "nvh264enc",
+                "nvd3d11h264enc",
+                "nvautogpuh264enc",
                 "vah264enc",
                 "amfh264enc",
                 "vtenc_h264",
@@ -740,6 +758,8 @@ mod tests {
             encoder_names(VideoCodec::H265),
             vec![
                 "nvh265enc",
+                "nvd3d11h265enc",
+                "nvautogpuh265enc",
                 "vah265enc",
                 "amfh265enc",
                 "vtenc_h265",
@@ -792,7 +812,7 @@ mod tests {
             probe.select(VideoCodec::Av1, &prefs).unwrap().element,
             "nvav1enc"
         );
-        assert_eq!(probe.usable(VideoCodec::H264).len(), 6);
+        assert_eq!(probe.usable(VideoCodec::H264).len(), 8);
     }
 
     #[test]
