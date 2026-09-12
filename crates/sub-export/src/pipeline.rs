@@ -32,6 +32,7 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -49,7 +50,7 @@ const NANOS_PER_SECOND: u128 = 1_000_000_000;
 /// Bytes of RGBA per pixel, matching `sub_render::readback::BYTES_PER_PIXEL`.
 pub const BYTES_PER_PIXEL: usize = 4;
 
-/// How many bytes each `appsrc` queues before a push blocks.
+/// How many bytes each `appsrc` queues before a push waits for room.
 ///
 /// The driver pushes video and audio in lockstep, so neither branch runs far
 /// ahead of the other and the cap only bounds the encoder's backlog.
@@ -57,6 +58,22 @@ const APPSRC_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 /// How long [`ExportPipeline::finish`] waits for the muxer before giving up.
 const EOS_TIMEOUT_SECONDS: u64 = 120;
+
+/// How long a push waits for the pipeline to make room before giving up.
+///
+/// A branch that stops draining is either an encoder that is simply slow or
+/// one that has failed, and the difference is on the bus: the wait is long
+/// enough that a 4K frame on a busy software encoder is never mistaken for a
+/// stall, and the bus is read on every slice so a real failure is reported the
+/// moment it is posted rather than after the whole budget.
+pub const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long each slice of that wait is.
+///
+/// Short enough that an export that *was* stalled resumes promptly and that an
+/// error reaches the caller within a frame's time, long enough that waiting
+/// costs no measurable CPU.
+const PUSH_POLL: Duration = Duration::from_millis(20);
 
 /// The file format the export is wrapped in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -548,6 +565,7 @@ pub struct ExportPipeline {
     video_frames: u64,
     audio_frames: u64,
     finished: bool,
+    push_timeout: Duration,
 }
 
 impl std::fmt::Debug for ExportPipeline {
@@ -632,7 +650,18 @@ impl ExportPipeline {
             video_frames: 0,
             audio_frames: 0,
             finished: false,
+            push_timeout: PUSH_TIMEOUT,
         })
+    }
+
+    /// How long a push waits for a branch to make room before it gives up.
+    ///
+    /// [`PUSH_TIMEOUT`] by default. A test that wants to see a stalled branch
+    /// reported rather than waited on shortens it; nothing else needs to.
+    #[must_use]
+    pub fn with_push_timeout(mut self, timeout: Duration) -> Self {
+        self.push_timeout = timeout;
+        self
     }
 
     /// The settings the pipeline was built for.
@@ -686,8 +715,11 @@ impl ExportPipeline {
     ///
     /// - [`codes::INVALID_SETTINGS`] when `pixels` is not one whole frame of
     ///   the export canvas.
-    /// - [`codes::PUSH_FAILED`] when the pipeline will not take it, which is
-    ///   how a failing encoder surfaces mid-export.
+    /// - [`codes::PIPELINE_FAILED`] when an element failed while the branch
+    ///   was full, which is how a failing encoder surfaces mid-export.
+    /// - [`codes::EXPORT_TIMEOUT`] when the branch stops taking buffers for
+    ///   [`PUSH_TIMEOUT`] with nothing on the bus to say why.
+    /// - [`codes::PUSH_FAILED`] when the pipeline refuses the buffer outright.
     pub fn push_video_frame(&mut self, pixels: &[u8]) -> SubResult<()> {
         let expected = self.settings.frame_bytes();
         if pixels.len() != expected {
@@ -709,6 +741,7 @@ impl ExportPipeline {
             index + 1,
         )?;
         tracing::trace!(frame = index, bytes = pixels.len(), "pushing a video frame");
+        self.wait_for_room(&self.video_src, "video", pixels.len() as u64)?;
         self.video_src
             .push_buffer(buffer)
             .map_err(|flow| self.push_failed("video", flow))?;
@@ -723,7 +756,8 @@ impl ExportPipeline {
     ///
     /// - [`codes::INVALID_SETTINGS`] when the export has no audio stream or
     ///   `samples` is not a whole number of interleaved frames.
-    /// - [`codes::PUSH_FAILED`] when the pipeline will not take it.
+    /// - [`codes::PIPELINE_FAILED`], [`codes::EXPORT_TIMEOUT`] and
+    ///   [`codes::PUSH_FAILED`], as [`ExportPipeline::push_video_frame`].
     pub fn push_audio(&mut self, samples: &[f32]) -> SubResult<()> {
         let channels = usize::from(self.settings.channels);
         let Some(src) = self.audio_src.as_ref() else {
@@ -750,6 +784,7 @@ impl ExportPipeline {
         for sample in samples {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
+        let bytes_len = bytes.len() as u64;
         let buffer = timed_buffer(
             bytes,
             start,
@@ -758,6 +793,7 @@ impl ExportPipeline {
             self.audio_frames + frames,
         )?;
         tracing::trace!(from = self.audio_frames, frames, "pushing audio frames");
+        self.wait_for_room(src, "audio", bytes_len)?;
         src.push_buffer(buffer)
             .map_err(|flow| self.push_failed("audio", flow))?;
         tracing::trace!(from = self.audio_frames, frames, "the audio branch took them");
@@ -852,6 +888,63 @@ impl ExportPipeline {
                 "the export pipeline posted something other than end of stream",
             )),
         }
+    }
+
+    /// Waits until `src` has room for `bytes`, or says why it never will.
+    ///
+    /// This is the export's back-pressure, and it is the exporter's rather
+    /// than `appsrc`'s on purpose (TASK-146). A branch stops draining for two
+    /// very different reasons — an encoder that is busy, and an encoder that
+    /// has failed — and only the bus can tell them apart. `appsrc`'s own
+    /// blocking push cannot read the bus, so a failure there is a stall that
+    /// never ends; here the bus is read on every slice, so a failed element
+    /// becomes the error it posted, a branch that is merely slow is waited
+    /// for, and a branch that is stuck for no stated reason ends the export
+    /// with [`codes::EXPORT_TIMEOUT`] instead of hanging the caller.
+    ///
+    /// A buffer larger than the whole queue is let through when the queue is
+    /// empty: a canvas whose frame does not fit the cap must still export.
+    fn wait_for_room(&self, src: &AppSrc, stream: &'static str, bytes: u64) -> SubResult<()> {
+        let deadline = Instant::now() + self.push_timeout;
+        loop {
+            let queued = src.current_level_bytes();
+            if queued == 0 || queued.saturating_add(bytes) <= src.max_bytes() {
+                return Ok(());
+            }
+            if let Some(error) = self.bus_error() {
+                return Err(error
+                    .with_detail("stream", stream)
+                    .with_detail("path", self.path.display().to_string()));
+            }
+            if Instant::now() >= deadline {
+                return Err(SubError::new(
+                    codes::EXPORT_TIMEOUT,
+                    format!("the export's {stream} branch stopped taking buffers"),
+                )
+                .with_detail("stream", stream)
+                .with_detail("video_encoder", self.elements.video_encoder.clone())
+                .with_detail("audio_encoder", self.elements.audio_encoder.clone())
+                .with_detail("queued_bytes", queued)
+                .with_detail("timeout_seconds", self.push_timeout.as_secs())
+                .with_detail("path", self.path.display().to_string()));
+            }
+            std::thread::sleep(PUSH_POLL);
+        }
+    }
+
+    /// The first error on the bus, as the error the export reports.
+    fn bus_error(&self) -> Option<SubError> {
+        let bus = self.pipeline.bus()?;
+        while let Some(message) = bus.pop_filtered(&[gst::MessageType::Error]) {
+            if let gst::MessageView::Error(err) = message.view() {
+                return Some(element_error(
+                    codes::PIPELINE_FAILED,
+                    "the export pipeline failed",
+                    err,
+                ));
+            }
+        }
+        None
     }
 
     /// The error a refused push turns into, enriched with whatever the bus
@@ -1135,12 +1228,19 @@ fn audio_caps(settings: &ExportSettings) -> gst::Caps {
 }
 
 /// The shared `appsrc` configuration: timestamps come from the buffers the
-/// exporter stamps, the source is not live, and a full queue blocks the push
-/// instead of growing without bound.
+/// exporter stamps, the source is not live, and the queue is capped so a
+/// branch cannot grow without bound.
+///
+/// `block` is deliberately **off**. `appsrc`'s own blocking push waits on a
+/// condition variable that only a flush or a state change wakes, so a branch
+/// that stops draining — an encoder that cannot open a session and rejects the
+/// caps, a muxer waiting for a stream that is not coming — stops the export
+/// dead with the failure sitting unread on the bus (TASK-146). The exporter
+/// waits for room itself instead, in slices, reading the bus between them.
 fn configure_appsrc(src: &AppSrc) {
     src.set_format(gst::Format::Time);
     src.set_is_live(false);
-    src.set_property("block", true);
+    src.set_property("block", false);
     src.set_max_bytes(APPSRC_MAX_BYTES);
     src.set_do_timestamp(false);
     src.set_property_from_str("stream-type", "stream");
