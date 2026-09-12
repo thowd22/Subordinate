@@ -607,17 +607,25 @@ jobs:
         id: uhd
         run: |
           New-Item -ItemType Directory -Force target\media | Out-Null
-          aws s3 cp s3://subordinate-test-media-731537225673/meld-4k60-excerpt-2min.mkv `
-            target\media\meld-4k60-excerpt-2min.mkv --no-progress
-          if ($LASTEXITCODE -ne 0) {
-            "::warning::the instance role could not read the excerpt; the 4K60 rows will be missing"
-            "have=no" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-          } else {
+          $have = "no"
+          # try/catch as well as $LASTEXITCODE: an image without the AWS CLI
+          # throws on the call itself rather than returning a code, and a
+          # missing 4K60 source is a gap in the table, not a failed job.
+          try {
+            aws s3 cp s3://subordinate-test-media-731537225673/meld-4k60-excerpt-2min.mkv `
+              target\media\meld-4k60-excerpt-2min.mkv --no-progress
+            if ($LASTEXITCODE -eq 0) { $have = "yes" }
+          } catch {
+            "aws s3 cp failed: $_"
+          }
+          if ($have -eq "yes") {
             python scripts/export-matrix.py project `
               --media target/media/meld-4k60-excerpt-2min.mkv `
               --out target/uhd-project --sequence "UHD" --seconds 5
-            "have=yes" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          } else {
+            "::warning::the instance role could not read the excerpt; the 4K60 rows will be missing"
           }
+          "have=$have" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
 
       - name: The matrix
         run: |
