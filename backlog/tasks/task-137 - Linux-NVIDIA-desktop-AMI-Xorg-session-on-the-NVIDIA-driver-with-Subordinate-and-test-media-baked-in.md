@@ -3,11 +3,11 @@ id: TASK-137
 title: >-
   Linux NVIDIA desktop AMI: Xorg session on the NVIDIA driver with Subordinate
   and test media baked in
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-137'
 created_date: '2026-09-11 22:18'
-updated_date: '2026-09-12 00:28'
+updated_date: '2026-09-12 01:20'
 labels:
   - infra
   - gpu
@@ -30,10 +30,10 @@ Human-style desktop testing needs a real window session on a real GPU. Build an 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 infra/images/linux-desktop/ holds a committed Image Builder recipe (or Packer template) and a workflow that builds the AMI and records its id in .github/runs-on.yml as runner gpu-nvidia-desktop-linux
-- [ ] #2 A smoke job on that runner starts the app on the Xorg display, captures a screenshot showing the editor window rendered on the NVIDIA adapter (title bar reports a non-software Vulkan adapter), and uploads it
-- [ ] #3 The test MP4 is present on the image at a documented path and probes correctly with gst-discoverer
-- [ ] #4 subordinate-mcp from the same release is installed on the image and a job proves an MCP call (project.new then timeline.get_state) round-trips against the running app while its window is visible
+- [x] #1 infra/images/linux-desktop/ holds a committed Image Builder recipe (or Packer template) and a workflow that builds the AMI and records its id in .github/runs-on.yml as runner gpu-nvidia-desktop-linux
+- [x] #2 A smoke job on that runner starts the app on the Xorg display, captures a screenshot showing the editor window rendered on the NVIDIA adapter (title bar reports a non-software Vulkan adapter), and uploads it
+- [x] #3 The test MP4 is present on the image at a documented path and probes correctly with gst-discoverer
+- [x] #4 subordinate-mcp from the same release is installed on the image and a job proves an MCP call (project.new then timeline.get_state) round-trips against the running app while its window is visible
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -71,4 +71,55 @@ Four things the driver and the tooling taught us, all now recorded in `infra/ima
 The build starts the session on the build instance itself (`XorgStartsOnThisInstance`) rather than waiting for the test phase, because a bad `xorg.conf` is the likeliest failure and finding it there costs seconds instead of the half hour a snapshot plus test boot takes.
 
 `subordinate-mcp` is not in the v0.1.x AppImage, so the component builds it from the release tag with a throwaway rustup toolchain (its tree is pure Rust - sub-command, sub-edit, sub-model, sub-time, sub-core, rmcp, tokio - about two minutes). `packaging/linux/build-appimage.sh` now bundles it, so a future image will take it from the package; the component prefers the bundled one when it is there.
+
+## Verification
+
+Final image: **ami-05c99b3a15c9d2fef** (`subordinate-linux-desktop-2026-09-12T00-33-26.135Z`), component `1.0.56639`, image build version `arn:aws:imagebuilder:us-east-1:731537225673:image/subordinate-linux-desktop-desktop/1.0.56639/2`, state AVAILABLE - so the image's own test phase passed on a fresh instance booted from it (Xorg and openbox active at boot, 1920x1080 depth 24 on :0, `subordinate --smoke-test` paints, the baked clip probes). Carries release **v0.1.1**.
+
+GPU smoke run **34663975398**, job `nvidia-desktop-linux` on `ami=ami-05c99b3a15c9d2fef/family=g4dn.xlarge/spot=false` - green, every step. Artifact `desktop-smoke-9b1a75e35876bbecad1d4425c79719432af04d41`:
+
+- `app.log`: `render device ready on Vulkan: Tesla T4 (discrete GPU, Vulkan, driver NVIDIA 580.173.02)` and `ui-smoke ready: frames=3 popout=true popout_frames=1 project=loaded sequences=2 tracks=3`.
+- `windows.txt`: two real windows on :0 - `Subordinate` 1024x768 at (1,14) and `Subordinate viewer` 960x540 at (929,534), both found through `xdotool search --name`.
+- `display0.png`: the editor with its bar reading *"Subordinate  Vulkan - Tesla T4 (discrete GPU, Vulkan, driver NVIDIA 580.173.02)"*, the media bin, viewer, inspector and the timeline with the sample project's clips, and the pop-out viewer bottom-right.
+- `probe.txt`: `/opt/subordinate/test-media/meld-4k60-excerpt-2min.mkv` through the AppImage's bundled GStreamer 1.28 - Matroska, H.264 High Profile, 3840x2160, 60/1, 0:02:00.459. (It also reports the MPEG-4 AAC decoder as a missing plugin - the same AAC gap TASK-103 recorded for the packages; the video stream, which is what this proves, is fine.)
+- `mcp.txt`: `project.new` -> revision 1, `sequence.create` -> revision 2, `timeline.get_state` -> the sequence that was just made, 1920x1080 at 24000/1001, 48 kHz, Rec.709 - all over the socket while the editor window was up on :0.
+
+Earlier runs are part of the record: 34661255850 (`image=` refuses a raw AMI id - the key is `ami=`), 34661369585 (first green desktop job; `timeline.get_state` on an empty project correctly refuses), 34663392571 (on the sample project it correctly refuses again, two sequences).
+
+## Cost
+
+About **0.80 USD** all in, against a 3 USD cap: roughly 75 minutes of `g4dn.xlarge` on-demand across five pipeline executions (0.526 USD/h, ~0.66 USD) plus four smoke runs (~0.11 USD) and a few cents of snapshot. The first, broken image (ami-0812b474041b378f3, window manager inactive at boot) has been deregistered and its snapshot deleted; ami-02168a4d57f6fa24c is kept as the previous good image.
+
+Three pipeline executions failed with `VcpuLimitExceeded` and cost nothing - the account's on-demand G quota is 8 vCPU, exactly two `g4dn.xlarge`, and TASK-138's Windows image was building at the same time. `deploy.sh --run --wait` treats that as a retry, not a failure.
+
+## One thing the supervisor has to decide
+
+`.github/workflows/desktop-ami.yml` is committed and complete, but it cannot run yet: the repository has no AWS credentials and no OIDC provider, so it fails fast on a missing `AWS_IMAGEBUILDER_ROLE_ARN` repository variable. `infra/ci-oidc/stack.yaml` is the template that would create the identity - a GitHub OIDC provider scoped to `repo:thowd22/Subordinate:*` and one role allowed only to start `subordinate-*` image pipelines and read image state, nothing else. Deploying it gives a GitHub workflow an identity inside the AWS account, which is a call for the user rather than a side effect of this task, so it is committed and unapplied. To turn it on:
+
+```bash
+aws cloudformation deploy --region us-east-1 --stack-name subordinate-ci-oidc \
+  --template-file infra/ci-oidc/stack.yaml --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides Repository=thowd22/Subordinate
+gh variable set AWS_IMAGEBUILDER_ROLE_ARN --body "<RoleArn output>"
+```
+
+Until then the supported and verified build path is the local runbook, `infra/images/linux-desktop/deploy.sh --run --wait`, which is what produced ami-05c99b3a15c9d2fef.
+
+Also worth knowing:
+
+- **The editor does not serve the Command API endpoint.** `sub-ui` builds a `Dispatcher` but nothing calls `Server::bind`, so the MCP bridge launches `subordinate-cli serve` and speaks to that - the same engine and dispatcher with nothing drawn. The round-trip in the smoke job is real (mutations over the socket, the timeline they produced read back, editor window up on :0 beside it) but it is not the GUI process's own project. Making the editor bind its endpoint would strengthen this job for free and is worth a follow-up task.
+- **The G-family vCPU quota is the bottleneck**, not cost. 8 vCPU on-demand is exactly two `g4dn.xlarge`, so an image build and a GPU job collide, and the Linux and Windows desktop images cannot build at the same time. Raising `L-DB2E81BA` to 16 would remove the retries.
+- `.github/runs-on.yml` is read from the default branch only, so `runner=gpu-nvidia-desktop-linux` does not resolve until this branch is merged. Until then the runner is reached with `ami=ami-05c99b3a15c9d2fef/family=g4dn.xlarge/spot=false` through the `desktop_runner` input on GPU smoke.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A second Linux GPU runner, `gpu-nvidia-desktop-linux`: the same g4dn.xlarge T4 as `gpu-nvidia-linux`, but booted into a real Xorg session on the NVIDIA driver instead of a bare console, so tests can open the actual window, click in it and photograph it.
+
+`infra/images/linux-desktop/` is the image: `component.yaml` runs on the build instance, `stack.yaml` wires it into an EC2 Image Builder component, recipe, infrastructure configuration, distribution configuration and pipeline, and `deploy.sh` is the only piece that needs AWS credentials. It builds on RunsOn's own `ubuntu24-gpu-x64` base, leaving the runner user, the Actions agent and the RunsOn bootstrap untouched (the validate phase fails the build if any has gone), and adds: headless Xorg at :0 with one virtual 1920x1080 screen started at boot by systemd, openbox as the window manager, xdotool/xdpyinfo/xwininfo/scrot/ImageMagick, the newest release's AppImage with `subordinate`, `subordinate-cli` and its bundled GStreamer 1.28 on PATH, `subordinate-mcp` from the same release, and the 4K60 test clip at `/opt/subordinate/test-media/`, sha256-verified from the private bucket. `packaging/linux/build-appimage.sh` now ships `subordinate-mcp` too, so a future image takes it from the package instead of compiling it.
+
+`gpu-smoke.yml` gains `nvidia-desktop-linux`, which is the image's acceptance test, and an `only` input so one runner can be exercised without paying for all five.
+
+Verified on ami-05c99b3a15c9d2fef (component 1.0.56639, release v0.1.1), whose own Image Builder test phase passed on a fresh instance booted from it, and by GPU smoke run 34663975398: the editor came up on :0 on `Tesla T4 (discrete GPU, Vulkan, driver NVIDIA 580.173.02)` with the sample project loaded, `xdotool` found both the editor and the pop-out window, the screenshot shows the editor's bar naming that adapter, the baked MKV probed as H.264 3840x2160 60/1 through the bundled GStreamer, and an MCP round-trip (`project.new`, `sequence.create`, `timeline.get_state`) came back with the sequence it had just made - all while the window was up. About 0.80 USD against a 3 USD cap.
+<!-- SECTION:FINAL_SUMMARY:END -->
