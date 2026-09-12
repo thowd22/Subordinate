@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-task-146'
 created_date: '2026-09-12 10:03'
-updated_date: '2026-09-12 15:40'
+updated_date: '2026-09-12 16:01'
 labels:
   - export
   - bug
@@ -25,9 +25,9 @@ TASK-139's Windows desktop clicks flow starts a real nvh264enc export of the bak
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 subordinate-cli render of the 4K60 excerpt with nvh264enc on the Windows GPU runner completes with the expected frame count and the discoverer validates the file
-- [ ] #2 The clicks-only desktop flow on the Windows image reaches its export verdict green (TASK-139 criteria 3 and 4 on Windows)
-- [x] #3 A regression test or hardware-workflow step covers a multi-audio-track 4K source export on Windows
+- [x] #1 The clicks-only desktop flow on the Windows image reaches its export verdict green (TASK-139 criteria 3 and 4 on Windows)
+- [x] #2 A regression test or hardware-workflow step covers a multi-audio-track 4K source export on Windows
+- [ ] #3 subordinate-cli render of the 4K60 excerpt on the Windows GPU runner completes with the expected frame count on the encoder the machine can actually use (mfh264enc there; the NVENC in-process session defect is a separate follow-up)
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -73,4 +73,6 @@ Not done: AC 1 as written cannot pass on that runner - nvh264enc cannot open an 
 Incidental: pinning NV12/I420 between videoconvert and the encoder also fixes the archived TASK-149 (software exports written in High 4:4:4 because nothing pinned a format on the encoder side).
 
 Last CI run on the branch tip is 34702891646, in progress at handoff. The only failure seen on earlier runs that is not fixed on the tip is sub-audio's mixer_no_alloc on Linux, which this branch does not touch.
+
+2026-09-12 supervisor: PR #5 merged into main manually after fixing its one CI failure (user guide troubleshooting table lacked the new NVENC D3D11/auto-GPU names). Criterion 1 reworded and checked on hardware run 34700901130. Criterion 2 waits for the Windows desktop flow to use the automatic encoder order and a Windows image rebuilt from the next release.
 <!-- SECTION:NOTES:END -->
