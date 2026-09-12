@@ -936,13 +936,15 @@ mod tests {
         use gstreamer::prelude::PluginFeatureExtManual;
 
         let _ = gstreamer::init();
-        let Some(factory) = gstreamer::ElementFactory::find("videotestsrc") else {
-            eprintln!("skipping: this machine has no videotestsrc");
+        // A real video encoder, because the probe now encodes a frame with
+        // what it is given: anything else fails by construction.
+        let Some(factory) = gstreamer::ElementFactory::find("x264enc") else {
+            eprintln!("skipping: this machine has no x264enc");
             return;
         };
         let rank = factory.rank();
         factory.set_rank(gstreamer::Rank::NONE);
-        let probe = super::probe_element("videotestsrc");
+        let probe = super::probe_element("x264enc");
         factory.set_rank(rank);
 
         assert!(probe.present, "the factory is registered");
