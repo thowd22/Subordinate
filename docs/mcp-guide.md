@@ -343,8 +343,12 @@ export appears in the Export panel with progress, its result and Cancel, and
 runs on the window's compositor and worker pool while the UI keeps painting.
 The accepted job retains its project snapshot and media folder if another
 project is opened before rendering begins. Socket `project_open` and
-`project_save` update the media folder used by subsequent host calls; save a
-new project once before exporting so relative media paths have a base folder.
+`project_save` update the media folder used by subsequent host calls. An
+unsaved project uses a draft working directory and can resolve explicit
+external references before Save. A media item can carry a project-relative
+string path or `"path": {"external": "/absolute/path/to/clip.mp4"}` (use a
+native absolute path on Windows). External references survive Save As and
+undo/redo without copying or relocating the source media.
 `system.list_methods` includes host methods registered after startup.
 
 ### Undo, redo and grouping

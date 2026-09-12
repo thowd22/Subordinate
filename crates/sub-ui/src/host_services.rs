@@ -331,20 +331,18 @@ impl GuiServices {
         &self.host
     }
 
-    /// The project folder, or the "this project has no file yet" refusal.
-    ///
-    /// Media paths are project-relative (docs/PLAN.md §5.6), so a project that
-    /// has never been saved can neither be exported nor have a proxy made for
-    /// it — the same refusal the panel shows.
+    /// The saved project folder or draft working directory. External media
+    /// references resolve independently, including before the first Save.
     fn require_project_dir(&self, project: &Project) -> SubResult<PathBuf> {
         GuiHost::lock(&self.host.project_dirs)
             .get(&project.id)
             .cloned()
             .flatten()
+            .or_else(|| crate::app::draft_project_dir(project.id))
             .ok_or_else(|| {
                 SubError::new(
                     crate::codes::EXPORT_NOT_READY,
-                    "this project has no file yet; save it so its media paths resolve",
+                    "the project working directory could not be initialized",
                 )
                 .with_detail("field", "project")
             })

@@ -78,11 +78,17 @@ thumbnail strip. Nothing about an import happens on the UI thread, so importing
 a long file never freezes the window, and an import is applied as an undoable
 command like any other edit.
 
-Media paths are stored relative to the project, so a file has to live in or
-under the project folder: importing from elsewhere is refused with
-`model.invalid_path` rather than silently storing an absolute path that will
-not survive being moved to another machine. Copy the footage into the project
-folder first.
+You can import and start editing before saving a project. Imported files stay
+where they are: the editor records explicit external references and does not
+copy the footage. The first Save As preserves those references, including
+imports that are still running. If you move the media or edit on another
+machine, use Relink to point at its new location. Existing projects with
+project-relative media paths still work.
+
+Drop a clip onto an empty timeline to create its first track automatically.
+You can also right-click the empty track-header area to add a video or audio
+track. Either action creates a sequence if needed, and Undo reverses the
+whole action.
 
 The bin lists items or tiles them, sorts by any column, and files them in
 folders you create and rename. Durations are timecodes at the item's own rate

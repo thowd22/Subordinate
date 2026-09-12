@@ -79,8 +79,8 @@ pub trait Services: Send + Sync + fmt::Debug + 'static {
     /// Whatever the prober returns for a file it cannot open.
     fn probe(&self, path: &Path) -> SubResult<Value>;
 
-    /// Transcodes a proxy for one media item, returning its project-relative
-    /// path.
+    /// Transcodes a proxy for one media item, returning a project-relative path
+    /// for relative sources or an absolute path for external sources.
     ///
     /// # Errors
     ///
@@ -172,9 +172,14 @@ pub fn register_methods(dispatcher: &mut Dispatcher, services: Arc<dyn Services>
             let params: ProxyParams = typed(params)?;
             let project = engine.snapshot();
             let path = host.make_proxy(&project, params.media)?;
+            let reference = if Path::new(&path).is_absolute() {
+                MediaPath::external(Path::new(&path))?
+            } else {
+                MediaPath::new(&path)?
+            };
             let applied = engine.apply(SetProxyState::new(
                 params.media,
-                ProxyState::Ready(MediaPath::new(&path)?),
+                ProxyState::Ready(reference),
             ))?;
             to_value(&AppliedResult::from(&applied))
         },
@@ -632,8 +637,21 @@ mod tests {
             Ok(json!({ "path": path.display().to_string(), "video": 1 }))
         }
 
-        fn make_proxy(&self, _project: &Project, media: MediaId) -> SubResult<String> {
-            Ok(format!("proxies/{media}.mp4"))
+        fn make_proxy(&self, project: &Project, media: MediaId) -> SubResult<String> {
+            let relative = format!("proxies/{media}.mp4");
+            if project
+                .media
+                .iter()
+                .any(|item| item.id == media && item.path.is_external())
+            {
+                return Ok(std::env::temp_dir()
+                    .join("draft-project")
+                    .join(relative)
+                    .to_str()
+                    .unwrap()
+                    .to_owned());
+            }
+            Ok(relative)
         }
 
         fn render_frame_png(&self, request: &FrameRequest<'_>) -> SubResult<FrameImage> {
@@ -674,8 +692,12 @@ mod tests {
 
     /// A dispatcher with the fake host installed, over a one-media project.
     fn fixture() -> (Engine, Dispatcher, MediaId) {
+        fixture_with_path(MediaPath::new("media/shot.mp4").expect("a relative path"))
+    }
+
+    fn fixture_with_path(path: MediaPath) -> (Engine, Dispatcher, MediaId) {
         let mut project = Project::new("Doc cut");
-        let item = MediaItem::new(MediaPath::new("media/shot.mp4").expect("a relative path"));
+        let item = MediaItem::new(path);
         let media = item.id;
         project.media.push(item);
         project
@@ -746,6 +768,55 @@ mod tests {
         );
         dispatcher.invoke("edit.undo", None).expect("it undoes");
         assert!(engine.handle().snapshot().media[0].proxy.path().is_none());
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn external_source_proxy_survives_save_reopen_and_undo_redo() {
+        let source = MediaPath::external(&std::env::temp_dir().join("outside-source.mp4")).unwrap();
+        let (engine, dispatcher, media) = fixture_with_path(source);
+        dispatcher
+            .invoke(MEDIA_MAKE_PROXY, Some(json!({ "media": media })))
+            .unwrap();
+        let snapshot = engine.handle().snapshot();
+        let reference = snapshot.media[0].proxy.path().unwrap().clone();
+        assert!(reference.is_external());
+        let generated = std::env::temp_dir()
+            .join("draft-project")
+            .join(format!("proxies/{media}.mp4"));
+        assert_eq!(
+            reference.resolve(&std::env::temp_dir().join("saved-project")),
+            generated
+        );
+        let reopened: Project =
+            serde_json::from_str(&serde_json::to_string(snapshot.as_ref()).unwrap()).unwrap();
+        assert_eq!(reopened.media[0].proxy.path(), Some(&reference));
+        dispatcher.invoke("edit.undo", None).unwrap();
+        assert!(engine.handle().snapshot().media[0].proxy.path().is_none());
+        dispatcher.invoke("edit.redo", None).unwrap();
+        assert_eq!(
+            engine.handle().snapshot().media[0].proxy.path(),
+            Some(&reference)
+        );
+        let saved_dir = std::env::temp_dir().join(format!("sub-proxy-first-save-{media}"));
+        std::fs::create_dir_all(&saved_dir).unwrap();
+        let saved = saved_dir.join("edit.sub");
+        dispatcher
+            .invoke("project.save", Some(json!({ "path": saved })))
+            .unwrap();
+        dispatcher
+            .invoke("project.new", Some(json!({ "name": "Scratch" })))
+            .unwrap();
+        dispatcher
+            .invoke("project.open", Some(json!({ "path": saved })))
+            .unwrap();
+        let reopened = engine.handle().snapshot();
+        assert_eq!(reopened.media[0].proxy.path(), Some(&reference));
+        assert_eq!(
+            reopened.media[0].proxy.path().unwrap().resolve(&saved_dir),
+            generated
+        );
+        std::fs::remove_dir_all(saved_dir).unwrap();
         engine.shutdown().unwrap();
     }
 

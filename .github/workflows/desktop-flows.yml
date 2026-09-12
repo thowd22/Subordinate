@@ -9,11 +9,10 @@ name: Desktop flows
 # an `::error::` annotation with the file name of its screenshot, which is
 # uploaded with the rest of the run.
 #
-# Everything either flow needs is already on the images
-# (infra/images/linux-desktop, infra/images/windows-desktop): the editor, the
-# CLI, the MCP bridge, GStreamer and the 4K60 test clip. The one thing a job
-# installs is the Linux desktop portal stack that the editor's **native file
-# dialog** needs, and only the clicks flow needs that.
+# Hosted builders compile the selected commit once. Paid desktops consume those
+# artifacts, using the image only for its desktop session and sample media.
+# Box and yodaddy run offscreen UI and real MCP regressions without interacting
+# with their owners' desktop sessions.
 #
 # ---------------------------------------------------------------- cost ------
 # Each flow is one `g4dn.xlarge`:
@@ -31,6 +30,10 @@ name: Desktop flows
 on:
   workflow_call:
     inputs:
+      artifact_run_id:
+        description: Reuse current-app artifacts from a completed Desktop flows run (only regressions, box or yodaddy).
+        type: string
+        default: ''
       linux_runner:
         description: RunsOn selector for the Linux desktop runner.
         type: string
@@ -45,6 +48,10 @@ on:
         default: ''
   workflow_dispatch:
     inputs:
+      artifact_run_id:
+        description: Reuse current-app artifacts from a completed Desktop flows run (only regressions, box or yodaddy).
+        type: string
+        default: ''
       linux_runner:
         description: >-
           RunsOn selector for the Linux desktop runner. RunsOn reads
@@ -69,20 +76,112 @@ on:
           - linux-clicks
           - windows-mcp
           - windows-clicks
+          - box
+          - yodaddy
+          - regressions
 
 permissions:
   contents: read
+  actions: read
 
 env:
   # The flows take their binaries, media and encoder from the environment, so
   # the same scripts run on a developer's machine against a local build.
+  GST_VERSION: "1.28.6"
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  FLOW_REQUESTED_REF: ${{ github.sha }}
   FLOW_PRESET: youtube-1080p
   FLOW_ENCODER: nvh264enc
 
 jobs:
+  resolve-artifacts:
+    name: Resolve verified application artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run-id: ${{ steps.source.outputs.run-id }}
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/github-script@v7
+        id: source
+        env:
+          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+          ONLY: ${{ inputs.only }}
+        with:
+          script: |
+            const source = process.env.ARTIFACT_RUN_ID;
+            if (!source) {
+              core.setOutput('run-id', String(context.runId));
+              core.setOutput('sha', context.sha);
+              return;
+            }
+            if (!['regressions', 'box', 'yodaddy'].includes(process.env.ONLY)) {
+              throw new Error('Artifact reuse is supported only for regressions, box or yodaddy; native desktops require a fresh build.');
+            }
+            if (!/^[1-9][0-9]*$/.test(source)) throw new Error('artifact_run_id must be a numeric Actions run ID');
+            const {data: run} = await github.rest.actions.getWorkflowRun({
+              ...context.repo, run_id: Number(source)
+            });
+            if (run.status !== 'completed' || run.path.split('@')[0] !== '.github/workflows/desktop-flows.yml') {
+              throw new Error('Source must be a completed Desktop flows run from this repository');
+            }
+            core.setOutput('run-id', source);
+            core.setOutput('sha', run.head_sha);
+            await core.summary.addHeading('Regression artifact provenance')
+              .addRaw(`Harness commit: ${context.sha}\nApplication/test commit: ${run.head_sha}\nSource run: ${source}\n`)
+              .write();
+
+  build-linux:
+    name: Build current Linux desktop and regression binaries (hosted, free)
+    needs: resolve-artifacts
+    if: inputs.artifact_run_id == '' && (inputs.only == '' || startsWith(inputs.only, 'linux') || inputs.only == 'box' || inputs.only == 'regressions')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GStreamer (apt)
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*google*.list \
+                     /etc/apt/sources.list.d/*google*.sources \
+                     /etc/apt/sources.list.d/*microsoft*.list \
+                     /etc/apt/sources.list.d/*microsoft*.sources || true
+          sudo apt-get update || sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-tools \
+            pkg-config libasound2-dev libxkbcommon-dev libwayland-dev libx11-dev
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop-current-linux-ubuntu24
+          prefix-key: v1-rust
+          cache-workspace-crates: true
+
+      - name: Build the current app and focused acceptance tests
+        run: |
+          cargo build -p subordinate -p subordinate-cli -p subordinate-mcp --message-format=json > desktop-build.json
+          cargo test -p sub-ui --test empty_timeline_drop --test empty_track_menu --test media_import_app --no-run --message-format=json >> desktop-build.json
+          cargo test -p subordinate-mcp --test stdio --no-run --message-format=json >> desktop-build.json
+          python3 scripts/desktop/package-build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux-${{ github.run_id }}
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
   # --------------------------------------------------------------- Linux ----
   linux-mcp:
     name: Linux desktop, MCP-only flow
+    needs: build-linux
     if: inputs.only == '' || inputs.only == 'linux-mcp'
     runs-on: runs-on=${{ github.run_id }}/${{ inputs.linux_runner || 'runner=gpu-nvidia-desktop-linux' }}
     timeout-minutes: 20
@@ -90,22 +189,40 @@ jobs:
       DISPLAY: ':0'
       XAUTHORITY: /run/subordinate/Xauthority
       SUBORDINATE_ENDPOINT_DIR: /tmp/subordinate-endpoint
-      SUBORDINATE_CLI: /usr/local/bin/subordinate-cli
+      SUBORDINATE_CLI: ${{ github.workspace }}/dist/subordinate-cli
       FLOW_OUT: ${{ github.workspace }}/flow-out
       FLOW_WORK: /tmp/desktop-flow
       FLOW_MEDIA: /opt/subordinate/test-media/meld-4k60-excerpt-2min.mkv
-      FLOW_EDITOR: /usr/local/bin/subordinate
-      FLOW_CLI: /usr/local/bin/subordinate-cli
-      FLOW_MCP: /usr/local/bin/subordinate-mcp
-      FLOW_DISCOVERER: /usr/local/bin/subordinate-gst-discoverer
+      FLOW_EDITOR: ${{ github.workspace }}/dist/subordinate
+      FLOW_CLI: ${{ github.workspace }}/dist/subordinate-cli
+      FLOW_MCP: ${{ github.workspace }}/dist/subordinate-mcp
+      FLOW_DISCOVERER: /usr/bin/gst-discoverer-1.0
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-linux-${{ github.run_id }}
+          path: dist
+      - name: Runtime for the current Linux build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libgstreamer-plugins-bad1.0-0 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools \
+            gstreamer1.0-plugins-base-apps libasound2t64 libvulkan1 libxkbcommon0
+          chmod +x dist/subordinate dist/subordinate-cli dist/subordinate-mcp
+      - name: First-use UI and MCP regressions on this GPU
+        run: python3 scripts/desktop/run-regressions.py dist
+
 
       - name: Instance, image and display facts
         run: |
           echo "runner=$RUNNER_NAME ami=${RUNS_ON_AMI_ID:-unknown}"
           . /etc/os-release && echo "os=$PRETTY_NAME"
           echo "release baked in: $(cat /opt/subordinate/RELEASE_TAG)"
+          echo "FLOW_INSTALLED_RELEASE=$(cat /opt/subordinate/RELEASE_TAG)" >> "$GITHUB_ENV"
+          echo "FLOW_TESTED_REF=$GITHUB_SHA" >> "$GITHUB_ENV"
           nvidia-smi
           systemctl is-active subordinate-xorg.service
           systemctl is-active subordinate-wm.service
@@ -126,69 +243,51 @@ jobs:
     name: Linux desktop, clicks-only flow
     # Deliberately after linux-mcp rather than beside it: the account's
     # G-family quota is two g4dn.xlarge, and windows-mcp holds the other one.
-    needs: linux-mcp
-    if: always() && (inputs.only == '' || inputs.only == 'linux-clicks')
+    needs: [build-linux, linux-mcp]
+    if: always() && needs.build-linux.result == 'success' && (inputs.only == '' || inputs.only == 'linux-clicks')
     runs-on: runs-on=${{ github.run_id }}/${{ inputs.linux_runner || 'runner=gpu-nvidia-desktop-linux' }}
     timeout-minutes: 20
     env:
       DISPLAY: ':0'
       XAUTHORITY: /run/subordinate/Xauthority
       SUBORDINATE_ENDPOINT_DIR: /tmp/subordinate-endpoint
-      SUBORDINATE_CLI: /usr/local/bin/subordinate-cli
+      SUBORDINATE_CLI: ${{ github.workspace }}/dist/subordinate-cli
       FLOW_OUT: ${{ github.workspace }}/flow-out
       FLOW_WORK: /tmp/desktop-flow
       FLOW_MEDIA: /opt/subordinate/test-media/meld-4k60-excerpt-2min.mkv
-      FLOW_EDITOR: /usr/local/bin/subordinate
-      FLOW_CLI: /usr/local/bin/subordinate-cli
-      FLOW_MCP: /usr/local/bin/subordinate-mcp
-      FLOW_DISCOVERER: /usr/local/bin/subordinate-gst-discoverer
+      FLOW_EDITOR: ${{ github.workspace }}/dist/subordinate
+      FLOW_CLI: ${{ github.workspace }}/dist/subordinate-cli
+      FLOW_MCP: ${{ github.workspace }}/dist/subordinate-mcp
+      FLOW_DISCOVERER: /usr/bin/gst-discoverer-1.0
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-linux-${{ github.run_id }}
+          path: dist
+      - name: Runtime for the current Linux build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libgstreamer-plugins-bad1.0-0 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools \
+            gstreamer1.0-plugins-base-apps libasound2t64 libvulkan1 libxkbcommon0
+          chmod +x dist/subordinate dist/subordinate-cli dist/subordinate-mcp
+      - name: First-use UI and MCP regressions on this GPU
+        run: python3 scripts/desktop/run-regressions.py dist
+
 
       - name: Instance, image and display facts
         run: |
           echo "runner=$RUNNER_NAME ami=${RUNS_ON_AMI_ID:-unknown}"
           echo "release baked in: $(cat /opt/subordinate/RELEASE_TAG)"
+          echo "FLOW_INSTALLED_RELEASE=$(cat /opt/subordinate/RELEASE_TAG)" >> "$GITHUB_ENV"
+          echo "FLOW_TESTED_REF=$GITHUB_SHA" >> "$GITHUB_ENV"
           nvidia-smi
           /usr/local/bin/subordinate-wait-for-display
 
-      # The two pieces of desktop plumbing a *clicking* test needs and an
-      # offscreen one does not:
-      #
-      #   * the editor's file dialog is rfd's XDG desktop portal backend
-      #     (rfd 0.17 with default features, and neither the gtk3 backend nor
-      #     ashpd is compiled in), so choosing a file needs
-      #     xdg-desktop-portal with a backend implementation behind it;
-      #   * AccessKit's Unix adapter publishes egui's widget tree on the
-      #     accessibility bus, so finding `Import...` by name needs
-      #     at-spi2-core and a client library to read it with.
-      #
-      # Both are D-Bus activated, which is why the flow runs under
-      # `dbus-run-session`. They belong in the image the moment this is
-      # settled; they are installed here so the flow can be iterated on
-      # without a 40-minute AMI rebuild per attempt.
-      #
-      # This job used to install libva-drm2, libva2, libva-x11-2 and libvdpau1
-      # here as well, and that was a **packaging defect** being papered over,
-      # not a test dependency: the v0.1.2 AppImage's `libav`, `va`, `qsv` and
-      # `msdk` plugins all failed to load with "libva-drm.so.2: cannot open
-      # shared object file", which the plugin scanner prints and nothing else
-      # notices - until an import of the baked 4K60 clip answers
-      # `media.unsupported` with `MissingPlugins` (run 34684471869 reproduced
-      # it through `media.probe`, with no window involved; run 34684749594
-      # found the next three). TASK-145 fixed it in the package: the AppImage
-      # now carries fallback copies of those four dispatchers and AppRun links
-      # in whichever ones a host turns out not to have, so this image is back
-      # to being an honest stock desktop. If the probe below ever answers
-      # media.unsupported again, the package regressed - do not re-add the apt
-      # line.
-      #
-      # One ordering fact: this runner runs the AppImage **baked into the AMI**,
-      # which infra/images/linux-desktop/ takes from the newest v* release. So
-      # this job only goes green once a release carrying the TASK-145 fix has
-      # been cut and the desktop image rebuilt from it; against an older baked
-      # release the import still answers media.unsupported, and that is the
-      # image being stale rather than the workflow being wrong.
+      # Native file dialogs and the accessibility tree are desktop test dependencies.
       - name: Desktop portal and accessibility bus (apt)
         run: |
           set -euxo pipefail
@@ -197,50 +296,6 @@ jobs:
             dbus-x11 libdbus-1-3 at-spi2-core python3-pyatspi \
             xdg-desktop-portal xdg-desktop-portal-gtk zenity
           dpkg -l | grep -E 'xdg-desktop-portal|at-spi2-core|pyatspi' || true
-
-      # The example flow, which is also the diagnosis when the clicks flow
-      # cannot find a control: it launches the editor, dumps the whole
-      # accessibility tree to controls.json and clicks `Import...`. Never
-      # fatal - the flow below is the job's verdict - but its artifact is the
-      # first thing to read when a name has moved or the a11y bus is not there.
-      # Can this build probe the baked clip at all? The clicks flow's import
-      # answers `media.unsupported`, and that is either the dialog choosing the
-      # wrong file or the probe refusing this one - this is the half that does
-      # not involve a dialog. Never fatal.
-      - name: Probe the baked clip through the Command API (never fatal)
-        continue-on-error: true
-        timeout-minutes: 4
-        env:
-          SUBORDINATE_INSTANCE: desktop-probe
-          SUBORDINATE_ENDPOINT_DIR: /tmp/subordinate-probe-endpoint
-        run: |
-          set -uo pipefail
-          mkdir -p "$FLOW_OUT"
-          timeout 180 python3 scripts/mcp-roundtrip.py --mcp "$FLOW_MCP" --max-chars 4000 \
-            "media.probe={\"path\":\"$FLOW_MEDIA\"}" 2>&1 | tee "$FLOW_OUT/probe.txt"
-          "$FLOW_DISCOVERER" "$FLOW_MEDIA" 2>&1 | head -30 | tee -a "$FLOW_OUT/probe.txt"
-
-      # The example flow, which is also the diagnosis when the clicks flow
-      # cannot find a control: it launches the editor, dumps the whole
-      # accessibility tree to controls.json and clicks `Import...`. Never
-      # fatal - the flow below is the job's verdict - but its artifact is the
-      # first thing to read when a name has moved or the a11y bus is not there.
-      # Can this build probe the baked clip at all? The clicks flow's import
-      # answers `media.unsupported`, and that is either the dialog choosing the
-      # wrong file or the probe refusing this one - this is the half that does
-      # not involve a dialog. Never fatal.
-      - name: Probe the baked clip through the Command API (never fatal)
-        continue-on-error: true
-        timeout-minutes: 4
-        env:
-          SUBORDINATE_INSTANCE: desktop-probe
-          SUBORDINATE_ENDPOINT_DIR: /tmp/subordinate-probe-endpoint
-        run: |
-          set -uo pipefail
-          mkdir -p "$FLOW_OUT"
-          timeout 180 python3 scripts/mcp-roundtrip.py --mcp "$FLOW_MCP" --max-chars 4000 \
-            "media.probe={\"path\":\"$FLOW_MEDIA\"}" 2>&1 | tee "$FLOW_OUT/probe.txt"
-          "$FLOW_DISCOVERER" "$FLOW_MEDIA" 2>&1 | head -30 | tee -a "$FLOW_OUT/probe.txt"
 
       - name: Accessibility diagnostics (never fatal)
         continue-on-error: true
@@ -305,31 +360,68 @@ jobs:
           if-no-files-found: warn
 
   # -------------------------------------------------------------- Windows ----
-  build-mcp-windows:
-    # The released MSI has not always carried the bridge (v0.1.1 and v0.1.2
-    # staged subordinate.exe and subordinate-cli.exe only), and it has no
-    # GStreamer or wgpu dependency, so a free hosted runner builds it in a
-    # couple of minutes and the paid instance stays short.
-    name: Build subordinate-mcp (hosted, free)
-    if: inputs.only == '' || startsWith(inputs.only, 'windows')
-    runs-on: windows-latest
-    timeout-minutes: 25
+  build-windows:
+    name: Build current Windows desktop and regression binaries (hosted, free)
+    needs: resolve-artifacts
+    if: inputs.artifact_run_id == '' && (inputs.only == '' || startsWith(inputs.only, 'windows') || inputs.only == 'yodaddy' || inputs.only == 'regressions')
+    runs-on: windows-2022
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install GStreamer (Windows, official installer)
+        shell: pwsh
+        run: |
+          $ver = $env:GST_VERSION
+          $exe = "gstreamer-1.0-msvc-x86_64-$ver.exe"
+          $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc/$exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          $dir = "C:\gstreamer\1.0\msvc_x86_64"
+          Start-Process -Wait -FilePath ".\$exe" -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/TYPE=devel","/ALLUSERS","/DIR=$dir"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$dir\lib\pkgconfig" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+          targets: wasm32-wasip2
+
       - uses: Swatinem/rust-cache@v2
         with:
-          key: mcp-windows
-      - run: cargo build --release -p subordinate-mcp
+          shared-key: desktop-current-windows
+          prefix-key: v1-rust
+          cache-workspace-crates: true
+
+      - name: Build and package the current app, tests and runtime
+        shell: pwsh
+        run: |
+          cargo build -p subordinate -p subordinate-cli -p subordinate-mcp --message-format=json | Out-File -Encoding utf8 desktop-build.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test -p sub-ui --test empty_timeline_drop --test empty_track_menu --test media_import_app --no-run --message-format=json | Out-File -Encoding utf8 -Append desktop-build.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test -p subordinate-mcp --test stdio --no-run --message-format=json | Out-File -Encoding utf8 -Append desktop-build.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python scripts/desktop/package-build.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $gst = $env:GSTREAMER_1_0_ROOT_MSVC_X86_64
+          New-Item -ItemType Directory -Force dist/runtime/lib/gstreamer-1.0, dist/runtime/libexec | Out-Null
+          Copy-Item "$gst/bin" dist/runtime/bin -Recurse
+          Copy-Item "$gst/lib/gstreamer-1.0/*.dll" dist/runtime/lib/gstreamer-1.0/
+          Copy-Item "$gst/libexec/*" dist/runtime/libexec/ -Recurse
+          # A private Python avoids the Store alias and installs nothing on yodaddy.
+          Invoke-WebRequest 'https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip' -OutFile python.zip
+          Expand-Archive python.zip dist/python
       - uses: actions/upload-artifact@v4
         with:
-          name: subordinate-mcp-windows-${{ github.run_id }}
-          path: target/release/subordinate-mcp.exe
+          name: desktop-windows-${{ github.run_id }}
+          path: dist/
+          retention-days: 7
           if-no-files-found: error
 
   windows-mcp:
     name: Windows desktop, MCP-only flow
-    needs: build-mcp-windows
+    needs: build-windows
     if: inputs.only == '' || inputs.only == 'windows-mcp'
     runs-on: runs-on=${{ github.run_id }}/${{ inputs.windows_runner || 'runner=gpu-nvidia-desktop-windows' }}
     timeout-minutes: 22
@@ -340,8 +432,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: subordinate-mcp-windows-${{ github.run_id }}
-          path: mcp
+          name: desktop-windows-${{ github.run_id }}
+          path: dist
       - name: Run the MCP-only flow in the console session
         uses: ./.github/actions/windows-desktop-flow
         with:
@@ -358,10 +450,10 @@ jobs:
         timeout-minutes: 6
         run: |
           $ErrorActionPreference = 'Continue'
-          $project = 'C:\SubordinateTest\flow-project\flow.sub'
+          $project = (Get-ChildItem 'C:\SubordinateTest\flow-project\flow-*.sub' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
           if (-not (Test-Path $project)) { 'no project to render'; exit 0 }
           $env:SUBORDINATE_LOG = 'info,sub_export=debug'
-          & 'C:\Program Files\Subordinate\bin\subordinate-cli.exe' render $project `
+          & 'C:\SubordinateTest\current\subordinate-cli.exe' render $project `
             --preset $env:FLOW_PRESET --out "$env:RUNNER_TEMP\flow-out\cli-render.mp4" `
             --range 0:48 --encoder nvh264enc --verify 2>&1 |
             Tee-Object "$env:RUNNER_TEMP\flow-out\cli-render.log"
@@ -376,8 +468,8 @@ jobs:
 
   windows-clicks:
     name: Windows desktop, clicks-only flow
-    needs: [build-mcp-windows, windows-mcp]
-    if: always() && (inputs.only == '' || inputs.only == 'windows-clicks')
+    needs: [build-windows, windows-mcp]
+    if: always() && needs.build-windows.result == 'success' && (inputs.only == '' || inputs.only == 'windows-clicks')
     runs-on: runs-on=${{ github.run_id }}/${{ inputs.windows_runner || 'runner=gpu-nvidia-desktop-windows' }}
     timeout-minutes: 22
     defaults:
@@ -387,8 +479,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: subordinate-mcp-windows-${{ github.run_id }}
-          path: mcp
+          name: desktop-windows-${{ github.run_id }}
+          path: dist
       - name: Run the clicks-only flow in the console session
         uses: ./.github/actions/windows-desktop-flow
         with:
@@ -401,3 +493,56 @@ jobs:
           name: windows-clicks-flow-${{ github.run_id }}
           path: ${{ runner.temp }}/flow-out
           if-no-files-found: warn
+
+  box:
+    name: Fresh-project UI and MCP (box, no desktop input)
+    needs: [resolve-artifacts, build-linux]
+    if: >-
+      !cancelled() && needs.resolve-artifacts.result == 'success'
+      && (inputs.artifact_run_id != '' || needs.build-linux.result == 'success')
+      && (inputs.only == '' || inputs.only == 'box' || inputs.only == 'regressions')
+    runs-on: [self-hosted, linux, box, amd-gpu]
+    env:
+      SUB_REGRESSION_ARTIFACT_SHA: ${{ needs.resolve-artifacts.outputs.sha }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-linux-${{ needs.resolve-artifacts.outputs.run-id }}
+          path: dist
+          run-id: ${{ needs.resolve-artifacts.outputs.run-id }}
+          github-token: ${{ github.token }}
+      - name: Offscreen UI and isolated real MCP acceptance tests
+        run: python3 scripts/desktop/run-regressions.py dist
+
+  yodaddy:
+    name: Fresh-project UI and MCP (yodaddy, no desktop input)
+    needs: [resolve-artifacts, build-windows]
+    if: >-
+      !cancelled() && needs.resolve-artifacts.result == 'success'
+      && (inputs.artifact_run_id != '' || needs.build-windows.result == 'success')
+      && (inputs.only == '' || inputs.only == 'yodaddy' || inputs.only == 'regressions')
+    runs-on: [self-hosted, windows, yodaddy, amd-gpu]
+    env:
+      SUB_REGRESSION_ARTIFACT_SHA: ${{ needs.resolve-artifacts.outputs.sha }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-windows-${{ needs.resolve-artifacts.outputs.run-id }}
+          path: dist
+          run-id: ${{ needs.resolve-artifacts.outputs.run-id }}
+          github-token: ${{ github.token }}
+      - name: Offscreen UI and isolated real MCP acceptance tests
+        run: |
+          $env:PATH = "$pwd/dist/runtime/bin;$env:PATH"
+          $env:GST_PLUGIN_PATH = "$pwd/dist/runtime/lib/gstreamer-1.0"
+          $env:GST_PLUGIN_SYSTEM_PATH = $env:GST_PLUGIN_PATH
+          $env:GST_PLUGIN_SCANNER = (Get-ChildItem dist/runtime/libexec -Filter gst-plugin-scanner.exe -Recurse | Select-Object -First 1).FullName
+          & dist/python/python.exe scripts/desktop/run-regressions.py dist
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

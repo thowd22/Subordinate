@@ -46,7 +46,13 @@ pub const PANEL_SIZE: egui::Vec2 = egui::vec2(800.0, 600.0);
 
 /// The committed sample project, as it lives in the `sub-model` fixtures.
 pub fn fixture_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../sub-model/tests/fixtures/sample-project.sub")
+    std::env::var_os("SUBORDINATE_REPO_ROOT").map_or_else(
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../sub-model/tests/fixtures/sample-project.sub")
+        },
+        |root| PathBuf::from(root).join("crates/sub-model/tests/fixtures/sample-project.sub"),
+    )
 }
 
 /// Loads the committed sample project.

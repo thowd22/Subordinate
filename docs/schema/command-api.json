@@ -1238,7 +1238,7 @@
     },
     "MediaItem": {
       "additionalProperties": false,
-      "description": "A source file the project references.\n\nOTIO counterpart: `ExternalReference`, the media reference a `Clip` points\nat. Subordinate hoists it out of the clip into a project-level list so many\nclips share one entry, and so relinking a moved file is a single edit.\n\nThe stored path is always project-relative and the [`ContentHash`] identifies\nthe bytes, so a project folder copied to another machine relinks without\nuser intervention (docs/PLAN.md §5.6).",
+      "description": "A source file the project references.\n\nOTIO counterpart: `ExternalReference`, the media reference a `Clip` points\nat. Subordinate hoists it out of the clip into a project-level list so many\nclips share one entry, and so relinking a moved file is a single edit.\n\nPaths may be project-relative or explicitly external. The [`ContentHash`]\nidentifies the bytes for relinking when source files move.",
       "properties": {
         "analyses": {
           "description": "What analyzer plugins found in this media, at most one entry per\nanalyzer (docs/PLAN.md §6.2). Empty until an analysis has run, and\nabsent from the project file while it is empty, so a file written\nbefore analyses existed still loads.",
@@ -1287,7 +1287,7 @@
         },
         "path": {
           "$ref": "#/$defs/MediaPath",
-          "description": "Where the file lives, relative to the project folder."
+          "description": "Where the file lives: relative to the project or explicitly external."
         },
         "proxy": {
           "$ref": "#/$defs/ProxyState",
@@ -1328,8 +1328,24 @@
       "type": "object"
     },
     "MediaPath": {
-      "description": "A slash-separated project-relative media path.",
-      "type": "string"
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "external": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "external"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "A project-relative media path or an explicitly external absolute reference.\n\nRelative paths retain their original string serialization and strict\nvalidation. External references serialize as `{ \"external\": \"/path/to/file\" }`\nand resolve independently of the project folder, including before first save."
     },
     "MethodInfo": {
       "description": "One entry of [`SYSTEM_LIST_METHODS`].",

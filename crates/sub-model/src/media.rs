@@ -211,7 +211,7 @@ impl MediaUse {
 /// The file a media item is read from for one [`MediaUse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MediaSource<'a> {
-    /// The project-relative path to open.
+    /// The relative or explicit external path to open.
     pub path: &'a MediaPath,
     /// True when that path is the proxy rather than the original.
     pub is_proxy: bool,
@@ -231,9 +231,8 @@ impl MediaSource<'_> {
 /// at. Subordinate hoists it out of the clip into a project-level list so many
 /// clips share one entry, and so relinking a moved file is a single edit.
 ///
-/// The stored path is always project-relative and the [`ContentHash`] identifies
-/// the bytes, so a project folder copied to another machine relinks without
-/// user intervention (docs/PLAN.md §5.6).
+/// Paths may be project-relative or explicitly external. The [`ContentHash`]
+/// identifies the bytes for relinking when source files move.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MediaItem {
@@ -241,7 +240,7 @@ pub struct MediaItem {
     pub id: MediaId,
     /// Display name, usually the file name.
     pub name: String,
-    /// Where the file lives, relative to the project folder.
+    /// Where the file lives: relative to the project or explicitly external.
     pub path: MediaPath,
     /// Fingerprint of the file's bytes, when it has been hashed. `None` until
     /// the file is first read, and on items restored from a project whose

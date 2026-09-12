@@ -211,3 +211,59 @@ gh workflow run desktop-flows.yml --ref main -f only=linux-clicks
 gh workflow run desktop-flows.yml --ref my-branch \
   -f linux_runner=ami=ami-08dbaf8367717a9a3/family=g4dn.xlarge/spot=false
 ```
+
+## Fresh-project regression coverage
+
+Both routine flows launch the editor without a project file. The clicks flow
+checks each track context menu on an empty timeline (undoing back to empty),
+imports an external file through the native chooser before saving, and drops
+it onto the empty timeline to create its first sequence and video track.
+The MCP flow calls `project.new`, imports `{external: absolutePath}` media,
+and creates the sequence and tracks through commands. Both retain their edit
+and export checks and verify media references and timeline edits after the
+first save and reopen. No staged project or copied source media masks first use.
+
+`FLOW_REQUESTED_REF` identifies the checkout, `FLOW_TESTED_REF` the current
+artifact, and `FLOW_INSTALLED_RELEASE` the image's unused baked application.
+Hosted builders produce the editor, CLI, MCP bridge and focused test binaries
+from the same SHA. Binary hashes and the SHA are checked before any test runs.
+The Windows artifact includes its GStreamer runtime; Linux uses the matching
+Ubuntu runtime. The image supplies the isolated desktop and test media only.
+
+Routine hardware/nightly/release runs include noninteractive `box` and
+`yodaddy` jobs. They execute the real egui application harness tests
+`empty_timeline_drop`, `empty_track_menu`, `media_import_app`, and the MCP stdio
+import/save/reopen regression. They create temporary configuration and endpoint
+directories, inject no desktop input, and do not open the user's editor. Missing
+GPU adapters and missing test filters fail rather than silently pass. Use
+`only=regressions` for just these two free runner jobs (or `box`/`yodaddy` for
+one); the native clicks/MCP flows continue on isolated paid desktop instances.
+No compilation happens on paid instances or the user's machines.
+
+Run the focused checks against a branch without starting paid runners:
+
+```sh
+gh workflow run desktop-flows.yml --ref my-branch -f only=regressions
+# Select one machine with only=box or only=yodaddy.
+```
+
+The same tests run in normal Linux, macOS and Windows pull-request CI through
+`cargo test --workspace -- --test-threads=1`. To replay a downloaded desktop
+artifact, check out its commit, set `GITHUB_SHA` to that full commit and run
+`python scripts/desktop/run-regressions.py dist` with GStreamer on PATH (on
+Windows, use the artifact's `python/python.exe` and bundled runtime paths as
+shown in the workflow). The script verifies the binaries and creates all
+required first-use fixtures automatically.
+
+To retry a harness-only change without compiling the application again, reuse
+a completed Desktop flows run:
+
+```sh
+gh workflow run desktop-flows.yml --ref my-branch \
+  -f only=regressions -f artifact_run_id=34723105729
+```
+
+Reuse supports `regressions`, `box`, or `yodaddy`. The workflow reads the source
+run's commit from GitHub, checks the downloaded binary manifest against it, and
+reports both the harness and binary commits. Use a fresh build when application
+or Rust test code changes; replay intentionally tests the selected older build.
