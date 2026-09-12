@@ -332,11 +332,11 @@ jobs:
                 ! video/x-raw,width=3840,height=2160,framerate=60/1 \
                 ! x264enc speed-preset=ultrafast bitrate=20000 ! h264parse ! m. \
               audiotestsrc num-buffers=470 wave=sine freq=440 \
-                ! audio/x-raw,rate=48000,channels=2 ! opusenc ! m. \
+                ! audio/x-raw,rate=48000,channels=2 ! avenc_aac ! aacparse ! m. \
               audiotestsrc num-buffers=470 wave=sine freq=660 \
-                ! audio/x-raw,rate=48000,channels=2 ! opusenc ! m. \
+                ! audio/x-raw,rate=48000,channels=2 ! avenc_aac ! aacparse ! m. \
               audiotestsrc num-buffers=470 wave=sine freq=880 \
-                ! audio/x-raw,rate=48000,channels=2 ! opusenc ! m.
+                ! audio/x-raw,rate=48000,channels=2 ! avenc_aac ! aacparse ! m.
             echo "synthetic 4K60 with three audio tracks (box has no ffmpeg)" \
               >target/uhd/excerpt.txt
           fi

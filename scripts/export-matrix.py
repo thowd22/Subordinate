@@ -419,7 +419,11 @@ def count_frames(path: Path, gst_prefix: str | None, timeout: int = 600) -> tupl
     as unknown rather than as zero.
     """
     launch = gst_tool("gst-launch-1.0", gst_prefix)
-    location = str(path.resolve())
+    # Forward slashes: gst-launch's own parser treats a backslash as an escape,
+    # so a Windows path in `location=` arrives mangled and the pipeline fails
+    # to build (TASK-143, yodaddy, run 34683736400). GStreamer takes either
+    # separator on Windows.
+    location = str(path.resolve()).replace("\\", "/")
     attempts: list[tuple[str, list[str]]] = []
     demuxer = DEMUXERS.get(path.suffix.lower())
     if demuxer:
@@ -509,10 +513,10 @@ def build_project(
     warnings. Both a video and an audio track carry the clip, so every export
     off this project exercises the decoder, the mixer and the audio encoder.
     """
-    info = probe(media, gst_prefix)
-    if not info.ok or not info.video:
-        raise SystemExit(f"{media} is not a video file the discoverer can read: {info.error}")
-    video = info.video[0]
+    probed = probe(media, gst_prefix)
+    if not probed.ok or not probed.video:
+        raise SystemExit(f"{media} is not a video file the discoverer can read: {probed.error}")
+    video = probed.video[0]
     rate = video.rate or (30, 1)
     width = video.width or 1920
     height = video.height or 1080
@@ -531,7 +535,7 @@ def build_project(
                 shutil.copy2(media, linked)
 
     frames = max(1, int(round(seconds * rate[0] / rate[1])))
-    source = info.seconds
+    source = probed.seconds
     if source is not None:
         frames = min(frames, max(1, int(source * rate[0] / rate[1]) - 1))
 
@@ -569,6 +573,31 @@ def build_project(
             "solo": False,
         }
 
+    # `info` is filled in rather than left null on purpose: `decode_audio`
+    # routes a clip through GStreamer when its media item says it has video and
+    # through symphonia when it does not, and an item with no info at all takes
+    # the second path - which refused the Opus audio of a Matroska source
+    # outright (TASK-143, yodaddy, run 34683736400; the routing itself is
+    # TASK-150).
+    info = {
+        "audio": [
+            {"channels": stream.channels or 2, "sample_rate": stream.sample_rate or 48000}
+            for stream in probed.audio
+        ],
+        "duration": {
+            "rate": {"denominator": 1, "numerator": 1_000_000_000},
+            "value": int((probed.seconds or 0) * 1_000_000_000),
+        },
+        "video": [
+            {
+                "color": {"primaries": "bt709", "space": "rec709", "transfer": "bt709"},
+                "frame_rate": {"denominator": rate[1], "numerator": rate[0]},
+                "height": height,
+                "sample_aspect": {"denominator": 1, "numerator": 1},
+                "width": width,
+            }
+        ],
+    }
     document = {
         "project": {
             "id": project_id,
@@ -577,7 +606,7 @@ def build_project(
                     "color": {"primaries": "bt709", "space": "rec709", "transfer": "bt709"},
                     "hash": None,
                     "id": media_id,
-                    "info": None,
+                    "info": info,
                     "name": media.name,
                     "offline": False,
                     "path": f"media/{media.name}",
@@ -616,9 +645,9 @@ def build_project(
         "height": height,
         "frame_rate": f"{rate[0]}/{rate[1]}",
         "frames": frames,
-        "source_seconds": info.seconds,
-        "source_audio_streams": len(info.audio),
-        "source_audio": [asdict(s) for s in info.audio],
+        "source_seconds": probed.seconds,
+        "source_audio_streams": len(probed.audio),
+        "source_audio": [asdict(s) for s in probed.audio],
     }
     # A sidecar beside the project, so `run` can report how many audio streams
     # the source really carried without probing it a second time.
