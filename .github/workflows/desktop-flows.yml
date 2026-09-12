@@ -172,8 +172,8 @@ jobs:
           set -euxo pipefail
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            dbus-x11 at-spi2-core python3-pyatspi \
-            xdg-desktop-portal xdg-desktop-portal-gtk
+            dbus-x11 libdbus-1-3 at-spi2-core python3-pyatspi \
+            xdg-desktop-portal xdg-desktop-portal-gtk zenity
           dpkg -l | grep -E 'xdg-desktop-portal|at-spi2-core|pyatspi' || true
 
       # The example flow, which is also the diagnosis when the clicks flow
@@ -219,6 +219,10 @@ jobs:
           # activation, so that its log is a file this job can upload: a
           # dialog that never appears is nearly always the portal refusing,
           # and it says so nowhere else.
+          # zenity is rfd's own fallback when the portal call fails, so it is
+          # installed too: either way the dialog that opens is the one the
+          # application asked for, and the flow records which came up.
+          export G_MESSAGES_DEBUG=all
           dbus-run-session -- bash -c '
             set -uo pipefail
             for portal in /usr/libexec/xdg-desktop-portal-gtk /usr/libexec/xdg-desktop-portal; do

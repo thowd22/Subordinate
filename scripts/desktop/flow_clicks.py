@@ -208,10 +208,20 @@ def run(run: flowlib.Run) -> None:
             tree = [control.as_dict() for control in session.controls()]
             (out / "controls-timeline.json").write_text(json.dumps(tree, indent=1))
             row, how = locate(session, window, staged.media.stem[:12], "row", offsets)
+            # Near the row's left edge, not its middle: the bin's name column
+            # is 220 points wide and the panel is narrower, so the control's
+            # rectangle - which the accessibility tree reports in full -
+            # reaches out under the panel beside it, and a press at its centre
+            # lands on the viewer instead of on the clip (run 34676051424).
+            grab = row if isinstance(row, tuple) else (
+                row.rect.x + min(30, row.rect.width // 4),
+                row.rect.center[1],
+            )
             drop, lane = _lane_point(session, window, layout)
             step.note(
                 row=getattr(row, "as_dict", lambda: row)(),
                 located_by=how,
+                grab={"x": grab[0], "y": grab[1]},
                 drop={"x": drop[0], "y": drop[1]},
                 lane=lane,
             )
@@ -219,7 +229,7 @@ def run(run: flowlib.Run) -> None:
             # the application saw a drag at all: egui paints a ghost of the
             # clip where it would land, or a refused wash where it may not.
             session.drag(
-                row,
+                grab,
                 drop,
                 midway=lambda: session.screenshot("07a-mid-drag.png"),
             )
