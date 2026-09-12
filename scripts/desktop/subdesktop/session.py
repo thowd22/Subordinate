@@ -291,7 +291,7 @@ class Session(abc.ABC):
 
     @abc.abstractmethod
     def maximize(self, window: "Window") -> "Window":
-        """Fill the screen with `window`, and answer its new rectangle.
+        """Fill the usable screen with `window`, and answer its new rectangle.
 
         Worth doing before any gesture: a window larger than the screen hides
         the panels at its bottom edge behind the taskbar, and a drop aimed at

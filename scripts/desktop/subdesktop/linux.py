@@ -188,15 +188,53 @@ class LinuxSession(Session):
         time.sleep(0.3)
         return (x, y)
 
+    def pointer_bounds(self) -> Rect:
+        """Where on this display the pointer can actually be put.
+
+        Not always the whole screen. On the Linux desktop image the virtual
+        screen is 1920x1080, but the pointer is confined to the right-hand part
+        of it: asking for x=102 or x=300 leaves it at x=448 (run 34681396173).
+        A click aimed at a control outside that band therefore lands somewhere
+        else entirely, which is exactly what "the editor takes motion but not
+        clicks" looked like. The bounds are measured rather than assumed, so a
+        display without the quirk gives the whole screen and nothing changes.
+        """
+        run([self._xdotool, "mousemove", "--sync", "0", "0"])
+        left, top = self._pointer()
+        run([self._xdotool, "mousemove", "--sync", "10000", "10000"])
+        right, bottom = self._pointer()
+        return Rect(left, top, max(right - left + 1, 1), max(bottom - top + 1, 1))
+
+    def _pointer(self) -> tuple[int, int]:
+        text = run([self._xdotool, "getmouselocation"])
+        values = dict(
+            part.split(":", 1) for part in text.split() if ":" in part
+        )
+        return int(values.get("x", 0)), int(values.get("y", 0))
+
     def maximize(self, window: Window) -> Window:
-        # openbox honours _NET_WM_STATE_MAXIMIZED, and xdotool asks for it
-        # through windowsize's percentage form, which is the same thing
-        # without needing a window manager hint.
+        """Fill the *pointer's* rectangle, which is not always the screen's."""
+        bounds = self.pointer_bounds()
         subprocess.run(
-            [self._xdotool, "windowmove", "--sync", window.handle, "0", "0"], check=False
+            [
+                self._xdotool,
+                "windowmove",
+                "--sync",
+                window.handle,
+                str(bounds.x),
+                str(bounds.y),
+            ],
+            check=False,
         )
         subprocess.run(
-            [self._xdotool, "windowsize", "--sync", window.handle, "100%", "100%"],
+            [
+                self._xdotool,
+                "windowsize",
+                "--sync",
+                window.handle,
+                str(bounds.width),
+                str(bounds.height),
+            ],
             check=False,
         )
         time.sleep(1.0)
