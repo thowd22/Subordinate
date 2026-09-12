@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-task-137'
 created_date: '2026-09-11 22:18'
-updated_date: '2026-09-11 22:46'
+updated_date: '2026-09-12 00:28'
 labels:
   - infra
   - gpu
@@ -53,3 +53,22 @@ Human-style desktop testing needs a real window session on a real GPU. Build an 
 5. Deploy the stack, run the pipeline in the foreground, record the AMI id, then verify by dispatching gpu-smoke.yml from the branch with the inline label form runs-on=<run_id>/image=<ami-id>/family=g4dn.xlarge/spot=false (named runners resolve only from main).
 6. Document the runner, the rebuild runbook and the cost in docs/DEVELOPMENT.md; remove the temporary push trigger before finishing.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Image build
+
+Image Builder pipeline `subordinate-linux-desktop` (CloudFormation stack of the same name, us-east-1), built on RunsOn's `ami-005e36ab413bd2f30` (`runs-on-v2.2-ubuntu24-gpu-x64-20260821141648`, owner 135269210855) - confirmed as what `ubuntu24-gpu-x64` resolves to from `RUNS_ON_AMI_ID` in gpu-smoke run 34643890462, not guessed.
+
+Four things the driver and the tooling taught us, all now recorded in `infra/images/linux-desktop/component.yaml`:
+
+1. Ubuntu keeps `nvidia_drv.so` outside Xorg's default module path (`/usr/lib/x86_64-linux-gnu/nvidia/xorg`), reached through a `ModulePath` the driver package's own `xorg.conf.d` snippet adds. The component finds it at build time and `subordinate-xorg-setup` writes a matching `Files` section.
+2. The 580 driver on a T4 refuses `UseDisplayDevice "None"`: *"not supported with virtual display"*, then *"no screens found"*. The headless screen is `AllowEmptyInitialConfiguration` plus `Virtual 1920 1080` and nothing else.
+3. `After=multi-user.target` on the Xorg unit plus `WantedBy=multi-user.target` on both units is an ordering cycle; systemd breaks it by dropping a job, and the window manager came up `inactive` on a fresh boot while Xorg itself was fine. The Xorg unit is now ordered after `systemd-user-sessions.service`.
+4. `xdpyinfo | grep -q 1920x1080` is a check that passes and then reports failure - grep leaves on the match, xdpyinfo takes SIGPIPE, `pipefail` turns that into exit 141. It failed the image's test phase on an instance whose display was demonstrably correct.
+
+The build starts the session on the build instance itself (`XorgStartsOnThisInstance`) rather than waiting for the test phase, because a bad `xorg.conf` is the likeliest failure and finding it there costs seconds instead of the half hour a snapshot plus test boot takes.
+
+`subordinate-mcp` is not in the v0.1.x AppImage, so the component builds it from the release tag with a throwaway rustup toolchain (its tree is pure Rust - sub-command, sub-edit, sub-model, sub-time, sub-core, rmcp, tokio - about two minutes). `packaging/linux/build-appimage.sh` now bundles it, so a future image will take it from the package; the component prefers the bundled one when it is there.
+<!-- SECTION:NOTES:END -->
