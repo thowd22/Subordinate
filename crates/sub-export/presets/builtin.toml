@@ -8,6 +8,11 @@
 # Frame rates are written as an exact numerator and denominator, never a
 # decimal: 23.976 fps is 24000/1001. Video quality is either an average
 # bitrate in kbit/s or a constant-quality CRF, never both.
+#
+# Video is encoded 4:2:0, which is what players, browsers and hardware decoders
+# take; a preset that is a master rather than a delivery file may add
+# `chroma = "4:2:2"` or `chroma = "4:4:4"`, and the export then fails with
+# `export.chroma_unsupported` if the encoder that was chosen cannot take it.
 
 [[preset]]
 id = "youtube-1080p"

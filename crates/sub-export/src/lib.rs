@@ -21,6 +21,7 @@
 //! quality of a named export target, shipped as TOML data and extensible by a
 //! user file in the config directory.
 
+pub mod chroma;
 pub mod encoder;
 pub mod job;
 pub mod pipeline;
@@ -34,6 +35,7 @@ pub use sequence::{
     open_streams, sequence_frames, settings_for_sequence,
 };
 
+pub use chroma::{CHROMA_FORMATS, ChromaFormat};
 pub use encoder::{
     CODECS, ElementProbe, EncodeRefusal, EncoderPreferences, EncoderProbe, EncoderStatus,
     EncoderVendor, VideoCodec, can_encode, element_is_usable, encoder_names,
@@ -71,6 +73,8 @@ pub mod codes {
     pub const ENCODER_UNAVAILABLE: ErrorCode = ErrorCode::from_static("export.encoder_unavailable");
     /// The export settings do not describe a file that can be written.
     pub const INVALID_SETTINGS: ErrorCode = ErrorCode::from_static("export.invalid_settings");
+    /// The chosen encoder cannot take the chroma format that was asked for.
+    pub const CHROMA_UNSUPPORTED: ErrorCode = ErrorCode::from_static("export.chroma_unsupported");
     /// The container cannot carry one of the chosen codecs.
     pub const UNSUPPORTED_COMBINATION: ErrorCode =
         ErrorCode::from_static("export.unsupported_combination");
@@ -105,6 +109,7 @@ mod tests {
             super::codes::ENCODER_UNAVAILABLE,
             super::codes::INVALID_SETTINGS,
             super::codes::UNSUPPORTED_COMBINATION,
+            super::codes::CHROMA_UNSUPPORTED,
             super::codes::MUXER_UNAVAILABLE,
             super::codes::PIPELINE_FAILED,
             super::codes::PUSH_FAILED,

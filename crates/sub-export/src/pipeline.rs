@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use sub_core::{ErrorCode, SubError, SubResult};
 use sub_time::{Rational, RationalTime};
 
+use crate::chroma::ChromaFormat;
 use crate::codes;
 use crate::encoder::{
     EncoderPreferences, EncoderProbe, EncoderStatus, VideoCodec, can_encode, element_is_usable,
@@ -265,6 +266,13 @@ pub struct ExportSettings {
     pub container: Container,
     /// The video codec to encode.
     pub video_codec: VideoCodec,
+    /// The chroma format the encoder is fed.
+    ///
+    /// 4:2:0 unless a preset asks for more: it is what every delivery profile
+    /// and every hardware decoder takes, and what an unpinned pipeline does
+    /// *not* produce.
+    #[serde(default)]
+    pub chroma: ChromaFormat,
     /// The audio codec to encode, or `None` for a video-only export.
     pub audio_codec: Option<AudioCodec>,
     /// The sample rate of the audio handed to the pipeline, in hertz.
@@ -283,6 +291,7 @@ impl ExportSettings {
             frame_rate,
             container,
             video_codec: VideoCodec::H264,
+            chroma: ChromaFormat::default(),
             audio_codec: Some(AudioCodec::Aac),
             sample_rate: 48_000,
             channels: 2,
@@ -293,6 +302,14 @@ impl ExportSettings {
     #[must_use]
     pub fn with_video_codec(mut self, codec: VideoCodec) -> Self {
         self.video_codec = codec;
+        self
+    }
+
+    /// The same settings with `chroma` as the chroma format handed to the
+    /// encoder.
+    #[must_use]
+    pub fn with_chroma(mut self, chroma: ChromaFormat) -> Self {
+        self.chroma = chroma;
         self
     }
 
@@ -1229,8 +1246,10 @@ pub fn export_with(
 
 /// Builds `appsrc ! videoconvert ! capsfilter ! encoder ! parser ! muxer`.
 ///
-/// The `capsfilter` is what makes `videoconvert` do the colour conversion
-/// rather than the encoder; see [`encoder_input_caps`].
+/// The capsfilter is the point of the branch: without it `videoconvert`
+/// negotiates whatever the encoder likes best, which for `x264enc` is `Y444`
+/// and a file in High 4:4:4 Predictive. With it the encoder is fed the chroma
+/// format the settings ask for — 4:2:0 unless a preset says otherwise.
 fn build_video_branch(
     pipeline: &gst::Pipeline,
     muxer: &gst::Element,
@@ -1240,13 +1259,12 @@ fn build_video_branch(
     let src = make_element("appsrc")?;
     let convert = make_element("videoconvert")?;
     let encoder = make_coded_element(&elements.video_encoder, codes::ENCODER_UNAVAILABLE)?;
-    let mut chain = vec![src.clone(), convert];
-    if let Some(caps) = encoder_input_caps(&elements.video_encoder) {
-        let filter = make_element("capsfilter")?;
-        filter.set_property("caps", &caps);
-        chain.push(filter);
-    }
-    chain.push(encoder);
+    let filter = make_element("capsfilter")?;
+    filter.set_property(
+        "caps",
+        chroma_caps(settings.chroma, &elements.video_encoder, &encoder)?,
+    );
+    let mut chain = vec![src.clone(), convert, filter, encoder];
     let parser = video_parser(settings.video_codec);
     if element_is_usable(parser) {
         chain.push(make_element(parser)?);
@@ -1380,6 +1398,88 @@ fn video_caps(settings: &ExportSettings) -> gst::Caps {
         .build()
 }
 
+/// The caps pinned between `videoconvert` and the encoder.
+///
+/// Every raw format of the requested family that `encoder` declares, in the
+/// element's own order, so the element's first choice within the family is
+/// what it gets: `I420` for `x264enc`, `NV12` for a VA-API or NVENC element.
+///
+/// # Errors
+///
+/// [`codes::CHROMA_UNSUPPORTED`] when the element declares no format of the
+/// family at all. Negotiating something else instead is exactly the silence
+/// this function exists to break.
+fn chroma_caps(chroma: ChromaFormat, name: &str, encoder: &gst::Element) -> SubResult<gst::Caps> {
+    chroma_caps_for(chroma, name, &declared_sink_formats(encoder))
+}
+
+/// [`chroma_caps`] against the formats an element declares, so the choice can
+/// be tested without an element that declares them.
+///
+/// # Errors
+///
+/// [`codes::CHROMA_UNSUPPORTED`], as [`chroma_caps`].
+fn chroma_caps_for(chroma: ChromaFormat, name: &str, declared: &[String]) -> SubResult<gst::Caps> {
+    let chosen: Vec<&'static str> = if declared.is_empty() {
+        // An element that declares nothing readable still has to be fed
+        // something: the family's own order is the best guess there is, and a
+        // format it truly cannot take fails to negotiate loudly.
+        chroma.formats().to_vec()
+    } else {
+        let chosen = chroma.declared_in(declared);
+        if chosen.is_empty() {
+            return Err(SubError::new(
+                codes::CHROMA_UNSUPPORTED,
+                format!("{name} cannot encode {chroma} chroma"),
+            )
+            .with_detail("encoder", name)
+            .with_detail("chroma", chroma.as_str())
+            .with_detail("wanted", chroma.formats())
+            .with_detail("declared", declared));
+        }
+        chosen
+    };
+    let mut caps = gst::Caps::new_empty();
+    {
+        let caps = caps
+            .get_mut()
+            .ok_or_else(|| SubError::new(codes::PIPELINE_FAILED, "fresh caps are not writable"))?;
+        for format in chosen {
+            caps.append_structure(
+                gst::Structure::builder("video/x-raw")
+                    .field("format", format)
+                    .build(),
+            );
+        }
+    }
+    Ok(caps)
+}
+
+/// Every `format` an element's sink pad template names, in template order.
+///
+/// An element whose template carries no `format` field, or none this build can
+/// read, yields an empty list, which the caller reads as "unknown" rather than
+/// as "nothing".
+fn declared_sink_formats(encoder: &gst::Element) -> Vec<String> {
+    let mut formats: Vec<String> = Vec::new();
+    let Some(template) = encoder.pad_template("sink") else {
+        return formats;
+    };
+    let caps = template.caps();
+    for structure in caps.iter() {
+        let Ok(value) = structure.value("format") else {
+            continue;
+        };
+        if let Ok(one) = value.get::<String>() {
+            formats.push(one);
+        } else if let Ok(list) = value.get::<gst::List>() {
+            formats.extend(list.iter().filter_map(|item| item.get::<String>().ok()));
+        }
+    }
+    formats.dedup();
+    formats
+}
+
 /// The caps of the mix: interleaved `f32`, as the mixer produces it.
 fn audio_caps(settings: &ExportSettings) -> gst::Caps {
     gst::Caps::builder("audio/x-raw")
@@ -1441,11 +1541,25 @@ fn pipeline_error(message: &str, source: &dyn std::error::Error) -> SubError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUDIO_CODECS, AudioCodec, AudioFrameSource, CONTAINERS, Container, ExportSettings,
-        PcmAudioSource, SolidFrames, VideoFrameSource, audio_nanos, element_is_usable, gst,
-        video_parser,
+        AUDIO_CODECS, AudioCodec, AudioFrameSource, CONTAINERS, ChromaFormat, Container,
+        ExportSettings, PcmAudioSource, SolidFrames, VideoFrameSource, audio_nanos,
+        chroma_caps_for, codes, declared_sink_formats, element_is_usable, video_parser,
     };
+    use gstreamer as gst;
     use sub_time::Rational;
+
+    /// The formats a list of names stands for, as an element would declare
+    /// them.
+    fn declared(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// The `format` of every structure of `caps`, in order.
+    fn caps_formats(caps: &gst::Caps) -> Vec<String> {
+        caps.iter()
+            .filter_map(|structure| structure.get::<String>("format").ok())
+            .collect()
+    }
 
     fn settings(rate: Rational) -> ExportSettings {
         ExportSettings::new(16, 16, rate, Container::Mkv)
@@ -1645,5 +1759,84 @@ mod tests {
             assert_eq!(frame[3], 0xff, "frames are opaque");
         }
         assert!(frames.next_frame().expect("a frame").is_none());
+    }
+    #[test]
+    fn an_export_is_four_two_zero_unless_it_is_told_otherwise() {
+        let settings = settings(Rational::FPS_24);
+        assert_eq!(settings.chroma, ChromaFormat::Yuv420);
+        assert_eq!(
+            settings.with_chroma(ChromaFormat::Yuv444).chroma,
+            ChromaFormat::Yuv444,
+        );
+    }
+
+    #[test]
+    fn the_pinned_caps_are_the_family_in_the_elements_own_order() {
+        gst::init().expect("GStreamer must initialise");
+        // x264enc's own order: Y444 first, which is exactly what an unpinned
+        // videoconvert used to hand it.
+        let x264 = declared(&["Y444", "Y42B", "I420", "YV12", "NV12", "GRAY8"]);
+        let caps = chroma_caps_for(ChromaFormat::Yuv420, "x264enc", &x264).expect("4:2:0 fits");
+        assert_eq!(caps_formats(&caps), ["I420", "YV12", "NV12"]);
+        assert!(
+            !caps_formats(&caps).contains(&"Y444".to_owned()),
+            "the 4:4:4 format the encoder prefers must not be offered",
+        );
+
+        let caps = chroma_caps_for(ChromaFormat::Yuv444, "x264enc", &x264).expect("4:4:4 fits too");
+        assert_eq!(caps_formats(&caps), ["Y444"]);
+    }
+
+    #[test]
+    fn a_hardware_encoder_is_pinned_to_the_one_format_it_takes() {
+        gst::init().expect("GStreamer must initialise");
+        let caps = chroma_caps_for(ChromaFormat::Yuv420, "vah264enc", &declared(&["NV12"]))
+            .expect("NV12 is 4:2:0");
+        assert_eq!(caps_formats(&caps), ["NV12"]);
+    }
+
+    #[test]
+    fn an_element_that_cannot_take_the_chroma_asked_for_fails_by_name() {
+        gst::init().expect("GStreamer must initialise");
+        let error = chroma_caps_for(ChromaFormat::Yuv444, "vah264enc", &declared(&["NV12"]))
+            .expect_err("NV12 is not 4:4:4");
+        assert_eq!(error.code, codes::CHROMA_UNSUPPORTED);
+        assert!(
+            error.to_string().contains("vah264enc"),
+            "the message names the element: {error}",
+        );
+    }
+
+    #[test]
+    fn an_element_that_declares_nothing_readable_still_gets_the_family() {
+        gst::init().expect("GStreamer must initialise");
+        let caps = chroma_caps_for(ChromaFormat::Yuv420, "mystery", &[]).expect("a best guess");
+        assert_eq!(caps_formats(&caps), ChromaFormat::Yuv420.formats());
+    }
+
+    #[test]
+    fn the_software_encoders_declare_the_formats_they_are_pinned_to() {
+        if gst::init().is_err() {
+            eprintln!("skipping: GStreamer will not initialise here");
+            return;
+        }
+        for name in ["x264enc", "x265enc"] {
+            let Ok(encoder) = gst::ElementFactory::make(name).build() else {
+                eprintln!("skipping {name}: this machine does not have it");
+                continue;
+            };
+            let formats = declared_sink_formats(&encoder);
+            assert!(
+                formats.contains(&"I420".to_owned()),
+                "{name} declares the 4:2:0 format an export pins: {formats:?}",
+            );
+            let caps = chroma_caps_for(ChromaFormat::Yuv420, name, &formats)
+                .expect("a software encoder takes 4:2:0");
+            assert_eq!(
+                caps_formats(&caps).first().map(String::as_str),
+                Some("I420"),
+                "{name} prefers I420 within the family",
+            );
+        }
     }
 }
