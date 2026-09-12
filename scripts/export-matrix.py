@@ -102,6 +102,12 @@ DEFAULT_PRESETS: dict[str, tuple[str, str]] = {
     "av1-archive": ("av1", "mkv"),
 }
 
+# Encoders slow enough that a cell of the normal length would outlast the job.
+# libaom's `av1enc` is seconds to minutes a frame at its default `cpu-used`,
+# and rav1e and SVT-AV1 are not much better on a hosted runner, so their cells
+# render `--slow-frames` frames instead. The count used is in the table.
+SLOW_ENCODERS: tuple[str, ...] = ("av1enc", "rav1enc", "svtav1enc")
+
 # How the codec a preset asks for shows up in a discoverer report.
 CODEC_PATTERNS: dict[str, re.Pattern[str]] = {
     "h264": re.compile(r"h\.?264|avc", re.I),
@@ -597,6 +603,7 @@ class Case:
     status: str = "pending"
     detail: str = ""
     size: int | None = None
+    frames_requested: int | None = None
     frames_expected: int | None = None
     frames_counted: int | None = None
     seconds: float | None = None
@@ -619,9 +626,11 @@ def render_case(
     gst_prefix: str,
     timeout: int,
     env: dict[str, str] | None,
+    frames: int | None,
 ) -> tuple[Case, dict[str, Any], str]:
     """Renders one cell and validates what it wrote."""
     case = Case(source=source.name, preset=preset, encoder=encoder, codec=codec)
+    case.frames_requested = frames
     stem = f"{source.name}-{preset}-{encoder}"
     output = out_dir / "outputs" / f"{stem}.{extension}"
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -640,8 +649,8 @@ def render_case(
     ]
     if source.sequence:
         argv += ["--sequence", source.sequence]
-    if source.frames:
-        argv += ["--range", f"0:{source.frames}"]
+    if frames:
+        argv += ["--range", f"0:{frames}"]
 
     done = run(argv, timeout=timeout, env=env)
     case.seconds = round(done.seconds, 1)
@@ -672,7 +681,7 @@ def render_case(
 
     case.output = str(written) if written else None
     case.size = written.stat().st_size if written and written.exists() else None
-    case.frames_expected = int(report.get("video_frames") or 0) or source.frames
+    case.frames_expected = int(report.get("video_frames") or 0) or frames
     settings = report.get("settings") or {}
     case.resolution = (
         f"{settings.get('width')}x{settings.get('height')}" if settings.get("width") else None
@@ -739,6 +748,17 @@ def render_case(
         "stderr": done.err[-4000:],
     }
     return case, artifacts, str(written) if written else ""
+
+
+def frames_for(source: Source, element: str, args: argparse.Namespace) -> int | None:
+    """How many frames this cell renders.
+
+    Every cell renders the source's own range except the ones whose encoder is
+    slow enough to outlast the job on its own; see `SLOW_ENCODERS`.
+    """
+    if element in set(args.slow_encoders) and source.frames:
+        return min(source.frames, args.slow_frames)
+    return source.frames
 
 
 def one_line(text: str) -> str:
@@ -839,6 +859,7 @@ def matrix(args: argparse.Namespace) -> int:
                     args.gst_prefix,
                     args.timeout,
                     env,
+                    frames_for(source, element, args),
                 )
                 cases.append(case)
                 stem = f"{source.name}-{preset}-{element}"
@@ -942,6 +963,13 @@ def table(
             f"{case.frames_counted if case.frames_counted is not None else '?'}"
             f"/{case.frames_expected if case.frames_expected is not None else '?'}"
         )
+        if (
+            case.frames_requested
+            and case.frames_expected
+            and case.frames_requested != case.frames_expected
+        ):
+            frames += f" (asked {case.frames_requested})"
+
         duration = f"{case.duration:.2f}s" if case.duration else "-"
         audio = (
             f"{case.audio_codec} {case.audio_channels}ch"
@@ -975,6 +1003,14 @@ def table(
         "- The `audio-only` preset is not in the matrix: it carries no video"
         " stream, and `render` refuses it before any encoder is chosen."
     )
+    slow = sorted({case.encoder for case in cases if case.frames_requested != case.frames_expected
+                   and case.frames_requested})
+    if slow:
+        lines.append(
+            "- " + ", ".join(f"`{element}`" for element in slow) + " render a short"
+            " range: software AV1 is seconds to minutes a frame at stock settings,"
+            " and a full-length cell would outlast the job."
+        )
     for source in sources:
         if source.audio_streams:
             lines.append(
@@ -1026,6 +1062,8 @@ def main() -> int:
     )
     run_parser.add_argument("--keep-bytes", type=int, default=200_000_000)
     run_parser.add_argument("--gst-debug", default=None)
+    run_parser.add_argument("--slow-encoders", nargs="*", default=list(SLOW_ENCODERS))
+    run_parser.add_argument("--slow-frames", type=int, default=8)
     run_parser.add_argument("--fail-on-error", action="store_true")
 
     project_parser = sub.add_parser(

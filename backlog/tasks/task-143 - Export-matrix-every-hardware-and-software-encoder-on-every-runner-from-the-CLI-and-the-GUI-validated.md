@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-task-143'
 created_date: '2026-09-12 03:58'
-updated_date: '2026-09-12 04:03'
+updated_date: '2026-09-12 04:35'
 labels:
   - export
   - gpu
@@ -45,3 +45,9 @@ Export has been verified one encoder at a time (hardware workflow: nvh264enc on 
 6. GUI comparison on the desktop image: the baked release editor exports through the Command API socket (export.render); nvh264enc versus x264enc is forced with GST_PLUGIN_FEATURE_RANK on the editor process, and the GUI output is compared with a CLI render of the same project for frame count and audio.
 7. Iterate on the free machines first (box, yodaddy, hosted) then the paid ones, staggering T4 dispatches after 'gh run list'; file a backlog bug task per failure naming encoder, preset, machine and the GStreamer error; record run ids in the task notes.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Run 34672568992 (branch push, free jobs only): build-linux passed; box failed at the matrix step because the --source list was built as a shell string and the sample sequence is called "Main cut" - word splitting handed argparse "cut::50". Fixed with bash arrays. box also has no ffmpeg, so no 4K60 excerpt reached the Windows jobs; a synthetic 4K60 three-track clip is now the stated fallback. The project builder itself worked: it read the user 32 GB meld-4k60-full.mkv as 3840x2160 at 60/1 with three 48 kHz stereo AAC streams and wrote a two-track project around it. CI run 34672571538 failed only on the user guide troubleshooting section, which is asserted against sub_export::encoder_names - fixed by naming the new catalogue entries there.
+<!-- SECTION:NOTES:END -->
