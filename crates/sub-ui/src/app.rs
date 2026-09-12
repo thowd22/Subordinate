@@ -1323,7 +1323,7 @@ impl SubordinateApp {
             .plan_edit_at_playhead(&project, &self.sequence, media, mode)
         {
             Ok(plan) => {
-                let _ = self.session.apply_boxed(plan.into_command());
+                let _ = self.session.apply_group(plan.label(), plan.into_commands());
                 self.sync_project();
             }
             Err(refusal) => log::debug!("{}: {}", mode.id(), refusal.message()),
@@ -1954,7 +1954,14 @@ impl SubordinateApp {
     /// is exactly one entry in the undo stack. A refusal is not an error: it
     /// is the panel saying the drag under the pointer cannot become an edit,
     /// and it is logged with its reason rather than applied.
-    fn apply_timeline(&mut self, response: TimelineResponse) {
+    fn apply_timeline(&mut self, mut response: TimelineResponse) {
+        if let Some(refusal) = response.drop_refused {
+            log::debug!("bin drop refused: {}", refusal.message());
+        }
+        if let Some(plan) = response.source_edit.take() {
+            let _ = self.session.apply_group(plan.label(), plan.into_commands());
+            self.sync_project();
+        }
         let Some(sequence) = self.tabs.active() else {
             return;
         };
@@ -1994,12 +2001,6 @@ impl SubordinateApp {
             let _ = self
                 .session
                 .apply_group(group.label.clone(), group.commands());
-        }
-        if let Some(refusal) = response.drop_refused {
-            log::debug!("bin drop refused: {}", refusal.message());
-        }
-        if let Some(plan) = response.source_edit {
-            let _ = self.session.apply_boxed(plan.into_command());
         }
         for action in response.marker_actions {
             let _ = self.session.apply_boxed(action.into_command(sequence));

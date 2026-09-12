@@ -20,8 +20,11 @@
 
 use sub_core::{SubError, SubResult};
 use sub_edit::clip::{AddClip, InsertClip};
+use sub_edit::commands::{InsertSequence, InsertTrack};
 use sub_edit::{BoxedCommand, History};
-use sub_model::{Clip, MediaId, MediaItem, Project, Sequence, SequenceId, TrackId, TrackKind};
+use sub_model::{
+    Clip, MediaId, MediaItem, Project, Sequence, SequenceId, Track, TrackId, TrackKind,
+};
 use sub_time::{RationalTime, TimeRange};
 
 use crate::codes;
@@ -140,6 +143,8 @@ pub struct PlannedEdit {
     pub clip: Clip,
     /// The span the clip occupies in sequence time.
     pub range: TimeRange,
+    create_sequence: Option<InsertSequence>,
+    create_track: Option<InsertTrack>,
 }
 
 impl PlannedEdit {
@@ -155,9 +160,23 @@ impl PlannedEdit {
         format!("{} {}", self.mode.label(), self.clip.name)
     }
 
+    /// Commands for one undoable gesture, including any empty-timeline setup.
+    #[must_use]
+    pub fn into_commands(mut self) -> Vec<BoxedCommand> {
+        let mut commands: Vec<BoxedCommand> = Vec::new();
+        if let Some(command) = self.create_sequence.take() {
+            commands.push(Box::new(command));
+        }
+        if let Some(command) = self.create_track.take() {
+            commands.push(Box::new(command));
+        }
+        commands.push(self.into_clip_command());
+        commands
+    }
+
     /// The command this edit is, ready for the Command API.
     #[must_use]
-    pub fn into_command(self) -> BoxedCommand {
+    fn into_clip_command(self) -> BoxedCommand {
         match self.mode {
             EditMode::Insert => Box::new(InsertClip {
                 sequence: self.sequence,
@@ -232,7 +251,48 @@ pub fn plan_source_edit(
         track_index,
         clip,
         range,
+        create_sequence: None,
+        create_track: None,
     })
+}
+
+/// Plans a bin edit, creating a first lane only when the timeline has none.
+/// The fallback sequence is inserted only when it is absent from the project.
+///
+/// # Errors
+/// Returns the same media and placement refusals as [`plan_source_edit`].
+pub fn plan_timeline_source_edit(
+    project: &Project,
+    sequence: &Sequence,
+    media: MediaId,
+    track_index: usize,
+    start: RationalTime,
+    mode: EditMode,
+) -> Result<PlannedEdit, SourceRefusal> {
+    if !sequence.tracks.is_empty() {
+        return plan_source_edit(project, sequence, media, track_index, start, mode);
+    }
+    let item = project
+        .media_item(media)
+        .ok_or(SourceRefusal::UnknownMedia)?;
+    let info = item.info.as_ref().ok_or(SourceRefusal::Unprobed)?;
+    let (name, kind) = if info.has_video() {
+        ("V1", TrackKind::Video)
+    } else {
+        ("A1", TrackKind::Audio)
+    };
+    let track = Track::new(name, kind);
+    let mut destination = sequence.clone();
+    destination.tracks.push(track.clone());
+    let mut plan = plan_source_edit(project, &destination, media, 0, start, mode)?;
+    if project.sequence(sequence.id).is_none() {
+        plan.create_sequence = Some(InsertSequence::new(
+            project.sequences.len(),
+            sequence.clone(),
+        ));
+    }
+    plan.create_track = Some(InsertTrack::new(sequence.id, 0, track));
+    Ok(plan)
 }
 
 /// Whether `item` has anything a track of `kind` can play.
@@ -264,7 +324,11 @@ pub fn apply_source_edit(
     project: &mut Project,
     plan: PlannedEdit,
 ) -> SubResult<()> {
-    history.apply_boxed(project, plan.into_command())?;
+    history.begin_group(plan.label())?;
+    for command in plan.into_commands() {
+        history.apply_boxed(project, command)?;
+    }
+    history.commit_group()?;
     Ok(())
 }
 
@@ -329,6 +393,54 @@ mod tests {
         sequence.tracks.push(Track::new("A1", TrackKind::Audio));
         project.sequences.push(sequence.clone());
         (project, sequence)
+    }
+
+    #[test]
+    fn empty_timeline_bootstrap_matches_media_and_undoes_exactly() {
+        for video in [true, false] {
+            for existing_sequence in [true, false] {
+                let source = item("source", 48, video, !video);
+                let media = source.id;
+                let mut project = Project::new("Untitled");
+                project.media.push(source);
+                let sequence = Sequence::new("Sequence", SequenceSettings::default());
+                if existing_sequence {
+                    project.sequences.push(sequence.clone());
+                }
+                let before = project.clone();
+                let plan = plan_timeline_source_edit(
+                    &project,
+                    &sequence,
+                    media,
+                    4,
+                    frames(24),
+                    EditMode::Overwrite,
+                )
+                .expect("an empty timeline accepts a probed item");
+                assert_eq!(project, before, "planning must not mutate the project");
+                let mut history = History::new();
+                apply_source_edit(&mut history, &mut project, plan).expect("bootstrap edit");
+                let after = project.clone();
+                assert_eq!(project.sequences.len(), 1);
+                assert_eq!(project.sequences[0].tracks.len(), 1);
+                assert_eq!(
+                    project.sequences[0].tracks[0].kind,
+                    if video {
+                        TrackKind::Video
+                    } else {
+                        TrackKind::Audio
+                    }
+                );
+                history
+                    .undo(&mut project)
+                    .expect("one undo removes the complete gesture");
+                assert_eq!(project, before);
+                history
+                    .redo(&mut project)
+                    .expect("redo restores all identities");
+                assert_eq!(project, after);
+            }
+        }
     }
 
     #[test]

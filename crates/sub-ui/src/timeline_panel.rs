@@ -28,7 +28,7 @@ use crate::markers::{self, DEFAULT_MARKER_NAME, MarkerAction, MarkerState};
 use crate::media_bin::BinDrag;
 use crate::selection::{ClipRef, MoveGroup, MoveRefusal, Selection, clips_in_marquee, plan_move};
 use crate::snapping::{self, SnapCandidate, SnapKind, SnapSettings};
-use crate::source_edit::{EditMode, PlannedEdit, SourceRefusal, plan_source_edit};
+use crate::source_edit::{EditMode, PlannedEdit, SourceRefusal, plan_timeline_source_edit};
 use crate::split::{SplitGroup, SplitRefusal, plan_split, plan_split_clip};
 use crate::thumbnails::{ThumbnailCache, ZoomBucket, tile_time};
 use crate::timeline::{TimelineView, TrackLayout, TransitionPlacement, ZoomLevel};
@@ -1034,7 +1034,7 @@ impl TimelinePanel {
         media: sub_model::MediaId,
         mode: EditMode,
     ) -> Result<PlannedEdit, SourceRefusal> {
-        plan_source_edit(
+        plan_timeline_source_edit(
             project,
             sequence,
             media,
@@ -1625,7 +1625,7 @@ impl TimelinePanel {
                 let time = self
                     .view
                     .time_at_pixel(round_px(pos.x - layout.content.left()));
-                plan_source_edit(
+                plan_timeline_source_edit(
                     project,
                     sequence,
                     drag.media,
