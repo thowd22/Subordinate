@@ -180,12 +180,22 @@ class Session(abc.ABC):
         seen: list[str] = []
         while True:
             seen = []
+            prefix: Control | None = None
             for control in self.controls(window=window):
                 seen.append(f"{control.role}:{control.name}")
                 if role is not None and control.role != role:
                     continue
-                if control.name == name or control.name.startswith(name):
+                # Exact first, always. A prefix is a convenience for labels
+                # that carry decoration (`Import...`), but it must never beat
+                # an exact match: a track header's mute button is `M`, and so
+                # are the first letters of `Main`, `Media` and `Minimize` (run
+                # 34677987056 minimized the window).
+                if control.name == name:
                     return control
+                if prefix is None and control.name.startswith(name):
+                    prefix = control
+            if prefix is not None:
+                return prefix
             if time.monotonic() >= deadline:
                 raise DesktopError(
                     f"no control named {name!r}"
