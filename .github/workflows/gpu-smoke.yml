@@ -93,7 +93,7 @@ jobs:
       # XDG_RUNTIME_DIR: the editor is started from one step's shell and the
       # bridge from another, and both have to land on the same socket. The
       # editor reads this variable, and so does subordinate-mcp.
-      SUBORDINATE_ENDPOINT_DIR: ${{ runner.temp }}/subordinate-endpoint
+      SUBORDINATE_ENDPOINT_DIR: /tmp/subordinate-endpoint
       # The bridge must drive the window, not a headless engine of its own:
       # with no fallback allowed, a session that cannot reach the editor fails
       # the step instead of quietly editing a project nobody can see.
