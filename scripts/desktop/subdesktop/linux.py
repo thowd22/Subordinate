@@ -41,6 +41,7 @@ class LinuxSession(Session):
         os.environ.setdefault("DISPLAY", self.display)
         self._xdotool = require("xdotool")
         self._registry = None
+        self._accessibility = enable_accessibility()
 
     # ------------------------------------------------------------------ launch
 
@@ -235,6 +236,44 @@ class LinuxSession(Session):
         scrot = require("scrot")
         run([scrot, "--overwrite", str(path)], timeout=60)
         return path
+
+
+def enable_accessibility() -> dict:
+    """Tell the accessibility bus that an assistive technology is listening.
+
+    AccessKit's Unix adapter does not publish a tree just because the bus is
+    there: it waits until `org.a11y.Status` says accessibility is enabled, the
+    same signal a screen reader sets when it starts. Without this the a11y bus
+    and the AT-SPI registry come up, the application registers nothing, and the
+    tree reads as empty rather than as absent (run 34673633121). Setting the
+    two properties is what a screen reader would do, and it is harmless where
+    there is no bus at all.
+    """
+    outcome: dict = {}
+    for prop in ("IsEnabled", "ScreenReaderEnabled"):
+        finished = subprocess.run(
+            [
+                "gdbus",
+                "call",
+                "--session",
+                "--dest",
+                "org.a11y.Bus",
+                "--object-path",
+                "/org/a11y/bus",
+                "--method",
+                "org.freedesktop.DBus.Properties.Set",
+                "org.a11y.Status",
+                prop,
+                "<true>",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        outcome[prop] = (
+            "set" if finished.returncode == 0 else finished.stderr.strip()[:120]
+        )
+    return outcome
 
 
 def _collect(node, found: list[Control], depth: int) -> None:

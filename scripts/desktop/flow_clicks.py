@@ -205,12 +205,15 @@ def run(run: flowlib.Run) -> None:
 
         with run.step("drag the clip from the bin onto the timeline") as step:
             session.activate(window)
+            tree = [control.as_dict() for control in session.controls()]
+            (out / "controls-timeline.json").write_text(json.dumps(tree, indent=1))
             row, how = locate(session, window, staged.media.stem[:12], "row", offsets)
-            drop = window.rect.point(*layout["timeline_drop"])
+            drop, lane = _lane_point(session, window, layout)
             step.note(
                 row=getattr(row, "as_dict", lambda: row)(),
                 located_by=how,
                 drop={"x": drop[0], "y": drop[1]},
+                lane=lane,
             )
             session.drag(row, drop)
             clips = _wait_until(
@@ -222,7 +225,8 @@ def run(run: flowlib.Run) -> None:
             step.note(clips=len(clips))
 
         with run.step("scrub the playhead, then press Ctrl+K") as step:
-            ruler = window.rect.point(*layout["ruler"])
+            ruler = _ruler_point(session, window, layout)
+            step.note(ruler={"x": ruler[0], "y": ruler[1]})
             session.click(ruler)
             position = _wait_until(
                 lambda: read("playback.status", {}),
@@ -249,6 +253,28 @@ def run(run: flowlib.Run) -> None:
             tree = [control.as_dict() for control in session.controls()]
             (out / "controls-export.json").write_text(json.dumps(tree, indent=1))
             step.note(tab=tab.as_dict(), controls=len(tree))
+
+        with run.step("limit the render to the first seconds") as step:
+            # A clip dragged out of the bin is the whole two-minute source, and
+            # rendering all of it would cost more GPU minutes than the rest of
+            # the flow together. `In to out` with a small Out is the panel's
+            # own way to say so. Best effort: a flow that cannot set it renders
+            # the lot rather than failing over a convenience.
+            try:
+                session.click(session.find("In to out", timeout=20))
+                out_label = session.find("Out", timeout=20)
+                # An egui DragValue becomes a text field when it is clicked
+                # into, and it sits immediately right of its label.
+                session.click(
+                    (out_label.rect.x + out_label.rect.width + 30, out_label.rect.center[1]),
+                    double=True,
+                )
+                session.key("ctrl+a")
+                session.type_text("120")
+                session.key("Return")
+                step.note(range="in to out", out_frame=120)
+            except DesktopError as error:
+                step.note(range="whole sequence", why=str(error)[:200])
 
         with run.step("type the output path and pin the vendor encoder") as step:
             # The output is a text field beside a `File` label, so it is typed
@@ -300,6 +326,37 @@ def run(run: flowlib.Run) -> None:
     finally:
         bridge.close()
         session.stop(started)
+
+
+# ---------------------------------------------------------------- the lanes
+
+
+def _lane_point(session, window, layout) -> tuple[tuple[int, int], str]:
+    """Where to drop a video clip: the middle of the V1 lane.
+
+    The lane itself is canvas with nothing to name, but its **header** is a
+    label the application publishes - `V1`, from the track's own name - and the
+    lane is the band of pixels beside it. Aiming at the header's own row is
+    what makes this a drop on the video track rather than on the audio track
+    below it: a video clip dropped on A1 is refused, which looks exactly like a
+    drag that never happened (run 34673633121).
+    """
+    try:
+        header = session.find("V1", timeout=20)
+        x = window.rect.x + int(window.rect.width * 0.5)
+        return (x, header.rect.center[1]), "the V1 header's row"
+    except DesktopError:
+        return window.rect.point(*layout["timeline_drop"]), "a fraction of the window"
+
+
+def _ruler_point(session, window, layout) -> tuple[int, int]:
+    """Where to click to scrub: the ruler, which is just above the first lane."""
+    try:
+        header = session.find("V1", timeout=10)
+        x = window.rect.x + int(window.rect.width * 0.35)
+        return (x, header.rect.y - 24)
+    except DesktopError:
+        return window.rect.point(*layout["ruler"])
 
 
 # ----------------------------------------------------------------- the dialog

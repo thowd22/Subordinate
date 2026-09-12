@@ -76,6 +76,13 @@ runs:
           FLOW_DISCOVERER = 'C:\Program Files\Subordinate\bin\gst-discoverer-1.0.exe'
           FLOW_PRESET     = ($env:FLOW_PRESET ? $env:FLOW_PRESET : 'youtube-1080p')
           FLOW_ENCODER    = ($env:FLOW_ENCODER ? $env:FLOW_ENCODER : 'nvh264enc')
+          # The Direct3D H.264 decoders stall on the baked 4K60 clip: the
+          # export pipeline starts, plugs d3d11h264dec, writes one frame and
+          # then nothing, with the editor running or closed (runs
+          # 34672165182 and 34673633121). Ranking them out leaves NVDEC
+          # (nvh264dec), which is the decoder this instance's GPU is for.
+          # GStreamer's own knob, so nothing in the application knows.
+          GST_PLUGIN_FEATURE_RANK = 'd3d11h264dec:0,d3d12h264dec:0,d3d11h265dec:0,d3d12h265dec:0'
         }
         if (-not $settings.FLOW_MEDIA) { throw 'no test clip under C:\SubordinateTest' }
         $settings.GetEnumerator() | ForEach-Object { "$($_.Key) = $($_.Value)" }

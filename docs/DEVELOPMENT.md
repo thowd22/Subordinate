@@ -1192,6 +1192,68 @@ account's on-demand G-family quota is 8 vCPU, which is exactly two
 `g4dn.xlarge`, so an image build and a GPU job can collide - re-run the
 pipeline, it is not a real failure.
 
+## Desktop flows (the application, end to end)
+
+`egui_kittest` exercises panels in isolation and `scripts/ui-smoke.sh`
+photographs the assembled window under Xvfb. The **desktop flows** are the
+layer above both: the whole application on a machine with a GPU, a window
+manager and a pointer, doing what a person or an agent would do end to end
+(TASK-139). They run on the two desktop images, and they are two jobs each:
+
+| Flow | What acts | What asserts |
+| --- | --- | --- |
+| `scripts/desktop/flow_mcp.py` | `subordinate-mcp` and nothing else, against the window on screen | the timeline read back after each call, and the exported file |
+| `scripts/desktop/flow_clicks.py` | a real pointer and real keystrokes, and nothing else | read-only Command API calls after each gesture |
+
+Both take a screenshot after every step, write `result.json` and `summary.md`,
+and print `::error title=<flow>: <step>::` naming the step that failed and the
+file name of its picture. `scripts/desktop/README.md` documents the harness -
+the seven verbs, the module CLI, how to write a flow and how to run one against
+a local build.
+
+```sh
+gh workflow run desktop-flows.yml --ref main -f only=linux-clicks
+```
+
+`.github/workflows/desktop-flows.yml` holds the four jobs and
+`hardware.yml` calls it, so they run nightly and on release tags. The clicks
+jobs are `needs:` the MCP jobs rather than beside them, because the account's
+G-family quota is exactly two `g4dn.xlarge`. Cost per flow: Linux about
+**0.03 USD** on spot (0.08 USD at the 20-minute cap), Windows about **0.13 USD**
+on demand (0.27 USD at the 22-minute cap).
+
+Three things about the images these flows found, and why the code does what it
+does:
+
+* **The window is on screen before the socket is.** The editor binds the
+  Command API off the UI thread, so a bridge started the moment the window
+  appears is answered `command.not_running`. The flows wait for
+  `the Command API is listening on` in the editor's log (run 34671892159).
+* **An agent's edit does not wake an idle window.** egui paints when something
+  asks it to; an edit arriving over the socket lands in the project the panels
+  draw, but with no pointer, keyboard or animation the window keeps showing the
+  frame it painted before, and a screenshot taken straight afterwards is of a
+  project that has already changed (run 34672010010). Every picture in the MCP
+  flow is therefore taken after `session.nudge()`, a pointer move that changes
+  nothing.
+* **The editor's endpoint does not serve `export.*`.** Only
+  `subordinate-cli serve` installs the host-backed families
+  (`docs/schema/host-api.json`); the editor serves the engine's own methods and
+  the plugin methods. So the MCP flow saves the project the window is holding
+  and renders through a second bridge on a scratch instance. It also closes the
+  editor first: on Windows, with the window still open on the same 4K60 clip,
+  the export managed one frame in fifteen minutes and finished in seconds once
+  it had the GPU to itself (run 34672165182).
+
+On Linux the clicks flow needs two pieces of desktop plumbing that the image
+does not carry yet, and the job installs them: `xdg-desktop-portal` with a
+backend, because the editor's file dialog is rfd's XDG portal backend (rfd 0.17
+with default features compiles neither `gtk3` nor `ashpd`), and `at-spi2-core`
+with `python3-pyatspi`, because AccessKit's Unix adapter publishes egui's widget
+tree on the accessibility bus. Both are D-Bus activated, so the flow runs under
+`dbus-run-session`. They belong in `infra/images/linux-desktop/component.yaml`
+once they have settled.
+
 ## Self-hosted AMD runner ("box")
 
 AWS no longer offers AMD GPU instances, so AMD Linux verification runs on
