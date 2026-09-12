@@ -3,11 +3,11 @@ id: TASK-143
 title: >-
   Export matrix: every hardware and software encoder on every runner, from the
   CLI and the GUI, validated
-status: In Progress
+status: Done
 assignee:
   - '@opus-task-143'
 created_date: '2026-09-12 03:58'
-updated_date: '2026-09-12 12:01'
+updated_date: '2026-09-12 14:59'
 labels:
   - export
   - gpu
@@ -86,4 +86,24 @@ Run 34689001087: RunsOn recovered and the NVIDIA T4 row ran. 10 passed, 4 failed
 And the GUI half on NVIDIA hardware: "nvh264enc: window 12 frames, CLI 12 frames, audio on both" and "x264enc: window 12 frames, CLI 12 frames, audio on both" - the assembled editor export runner and subordinate-cli render, same project, same preset, same pinned encoder, same file.
 
 On checking AC 3, one substitution the reviewer should weigh rather than take on trust. The criterion names the Linux desktop image; the comparison ran on box and on the Tesla T4 instead, for a reason that is itself a finding: the running editor Command API serves the engine methods and not the host family, so export.render reaches no window and nothing on that image can ask the editor to export at all (TASK-147). The image also carries a released build and no Rust, so a test binary cannot run there either. What did run is the assembled SubordinateApp - its export panel, its encoder pin, its ExportRunner, its render context - on two machines with real GPUs, against subordinate-cli over the same project, preset and encoder, for nvh264enc, vah264enc and x264enc. That is the substance the criterion is about; the machine is not the one it names. Move the comparison onto the desktop image once TASK-147 is done.
+
+Runs 34695092575 and 34697692471, the NVIDIA T4 Windows row: 14 cells observed passing or failing before the job hit its own limit (raised to 60 minutes since - eight of that machine cells stall rather than fail, and even capped at two minutes each that is a third of the job). mfh264enc, x264enc, x265enc, svtav1enc and rav1enc write the sample project on every preset in four to ten seconds. nvh264enc, nvh265enc and mfh265enc stop on frame 1 - TASK-152 - and every hardware encoder stalls on the 4K source, TASK-148.
+
+Worth flagging to whoever reads this next: another agent, on another branch, has independently found and fixed the mechanism behind both stalls - the export pushed into appsrc with a blocking push and never read the bus, so a failed element hung the render instead of reporting itself. This matrix found the same phenomenon from the outside on four vendors and three operating systems, which is corroboration rather than duplication, but TASK-148 and TASK-152 should be read alongside that work rather than started from scratch. Their branch also numbers a task TASK-146, which is this branch 4:4:4 task - parallel agents are colliding on task ids and someone should reconcile them.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Export is now measured as a matrix rather than one encoder at a time.
+
+.github/workflows/export-matrix.yml runs on demand and nightly, one job per machine, and every job runs the same driver - scripts/export-matrix.py - so the rows are comparable. The driver discovers encoders from the exporter own probe next to the raw registry, crosses every pinnable encoder with every preset of its codec and every source, renders each cell through subordinate-cli render --encoder --preset --verify, and then validates the file independently: stream layout and duration from gst-discoverer, and a frame count taken by reading the written file own video track, which is the only check that catches an encoder writing a plausible header and dropping pictures. It writes a machine x source x preset x encoder table into the job summary with pass/fail, size, frames, duration and audio, and keeps every failing output with its discoverer report as an artifact. The same driver builds a project around any media file, which is how the user 4K60 three-audio-track footage reaches each machine.
+
+Measured, on four machines: hosted ubuntu-24.04 6/6, box 17/20, the Tesla T4 10 passed 4 failed 6 deliberately skipped, yodaddy 24/30, and fourteen cells of the Windows T4. Thirteen distinct encoder elements exercised across NVENC, VA-API, AMF, Media Foundation and software, including two - amfav1enc and mfh265enc - that the exporter could not have been asked for at all before this branch catalogued them, and AV1, which had no preset to ask for.
+
+Two gaps in sub-export were filled to make "every present encoder" mean anything: the catalogue gained vaav1enc, amfav1enc, mfh265enc and three software AV1 encoders, and builtin.toml gained an av1-archive preset. The GUI half of the claim is a new sub-ui test - the assembled SubordinateApp, its export panel, its pinned encoder and its ExportRunner - compared against subordinate-cli over the same project, preset and encoder; it matches on frame count and audio for nvh264enc on the T4, vah264enc on box and x264enc on both.
+
+Verified by runs 34689001087 (T4, and the GUI comparison on NVIDIA hardware), 34685591190 (box, and the GUI comparison there), 34683736400 and 34688535274 (yodaddy), 34675906145 (hosted software) and 34697692471 (T4 Windows); CI green on run 34690432963.
+
+Seven bug tasks carry what it found: TASK-145, TASK-146, TASK-147, TASK-148, TASK-149, TASK-150, TASK-151 and TASK-152.
+<!-- SECTION:FINAL_SUMMARY:END -->
