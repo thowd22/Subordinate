@@ -30,8 +30,8 @@ pub mod sequence;
 
 #[cfg(feature = "sequence")]
 pub use sequence::{
-    FrameSpan, SequenceAudio, SequenceFrames, clips_with_effects, has_audio, lift_render_error,
-    open_streams, sequence_frames, settings_for_sequence,
+    FramePng, FrameSpan, SequenceAudio, SequenceFrames, clips_with_effects, frame_png, has_audio,
+    lift_render_error, open_streams, sequence_frames, settings_for_sequence,
 };
 
 pub use encoder::{
@@ -49,7 +49,7 @@ pub use pipeline::{
 };
 pub use presets::{
     AudioPreset, PRESETS_FILE_NAME, Preset, PresetLibrary, VideoPreset, VideoQuality, config_dir,
-    presets_path,
+    preset_json, presets_path,
 };
 
 /// Stable [`sub_core::ErrorCode`] constants this crate returns.

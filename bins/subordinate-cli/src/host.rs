@@ -25,16 +25,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use sub_command::host::{ExportParams, ExportStatus, FrameImage, FrameRequest, Services};
 use sub_core::{SubError, SubResult, codes};
-use sub_export::{ExportEvent, PresetLibrary};
-use sub_media::probe::{MediaInfo, probe};
-use sub_media::proxy::{Proxy, ProxyCodec, ProxyOptions, proxy_size};
+use sub_export::{ExportEvent, PresetLibrary, preset_json};
+use sub_media::probe::{media_info_json, probe};
+use sub_media::proxy::proxy_for_media;
 use sub_model::{MediaId, Project, json as project_json};
-
-/// The folder proxies are written into, relative to the project.
-pub const PROXY_DIR: &str = "proxies";
 
 /// The host services of a headless server.
 #[derive(Debug)]
@@ -90,31 +87,7 @@ impl Services for CliServices {
     }
 
     fn make_proxy(&self, project: &Project, media: MediaId) -> SubResult<String> {
-        let source = project
-            .absolute_path(&self.project_dir, media)
-            .ok_or_else(|| {
-                SubError::new(codes::NOT_FOUND, "no such media item in the project")
-                    .with_detail("media", media.to_string())
-            })?;
-        let info = probe(&source)?;
-        let video = info.video.first().ok_or_else(|| {
-            SubError::new(
-                codes::INVALID_ARGUMENT,
-                "a proxy needs a source with a video stream",
-            )
-            .with_detail("media", media.to_string())
-        })?;
-        let defaults = ProxyOptions::default();
-        let (width, height) = proxy_size(video.width, video.height, defaults.scale);
-        let options = ProxyOptions {
-            codec: ProxyCodec::preferred_at(width, height),
-            ..defaults
-        };
-        let cache = self.project_dir.join(PROXY_DIR);
-        let proxy = Proxy::generate(&source, &cache, options)?;
-        let file = proxy.path();
-        let relative = file.strip_prefix(&self.project_dir).unwrap_or(&file);
-        Ok(relative.to_string_lossy().replace('\\', "/"))
+        proxy_for_media(project, &self.project_dir, media)
     }
 
     fn render_frame_png(&self, request: &FrameRequest<'_>) -> SubResult<FrameImage> {
@@ -129,13 +102,12 @@ impl Services for CliServices {
             request.time,
             request.width,
         )?;
-        Ok(FrameImage {
-            data: base64(&frame.png),
-            mime_type: "image/png".to_owned(),
-            width: frame.width,
-            height: frame.height,
-            time: request.time,
-        })
+        Ok(FrameImage::png(
+            &frame.png,
+            frame.width,
+            frame.height,
+            request.time,
+        ))
     }
 
     fn presets(&self) -> SubResult<Vec<Value>> {
@@ -258,114 +230,11 @@ impl Exports {
     }
 }
 
-/// One preset, as `export.list_presets` reports it.
-fn preset_json(preset: &sub_export::Preset) -> Value {
-    json!({
-        "id": preset.id,
-        "name": preset.name,
-        "container": preset.container,
-        "video": preset.video.as_ref().map(|video| json!({
-            "codec": video.codec.as_str(),
-            "width": video.width,
-            "height": video.height,
-            "frame_rate": {
-                "numerator": video.frame_rate.numerator(),
-                "denominator": video.frame_rate.denominator(),
-            },
-            "quality": video.quality.to_string(),
-        })),
-        "audio": preset.audio.as_ref().map(|audio| json!({
-            "codec": audio.codec.as_str(),
-            "channels": audio.channels,
-            "sample_rate": audio.sample_rate,
-            "bitrate_kbps": audio.bitrate_kbps,
-        })),
-    })
-}
-
-/// A probed file, as `media.probe` reports it.
-///
-/// [`MediaInfo`] is not a serde type — it is what the prober returns, not
-/// something the project file stores — so the wire shape is built here, and
-/// every time in it is an exact rational.
-fn media_info_json(info: &MediaInfo, path: &Path) -> Value {
-    json!({
-        "path": path.display().to_string(),
-        "container": info.container,
-        "container_format": info.container_format,
-        "duration": info.duration,
-        "seekable": info.seekable,
-        "variable_frame_rate": info.is_variable_frame_rate(),
-        "video": info.video.iter().map(|video| json!({
-            "codec": video.codec,
-            "codec_description": video.codec_description,
-            "width": video.width,
-            "height": video.height,
-            "frame_rate": video.frame_rate.map(|rate| json!({
-                "numerator": rate.numerator(),
-                "denominator": rate.denominator(),
-            })),
-            "sample_aspect": {
-                "numerator": video.sample_aspect.numerator(),
-                "denominator": video.sample_aspect.denominator(),
-            },
-            "rotation_degrees": video.rotation.degrees(),
-            "mirrored": video.mirrored,
-            "interlaced": video.interlaced,
-            "variable_frame_rate": video.timing.is_variable(),
-        })).collect::<Vec<Value>>(),
-        "audio": info.audio.iter().map(|audio| json!({
-            "codec": audio.codec,
-            "codec_description": audio.codec_description,
-            "channels": audio.channels,
-            "sample_rate": audio.sample_rate,
-            "language": audio.language,
-        })).collect::<Vec<Value>>(),
-    })
-}
-
-/// Standard base64, as an MCP image content block carries a PNG.
-///
-/// Sixteen lines rather than a dependency: this is the only place in the build
-/// that needs it, and the alphabet has not moved since RFC 4648.
-#[must_use]
-pub fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let mut block = [0u8; 3];
-        block[..chunk.len()].copy_from_slice(chunk);
-        let triple = (u32::from(block[0]) << 16) | (u32::from(block[1]) << 8) | u32::from(block[2]);
-        for index in 0..4 {
-            if index <= chunk.len() {
-                let shift = 18 - index * 6;
-                out.push(char::from(ALPHABET[((triple >> shift) & 0x3f) as usize]));
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{CliServices, base64};
+    use super::CliServices;
     use std::path::Path;
     use sub_command::host::Services;
-
-    #[test]
-    fn base64_matches_the_rfc_test_vectors() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foob"), "Zm9vYg==");
-        assert_eq!(base64(b"fooba"), "Zm9vYmE=");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
-        // The PNG signature, which is what a frame's data starts with.
-        assert_eq!(base64(&[0x89, b'P', b'N', b'G']), "iVBORw==");
-    }
 
     #[test]
     fn the_project_folder_is_where_media_paths_resolve() {

@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sub_command::Dispatcher;
+use sub_command::host::{Services, register_methods};
 use sub_core::{SubError, SubResult};
 use sub_edit::{
     Autosave, AutosaveConfig, AutosaveStatus, BoxedCommand, ChangeEvent, Command, Engine,
@@ -52,6 +53,14 @@ pub struct EditorSession {
     /// engine, and with it the dispatcher; the socket server watches this so
     /// it can rebind onto the engine the panels are now drawing.
     generation: u64,
+    /// What answers the families the engine cannot: `export.*`, `media.probe`,
+    /// `media.make_proxy` and `playback.render_frame_png` (docs/PLAN.md §7).
+    ///
+    /// `None` until the window installs its own
+    /// ([`crate::host_services::GuiServices`]), which it does before it binds
+    /// its endpoint — a session with no services serves the engine families
+    /// alone, exactly as it always did.
+    host: Option<Arc<dyn Services>>,
     /// The file the project came from, once one has been opened.
     project_file: Option<PathBuf>,
     /// The autosave worker, running whenever a project file is known.
@@ -78,6 +87,7 @@ impl EditorSession {
             revision,
             events,
             commands,
+            host: None,
             generation: 0,
             project_file: None,
             autosave: None,
@@ -105,6 +115,41 @@ impl EditorSession {
     #[must_use]
     pub fn commands_arc(&self) -> Arc<Dispatcher> {
         Arc::clone(&self.commands)
+    }
+
+    /// Puts `services` on this session's dispatcher, and on every dispatcher
+    /// it builds afterwards.
+    ///
+    /// This is what makes the running editor answer `export.list_presets`,
+    /// `export.render`, `export.progress`, `media.probe`, `media.make_proxy`
+    /// and `playback.render_frame_png` — so `system.list_methods` is the same
+    /// list from the window and from `subordinate-cli serve` (TASK-155).
+    ///
+    /// Install it before the endpoint is bound: the socket server is handed
+    /// the dispatcher this replaces, and a client already connected would go
+    /// on talking to the old one.
+    ///
+    /// # Errors
+    ///
+    /// `command.duplicate_method` when one of the names is already served,
+    /// which would mean this was installed twice.
+    pub fn install_host_services(&mut self, services: Arc<dyn Services>) -> SubResult<()> {
+        self.commands = Self::dispatcher(self.engine.handle(), Some(&services))?;
+        self.host = Some(services);
+        Ok(())
+    }
+
+    /// A dispatcher over `handle`, with the host families on it when this
+    /// process serves them.
+    fn dispatcher(
+        handle: &EngineHandle,
+        host: Option<&Arc<dyn Services>>,
+    ) -> SubResult<Arc<Dispatcher>> {
+        let mut dispatcher = Dispatcher::new(handle.clone());
+        if let Some(services) = host {
+            register_methods(&mut dispatcher, Arc::clone(services))?;
+        }
+        Ok(Arc::new(dispatcher))
     }
 
     /// How many engines this session has had, counting from zero.
@@ -353,7 +398,9 @@ impl EditorSession {
         self.revision = engine.handle().revision();
         // The dispatcher holds a handle to the outgoing engine, so it is
         // rebuilt with the new one rather than left pointing at a dead thread.
-        self.commands = Arc::new(Dispatcher::new(engine.handle().clone()));
+        // The host families go back on it: opening a project must not cost the
+        // window its export, probe and frame methods.
+        self.commands = Self::dispatcher(engine.handle(), self.host.as_ref())?;
         self.generation += 1;
         self.engine = engine;
         self.project_file = file;

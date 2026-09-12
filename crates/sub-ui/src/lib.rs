@@ -17,6 +17,7 @@ pub mod export_runner;
 pub mod fade;
 pub mod fullscreen;
 pub mod history_panel;
+pub mod host_services;
 pub mod inspector;
 pub mod keymap;
 pub mod markers;
@@ -70,6 +71,7 @@ pub use history_panel::{
     EARLIER_STEP_LABEL, HistoryAction, HistoryList, HistoryPanel, LATER_STEP_LABEL,
     ORIGINAL_STATE_LABEL, edit_menu_ui,
 };
+pub use host_services::{GuiHost, GuiServices, QueuedExport};
 pub use inspector::{
     InspectorField, InspectorPanel, InspectorResponse, apply_edit as apply_inspector_edit,
 };

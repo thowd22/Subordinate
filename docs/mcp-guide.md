@@ -337,8 +337,15 @@ edit made a moment ago is in the file without saving first.
 
 `media_probe`, `media_make_proxy`, `playback_render_frame_png` and the three
 export tools are supplied by the process serving the Command API rather than by
-the engine (`docs/schema/host-api.json`). A build serving without decoders or a GPU
-simply does not offer them.
+the engine (`docs/schema/host-api.json`). Both the running window and
+`subordinate-cli serve` answer these methods. In the window, an agent-started
+export appears in the Export panel with progress, its result and Cancel, and
+runs on the window's compositor and worker pool while the UI keeps painting.
+The accepted job retains its project snapshot and media folder if another
+project is opened before rendering begins. Socket `project_open` and
+`project_save` update the media folder used by subsequent host calls; save a
+new project once before exporting so relative media paths have a base folder.
+`system.list_methods` includes host methods registered after startup.
 
 ### Undo, redo and grouping
 

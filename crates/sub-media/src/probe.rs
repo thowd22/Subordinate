@@ -624,6 +624,51 @@ fn classify_timing(timestamps: &mut Vec<u64>) -> FrameTiming {
     }
 }
 
+/// A probed file as the Command API reports it (`media.probe`).
+///
+/// [`MediaInfo`] is not a serde type — it is what the prober returns, not
+/// something the project file stores — so the wire shape is written here, once,
+/// for every process that serves the method: the editor and
+/// `subordinate-cli serve` answer with the same document rather than with two
+/// hand-written copies of it. Every time in it is an exact rational.
+#[must_use]
+pub fn media_info_json(info: &MediaInfo, path: &Path) -> serde_json::Value {
+    use serde_json::{Value, json};
+    json!({
+        "path": path.display().to_string(),
+        "container": info.container,
+        "container_format": info.container_format,
+        "duration": info.duration,
+        "seekable": info.seekable,
+        "variable_frame_rate": info.is_variable_frame_rate(),
+        "video": info.video.iter().map(|video| json!({
+            "codec": video.codec,
+            "codec_description": video.codec_description,
+            "width": video.width,
+            "height": video.height,
+            "frame_rate": video.frame_rate.map(|rate| json!({
+                "numerator": rate.numerator(),
+                "denominator": rate.denominator(),
+            })),
+            "sample_aspect": {
+                "numerator": video.sample_aspect.numerator(),
+                "denominator": video.sample_aspect.denominator(),
+            },
+            "rotation_degrees": video.rotation.degrees(),
+            "mirrored": video.mirrored,
+            "interlaced": video.interlaced,
+            "variable_frame_rate": video.timing.is_variable(),
+        })).collect::<Vec<Value>>(),
+        "audio": info.audio.iter().map(|audio| json!({
+            "codec": audio.codec,
+            "codec_description": audio.codec_description,
+            "channels": audio.channels,
+            "sample_rate": audio.sample_rate,
+            "language": audio.language,
+        })).collect::<Vec<Value>>(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
