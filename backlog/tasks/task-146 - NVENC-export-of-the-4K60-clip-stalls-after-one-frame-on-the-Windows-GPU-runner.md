@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-task-146'
 created_date: '2026-09-12 10:03'
-updated_date: '2026-09-12 15:32'
+updated_date: '2026-09-12 15:55'
 labels:
   - export
   - bug
@@ -34,4 +34,6 @@ TASK-139's Windows desktop clicks flow starts a real nvh264enc export of the bak
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-09-12 supervisor: a dedicated agent is working this on branch task/task-146 (it found the mechanism: the export pushes into appsrc with a blocking push and never reads the bus, so a failed element hangs the render). TASK-148 and TASK-152 from the export matrix describe the same stall on other encoders and should be verified against this fix rather than worked separately.
+
+2026-09-12 supervisor handoff: PR #5 (branch task/task-146) holds the fix but was NOT merged: its final CI run 34702935088 failed (see the failing tests recorded here by the next supervisor: run gh run view 34702935088). The agent reported earlier failures were its own two test bugs (fixed on the tip) plus sub-audio's mixer_no_alloc flake on Linux; check whether the remaining failure is that flake, then merge PR #5 manually (git merge --no-ff origin/task/task-146 in the supervisor clone) and reword criterion 1 to 'completes on the encoder the machine can use'. Worktree wf_423097c5-8cf-6 (TASK-151, uncommitted) also edits crates/sub-export/src/pipeline.rs and will conflict.
 <!-- SECTION:NOTES:END -->
