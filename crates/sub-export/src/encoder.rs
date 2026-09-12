@@ -666,9 +666,12 @@ fn run_probe_pipeline(pipeline: &gst::Element, name: &str) -> ElementProbe {
             gst::ClockTime::from_nseconds(left.as_nanos().min(u128::from(u64::MAX)) as u64),
             &[gst::MessageType::Eos, gst::MessageType::Error],
         );
-        match message.as_ref().map(gst::Message::view) {
-            Some(gst::MessageView::Eos(_)) => return ElementProbe::ready(),
-            Some(gst::MessageView::Error(err)) => {
+        let Some(message) = message else {
+            continue;
+        };
+        match message.view() {
+            gst::MessageView::Eos(_) => return ElementProbe::ready(),
+            gst::MessageView::Error(err) => {
                 let reason = err.error().to_string();
                 tracing::debug!(element = name, reason, "encoder cannot encode here");
                 return ElementProbe::not_ready(reason);
