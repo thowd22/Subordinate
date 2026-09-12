@@ -26,6 +26,7 @@ pub mod meter;
 pub mod plugins;
 pub mod plugins_panel;
 pub mod popout;
+pub mod preview;
 pub mod recovery;
 pub mod relink_dialog;
 pub mod selection;
@@ -104,6 +105,10 @@ pub use popout::{
 // clock span) and a `MENU_TITLE`/`EMPTY_LABEL` pair belongs to the plugin
 // menu.
 pub use fade::{FadeEdge, FadeEdit, FadeRefusal, apply_fade, plan_fade};
+pub use preview::{
+    DECODE_AHEAD_FRAMES, MAX_OPEN_CLIPS, PREVIEW_JOB_KIND, PreviewFrames, PreviewService,
+    PreviewStats,
+};
 pub use recovery::{
     DISCARD_LABEL, NO_PROJECT_LABEL, PROMPT_TITLE, RECOVER_LABEL, RecoveryOutcome, RecoveryPrompt,
     SnapshotMenu, entry_label,

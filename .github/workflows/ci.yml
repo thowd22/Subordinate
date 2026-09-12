@@ -530,7 +530,11 @@ jobs:
         env:
           RUST_LOG: info
         run: |
-          ./scripts/ui-smoke.sh --binary target/debug/subordinate
+          # The sample media was fetched earlier in this job, so the demo
+          # project the script picks up has real footage and the viewer has
+          # something to decode. --require-picture turns that from a
+          # screenshot someone has to look at into an assertion (TASK-144).
+          ./scripts/ui-smoke.sh --binary target/debug/subordinate --require-picture
           cat target/ui-smoke/summary.md >> "$GITHUB_STEP_SUMMARY"
 
       # Uploaded even when the step failed: a screenshot of a broken window is

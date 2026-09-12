@@ -31,6 +31,18 @@ anything is timed, because that is how the viewer scrubs: the index is what
 can say where the pictures are without decoding them, and every cheap path
 below depends on it.
 
+Since TASK-144 that last sentence is literal rather than aspirational. The
+editor's preview (`sub_ui::preview::PreviewService`) opens one decoder per clip
+under the playhead, calls `Decoder::set_index` on it with a `PtsIndex` built off
+the UI thread, and moves it with `Decoder::seek_to` for every scrub step — then
+uploads the picture through one `Nv12Converter` kept per clip, which is exactly
+what the harness's `Uploader` does. So `scrub_drag` and a hand on the scrub bar
+are the same code stage for stage, and a change to the seek planner or the GOP
+cache moves both. Playback is the one deliberate difference: there the preview
+takes a forward step out of the `DecodeAhead` ring rather than seeking for it,
+because a seek would throw the decode-ahead away, which is what the `playback`
+scenario measures instead.
+
 Two numbers come out of each scenario:
 
 * **decode-to-texture latency** — one step end to end, reported as p50, p95,
