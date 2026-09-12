@@ -1003,18 +1003,21 @@ def table(
     )
     lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     mark = {"pass": "pass", "fail": "**FAIL**", "skip": "skip"}
+    by_name = {source.name: source for source in sources}
     for case in cases:
         size = f"{case.size / 1_000_000:.1f} MB" if case.size else "-"
         frames = (
             f"{case.frames_counted if case.frames_counted is not None else '?'}"
             f"/{case.frames_expected if case.frames_expected is not None else '?'}"
         )
+        source = by_name.get(case.source)
         if (
             case.frames_requested
-            and case.frames_expected
-            and case.frames_requested != case.frames_expected
+            and source
+            and source.frames
+            and case.frames_requested != source.frames
         ):
-            frames += f" (asked {case.frames_requested})"
+            frames += " (short range)"
 
         duration = f"{case.duration:.2f}s" if case.duration else "-"
         audio = (
@@ -1051,8 +1054,16 @@ def table(
         "- The `audio-only` preset is not in the matrix: it carries no video"
         " stream, and `render` refuses it before any encoder is chosen."
     )
-    slow = sorted({case.encoder for case in cases if case.frames_requested != case.frames_expected
-                   and case.frames_requested})
+    slow = sorted(
+        {
+            case.encoder
+            for case in cases
+            if case.frames_requested
+            and by_name.get(case.source)
+            and by_name[case.source].frames
+            and case.frames_requested != by_name[case.source].frames
+        }
+    )
     if slow:
         lines.append(
             "- " + ", ".join(f"`{element}`" for element in slow) + " render a short"
