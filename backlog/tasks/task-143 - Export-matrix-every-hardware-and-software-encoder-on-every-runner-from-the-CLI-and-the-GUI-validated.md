@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-task-143'
 created_date: '2026-09-12 03:58'
-updated_date: '2026-09-12 04:50'
+updated_date: '2026-09-12 06:17'
 labels:
   - export
   - gpu
@@ -56,4 +56,14 @@ Run 34673584123: the hosted software job is green - 6 of 6 cells pass with exact
 Findings filed as bug tasks: TASK-144 (presets carry a bitrate and a CRF that reach no encoder - ExportSettings has no quality field at all), TASK-145 (a source with three audio streams exports only its first), TASK-146 (every software export comes out in High 4:4:4 profile because nothing pins 4:2:0 between the compositor RGBA and the encoder), TASK-147 (the running editor Command API serves no export, probe or frame methods, so export.render reaches no window).
 
 TASK-147 changed the plan for AC 3: the GUI export cannot be driven over the socket on the desktop image at all. The comparison is now a sub-ui test - the_window_and_the_cli_write_the_same_file_for_each_encoder - that opens the assembled SubordinateApp, pins an encoder in the export panel, exports the way a click on Export does, then renders the same frames through subordinate-cli with the same encoder and compares frame count and audio. It runs on box (vah264enc, x264enc) and on the T4 (nvh264enc, x264enc). The paid desktop-image job is gone with it.
+
+Runs 34674014655, 34675906145 (branch push) and 34676733798 (dispatch, only=nvidia-linux).
+
+box, run 34675906145: 17 of 20 cells pass. vah264enc, vah265enc, x264enc, x265enc, svtav1enc and av1enc all present and pinnable; vah264enc and vah265enc are ranked NONE and are used because they are pinned, which is exactly what TASK-134 built. Frame counts exact on every passing cell, audio present on every one. The three failures are all uhd x vah264enc - TASK-148 - and they stall rather than fail: frame 20 of 60 at zero fps for two presets, frame 1 for the third, while vah265enc writes the same sixty 4K frames in seconds.
+
+hosted ubuntu-24.04: 6 of 6 pass, including both software AV1 encoders against the new av1-archive preset.
+
+GUI versus CLI on box (TASK-143 AC 3), run 34675906145: "vah264enc: window 12 frames, CLI 12 frames, audio on both" and "x264enc: window 12 frames, CLI 12 frames, audio on both".
+
+BLOCKED on the NVIDIA rows, and not by anything in this branch: every RunsOn GPU job in the repository is failing at runner resolution with "failed to resolve runner spec: gpu-nvidia-linux not found", including hardware.yml on main, which has not changed (run 34676554315, 06:02 UTC) and the TASK-139 dispatches. .github/runs-on.yml on main is valid and unchanged since TASK-138 merged, and GPU jobs worked at 03:32 UTC, so something in the RunsOn stack or its repository config resolution broke between 05:00 and 06:00 UTC. The nvidia-linux, nvidia-windows and (through them) the NVENC half of the GUI comparison are waiting on that.
 <!-- SECTION:NOTES:END -->

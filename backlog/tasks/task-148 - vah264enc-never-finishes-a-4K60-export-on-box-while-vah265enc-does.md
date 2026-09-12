@@ -4,6 +4,7 @@ title: 'vah264enc never finishes a 4K60 export on box, while vah265enc does'
 status: To Do
 assignee: []
 created_date: '2026-09-12 05:32'
+updated_date: '2026-09-12 06:01'
 labels:
   - export
   - gpu
@@ -27,3 +28,13 @@ What makes it worth a task rather than a note: it hangs rather than failing. A u
 - [ ] #3 Where the limit is a real one the encoder cannot exceed, the encoder probe or the export panel says so before the export starts rather than after it stalls
 - [ ] #4 The export matrix job on box passes its uhd x vah264enc cells, or the task records why that machine cannot
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Run 34675906145 caught where it stops. The CLI prints a progress line per frame, and the last one before the five-minute cap reads "render: 20/60 frames 33% 0 fps eta 44s" for youtube-1080p and youtube-4k, and "render: 1/60 frames 1% 0 fps eta 1212s" for mezzanine. So the pipeline is not slow - it reaches frame 20 (or frame 1) and then makes no progress at all, rate zero, for the remaining minutes. It is a stall, not a throughput problem, and the frame it stalls on is not always the same, which points at the encoder rather than at anything deterministic in the compositor or the decoder. Same sixty frames of the same project through vah265enc: seconds, clean. Reproduce with:
+
+  subordinate-cli render <4k60 project>.sub --sequence UHD --preset youtube-1080p --encoder vah264enc --range 0:60 --out /tmp/x.mp4
+
+with GST_DEBUG=2,va*:6,vah264enc:7 on box.
+<!-- SECTION:NOTES:END -->

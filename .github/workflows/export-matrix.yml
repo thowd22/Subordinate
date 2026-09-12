@@ -703,16 +703,35 @@ jobs:
           } else { "already installed" }
           "$dir\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
-      - name: Python is present
+      # yodaddy has no Python, and what `python` resolves to there is the
+      # Microsoft Store alias stub, which prints an advertisement and exits.
+      # Rather than ask its owner to install one, the job unpacks the
+      # embeddable distribution - an 11 MB zip, no installer, no registry, no
+      # PATH - under RUNNER_TEMP and deletes it with everything else at the
+      # end. The driver uses nothing outside the standard library.
+      - name: A Python for the driver
+        env:
+          PYTHON_EMBED: "3.12.7"
         run: |
-          $py = Get-Command python -ErrorAction SilentlyContinue
-          if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
-          if (-not $py) {
-            Write-Output "::error::no python on yodaddy: install Python 3 for the runner user (winget install Python.Python.3.12)"
-            exit 1
+          $real = $null
+          foreach ($name in 'python3','python') {
+            $found = Get-Command $name -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Source -notlike '*WindowsApps*' } |
+                     Select-Object -First 1
+            if ($found) { $real = $found.Source; break }
           }
-          "PY=$($py.Source)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          & $py.Source --version
+          if (-not $real) {
+            $dir = "$env:RUNNER_TEMP\python-embed"
+            $zip = "$env:RUNNER_TEMP\python-embed.zip"
+            $ProgressPreference = 'SilentlyContinue'
+            $url = "https://www.python.org/ftp/python/$env:PYTHON_EMBED/python-$env:PYTHON_EMBED-embed-amd64.zip"
+            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zip
+            Expand-Archive -Path $zip -DestinationPath $dir -Force
+            Remove-Item $zip -ErrorAction SilentlyContinue
+            $real = "$dir\python.exe"
+          }
+          "PY=$real" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          & $real --version
 
       - name: Fetch the sample project media
         run: ./scripts/get-sample-media.ps1
@@ -771,7 +790,8 @@ jobs:
       - name: Clean up
         if: always()
         run: |
-          foreach ($p in @("$env:RUNNER_TEMP\export-matrix", "$env:RUNNER_TEMP\uhd-project", "$env:RUNNER_TEMP\media")) {
+          foreach ($p in @("$env:RUNNER_TEMP\export-matrix", "$env:RUNNER_TEMP\uhd-project",
+                           "$env:RUNNER_TEMP\media", "$env:RUNNER_TEMP\python-embed")) {
             Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
           }
           Get-ChildItem $env:RUNNER_TEMP | Select-Object Name, Length | Format-Table -AutoSize | Out-String -Width 120
