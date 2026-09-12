@@ -173,6 +173,25 @@ def _track_kind(track: dict) -> str:
     return "video" if str(track.get("name", "")).upper().startswith("V") else "audio"
 
 
+def wait_for_command_api(session, log: Path | str, *, timeout: float = 120.0) -> str:
+    """Wait until the editor has bound its endpoint, and say where.
+
+    The window is on screen a second or two before the socket is: the editor
+    binds off the UI thread and collects the outcome a frame or two later
+    (crates/sub-ui/src/command_api.rs), so a bridge started at the moment the
+    window appears is answered `command.not_running` and exits. The editor logs
+    the outcome either way, which is the thing to wait for.
+    """
+    line = session.wait_for_log(
+        log,
+        r"the Command API is (listening on|not served)|another editor is already serving",
+        timeout=timeout,
+    )
+    if "listening on" not in line:
+        raise DesktopError(f"the editor is not serving the Command API: {line}")
+    return line
+
+
 # --------------------------------------------------------------------- steps
 
 

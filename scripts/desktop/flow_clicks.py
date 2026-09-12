@@ -108,16 +108,19 @@ def run(run: flowlib.Run) -> None:
             env={"SUBORDINATE_LOG": "info,sub_export=debug"},
         )
         window = session.wait_for_title(WINDOW, timeout=180)
+        endpoint = flowlib.wait_for_command_api(session, app_log)
         session.activate(window)
-        step.note(pid=started.pid, window=window.as_dict())
+        step.note(pid=started.pid, window=window.as_dict(), endpoint=endpoint)
 
-    bridge = Bridge(
-        mcp,
-        cwd=staged.directory,
-        env={"SUBORDINATE_MCP_NO_LAUNCH": "1"},
-        require_editor=True,
-        log=out / "mcp-reads.log",
-    )
+    with run.step("connect a read-only bridge to the editor") as step:
+        bridge = Bridge(
+            mcp,
+            cwd=staged.directory,
+            env={"SUBORDINATE_MCP_NO_LAUNCH": "1"},
+            require_editor=True,
+            log=out / "mcp-reads.log",
+        )
+        step.note(connection=bridge.connection)
     read = ReadOnly(bridge)
     try:
         with run.step("the editor is the one being read") as step:

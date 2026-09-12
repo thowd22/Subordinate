@@ -82,7 +82,8 @@ def run(run: flowlib.Run) -> None:
             [editor, str(staged.project)], log=app_log, cwd=str(staged.directory)
         )
         window = run.session.wait_for_title(WINDOW, timeout=180)
-        step.note(pid=started.pid, window=window.as_dict())
+        endpoint = flowlib.wait_for_command_api(run.session, app_log)
+        step.note(pid=started.pid, window=window.as_dict(), endpoint=endpoint)
 
     rate = staged.frame_rate
     fps = rate["numerator"] / rate["denominator"]
@@ -93,13 +94,15 @@ def run(run: flowlib.Run) -> None:
     item = flowlib.media_item(staged.media.name, staged.media_relative)
     piece = flowlib.clip("Meld", item["id"], 0, length, rate)
 
-    bridge = Bridge(
-        mcp,
-        cwd=staged.directory,
-        env={"SUBORDINATE_MCP_NO_LAUNCH": "1"},
-        require_editor=True,
-        log=out / "mcp-editor.log",
-    )
+    with run.step("connect the bridge to the editor's own endpoint") as step:
+        bridge = Bridge(
+            mcp,
+            cwd=staged.directory,
+            env={"SUBORDINATE_MCP_NO_LAUNCH": "1"},
+            require_editor=True,
+            log=out / "mcp-editor.log",
+        )
+        step.note(connection=bridge.connection)
     try:
         with run.step("project.new and project.open through the bridge") as step:
             bridge.call("project.new", {"name": "Desktop MCP flow"})
