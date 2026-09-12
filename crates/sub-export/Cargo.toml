@@ -45,3 +45,6 @@ sub-export = { path = ".", features = ["sequence"] }
 sub-audio = { path = "../sub-audio" }
 sub-media = { path = "../sub-media" }
 sub-model = { path = "../sub-model" }
+# The chroma test reads the profile back off a written file exactly as a player
+# would: through the discoverer, not through anything the exporter told it.
+gstreamer-pbutils = "0.25"

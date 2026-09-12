@@ -4932,6 +4932,7 @@ version = "0.1.3"
 dependencies = [
  "gstreamer",
  "gstreamer-app",
+ "gstreamer-pbutils",
  "serde",
  "serde_json",
  "sub-audio",

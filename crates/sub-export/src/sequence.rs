@@ -93,9 +93,13 @@ pub fn settings_for_sequence(
         preset.container,
     )
     .with_video_codec(video.codec)
+    .with_chroma(video.chroma)
+    .with_video_quality(Some(video.quality))
     .with_audio_codec(preset.audio.as_ref().map(|audio| audio.codec));
     if let Some(audio) = &preset.audio {
-        settings = settings.with_audio_format(audio.sample_rate, audio.channels);
+        settings = settings
+            .with_audio_format(audio.sample_rate, audio.channels)
+            .with_audio_bitrate(audio.bitrate_kbps);
     }
     if !has_audio(sequence) {
         settings = settings.with_audio_codec(None);
@@ -809,6 +813,30 @@ mod tests {
         assert!(
             warnings.iter().any(|line| line.contains("fps")),
             "the rate difference is reported: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn sequence_exports_keep_the_presets_chroma_and_quality() {
+        let library = PresetLibrary::builtin();
+        let mut preset = library
+            .iter()
+            .find(|preset| preset.video.is_some())
+            .unwrap()
+            .clone();
+        let video = preset.video.as_mut().unwrap();
+        video.chroma = crate::ChromaFormat::Yuv444;
+        video.quality = crate::VideoQuality::Crf { value: 12 };
+        let (settings, _) =
+            settings_for_sequence(&preset, &sequence_at(64, 48, Rational::FPS_24)).unwrap();
+        assert_eq!(settings.chroma, crate::ChromaFormat::Yuv444);
+        assert_eq!(
+            settings.video_quality,
+            Some(crate::VideoQuality::Crf { value: 12 })
+        );
+        assert_eq!(
+            settings.audio_bitrate_kbps,
+            preset.audio.as_ref().and_then(|audio| audio.bitrate_kbps)
         );
     }
 

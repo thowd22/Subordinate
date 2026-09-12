@@ -33,9 +33,10 @@ use serde::{Deserialize, Serialize};
 use sub_core::{SubError, SubResult};
 use sub_time::Rational;
 
+use crate::chroma::ChromaFormat;
 use crate::codes;
 use crate::encoder::VideoCodec;
-use crate::pipeline::{AudioCodec, Container, ExportSettings};
+use crate::pipeline::{AudioCodec, Container, ExportSettings, MAX_CRF, VideoQuality};
 
 /// The environment variable that overrides where the config directory is.
 ///
@@ -49,9 +50,6 @@ pub const PRESETS_FILE_NAME: &str = "presets.toml";
 /// The shipped presets, embedded at compile time.
 const BUILTIN_TOML: &str = include_str!("../presets/builtin.toml");
 
-/// The largest CRF any of the exporter's encoders accepts.
-const MAX_CRF: u8 = 51;
-
 /// The most audio channels a preset may ask for.
 const MAX_CHANNELS: u16 = 8;
 
@@ -60,34 +58,6 @@ const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 
 /// The channel count a preset gets when it does not say.
 const DEFAULT_CHANNELS: u16 = 2;
-
-/// How a video stream's quality is asked for: a rate, or a quality target.
-///
-/// The two are mutually exclusive, and a preset that gives both or neither is
-/// rejected naming the field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VideoQuality {
-    /// An average bitrate in kbit/s, what a delivery target asks for.
-    Bitrate {
-        /// Kilobits per second.
-        kbps: u32,
-    },
-    /// A constant-quality factor, where lower is better and 0 is lossless.
-    Crf {
-        /// The CRF value, 0 through 51.
-        value: u8,
-    },
-}
-
-impl std::fmt::Display for VideoQuality {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Bitrate { kbps } => write!(f, "{kbps} kbit/s"),
-            Self::Crf { value } => write!(f, "CRF {value}"),
-        }
-    }
-}
 
 /// The video half of a preset.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +72,12 @@ pub struct VideoPreset {
     pub frame_rate: Rational,
     /// The bitrate or CRF the encoder is driven with.
     pub quality: VideoQuality,
+    /// The chroma format the encoder is fed.
+    ///
+    /// 4:2:0 when the preset does not say, because that is what plays
+    /// everywhere; a mezzanine or master preset may ask for more, and the
+    /// export then fails by name if the chosen encoder cannot take it.
+    pub chroma: ChromaFormat,
 }
 
 /// The audio half of a preset.
@@ -157,9 +133,13 @@ impl Preset {
         let mut settings =
             ExportSettings::new(video.width, video.height, video.frame_rate, self.container)
                 .with_video_codec(video.codec)
+                .with_chroma(video.chroma)
+                .with_video_quality(Some(video.quality))
                 .with_audio_codec(self.audio.as_ref().map(|audio| audio.codec));
         if let Some(audio) = &self.audio {
-            settings = settings.with_audio_format(audio.sample_rate, audio.channels);
+            settings = settings
+                .with_audio_format(audio.sample_rate, audio.channels)
+                .with_audio_bitrate(audio.bitrate_kbps);
         }
         settings.validate()?;
         Ok(settings)
@@ -482,6 +462,8 @@ struct RawPreset {
     #[serde(skip_serializing_if = "Option::is_none")]
     video_crf: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    chroma: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     audio_codec: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     audio_bitrate_kbps: Option<u32>,
@@ -569,7 +551,8 @@ impl RawPreset {
             || self.frame_rate_numerator.is_some()
             || self.frame_rate_denominator.is_some()
             || self.video_bitrate_kbps.is_some()
-            || self.video_crf.is_some();
+            || self.video_crf.is_some()
+            || self.chroma.is_some();
         if !mentions_video {
             return Ok(None);
         }
@@ -647,13 +630,29 @@ impl RawPreset {
                 ));
             }
         };
+        let chroma = self.validate_chroma(id)?;
         Ok(Some(VideoPreset {
             codec,
             width,
             height,
             frame_rate,
             quality,
+            chroma,
         }))
+    }
+
+    /// Validate the optional chroma family independently of geometry and quality.
+    fn validate_chroma(&self, id: &str) -> SubResult<ChromaFormat> {
+        Ok(match self.chroma.as_deref() {
+            None => ChromaFormat::default(),
+            Some(name) => ChromaFormat::parse(name).ok_or_else(|| {
+                invalid(
+                    id,
+                    "chroma",
+                    &format!("'{name}' is not a chroma format this exporter encodes"),
+                )
+            })?,
+        })
     }
 
     /// The audio half, or `None` when the preset names no audio field at all.
@@ -767,6 +766,7 @@ impl From<&Preset> for RawPreset {
                 VideoQuality::Crf { value } => Some(value),
                 VideoQuality::Bitrate { .. } => None,
             }),
+            chroma: video.map(|video| video.chroma.as_str().to_owned()),
             audio_codec: audio.map(|audio| audio.codec.as_str().to_owned()),
             audio_bitrate_kbps: audio.and_then(|audio| audio.bitrate_kbps),
             sample_rate: audio.map(|audio| audio.sample_rate),
@@ -781,6 +781,7 @@ mod tests {
         AudioPreset, CONFIG_DIR_ENV, PRESETS_FILE_NAME, Preset, PresetLibrary, VideoQuality,
         config_dir_from,
     };
+    use crate::chroma::ChromaFormat;
     use crate::codes;
     use crate::encoder::VideoCodec;
     use crate::pipeline::{AudioCodec, Container};
@@ -879,6 +880,59 @@ mod tests {
         let audio = preset.audio.as_ref().expect("has audio");
         assert_eq!(audio.codec, AudioCodec::Flac);
         assert_eq!(audio.bitrate_kbps, None, "FLAC takes no bitrate");
+    }
+
+    #[test]
+    fn a_preset_hands_its_quality_to_the_export_settings() {
+        let library = PresetLibrary::builtin();
+        let youtube = library
+            .require("youtube-1080p")
+            .expect("the built-ins carry youtube-1080p");
+        let settings = youtube.to_settings().expect("a video preset has settings");
+        assert_eq!(
+            settings.video_quality,
+            Some(VideoQuality::Bitrate { kbps: 12_000 }),
+            "the preset's bitrate must reach the encoder"
+        );
+        assert_eq!(settings.audio_bitrate_kbps, Some(192));
+
+        for preset in library.iter() {
+            let Some(video) = preset.video.as_ref() else {
+                continue;
+            };
+            let settings = preset.to_settings().expect("a video preset has settings");
+            assert_eq!(
+                settings.video_quality,
+                Some(video.quality),
+                "preset '{}' loses its quality on the way to the pipeline",
+                preset.id
+            );
+            assert_eq!(
+                settings.audio_bitrate_kbps,
+                preset.audio.as_ref().and_then(|audio| audio.bitrate_kbps),
+                "preset '{}' loses its audio bitrate",
+                preset.id
+            );
+        }
+    }
+
+    #[test]
+    fn two_presets_of_different_quality_make_different_settings() {
+        let library = PresetLibrary::builtin();
+        let youtube = library
+            .require("youtube-1080p")
+            .expect("the built-ins carry youtube-1080p")
+            .to_settings()
+            .expect("settings");
+        let mezzanine = library
+            .require("mezzanine")
+            .expect("the built-ins carry mezzanine")
+            .to_settings()
+            .expect("settings");
+        assert_ne!(
+            youtube.video_quality, mezzanine.video_quality,
+            "the delivery and the master preset must not ask the encoder for the same thing"
+        );
     }
 
     #[test]
@@ -1181,6 +1235,68 @@ mod tests {
             }
             .channels,
             2
+        );
+    }
+    #[test]
+    fn every_shipped_preset_is_four_two_zero() {
+        for preset in &PresetLibrary::builtin() {
+            let Some(video) = &preset.video else {
+                continue;
+            };
+            assert_eq!(
+                video.chroma,
+                ChromaFormat::Yuv420,
+                "preset '{}' ships a profile every player takes",
+                preset.id,
+            );
+            let settings = preset.to_settings().expect("a video preset resolves");
+            assert_eq!(settings.chroma, ChromaFormat::Yuv420);
+        }
+    }
+
+    #[test]
+    fn a_preset_may_ask_for_a_higher_chroma_format() {
+        let library = PresetLibrary::from_toml(&document(
+            "container = \"mkv\"\nvideo_codec = \"h264\"\nwidth = 1920\nheight = 1080\nframe_rate_numerator = 30\nvideo_crf = 0\nchroma = \"4:4:4\"",
+        ))
+        .expect("a master preset is valid");
+        let preset = library.require("custom").expect("the preset is there");
+        let video = preset.video.as_ref().expect("has video");
+        assert_eq!(video.chroma, ChromaFormat::Yuv444);
+        assert_eq!(
+            preset.to_settings().expect("it resolves").chroma,
+            ChromaFormat::Yuv444,
+        );
+    }
+
+    #[test]
+    fn a_chroma_format_this_exporter_does_not_encode_names_its_field() {
+        assert_eq!(
+            failing_field(
+                "container = \"mkv\"\nvideo_codec = \"h264\"\nwidth = 640\nheight = 480\nframe_rate_numerator = 30\nvideo_crf = 20\nchroma = \"4:1:1\"",
+            ),
+            "chroma",
+        );
+    }
+
+    #[test]
+    fn the_chroma_format_survives_a_round_trip_through_toml() {
+        let library = PresetLibrary::from_toml(&document(
+            "container = \"mkv\"\nvideo_codec = \"h265\"\nwidth = 640\nheight = 480\nframe_rate_numerator = 30\nvideo_crf = 20\nchroma = \"4:2:2\"",
+        ))
+        .expect("valid");
+        let written = library.to_toml_string().expect("it writes");
+        assert!(written.contains("4:2:2"), "{written}");
+        let again = PresetLibrary::from_toml(&written).expect("it reads back");
+        assert_eq!(
+            again
+                .require("custom")
+                .expect("still there")
+                .video
+                .as_ref()
+                .expect("has video")
+                .chroma,
+            ChromaFormat::Yuv422,
         );
     }
 }
