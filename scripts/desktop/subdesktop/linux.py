@@ -169,19 +169,22 @@ class LinuxSession(Session):
     # ------------------------------------------------------------------- input
 
     def click(self, target, *, button: int = 1, double: bool = False) -> tuple[int, int]:
+        """Move, then press and release with a human's pause in between.
+
+        Not `xdotool click`, which moves and clicks in the same instant: egui
+        decides what a press did on the frame it arrives, and a press and
+        release in the same millisecond can be swallowed by a window that is
+        still settling. The pointer is moved first, on its own, so the widget
+        under it is hovered before it is pressed.
+        """
         x, y = self.point_of(target)
-        arguments = [
-            self._xdotool,
-            "mousemove",
-            "--sync",
-            str(x),
-            str(y),
-            "click",
-        ]
-        if double:
-            arguments += ["--repeat", "2", "--delay", "80"]
-        arguments.append(str(button))
-        run(arguments)
+        for _ in range(2 if double else 1):
+            self.click_free_move(x, y)
+            time.sleep(0.15)
+            run([self._xdotool, "mousedown", str(button)])
+            time.sleep(0.12)
+            run([self._xdotool, "mouseup", str(button)])
+            time.sleep(0.1)
         time.sleep(0.3)
         return (x, y)
 

@@ -113,6 +113,7 @@ def _candidates(control, window) -> list[tuple[int, int]]:
 #: `TabItem` and `Button`; AT-SPI says `page tab` and `push button`.
 TAB_ROLES = ("TabItem", "page tab", "Tab", "tab")
 BUTTON_ROLES = ("Button", "push button")
+COMBO_ROLES = ("ComboBox", "combo box", "Button", "push button")
 
 
 def _by_role(session, name: str, roles, *, timeout: float = 30.0):
@@ -219,6 +220,9 @@ def run(run: flowlib.Run) -> None:
             mute = _by_role(session, "M", BUTTON_ROLES, timeout=60)
             muted = False
             for point in _candidates(mute, window):
+                # Focused first: a window manager that gives focus on click can
+                # swallow the click that does it.
+                session.activate(window)
                 session.click(point)
                 for _ in range(10):
                     muted = _muted(read("project.get", {}))
@@ -332,6 +336,9 @@ def run(run: flowlib.Run) -> None:
         with run.step("open the export panel") as step:
             session.activate(window)
             where = _open_export_panel(session, window)
+            # A candidate point that missed the tab strip may have opened the
+            # View menu instead; Escape closes whatever it was.
+            session.key("Escape")
             tree = [control.as_dict() for control in session.controls()]
             (out / "controls-export.json").write_text(json.dumps(tree, indent=1))
             step.note(tab=where, controls=len(tree))
@@ -346,16 +353,34 @@ def run(run: flowlib.Run) -> None:
                 session.click(session.find("In to out", timeout=20))
                 out_label = session.find("Out", timeout=20)
                 # An egui DragValue becomes a text field when it is clicked
-                # into, and it sits immediately right of its label.
-                session.click(
-                    (out_label.rect.x + out_label.rect.width + 30, out_label.rect.center[1]),
-                    double=True,
+                # into, and it sits immediately right of its label. It is also
+                # a *drag* value, so what is typed has to be read back: a
+                # click that slid by a pixel drags the number instead, and the
+                # panel cheerfully offered to render 388,627,000,000 frames
+                # (run 34678351781).
+                target = (
+                    out_label.rect.x + out_label.rect.width + 30,
+                    out_label.rect.center[1],
                 )
-                session.key("ctrl+a")
-                session.type_text("120")
-                session.key("Return")
+                for attempt in range(3):
+                    session.click(target)
+                    session.key("ctrl+a")
+                    session.type_text("120")
+                    session.key("Return")
+                    summary = _range_summary(session)
+                    step.note(**{f"attempt_{attempt}": summary})
+                    if summary.startswith("120 frames"):
+                        break
+                else:
+                    raise DesktopError(f"the out point would not take: {summary}")
                 step.note(range="in to out", out_frame=120)
-            except DesktopError as error:
+            except (DesktopError, AssertionError) as error:
+                # Whole sequence is the safe fallback: slower, but a render of
+                # the right thing.
+                try:
+                    session.click(session.find("Whole sequence", timeout=10))
+                except DesktopError:
+                    pass
                 step.note(range="whole sequence", why=str(error)[:200])
 
         with run.step("type the output path and pin the vendor encoder") as step:
@@ -370,7 +395,10 @@ def run(run: flowlib.Run) -> None:
             # `ComboBox::from_label("Encoder")` draws the label beside the
             # button and the *selection* on it, so the button to click is the
             # one reading `Automatic` (export_panel.rs).
-            picker = session.find("Automatic", timeout=30)
+            # The encoder picker is a combo box the application names
+            # `Encoder`; its menu items are the element names themselves
+            # (crates/sub-ui/src/export_panel.rs).
+            picker = _by_role(session, "Encoder", COMBO_ROLES, timeout=30)
             session.click(picker)
             choice = session.find(encoder, timeout=30)
             session.click(choice)
@@ -445,6 +473,14 @@ def _open_export_panel(session, window) -> str:
         "the export panel would not open: none of the points tried hit the dock "
         "tab named Export"
     )
+
+
+def _range_summary(session) -> str:
+    """The panel's own sentence about what the range covers, or why not."""
+    for control in session.controls():
+        if "frames" in control.name and "·" in control.name:
+            return control.name
+    return "(the panel says nothing about a range)"
 
 
 def _export_panel_open(session, *, timeout: float) -> bool:
