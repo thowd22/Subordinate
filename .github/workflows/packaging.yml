@@ -163,12 +163,17 @@ jobs:
 
           appdir = sys.argv[1]
           libdir = os.path.abspath(os.path.join(appdir, "usr/lib"))
+          # usr/lib/fallback is on the path here and not at run time: AppRun
+          # links in only what a given host turns out not to have. Including it
+          # keeps this list to the libraries the host must *really* provide,
+          # which is what the smoke and fresh-install baselines install.
+          fallback = os.path.join(libdir, "fallback")
           targets = (
               glob.glob(f"{appdir}/usr/lib/*.so*")
               + glob.glob(f"{appdir}/usr/lib/gstreamer-1.0/*.so")
               + glob.glob(f"{appdir}/usr/bin/*")
           )
-          env = dict(os.environ, LD_LIBRARY_PATH=libdir)
+          env = dict(os.environ, LD_LIBRARY_PATH=os.pathsep.join([libdir, fallback]))
           needed = set()
           for target in targets:
               out = subprocess.run(["ldd", target], capture_output=True, text=True, env=env).stdout
@@ -186,6 +191,8 @@ jobs:
           PY
           echo "host libraries the package expects to find:"
           cat target/appimage/host-libraries.txt
+          echo "carried as a per-host fallback (AppRun links these in only where the host has none):"
+          ls target/appimage/Subordinate.AppDir/usr/lib/fallback
           {
             echo "<details><summary>Host libraries the AppImage expects</summary>"
             echo
@@ -220,9 +227,12 @@ jobs:
   # one that built it: the 26.04 runner (much newer glibc), the build base
   # itself, and a bare Fedora container with no GStreamer at all. `--help`
   # exits without a window, which is all that is needed to prove the binary,
-  # its bundled libraries and the loader agree. The gst-inspect runs through
-  # SUB_APPIMAGE_TOOL prove the *bundled* registry sees the hardware plugins;
-  # the elements themselves need a GPU, hence the packages-amd job below.
+  # its bundled libraries and the loader agree. Then
+  # packaging/linux/check-plugins.sh loads *every* bundled plugin through
+  # SUB_APPIMAGE_TOOL and fails the job on any that will not -- that is the
+  # check the build itself cannot make, because the build machine has the
+  # development packages and resolves dependencies the package does not carry.
+  # The elements themselves need a GPU, hence the packages-amd job below.
   appimage-smoke:
     name: AppImage smoke (${{ matrix.target }})
     runs-on: ubuntu-26.04
@@ -241,13 +251,20 @@ jobs:
           # guessed: it is the Debian spelling of the "host libraries" list the
           # appimage job prints, i.e. every library the bundle resolves outside
           # its own AppDir.
+          #
+          # No libva2, libva-drm2, libva-x11-2 or libvdpau1 anywhere in this
+          # matrix, on purpose. The bundled gst-libav, va, qsv and msdk modules
+          # all link those four, a stock desktop may well not have them, and
+          # the v0.1.2/v0.1.3 packages were blacklisting half their plugins
+          # because of it (TASK-139). The package now carries its own copies in
+          # usr/lib/fallback, so installing them here would hide the very
+          # regression these jobs exist to catch.
           - target: ubuntu-26.04 host
             image: ""
             install: |
               apt-get update >/dev/null
               DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-                libgl1 libegl1 libglx0 libglvnd0 libgbm1 libdrm2 \
-                libva2 libva-drm2 libva-x11-2 libvdpau1 libvulkan1 \
+                libgl1 libegl1 libglx0 libglvnd0 libgbm1 libdrm2 libvulkan1 \
                 libx11-6 libx11-xcb1 libxau6 libxdmcp6 libxext6 libxfixes3 libxrender1 \
                 libxcb1 libxcb-dri3-0 libxcb-render0 libxcb-shm0 libxcb-xkb1 \
                 libwayland-client0 libwayland-cursor0 libwayland-egl1 \
@@ -258,8 +275,7 @@ jobs:
             install: |
               apt-get update >/dev/null
               DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-                libgl1 libegl1 libglx0 libglvnd0 libgbm1 libdrm2 \
-                libva2 libva-drm2 libva-x11-2 libvdpau1 libvulkan1 \
+                libgl1 libegl1 libglx0 libglvnd0 libgbm1 libdrm2 libvulkan1 \
                 libx11-6 libx11-xcb1 libxau6 libxdmcp6 libxext6 libxfixes3 libxrender1 \
                 libxcb1 libxcb-dri3-0 libxcb-render0 libxcb-shm0 libxcb-xkb1 \
                 libwayland-client0 libwayland-cursor0 libwayland-egl1 \
@@ -276,10 +292,14 @@ jobs:
             install: |
               dnf install -y -q --setopt=install_weak_deps=False \
                 alsa-lib pulseaudio-libs mesa-libGL mesa-libEGL mesa-libgbm \
-                libdrm libva libX11 libX11-xcb libxcb libXext libXrender \
-                libvdpau vulkan-loader libwayland-client libwayland-cursor \
+                libdrm libX11 libX11-xcb libxcb libXext libXrender libXfixes \
+                vulkan-loader libwayland-client libwayland-cursor \
                 libwayland-egl > /dev/null
     steps:
+      # The repository is here only for packaging/linux/check-plugins.sh: the
+      # package under test is the artifact, never the tree.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: subordinate-appimage
@@ -296,18 +316,11 @@ jobs:
           echo "host glibc: $(ldd --version 2>&1 | head -n1)"
           "$appimage" --appimage-extract-and-run --help > /dev/null
           echo "the editor starts"
-          SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run --version
-          for plugin in nvcodec va libav x264 voaacenc; do
-            SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run "$plugin" > /dev/null \
-              || { echo "::error::the bundled runtime does not expose $plugin"; exit 1; }
-            echo "bundled plugin ok: $plugin"
-          done
-          # A blacklisted plugin means a dependency did not come along.
-          summary=$(SUB_APPIMAGE_TOOL=gst-inspect-1.0 "$appimage" --appimage-extract-and-run 2>/dev/null | tail -1)
-          echo "$summary"
-          case "$summary" in
-            *blacklist*) echo "::error::some bundled plugins were blacklisted"; exit 1 ;;
-          esac
+          # Every bundled plugin, not a hand-picked five: a module that will not
+          # load is blacklisted quietly, and the ones that broke in v0.1.2 were
+          # not the ones anybody thought to name (TASK-145). The script fails
+          # the job on any load error and on any blacklist entry.
+          sh packaging/linux/check-plugins.sh "$appimage"
           SMOKE
 
       - name: Smoke test

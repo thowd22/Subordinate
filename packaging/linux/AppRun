@@ -29,6 +29,56 @@ export GST_REGISTRY GST_PLUGIN_SYSTEM_PATH_1_0 GST_PLUGIN_PATH_1_0 GST_PLUGIN_SC
 LD_LIBRARY_PATH=$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export LD_LIBRARY_PATH
 
+# usr/lib/fallback holds the VA-API and VDPAU dispatchers, which the bundled
+# gst-libav, va, qsv and msdk modules all have in DT_NEEDED and which a host is
+# entitled not to have installed: when it does not, those plugins are
+# blacklisted at scan time and an ordinary H.264/AAC file stops being readable
+# (TASK-139/TASK-145). They are staged off the library path because they are
+# dispatchers -- they dlopen the host's driver and bind it by a version-stamped
+# init symbol -- so a bundled copy in front of the host's would refuse a driver
+# built against a newer one and turn working hardware encode into software.
+#
+# So the choice is made per library, at start-up: link only the sonames this
+# machine has no answer for into a shim directory, and leave the rest to the
+# host. See packaging/linux/fallback-libs.txt.
+if [ -d "$libdir/fallback" ]; then
+    shim=${TMPDIR:-/tmp}/subordinate-hostlibs-$(id -u)
+    # Recreated every run: a machine that has since installed libva must stop
+    # getting the bundled one. A path that is not a directory this user owns
+    # (someone else got there first) is stepped around, not written to.
+    if [ -e "$shim" ] && { [ ! -d "$shim" ] || [ ! -O "$shim" ]; }; then
+        shim=$(mktemp -d "${TMPDIR:-/tmp}/subordinate-hostlibs-XXXXXX" 2>/dev/null || echo "")
+    else
+        mkdir -p "$shim" 2>/dev/null || shim=""
+    fi
+    if [ -n "$shim" ]; then
+        rm -f "$shim"/*.so.* 2>/dev/null || true
+        linked=0
+        for lib in "$libdir"/fallback/*.so.*; do
+            [ -e "$lib" ] || continue
+            soname=${lib##*/}
+            found=""
+            for dir in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /lib/x86_64-linux-gnu \
+                /lib64 /lib /usr/local/lib/x86_64-linux-gnu /usr/local/lib64 /usr/local/lib; do
+                if [ -e "$dir/$soname" ]; then
+                    found=$dir/$soname
+                    break
+                fi
+            done
+            if [ -z "$found" ] && ln -sf "$lib" "$shim/$soname" 2>/dev/null; then
+                linked=$((linked + 1))
+            fi
+        done
+        if [ "$linked" -gt 0 ]; then
+            LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$shim
+            export LD_LIBRARY_PATH
+            if [ -n "${SUB_APPIMAGE_VERBOSE:-}" ]; then
+                echo "AppRun: this host has no $(cd "$shim" && echo *); using the bundled copies" >&2
+            fi
+        fi
+    fi
+fi
+
 # GIO modules and typelibs would otherwise be looked up in /usr on the host,
 # where they may be a different major version than the bundled GLib.
 if [ -d "$libdir/gio/modules" ]; then

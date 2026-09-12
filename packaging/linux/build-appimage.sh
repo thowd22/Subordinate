@@ -163,10 +163,12 @@ scanner=$(find "$gst_libdir" -name gst-plugin-scanner -type f -print -quit)
 [ -n "$scanner" ] || die "no gst-plugin-scanner under $gst_libdir"
 install -m 0755 "$scanner" "$appdir/usr/lib/gstreamer-1.0/gst-plugin-scanner"
 
-# gst-inspect and gst-discoverer ship so the package can be inspected from the
-# outside (SUB_APPIMAGE_TOOL in AppRun) -- that is how hardware encode gets
-# verified against the bundled runtime rather than the host's.
-for tool in gst-inspect-1.0 gst-discoverer-1.0; do
+# gst-inspect, gst-discoverer and gst-launch ship so the package can be
+# inspected from the outside (SUB_APPIMAGE_TOOL in AppRun) -- that is how
+# hardware encode gets verified against the bundled runtime rather than the
+# host's, and how a fresh-machine check synthesises a clip with the package's
+# own encoders instead of needing a GStreamer on the machine it is checking.
+for tool in gst-inspect-1.0 gst-discoverer-1.0 gst-launch-1.0; do
     if [ -n "$gst_bindir" ] && [ -x "$gst_bindir/$tool" ]; then
         install -m 0755 "$gst_bindir/$tool" "$appdir/usr/bin/$tool"
     else
@@ -207,6 +209,31 @@ for pass in 1 2 3; do
     echo "==> pass $pass: $before -> $after libraries"
 done
 echo "==> bundled $(find "$appdir/usr/lib" -maxdepth 1 -name '*.so*' | wc -l) libraries"
+
+# --- fallback libraries ----------------------------------------------------
+# The four VA-API/VDPAU dispatchers in fallback-libs.txt are on the excludelist
+# above and must stay there: they are staged *outside* usr/lib, where the
+# loader never looks, and AppRun links in only the ones the host turns out not
+# to have. Read packaging/linux/fallback-libs.txt for why bundling them
+# normally would break VA-API rather than fix it.
+fallback_dir=$appdir/usr/lib/fallback
+mkdir -p "$fallback_dir"
+while read -r soname; do
+    soname=${soname%%#*}
+    soname=$(echo "$soname" | tr -d '[:space:]')
+    [ -n "$soname" ] || continue
+    [[ $soname =~ $exclude_re ]] ||
+        die "$soname is in fallback-libs.txt but not on the excludelist; bundle it normally instead"
+    lib=$(ldconfig -p 2>/dev/null |
+        awk -v want="$soname" '$1 == want && /x86-64/ { print $NF; exit }')
+    if [ -z "$lib" ] || [ ! -f "$lib" ]; then
+        lib=$(find /usr/lib /lib -maxdepth 3 -name "$soname" -type f -print -quit 2>/dev/null || true)
+    fi
+    [ -n "$lib" ] && [ -f "$lib" ] ||
+        die "no $soname on this build machine; the package would ship without its fallback"
+    install -m 0644 "$lib" "$fallback_dir/$soname"
+done < "$packaging_dir/fallback-libs.txt"
+echo "==> fallback libraries: $(cd "$fallback_dir" && echo *)"
 
 # --- plugins whose dependencies are not in the bundle -----------------------
 # A plugin with an unsatisfiable dependency does not fail loudly: GStreamer
