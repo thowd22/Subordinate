@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-task-133-2'
 created_date: '2026-09-11 14:48'
-updated_date: '2026-09-12 04:27'
+updated_date: '2026-09-12 04:44'
 labels:
   - media
   - performance
@@ -160,6 +160,21 @@ Repeats: 4K drag 29.904 fps legacy, 130.863 fps after. Eight of the twenty timed
 cargo fmt --all --check clean; cargo clippy --workspace --all-targets -- -D warnings clean; cargo test -p sub-media -p subordinate-bench green; cargo test --workspace --exclude sub-ui green (exit 0). Frame accuracy: seek_fixtures unchanged and passing (burnt-in timecode plus whole-picture comparison), and two new fixture tests in index_fixtures -- one walks a drag over a GOP and compares every picture the cache hands back against the same file decoded from the start, the other proves a step just past the next keyframe decodes on while one far ahead still seeks.
 
 Hardware run 34672738874 dispatched from the branch; numbers to follow.
+
+## Hardware: box APU (vah264dec), run 34673268738
+
+The workflow now runs the bench twice on each runner -- once as shipped, once with --legacy-scrub -- so each machine reports its own before half. Box, AMD APU, GStreamer 1.28, GPU upload included, harness defaults (30 steps):
+
+| fixture | scenario | before | after | pictures/step | seeks/step | cached |
+| --- | --- | --- | --- | --- | --- | --- |
+| bars_2160p | scrub_drag | 20.918 fps | **44.956 fps** | 2.60 -> 1.36 | 0.40 -> 0.03 | 14 of 30 |
+| bars_1080p | scrub_drag | 45.223 fps | **144.650 fps** | 2.63 -> 1.36 | 0.36 -> 0.03 | 14 of 30 |
+| bars_2160p | scrub (jump) | 10.594 fps | 10.574 fps | 3.00 | 0.90 | 0 |
+| bars_1080p | scrub (jump) | 23.125 fps | 24.823 fps | 3.00 -> 2.33 | 0.90 -> 0.83 | 4 |
+
+The job's own criteria line: '4K H.264 scrub (scrub_drag): **44.956 fps** through vah264dec (criterion: above 30 fps) - PASS', with '4K decode element: vah264dec - PASS'. 4K playback on this machine is 45.572 fps with the upload stage, so the drag is now at the machine's decode-and-upload ceiling rather than at the seek's.
+
+The jump scrub is unchanged on both fixtures, which is the control: every one of its steps lands in a GOP the decoder is not in, so it flushes whatever the planner knows.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
