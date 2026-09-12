@@ -30,13 +30,20 @@ fn socket_exports_appear_in_the_panel_and_keep_the_window_painting() {
         .sequences
         .push(Sequence::new("Main", SequenceSettings::default()));
     std::fs::write(&path, sub_model::json::to_json(&project).unwrap()).unwrap();
+    // macOS temp paths can exceed the Unix socket path limit.
+    #[cfg(unix)]
+    let endpoint_dir = std::path::PathBuf::from("/tmp")
+        .join(format!("sub-ui-api-{}", sub_model::ProjectId::new()));
+    #[cfg(not(unix))]
+    let endpoint_dir = dir.join("endpoint");
     let options = AppOptions {
         project: Some(path),
         serve_command_api: true,
         instance: Some("host-test".to_owned()),
-        endpoint_dir: Some(dir.join("endpoint")),
+        endpoint_dir: Some(endpoint_dir.clone()),
         ..AppOptions::default()
     };
+    options.endpoint().expect("the test socket path is valid");
     let mut harness: Harness<'_, SubordinateApp> = support::builder()
         .with_size(eframe::egui::vec2(1400.0, 900.0))
         .build_eframe(move |cc| SubordinateApp::new(cc, options).unwrap());
@@ -204,5 +211,8 @@ fn socket_exports_appear_in_the_panel_and_keep_the_window_painting() {
         .to_string();
     assert_eq!(rebuilt, methods);
     drop(harness);
+    if endpoint_dir.exists() {
+        std::fs::remove_dir_all(endpoint_dir).unwrap();
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }
