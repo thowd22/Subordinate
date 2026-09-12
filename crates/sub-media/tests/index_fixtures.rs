@@ -506,6 +506,116 @@ fn an_index_removes_the_seek_a_long_gop_forward_step_would_otherwise_cost() {
 }
 
 #[test]
+fn a_drag_over_a_gop_seeks_once_and_answers_the_way_back_from_the_cache() {
+    // What a hand does to a scrub bar: forward a picture at a time, then back
+    // a few, then forward again. Before TASK-133 every one of those backward
+    // steps was a flushing seek and a re-decode of the GOP from its keyframe.
+    // Now the forward steps decode on from the last picture and the backward
+    // ones are answered out of the pictures the decoder already decoded, so
+    // the whole drag costs the one seek that started it -- and every picture
+    // it hands back is still the picture that file decodes at that frame.
+    let Some(path) = fixture(CFR) else { return };
+    let index = Arc::new(index_of(&path));
+    let expected = reference(&path);
+
+    let mut decoder = Decoder::open(&path).unwrap_or_else(|e| panic!("[{}] {e}", e.code));
+    decoder.set_index(Arc::clone(&index));
+
+    // Frames 30 to 35 and back: all inside the fixture's second GOP, which
+    // starts at frame 25.
+    let walk = [30_usize, 31, 32, 33, 32, 31, 30, 31, 32, 33, 34, 35];
+    let mut seeks = 0_u64;
+    let mut hits = 0_u64;
+    let mut pictures = 0_u64;
+    for (step, &frame) in walk.iter().enumerate() {
+        let target = index.pts(frame).expect("a frame inside the fixture");
+        let picture = decoder
+            .seek_to(target)
+            .unwrap_or_else(|e| panic!("[{}] {e}", e.code))
+            .unwrap_or_else(|| panic!("frame {frame} exists"));
+        assert_eq!(
+            picture.pts(),
+            target,
+            "step {step} of the drag landed on the wrong instant"
+        );
+        assert_eq!(
+            fingerprint(&picture),
+            expected[frame],
+            "step {step} of the drag did not hand back frame {frame}"
+        );
+        let timing = decoder.last_seek_timing().expect("a timed step");
+        seeks += timing.seeks_issued;
+        hits += timing.cache_hits;
+        pictures += timing.frames_decoded;
+    }
+
+    assert_eq!(
+        seeks, 1,
+        "only the step that started the drag has anywhere to seek from"
+    );
+    assert_eq!(
+        hits, 6,
+        "every step back over ground the drag has covered is a cache hit"
+    );
+    assert!(
+        pictures <= u64::try_from(walk.len()).expect("a short walk"),
+        "a drag of {} steps decoded {pictures} pictures",
+        walk.len()
+    );
+    let stats = decoder.cache_stats();
+    assert_eq!(stats.hits, hits, "the cache counts what the steps report");
+    assert!(
+        stats.bytes_used <= stats.bytes_budget,
+        "the cache stayed inside its budget"
+    );
+}
+
+#[test]
+fn a_step_just_past_the_next_keyframe_decodes_on_instead_of_flushing() {
+    // A keyframe boundary used to end a drag's free ride: the picture after it
+    // sits in a GOP the decoder is not in, so the step flushed the pipeline to
+    // decode one picture from that keyframe. Decoding on from where the
+    // decoder already is costs a handful of pictures and no flush, which is
+    // the cheaper of the two (TASK-133).
+    let Some(path) = fixture(CFR) else { return };
+    let index = Arc::new(index_of(&path));
+    let expected = reference(&path);
+
+    let mut decoder = Decoder::open(&path).unwrap_or_else(|e| panic!("[{}] {e}", e.code));
+    decoder.set_index(Arc::clone(&index));
+    // The fixture keyframes every 25 pictures, so frame 50 opens a GOP.
+    decoder
+        .seek_to(index.pts(47).expect("frame 47"))
+        .unwrap_or_else(|e| panic!("[{}] {e}", e.code))
+        .expect("frame 47 exists");
+    let seeks_before = decoder.seek_count();
+
+    let picture = decoder
+        .seek_to(index.pts(51).expect("frame 51"))
+        .unwrap_or_else(|e| panic!("[{}] {e}", e.code))
+        .expect("frame 51 exists");
+    assert_eq!(fingerprint(&picture), expected[51]);
+    assert_eq!(
+        decoder.seek_count(),
+        seeks_before,
+        "four pictures forward is cheaper than a flush, keyframe or no keyframe"
+    );
+
+    // Far enough ahead and the seek is the cheaper one again, so the rule
+    // still stops a step from decoding the rest of the file.
+    let far = decoder
+        .seek_to(index.pts(120).expect("frame 120"))
+        .unwrap_or_else(|e| panic!("[{}] {e}", e.code))
+        .expect("frame 120 exists");
+    assert_eq!(fingerprint(&far), expected[120]);
+    assert_eq!(
+        decoder.seek_count(),
+        seeks_before + 1,
+        "a step that far ahead flushes rather than decode every picture to it"
+    );
+}
+
+#[test]
 fn an_indexed_seek_lands_on_the_keyframe_instead_of_overshooting_it() {
     // The colour-bar fixture's timestamps start 80 ms in, because its first
     // pictures are reordered. A seek expresses its target in stream time, which

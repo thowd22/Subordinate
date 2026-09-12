@@ -284,6 +284,19 @@ jobs:
             | tee target/hardware/bench-summary.txt
           cp target/bench/perf.json target/hardware/perf.json
 
+      # The same measurement with the seek path as it was before TASK-133: no
+      # cache of the pictures a step decoded, and no allowance for what a flush
+      # costs when a step chooses between decoding on and seeking. Reported,
+      # never gated -- it is the before half of a before-and-after, taken on
+      # this machine rather than argued from another one, and it costs seconds.
+      - name: Scrub benchmark with the pre-TASK-133 seek path
+        continue-on-error: true
+        run: |
+          xvfb-run -a ./dist/subordinate-bench --out target/bench/perf-legacy.json \
+            --fixtures "$GITHUB_WORKSPACE/fixtures" --legacy-scrub \
+            | tee target/hardware/bench-summary-legacy.txt
+          cp target/bench/perf-legacy.json target/hardware/perf-legacy.json
+
       # Compositor readback throughput on a 1080p canvas: TASK-58 AC 2, which
       # could not be measured on a software adapter and moved here. The test is
       # #[ignore]d so it only ever runs on a job like this one, and it is the
@@ -426,6 +439,15 @@ jobs:
             --fixtures "$GITHUB_WORKSPACE/fixtures" \
             | tee target/hardware/bench-summary.txt
           cp target/bench/perf.json target/hardware/perf.json
+
+      # The before half of the before-and-after; see the NVIDIA job.
+      - name: Scrub benchmark with the pre-TASK-133 seek path
+        continue-on-error: true
+        run: |
+          xvfb-run -a ./target/release/subordinate-bench --out target/bench/perf-legacy.json \
+            --fixtures "$GITHUB_WORKSPACE/fixtures" --legacy-scrub \
+            | tee target/hardware/bench-summary-legacy.txt
+          cp target/bench/perf-legacy.json target/hardware/perf-legacy.json
 
       # Reported, not gated: the 60 fps readback criterion (TASK-58) is stated
       # against the NVIDIA job. This APU's number is recorded for comparison.
