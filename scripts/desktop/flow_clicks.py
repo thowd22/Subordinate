@@ -656,35 +656,58 @@ def _choose_file(session, path: Path, dialog: dict) -> str:
     if platform.system() != "Windows":
         window_id = dialog.get("window")
         if window_id:
-            subprocess.run(
-                ["xdotool", "windowactivate", "--sync", window_id], check=False
-            )
-            subprocess.run(["xdotool", "windowraise", window_id], check=False)
-            # Into the part of the screen the pointer can reach, so its rows
-            # and its Open button can be clicked as well as typed at.
-            subprocess.run(
-                ["xdotool", "windowmove", "--sync", window_id, "520", "80"], check=False
-            )
+            for command in (
+                ["windowactivate", "--sync", window_id],
+                ["windowfocus", "--sync", window_id],
+                # Into the part of the screen the pointer can reach, so its
+                # rows and its Open button can be clicked as well as typed at.
+                ["windowmove", "--sync", window_id, "520", "80"],
+            ):
+                subprocess.run(["xdotool", *command], check=False)
             time.sleep(1)
+        focused = subprocess.run(
+            ["xdotool", "getwindowfocus"], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        # Keystrokes go where the focus is, and the chooser is a window of its
+        # own: run 34683546727 typed the path into the *editor*, which took the
+        # `m` as "add a marker" and left the dialog to import whatever it had
+        # selected. When the focus has not moved, the keys are addressed to the
+        # dialog's window explicitly.
+        into = [] if focused == window_id else ["--window", str(window_id)]
+        def send_key(keys: str) -> None:
+            subprocess.run(["xdotool", "key", *into, "--clearmodifiers", keys], check=False)
+
+        def send_text(text: str) -> None:
+            subprocess.run(
+                ["xdotool", "type", *into, "--delay", "25", text], check=False
+            )
+
         # Navigate to the folder first, then pick the file by name. Typing a
         # whole path into GTK's location bar is at the mercy of its inline
         # completion, which turned the clip's path into a file the editor
         # answered `media.unsupported` for (runs 34682198476 and 34682903107);
         # once the chooser is showing the folder, the row is a control with
         # the file's own name on it.
-        session.key("ctrl+l")
+        send_key("ctrl+l")
         time.sleep(0.5)
-        session.type_text(f"{path.parent}/")
+        send_text(f"{path.parent}/")
         time.sleep(0.5)
-        session.key("Return")
+        send_key("Return")
         time.sleep(2)
         try:
             row = session.find(path.name, timeout=15)
             session.click(row, double=True)
             time.sleep(2)
-            return f"double-clicked the row named {path.name!r}"
+            return f"double-clicked the row named {path.name!r} (focus={focused})"
         except DesktopError:
             pass
+        send_key("ctrl+l")
+        time.sleep(0.5)
+        send_text(str(path))
+        time.sleep(0.5)
+        send_key("Return")
+        time.sleep(2)
+        return f"typed the path (focus={focused}, dialog={window_id})"
     session.type_text(str(path))
     time.sleep(0.5)
     session.key("Return")
