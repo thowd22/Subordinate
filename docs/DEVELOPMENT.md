@@ -1360,6 +1360,106 @@ There are no Windows jobs: there is no AMD Windows host anywhere this project
 can reach, and the NVIDIA Windows AMI is TASK-115. The workflow carries a
 commented placeholder rather than a job that would quietly pass on software.
 
+## Export matrix workflow
+
+`.github/workflows/export-matrix.yml` is the other half of the hardware story
+(TASK-143). `hardware.yml` proves *one* encoder per machine; this proves every
+encoder each machine carries, against every preset of that encoder's codec,
+against two sources, and - on the machines with a GPU - through the editor's
+own export runner as well as the CLI's. It runs on `workflow_dispatch` and
+nightly at 05:40 UTC, an hour after `hardware.yml` so the two never bid for the
+same GPU quota.
+
+Every job runs the same driver, `scripts/export-matrix.py`, so the rows are
+comparable between machines:
+
+| Job | Runner | Cost | Encoders it covers |
+| --- | --- | --- | --- |
+| `build-linux` / `build-windows` | hosted | free | build `subordinate-cli` and hand it over as an artifact |
+| `hosted-software` | hosted `ubuntu-24.04` | free | `x264enc`, `x265enc` and any software AV1 encoder, on lavapipe |
+| `amd-linux` | self-hosted `box` | free | the `va` family, the software encoders, the user's 4K60 footage, and the GUI-versus-CLI comparison for `vah264enc` and `x264enc` |
+| `nvidia-linux` | RunsOn `gpu-nvidia-linux` | about 0.16 USD | `nvh264enc`, `nvh265enc`, `nvav1enc`, and the GUI-versus-CLI comparison for `nvh264enc` and `x264enc` |
+| `nvidia-windows` | RunsOn `gpu-nvidia-windows` | about 0.15 USD | NVENC and Media Foundation on Windows |
+| `amd-windows` | self-hosted `yodaddy` | free | the `amf` family - the only AMF hardware this project can reach |
+
+The two paid jobs are chained with `needs` rather than run side by side: the
+account's G-family quota allows two `g4dn` instances at once and other work
+shares it, so this workflow never asks for more than one.
+
+### The GUI half
+
+The window's export runs through `sub_ui::ExportRunner`, which is a different
+door from `subordinate-cli render` even though TASK-135 made both walk through
+`sub_export::sequence`. The comparison is the
+`the_window_and_the_cli_write_the_same_file_for_each_encoder` test in
+`crates/sub-ui/tests/export_end_to_end.rs`: it opens the real `SubordinateApp`
+on the sample project, pins an encoder in the export panel, exports the way a
+click on Export exports, then runs `subordinate-cli render` over the same
+frames with the same encoder and compares the two files on frame count and
+audio. `SUBORDINATE_MATRIX_ENCODERS` names the encoders and `SUBORDINATE_CLI`
+the binary; with either unset the test skips, so hosted CI is unaffected.
+
+It runs on box and on the T4 rather than on the Linux desktop image, and that
+is worth knowing why: the editor's Command API serves the engine's methods and
+not the `host::*` family, so `export.render` reaches no running window and
+nothing on that image can ask the editor to export at all (TASK-147). The
+desktop image also carries a *released* build and no Rust, so a test binary
+cannot run there either. What runs on box and the T4 is the assembled window
+itself, on a real GPU, which is the part of the claim that was never tested.
+
+### What a cell is checked for
+
+A render that exits zero is not a pass. For every cell the driver reads the
+written file back with `gst-discoverer-1.0` - stream layout, picture size,
+duration, audio codec and channels - and then counts the frames actually in it,
+which is the only check that catches an encoder writing a plausible header and
+dropping pictures. The count comes from `identity silent=false` under
+`gst-launch -v`, which prints one `chain` line per buffer, reading the video
+track straight off `qtdemux` or `matroskademux`.
+
+Reading the *muxed* track rather than decoding it is deliberate: the hosted
+runner has no AAC decoder, and a full `decodebin` of an MP4 this matrix had
+just written failed to preroll on its audio track and counted nothing at all
+(run 34672568992). The audio pad is left unlinked on purpose - a demuxer's flow
+combiner only errors when every pad is unlinked, so the video branch carries
+the pipeline by itself.
+
+Failing outputs and their discoverer reports are uploaded; passing ones are
+deleted, because a 4K60 matrix writes gigabytes of them.
+
+### Things that shape the table
+
+- **The canvas and the frame rate come from the sequence, not the preset**
+  (`settings_for_sequence`). A 4K60 source under `youtube-1080p` is written
+  4K60, and the preset's own size and rate come back as warnings. The summary
+  says so under every table.
+- **The preset's bitrate and CRF reach nothing.** `ExportSettings` carries no
+  quality field, so a preset currently selects the container, the codecs and
+  the audio format and nothing else (TASK-149).
+- **`audio-only` is not in the matrix.** It has no video stream, and `render`
+  refuses it before an encoder is chosen.
+- **Hardware encoders are ranked `NONE`,** so the driver treats "present and
+  READY" as the test for a cell rather than "usable", exactly as
+  `EncoderStatus::is_pinnable` does.
+- **Only the first audio stream of a multi-track source is exported.** The
+  user's 4K60 footage carries three; `uridecodebin` exposes one audio pad and
+  the mixer writes a single stereo track (TASK-145).
+
+### Sources
+
+`examples/sample-project/demo.sub` with media from `scripts/get-sample-media.sh`,
+and the user's 4K60 three-audio-track footage, which reaches each machine
+differently: box has the full file at `~/test-media/meld-4k60-full.mkv`, the
+RunsOn instances read the two-minute excerpt from the private S3 bucket with
+their instance role (TASK-140), the Linux desktop image has it baked at
+`/opt/subordinate/test-media/`, and yodaddy - which has no AWS role - takes a
+ten-second excerpt cut by the box job and passed through an artifact. Put a
+copy in `C:\SubordinateTest\` on yodaddy and its job prefers that.
+
+Neither source is rendered whole: `--range` caps each cell at a couple of
+seconds. The matrix is about the encoders, not about throughput, which is what
+`hardware.yml` and docs/PERFORMANCE.md measure.
+
 ## Pop-out and second display
 
 Two displays are an MVP requirement, and the two features that serve them --
