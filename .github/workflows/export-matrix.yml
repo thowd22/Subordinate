@@ -23,7 +23,7 @@ name: Export matrix
 # Two of the jobs cost money, all of them g4dn.xlarge in us-east-1:
 #
 #   nvidia-linux    spot, timeout 35 -> under 0.16 USD
-#   nvidia-windows  spot, timeout 35 -> under 0.15 USD
+#   nvidia-windows  spot, timeout 45 -> under 0.19 USD
 #
 # so a full run is under 0.35 USD and the nightly schedule is about 10 USD a
 # month at the worst case, half that on spot. The two are chained with `needs`
@@ -548,7 +548,7 @@ jobs:
     # Chained rather than parallel: one g4dn of this workflow's at a time.
     needs: [build-windows, nvidia-linux]
     runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-windows
-    timeout-minutes: 35
+    timeout-minutes: 45
     defaults:
       run:
         shell: pwsh
@@ -638,7 +638,7 @@ jobs:
             --cli dist\subordinate-cli.exe `
             --out target\export-matrix `
             --no-software-for uhd `
-            --timeout 240 `
+            --timeout 120 `
             @sources
 
       - name: Job summary
