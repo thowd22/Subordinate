@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@codex'
 created_date: '2026-09-12 12:00'
-updated_date: '2026-09-12 18:03'
+updated_date: '2026-09-12 18:10'
 labels:
   - export
   - bug
@@ -34,6 +34,8 @@ So an export that would have succeeded is abandoned, and the user is told the pi
 
 <!-- SECTION:PLAN:BEGIN -->
 1. Keep TASK-146 bus-aware bounded pushes and planar conversion. Apply request stall_timeout_ms to push and EOS waits, resetting patience for queue, file, position or encoder-output progress. 2. Honor an optional timeout_ms cap on final EOS draining even when progress continues. 3. Preserve stable timeout reason and element details. 4. Replace machine-dependent noisy AV1 tests with an x264 stream delayed by a pad probe, proving continuous progress survives a short patience window and an explicit deadline still wins. 5. Run combined export tests and clippy locally.
+
+Post-integration review: observe encoder EOS to distinguish an internally stalled encoder from a muxer after appsrc has drained; add a deterministic regression holding encoder EOS after the queue empties.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -42,6 +44,8 @@ So an export that would have succeeded is abandoned, and the user is told the pi
 Reproduced the shape from the report: the only time budget is EOS_TIMEOUT_SECONDS = 120 in crates/sub-export/src/pipeline.rs, spent entirely in wait_for_eos after both appsrc streams have ended, so a slow encoder draining its queue is indistinguishable from a dead one.
 
 Replaced the expensive 240-frame AV1 test with deterministic 50 ms delays on 24 x264 input buffers. Continuous progress completes beyond a 300 ms patience window; a 400 ms explicit drain limit fails despite ongoing progress and names x264enc. Encoded-output pad probes additionally prevent buffered muxer output from hiding encoder progress. Existing starved-branch regression checks stopped pushes and cleanup. timeout_ms intentionally caps final EOS draining, while stall_timeout_ms governs both pushes and EOS.
+
+Post-integration review now observes each encoder output EOS. An empty appsrc no longer falsely attributes an encoder flush stall to the muxer. A deterministic test holds x264 input EOS after the queue drains and verifies export.timeout names x264enc; all 33 pipeline unit tests and clippy across export targets pass.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

@@ -27,7 +27,8 @@
 //! CRF values are written on the H.264 scale of 0..=51 that the presets use
 //! ([`MAX_CRF`]). An encoder whose quantiser range is wider — AV1's 0..=63 or
 //! 0..=255 — is given the value rescaled onto its own range, so "CRF 20" means
-//! roughly the same picture whichever encoder runs.
+//! a consistent best-to-worst control direction. Equal numbers across codecs
+//! do not promise equal perceptual quality or losslessness.
 
 use gstreamer as gst;
 use gstreamer::glib;
@@ -62,6 +63,8 @@ enum Setting {
     /// carries. The several spellings exist because the same mode is
     /// `constqp` on one NVENC generation and `cqp` on the next.
     Mode(&'static [&'static str]),
+    /// A normalized floating-point quality, where 1 is best and 0 is worst.
+    NormalizedQuality,
     /// The average bitrate, in the unit the property documents.
     Bitrate(BitrateUnit),
     /// The quality target, rescaled from the CRF scale onto `0..=max`.
@@ -94,7 +97,7 @@ struct Mapping {
     /// The knobs for a constant-quality target; empty when the encoder has no
     /// constant-quality mode at all, which is a warning rather than a failure.
     quality: &'static [Knob],
-    /// Why the encoder has no constant-quality mode, when it has none.
+    /// Why the encoder has no mapped CRF equivalent, when it has none.
     no_quality: Option<&'static str>,
 }
 
@@ -122,8 +125,8 @@ const QP_63: u32 = 63;
 const QP_255: u32 = 255;
 
 /// NVENC: `bitrate` is in kbit/s and `rc-mode` selects the mode; the constant
-/// quantiser lives on `qp-const` on the nvcodec elements and on the per-frame
-/// `qp-const-i` on the newer device-specific ones.
+/// quantisers live on `qp-const-{i,p,b}`; older plugins expose a shared
+/// `qp-const` instead. Each frame class must receive the requested value.
 const NVENC_BITRATE: &[Knob] = &[
     knob(&["rc-mode"], Setting::Mode(&["cbr", "cbr-ld-hq", "vbr"])),
     knob(&["bitrate"], Setting::Bitrate(BitrateUnit::Kbps)),
@@ -156,7 +159,15 @@ const MAPPINGS: &[Mapping] = &[
         &[
             knob(&["rc-mode"], Setting::Mode(&["constqp", "cqp"])),
             knob(
-                &["qp-const", "qp-const-i", "qp-i"],
+                &["qp-const-i", "qp-const", "qp-i"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+            knob(
+                &["qp-const-p", "qp-const", "qp-p"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+            knob(
+                &["qp-const-b", "qp-const", "qp-b"],
                 Setting::Quantiser { max: QP_51 },
             ),
         ],
@@ -168,7 +179,15 @@ const MAPPINGS: &[Mapping] = &[
         &[
             knob(&["rc-mode"], Setting::Mode(&["constqp", "cqp"])),
             knob(
-                &["qp-const", "qp-const-i", "qp-i"],
+                &["qp-const-i", "qp-const", "qp-i"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+            knob(
+                &["qp-const-p", "qp-const", "qp-p"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+            knob(
+                &["qp-const-b", "qp-const", "qp-b"],
                 Setting::Quantiser { max: QP_51 },
             ),
         ],
@@ -180,7 +199,15 @@ const MAPPINGS: &[Mapping] = &[
         &[
             knob(&["rc-mode"], Setting::Mode(&["constqp", "cqp"])),
             knob(
-                &["qp-const", "qp-const-i", "qp-i"],
+                &["qp-const-i", "qp-const", "qp-i"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+            knob(
+                &["qp-const-p", "qp-const", "qp-p"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+            knob(
+                &["qp-const-b", "qp-const", "qp-b"],
                 Setting::Quantiser { max: QP_51 },
             ),
         ],
@@ -192,7 +219,15 @@ const MAPPINGS: &[Mapping] = &[
         &[
             knob(&["rc-mode"], Setting::Mode(&["constqp", "cqp"])),
             knob(
-                &["qp-const", "qp-const-i", "qp-i"],
+                &["qp-const-i", "qp-const", "qp-i"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+            knob(
+                &["qp-const-p", "qp-const", "qp-p"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+            knob(
+                &["qp-const-b", "qp-const", "qp-b"],
                 Setting::Quantiser { max: QP_51 },
             ),
         ],
@@ -204,7 +239,15 @@ const MAPPINGS: &[Mapping] = &[
         &[
             knob(&["rc-mode"], Setting::Mode(&["constqp", "cqp"])),
             knob(
-                &["qp-const", "qp-const-i", "qp-i"],
+                &["qp-const-i", "qp-const", "qp-i"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+            knob(
+                &["qp-const-p", "qp-const", "qp-p"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+            knob(
+                &["qp-const-b", "qp-const", "qp-b"],
                 Setting::Quantiser { max: QP_51 },
             ),
         ],
@@ -216,7 +259,15 @@ const MAPPINGS: &[Mapping] = &[
         &[
             knob(&["rc-mode"], Setting::Mode(&["constqp", "cqp"])),
             knob(
-                &["qp-const", "qp-const-i", "qp-i"],
+                &["qp-const-i", "qp-const", "qp-i"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+            knob(
+                &["qp-const-p", "qp-const", "qp-p"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+            knob(
+                &["qp-const-b", "qp-const", "qp-b"],
                 Setting::Quantiser { max: QP_51 },
             ),
         ],
@@ -228,7 +279,15 @@ const MAPPINGS: &[Mapping] = &[
         &[
             knob(&["rc-mode"], Setting::Mode(&["constqp", "cqp"])),
             knob(
-                &["qp-const", "qp-const-i", "qp-i"],
+                &["qp-const-i", "qp-const", "qp-i"],
+                Setting::Quantiser { max: QP_255 },
+            ),
+            knob(
+                &["qp-const-p", "qp-const", "qp-p"],
+                Setting::Quantiser { max: QP_255 },
+            ),
+            knob(
+                &["qp-const-b", "qp-const", "qp-b"],
                 Setting::Quantiser { max: QP_255 },
             ),
         ],
@@ -297,20 +356,20 @@ const MAPPINGS: &[Mapping] = &[
         ],
         None,
     ),
-    // Apple VideoToolbox: bitrate only. The element has no constant-quality
-    // mode for H.264 or HEVC — `quality` is a ProRes knob — so a CRF preset
-    // warns and the encoder keeps its default.
+    // VideoToolbox exposes a floating-point compression quality on H.264/HEVC.
+    // Invert the preset scale onto 0..1; this is a relative quality request,
+    // not a claim that Apple's scale is perceptually equivalent to x264 CRF.
     mapping(
         "vtenc_h264",
         &[knob(&["bitrate"], Setting::Bitrate(BitrateUnit::Kbps))],
-        &[],
-        Some("VideoToolbox encodes H.264 at an average bitrate and has no constant-quality mode"),
+        &[knob(&["quality"], Setting::NormalizedQuality)],
+        None,
     ),
     mapping(
         "vtenc_h265",
         &[knob(&["bitrate"], Setting::Bitrate(BitrateUnit::Kbps))],
-        &[],
-        Some("VideoToolbox encodes HEVC at an average bitrate and has no constant-quality mode"),
+        &[knob(&["quality"], Setting::NormalizedQuality)],
+        None,
     ),
     // Windows Media Foundation: bitrate only; its quality-vs-speed knob is
     // not a quantiser.
@@ -319,7 +378,7 @@ const MAPPINGS: &[Mapping] = &[
         &[knob(&["bitrate"], Setting::Bitrate(BitrateUnit::Kbps))],
         &[],
         Some(
-            "Media Foundation encodes H.264 at an average bitrate and has no constant-quality mode",
+            "Media Foundation encodes H.264 at an average bitrate and has no mapped CRF equivalent",
         ),
     ),
     mapping(
@@ -327,7 +386,7 @@ const MAPPINGS: &[Mapping] = &[
         &[knob(&["bitrate"], Setting::Bitrate(BitrateUnit::Kbps))],
         &[],
         Some(
-            "Media Foundation encodes HEVC at an average bitrate and has no constant-quality mode",
+            "Media Foundation encodes HEVC at an average bitrate and has no mapped CRF equivalent",
         ),
     ),
     // Software. `x264enc` distinguishes constant quantiser (`quant`) from
@@ -469,6 +528,19 @@ fn apply_knob(
         };
         return match knob.setting {
             Setting::Mode(nicks) => set_mode(encoder, element, name, &spec, nicks),
+            Setting::NormalizedQuality => {
+                let VideoQuality::Crf { value } = quality else {
+                    return Ok(());
+                };
+                let Some(range) = spec.downcast_ref::<glib::ParamSpecDouble>() else {
+                    return Err(format!(
+                        "{element}'s '{name}' is not a floating-point quality"
+                    ));
+                };
+                let normalized = 1.0 - f64::from(value.min(MAX_CRF)) / f64::from(MAX_CRF);
+                encoder.set_property(name, normalized.clamp(range.minimum(), range.maximum()));
+                Ok(())
+            }
             Setting::Bitrate(unit) => {
                 let VideoQuality::Bitrate { kbps } = quality else {
                     return Ok(());
@@ -653,3 +725,6 @@ mod tests {
         assert_eq!(BitrateUnit::Bps.value(12_000), 12_000_000);
     }
 }
+
+#[cfg(test)]
+mod property_tests;

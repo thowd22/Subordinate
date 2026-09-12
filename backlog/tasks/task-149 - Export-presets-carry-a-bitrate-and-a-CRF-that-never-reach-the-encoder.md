@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@codex'
 created_date: '2026-09-12 08:11'
-updated_date: '2026-09-12 18:03'
+updated_date: '2026-09-12 18:08'
 labels:
   - export
   - bug
@@ -37,12 +37,16 @@ The export matrix (TASK-143) crosses every encoder with every preset, and the ce
 6. Update docs/user-guide.md wording if it claims presets choose quality; run fmt, clippy pedantic and the sub-export tests.
 
 Resume preserved agent implementation; integrate with TASK-146 and the other export fixes on a shared export branch, then validate locally without AWS.
+
+Post-integration review: verify vendor properties against primary GStreamer docs/source, correct per-frame NVENC QP application and VideoToolbox floating-point quality, add property-level regressions, and rerun focused quality tests and clippy.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Integrated quality mapping with TASK-146 NVENC additions: nvd3d11h264enc/nvd3d11h265enc/nvautogpuh264enc/nvautogpuh265enc now have mappings. Preserved chroma and quality together in sequence settings; fixed stale error.code() assertions. Hardware property mappings remain defensive and log unsupported properties.
+
+Post-integration review corrected two verified vendor gaps: NVENC now applies qp-const-i/p/b individually with legacy shared-property fallback, and VideoToolbox maps CRF direction onto the real 0..1 quality property. Primary references: https://gstreamer.freedesktop.org/documentation/nvcodec/nvav1enc.html and https://github.com/GStreamer/gstreamer/blob/main/subprojects/gst-plugins-bad/sys/applemedia/vtenc.c. Two GObject property regressions prove I/P/B receive values without legacy qp-const and floating quality preserves both endpoints. 11 focused rate-control tests, 2 file-size integration tests and export clippy with warnings denied passed. CLI diag also passed all 4 tests.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

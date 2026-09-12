@@ -66,3 +66,55 @@ fn a_hard_limit_in_the_request_fails_even_while_progress_continues() {
     assert!(error.message.contains("x264enc"));
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn a_drained_appsrc_still_names_the_encoder_until_it_emits_eos() {
+    gst::init().unwrap();
+    if !element_is_usable("x264enc") || !element_is_usable("matroskamux") {
+        eprintln!("skipping: x264enc or matroskamux is unavailable");
+        return;
+    }
+    let settings = ExportSettings::new(16, 16, Rational::FPS_24, Container::Mkv)
+        .with_audio_codec(None)
+        .with_stall_timeout_ms(100);
+    let elements = ExportElements {
+        video_encoder: "x264enc".to_owned(),
+        audio_encoder: None,
+    };
+    let path = std::env::temp_dir().join(format!("sub-export-flush-{}.mkv", std::process::id()));
+    let mut pipeline = ExportPipeline::new(&path, &settings, &elements).unwrap();
+    let encoder = pipeline
+        .pipeline
+        .iterate_elements()
+        .into_iter()
+        .filter_map(Result::ok)
+        .find(|element| {
+            element
+                .factory()
+                .is_some_and(|factory| factory.name() == "x264enc")
+        })
+        .unwrap();
+    encoder.static_pad("sink").unwrap().add_probe(
+        gst::PadProbeType::EVENT_DOWNSTREAM,
+        |_, info| {
+            if info
+                .event()
+                .is_some_and(|event| event.type_() == gst::EventType::Eos)
+            {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            gst::PadProbeReturn::Ok
+        },
+    );
+    pipeline
+        .push_video_frame(&vec![255; settings.frame_bytes()])
+        .unwrap();
+    let error = pipeline
+        .finish()
+        .expect_err("an encoder holding EOS has stalled");
+    assert_eq!(error.code, codes::EXPORT_TIMEOUT);
+    assert_eq!(error.details["reason"], "stalled");
+    assert_eq!(error.details["element"], "x264enc");
+    assert!(error.message.contains("x264enc"));
+    let _ = std::fs::remove_file(path);
+}

@@ -34,7 +34,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -851,7 +851,7 @@ pub struct ExportPipeline {
     video_frames: u64,
     audio_frames: u64,
     finished: bool,
-    encoded_buffers: Arc<AtomicU64>,
+    activity: Arc<EncoderActivity>,
     push_timeout: Duration,
 }
 
@@ -909,24 +909,7 @@ impl ExportPipeline {
             _ => None,
         };
 
-        let encoded_buffers = Arc::new(AtomicU64::new(0));
-        for element in pipeline
-            .iterate_elements()
-            .into_iter()
-            .filter_map(Result::ok)
-        {
-            let is_encoder = element.factory().is_some_and(|factory| {
-                factory.name() == elements.video_encoder
-                    || elements.audio_encoder.as_deref() == Some(factory.name().as_str())
-            });
-            if is_encoder && let Some(pad) = element.static_pad("src") {
-                let count = encoded_buffers.clone();
-                pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
-                    count.fetch_add(1, Ordering::Relaxed);
-                    gst::PadProbeReturn::Ok
-                });
-            }
-        }
+        let activity = observe_encoders(&pipeline, elements);
 
         pipeline.set_state(gst::State::Playing).map_err(|e| {
             let error = pipeline_error("the export pipeline would not start", &e)
@@ -956,7 +939,7 @@ impl ExportPipeline {
             video_frames: 0,
             audio_frames: 0,
             finished: false,
-            encoded_buffers,
+            activity,
             push_timeout: settings.stall_timeout(),
         })
     }
@@ -1298,7 +1281,9 @@ impl ExportPipeline {
     fn progress_mark(&self) -> ProgressMark {
         ProgressMark {
             bytes_written: self.bytes_written(),
-            encoded_buffers: self.encoded_buffers.load(Ordering::Relaxed),
+            encoded_buffers: self.activity.buffers.load(Ordering::Relaxed),
+            video_eos: self.activity.video_eos.load(Ordering::Relaxed),
+            audio_eos: self.activity.audio_eos.load(Ordering::Relaxed),
             video_queued: queued_bytes(&self.video_src),
             audio_queued: self.audio_src.as_ref().map_or(0, queued_bytes),
             position_nanos: self
@@ -1354,6 +1339,59 @@ impl ExportPipeline {
     }
 }
 
+/// Output activity shared with encoder streaming threads.
+#[derive(Default)]
+struct EncoderActivity {
+    buffers: AtomicU64,
+    video_eos: AtomicBool,
+    audio_eos: AtomicBool,
+}
+
+/// Observe produced buffers and final EOS, including output buffered by a muxer.
+fn observe_encoders(pipeline: &gst::Pipeline, elements: &ExportElements) -> Arc<EncoderActivity> {
+    let activity = Arc::new(EncoderActivity {
+        audio_eos: AtomicBool::new(elements.audio_encoder.is_none()),
+        ..EncoderActivity::default()
+    });
+    for element in pipeline
+        .iterate_elements()
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let Some(factory) = element.factory() else {
+            continue;
+        };
+        let video = factory.name() == elements.video_encoder;
+        if !video && elements.audio_encoder.as_deref() != Some(factory.name().as_str()) {
+            continue;
+        }
+        if let Some(pad) = element.static_pad("src") {
+            let activity = activity.clone();
+            pad.add_probe(
+                gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+                move |_, info| {
+                    if info.buffer().is_some() {
+                        activity.buffers.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if info
+                        .event()
+                        .is_some_and(|event| event.type_() == gst::EventType::Eos)
+                    {
+                        let eos = if video {
+                            &activity.video_eos
+                        } else {
+                            &activity.audio_eos
+                        };
+                        eos.store(true, Ordering::Relaxed);
+                    }
+                    gst::PadProbeReturn::Ok
+                },
+            );
+        }
+    }
+    activity
+}
+
 /// What the export had done the last time it was looked at.
 ///
 /// Two equal marks a patience window apart are what a stalled export looks
@@ -1361,6 +1399,9 @@ impl ExportPipeline {
 /// however slowly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProgressMark {
+    /// Whether each encoder has completed its own output stream.
+    video_eos: bool,
+    audio_eos: bool,
     /// Encoded buffers emitted, including frames the muxer has not written yet.
     encoded_buffers: u64,
     /// Bytes the muxer has written to the file.
@@ -1416,8 +1457,9 @@ fn timeout_verdict(
 /// The element an export that stopped was waiting on.
 ///
 /// A branch whose `appsrc` is still holding buffers is waiting on the encoder
-/// that has not taken them; when both branches are drained, what is left is
-/// the muxer that has not finished the file.
+/// that has not taken them. An empty appsrc does not mean the encoder has
+/// finished flushing: only its output EOS proves that. Once both encoders
+/// emitted EOS, the remaining wait belongs to the muxer.
 fn waiting_on(
     mark: &ProgressMark,
     video_encoder: &str,
@@ -1428,6 +1470,14 @@ fn waiting_on(
         return video_encoder.to_owned();
     }
     if mark.audio_queued > 0
+        && let Some(encoder) = audio_encoder
+    {
+        return encoder.to_owned();
+    }
+    if !mark.video_eos {
+        return video_encoder.to_owned();
+    }
+    if !mark.audio_eos
         && let Some(encoder) = audio_encoder
     {
         return encoder.to_owned();
@@ -2212,6 +2262,8 @@ mod tests {
         ProgressMark {
             bytes_written: 0,
             encoded_buffers: 0,
+            video_eos: video == 0,
+            audio_eos: audio == 0,
             video_queued: video,
             audio_queued: audio,
             position_nanos: None,

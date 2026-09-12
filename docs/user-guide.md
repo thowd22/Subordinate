@@ -198,10 +198,11 @@ code: a TOML file in the config directory adds presets and replaces built-ins by
 id, and exporter plugins contribute presets that sit in the same list.
 
 A preset's quality — an average bitrate for a delivery target, a CRF for a
-master — is set on whichever encoder runs, in that encoder's own spelling, with bitrate and constant-quality settings applied explicitly. Two backends
-have no constant-quality mode at all: Apple VideoToolbox and Windows Media
-Foundation encode to an average bitrate only, so a CRF preset on one of them
-falls back to the encoder's default and logs a warning saying so.
+master — is set on whichever encoder runs, in that encoder's own spelling, with bitrate and constant-quality settings applied explicitly. VideoToolbox
+uses its 0–1 compression-quality scale, and hardware quantizers use their own
+ranges; these mappings preserve the quality direction, not identical perceptual
+quality or guaranteed losslessness. Media Foundation has no mapped CRF
+equivalent and logs a warning when a preset requests one.
 
 Exports default to 4:2:0 chroma for playback compatibility. A custom preset can
 set `chroma = "4:2:2"` or `chroma = "4:4:4"`; an encoder that cannot accept the
