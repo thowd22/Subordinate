@@ -28,7 +28,7 @@ use sub_audio::decode::Pcm;
 use sub_audio::mixer::{ClipSpec, MixGraphBuilder, TrackSpec};
 use sub_audio::offline::{OfflineSequence, PcmSource, render_audio};
 use sub_core::{ErrorCode, SubError, SubResult, codes};
-use sub_media::{Decoder, DecoderOptions, FrameFormat, StreamSelection};
+use sub_media::{Decoder, DecoderOptions, FrameFormat, ProbeOptions, StreamSelection};
 use sub_model::{ClipId, MediaUse, Project, Sequence, TrackKind};
 use sub_render::{
     Compositor, Nv12Converter, Nv12Geometry, RenderContext, RenderError, ResolvedClip, SourceFrame,
@@ -444,6 +444,9 @@ impl SequenceAudio {
         let mut builder = MixGraphBuilder::new(settings.sample_rate, settings.channels);
         let mut sources: Vec<(usize, PcmSource)> = Vec::new();
         let mut slot = 0;
+        // One answer per file for the whole mix: a project that cuts the same
+        // clip twenty times probes it once, not twenty times.
+        let mut routing: HashMap<PathBuf, bool> = HashMap::new();
         for track in self
             .sequence
             .tracks
@@ -455,7 +458,13 @@ impl SequenceAudio {
                 .with_muted(track.muted)
                 .with_solo(track.solo);
             for (clip, placement) in track.clip_placements(rate) {
-                let pcm = clip_pcm(&self.project, &self.project_dir, clip, settings)?;
+                let pcm = clip_pcm(
+                    &self.project,
+                    &self.project_dir,
+                    clip,
+                    settings,
+                    &mut routing,
+                )?;
                 spec = spec.with_clip(
                     ClipSpec::new(slot, placement.start(), placement.duration())
                         .with_gain_db(clip.gain.decibels().as_f64())
@@ -539,11 +548,16 @@ fn media_path(
 
 /// One audio clip's frames, decoded, folded and resampled to the export
 /// format, starting at the clip's own in point.
+///
+/// `routing` remembers, per file, which decoder that file's audio goes
+/// through, so a mix over many cuts of one source asks the question once. See
+/// [`source_has_video`].
 fn clip_pcm(
     project: &Project,
     project_dir: &Path,
     clip: &sub_model::Clip,
     settings: &ExportSettings,
+    routing: &mut HashMap<PathBuf, bool>,
 ) -> SubResult<Pcm> {
     let item = project
         .media
@@ -569,15 +583,60 @@ fn clip_pcm(
         .with_detail("path", path.display().to_string()));
     }
 
-    let decoded = decode_audio(
-        &path,
-        item.info
-            .as_ref()
-            .is_some_and(sub_model::StreamInfo::has_video),
-    )?;
+    let has_video = source_has_video(item, &path, routing);
+    let decoded = decode_audio(&path, has_video)?;
     let decoded = to_channels(decoded, settings.channels);
     let decoded = resample(decoded, settings.sample_rate)?;
     Ok(trim_to_source_start(decoded, clip.source_range))
+}
+
+/// Whether the file a clip reads carries video, which is what decides the
+/// decoder its audio goes through (decision-4).
+///
+/// A probed media item answers from the model, which costs nothing. An item
+/// whose `info` is `None` has never been probed — or was offline when the
+/// project was saved — and the model has nothing to say about it. Reading that
+/// silence as "audio only" sent video files to symphonia, which carries far
+/// fewer codecs than GStreamer does, so an unprobed Matroska file with Opus
+/// audio failed an export that the same file, probed, sails through
+/// (TASK-150). The file itself is asked instead, before the export reads it.
+///
+/// The frame-timing scan is off: this only needs the list of streams, not how
+/// they are spaced, and the scan parses the whole file.
+///
+/// A probe that fails answers nothing either, and the only decoder left to try
+/// is symphonia — which is also the decoder this file would have got before,
+/// so a machine whose GStreamer cannot see a format symphonia reads keeps
+/// working. The failure is logged rather than raised, because the decode that
+/// follows reports a far better error than "the probe failed" would.
+fn source_has_video(
+    item: &sub_model::MediaItem,
+    path: &Path,
+    routing: &mut HashMap<PathBuf, bool>,
+) -> bool {
+    if let Some(info) = item.info.as_ref() {
+        return info.has_video();
+    }
+    if let Some(known) = routing.get(path) {
+        return *known;
+    }
+    let options = ProbeOptions {
+        scan_frame_timing: false,
+        ..ProbeOptions::default()
+    };
+    let has_video = match sub_media::probe_with(path, options) {
+        Ok(info) => info.has_video(),
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "probing an unprobed source before an export failed; its audio is decoded as audio-only"
+            );
+            false
+        }
+    };
+    routing.insert(path.to_path_buf(), has_video);
+    has_video
 }
 
 /// Decodes a whole file's audio: through GStreamer when the file carries
@@ -678,11 +737,19 @@ pub fn lift_render_error(error: &RenderError) -> SubError {
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameSpan, SequenceAudio, SequenceFrames, has_audio, settings_for_sequence};
+    use super::{
+        FrameSpan, SequenceAudio, SequenceFrames, has_audio, settings_for_sequence,
+        source_has_video,
+    };
     use crate::presets::PresetLibrary;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use sub_audio::decode::Pcm;
-    use sub_model::{Project, Resolution, Sequence, SequenceSettings, TrackKind};
+    use sub_model::{
+        MediaItem, MediaPath, Project, Resolution, Sequence, SequenceSettings, StreamInfo,
+        TrackKind, VideoStream,
+    };
     use sub_time::Rational;
 
     const fn _assert_send() {
@@ -795,5 +862,51 @@ mod tests {
         );
         let rendered = audio.render().expect("an empty mix");
         assert_eq!(rendered.remaining(), 0);
+    }
+
+    fn item_with(info: Option<StreamInfo>) -> MediaItem {
+        let mut item = MediaItem::new(MediaPath::new("footage/a.mkv").expect("a media path"));
+        item.info = info;
+        item
+    }
+
+    #[test]
+    fn a_probed_item_routes_from_the_model_without_touching_the_file() {
+        let info = StreamInfo {
+            video: vec![VideoStream {
+                width: 1920,
+                height: 1080,
+                frame_rate: Rational::FPS_25,
+                sample_aspect: Rational::ONE,
+                color: sub_model::ColorTags::default(),
+            }],
+            ..StreamInfo::default()
+        };
+        let item = item_with(Some(info));
+        let mut routing = HashMap::new();
+        // The path does not exist: a probed item never reaches the probe.
+        assert!(source_has_video(
+            &item,
+            Path::new("/nonexistent/a.mkv"),
+            &mut routing
+        ));
+        assert!(routing.is_empty(), "nothing was probed, nothing was cached");
+
+        let item = item_with(Some(StreamInfo::default()));
+        assert!(!source_has_video(
+            &item,
+            Path::new("/nonexistent/a.wav"),
+            &mut routing
+        ));
+    }
+
+    #[test]
+    fn an_unprobed_item_reuses_the_answer_already_found_for_its_file() {
+        let item = item_with(None);
+        let path = PathBuf::from("/nonexistent/a.mkv");
+        let mut routing = HashMap::from([(path.clone(), true)]);
+        // Cached, so this answers "video" for a file that is not there at all:
+        // one probe per file per mix, not one per clip.
+        assert!(source_has_video(&item, &path, &mut routing));
     }
 }
