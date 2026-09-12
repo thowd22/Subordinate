@@ -502,6 +502,7 @@ jobs:
             --cli ./dist/subordinate-cli \
             --out target/export-matrix \
             --no-software-for uhd \
+            --timeout 240 \
             "${sources[@]}"
 
       # TASK-143 AC 3 on NVIDIA hardware: the window's export runner against the
@@ -637,6 +638,7 @@ jobs:
             --cli dist\subordinate-cli.exe `
             --out target\export-matrix `
             --no-software-for uhd `
+            --timeout 240 `
             @sources
 
       - name: Job summary
