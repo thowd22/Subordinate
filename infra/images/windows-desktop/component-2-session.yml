@@ -48,21 +48,17 @@ phases:
                 try { Add-LocalGroupMember -Group $g -Member $user -ErrorAction Stop } catch { "already in $g" }
               }
 
-              $wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
-              Set-ItemProperty $wl AutoAdminLogon '1' -Type String
-              Set-ItemProperty $wl DefaultUserName $user -Type String
-              Set-ItemProperty $wl DefaultDomainName $env:COMPUTERNAME -Type String
-              Set-ItemProperty $wl DefaultPassword $plain -Type String
-              # Log back on after an unexpected logoff instead of parking on
-              # the logon screen, and never show the "last user" tile prompt.
-              Set-ItemProperty $wl ForceAutoLogon '1' -Type String
-              Remove-ItemProperty $wl AutoLogonCount -ErrorAction SilentlyContinue
-
-              # Sysprep's generalize pass can clear the autologon values, and
-              # Image Builder syspreps the image at the end of the build. Drop
-              # the same values into a file that SetupComplete.cmd re-applies
-              # at the end of Setup, before the first logon, so the runtime
-              # instance logs on whatever sysprep did.
+              # Auto-logon is NOT configured here. Image Builder syspreps the
+              # image at the end of the build, and an image that is already
+              # set to log a user on automatically hangs the generalize pass:
+              # build 1.0.7 went unreachable (instance status impaired) a few
+              # minutes into sysprep and never shut down. It is also pointless,
+              # because generalize clears those values anyway.
+              #
+              # Instead the values are written by SetupComplete.cmd, which
+              # Windows runs at the very end of Setup on the *runtime*
+              # instance, before the logon screen appears - the standard way to
+              # bake auto-logon into an image.
               $dir = 'C:\SubordinateTest\bin'
               New-Item -ItemType Directory -Force -Path $dir | Out-Null
               @"
@@ -71,7 +67,6 @@ phases:
               Set-ItemProperty `$wl DefaultUserName '$user' -Type String
               Set-ItemProperty `$wl DefaultDomainName `$env:COMPUTERNAME -Type String
               Set-ItemProperty `$wl DefaultPassword '$plain' -Type String
-              Set-ItemProperty `$wl ForceAutoLogon '1' -Type String
               Remove-ItemProperty `$wl AutoLogonCount -ErrorAction SilentlyContinue
               "@ | Set-Content -Encoding ASCII "$dir\apply-autologon.ps1"
 
@@ -133,22 +128,20 @@ phases:
               New-Item -Path $sys -Force | Out-Null
               Set-ItemProperty $sys DisableLockWorkstation 1 -Type DWord
               Set-ItemProperty $sys InactivityTimeoutSecs 0 -Type DWord
-              Set-ItemProperty $sys DisableCAD 1 -Type DWord
               $pers = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization'
               New-Item -Path $pers -Force | Out-Null
               Set-ItemProperty $pers NoLockScreen 1 -Type DWord
 
-              # The same for every profile created from the default user hive,
-              # which is where the auto-logon user's settings come from.
-              reg load HKU\DefaultUser C:\Users\Default\NTUSER.DAT | Out-Null
-              foreach ($pair in @(
-                @('ScreenSaveActive', '0'), @('ScreenSaverIsSecure', '0'), @('ScreenSaveTimeOut', '0')
-              )) {
-                reg add 'HKU\DefaultUser\Control Panel\Desktop' /v $pair[0] /t REG_SZ /d $pair[1] /f | Out-Null
-              }
-              reg delete 'HKU\DefaultUser\Control Panel\Desktop' /v SCRNSAVE.EXE /f 2>$null | Out-Null
-              [gc]::Collect()
-              reg unload HKU\DefaultUser | Out-Null
+              # The screensaver is a per-user setting, but the policy branch
+              # under HKLM applies it to every user without touching a profile.
+              # Loading C:\Users\Default\NTUSER.DAT to edit it directly is the
+              # other way, and a default hive that fails to unload is a classic
+              # sysprep hang - not worth the risk for a screensaver.
+              $desktop = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop'
+              New-Item -Path $desktop -Force | Out-Null
+              Set-ItemProperty $desktop ScreenSaveActive '0' -Type String
+              Set-ItemProperty $desktop ScreenSaverIsSecure '0' -Type String
+              Set-ItemProperty $desktop ScreenSaveTimeOut '0' -Type String
 
               # Never sleep, never turn the display off. "Display off" on a
               # headless EC2 instance does not blank the virtual framebuffer,

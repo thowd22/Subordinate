@@ -7,6 +7,14 @@
 # as the editor.
 $ErrorActionPreference = 'Stop'
 
+# The MSI does not ship the bridge yet (checked on v0.1.1: build-msi.ps1 stages
+# subordinate.exe and subordinate-cli.exe only), so fall back to the copy the
+# workflow's free hosted-runner job built and staged.
+$bridge = 'C:\Program Files\Subordinate\bin\subordinate-mcp.exe'
+if (-not (Test-Path $bridge)) { $bridge = 'C:\SubordinateTest\bin\subordinate-mcp.exe' }
+if (-not (Test-Path $bridge)) { throw 'no subordinate-mcp.exe anywhere' }
+"bridge: $bridge"
+
 $lock = "$env:LOCALAPPDATA\Subordinate\run\default.lock.json"
 if (-not (Test-Path $lock)) { throw "no Command API lock file at $lock - is the editor running?" }
 Get-Content $lock
@@ -25,7 +33,7 @@ Set-Content -Encoding ASCII C:\SubordinateTest\mcp-in.jsonl ($requests -join "`r
 
 # Piping through cmd keeps stdin, stdout and stderr straight without
 # Start-Process redirection games; the bridge exits when stdin reaches EOF.
-cmd /c "type C:\SubordinateTest\mcp-in.jsonl | ""C:\Program Files\Subordinate\bin\subordinate-mcp.exe"" > C:\SubordinateTest\mcp-out.jsonl 2> C:\SubordinateTest\mcp-err.txt"
+cmd /c "type C:\SubordinateTest\mcp-in.jsonl | ""$bridge"" > C:\SubordinateTest\mcp-out.jsonl 2> C:\SubordinateTest\mcp-err.txt"
 
 '--- subordinate-mcp stderr ---'
 Get-Content C:\SubordinateTest\mcp-err.txt -ErrorAction SilentlyContinue | Select-Object -Last 20

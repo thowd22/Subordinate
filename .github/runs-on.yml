@@ -76,7 +76,52 @@ runners:
     volume: 120gb:gp3:125mbs:3000iops
     ssh: false
 
+  # NVIDIA T4 (16 GB) on Windows Server 2022, with a *desktop*: 4 vCPU / 16 GB.
+  # us-east-1 on-demand $0.746/h, same as `gpu-nvidia-windows`; the image saves
+  # the 100 s driver install and the MSI download, so a job is shorter.
+  #
+  # Custom AMI (TASK-138), built by EC2 Image Builder from the same stock
+  # `windows22-full-x64` parent - see infra/images/windows-desktop/. On top of
+  # it: the NVIDIA driver, the released MSI with its bundled GStreamer 1.28,
+  # Python with pywinauto, the 4K test clip in C:\SubordinateTest, and a local
+  # user Windows logs on automatically at boot so there is a real console
+  # session with a desktop.
+  #
+  # Use this runner only for jobs that have to *see* the application. The
+  # RunsOn agent still runs as SYSTEM in session 0, which has no desktop and
+  # cannot even create a swapchain, so such a job sends its work into the
+  # console session through C:\SubordinateTest\bin\InteractiveSession.psm1.
+  # The `nvidia-desktop-windows` job in .github/workflows/gpu-smoke.yml is the
+  # worked example.
+  #
+  # Rebuild the AMI at least every 30 days - GitHub stops dispatching jobs to a
+  # runner whose agent binary is older than that - and update the id here.
+  gpu-nvidia-desktop-windows:
+    family: ["g4dn.xlarge"]
+    cpu: [4, 4]
+    ram: [16, 16]
+    image: subordinate-windows-desktop
+    # Windows spot is rarely discounted and a reclaimed instance in the middle
+    # of a UI interaction is just noise, so this one is on-demand.
+    spot: false
+    volume: 120gb:gp3:125mbs:3000iops
+    ssh: false
+
   # There is deliberately no `gpu-amd-windows` runner: AWS has retired g4ad and
   # offers no other AMD GPU instance type, so AMF/amfh264enc cannot be verified
   # in this account at all. AMD Linux (VA-API) runs on the self-hosted `box`
   # runner; AMD Windows stays manual until an AMD Windows machine exists.
+
+# Custom AMIs. RunsOn needs the platform and architecture spelled out for an
+# image it did not build, and either an exact `ami` or a `name` wildcard.
+# Schema: https://runs-on.com/docs/runners/custom/
+images:
+  # Built by infra/images/windows-desktop/build.sh (TASK-138). The id is
+  # pinned rather than matched by name so that a rebuild has to be adopted
+  # deliberately; `name: subordinate-windows-desktop-*` would pick the newest
+  # build automatically, including a broken one.
+  subordinate-windows-desktop:
+    platform: windows
+    arch: x64
+    owner: "731537225673"
+    ami: AMI_ID_PLACEHOLDER

@@ -11,8 +11,31 @@ on:
   workflow_dispatch:
 
 jobs:
+  build-mcp-windows:
+    # The released MSI does not carry the MCP bridge: packaging's
+    # build-msi.ps1 stages subordinate.exe and subordinate-cli.exe only
+    # (v0.1.1, and v0.1.0 before it). subordinate-mcp has no GStreamer
+    # dependency, so a free hosted runner can build it in a couple of minutes
+    # and hand it to the GPU job, which keeps the paid instance short.
+    name: Build subordinate-mcp (hosted, free)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mcp-windows
+      - run: cargo build --release -p subordinate-mcp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: subordinate-mcp-windows
+          path: target/release/subordinate-mcp.exe
+          if-no-files-found: error
+
   nvidia-desktop-windows:
     name: NVIDIA T4 desktop (g4dn.xlarge, Windows Server 2022, console session)
+    needs: build-mcp-windows
     runs-on: runs-on=${{ github.run_id }}/ami=AMI_ID/family=g4dn.xlarge/spot=false
     timeout-minutes: 20
     defaults:
@@ -55,6 +78,12 @@ jobs:
           $r.Output
           if ($r.ExitCode -ne 0) { throw 'the interactive helper could not run a script' }
 
+      - name: Fetch the MCP bridge built on the hosted runner
+        uses: actions/download-artifact@v4
+        with:
+          name: subordinate-mcp-windows
+          path: mcp
+
       - name: Stage the sample project and the automation scripts
         run: |
           $ErrorActionPreference = 'Stop'
@@ -63,6 +92,13 @@ jobs:
           Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item examples\sample-project $dest -Recurse
           Copy-Item "$env:SCRIPTS\import-click.py" C:\SubordinateTest\import-click.py -Force
+          # The image says whether the MSI carried the bridge; when it did not,
+          # stage the one the hosted job just built.
+          Get-Content C:\SubordinateTest\image.json
+          if (-not (Test-Path 'C:\Program Files\Subordinate\bin\subordinate-mcp.exe')) {
+            Copy-Item mcp\subordinate-mcp.exe C:\SubordinateTest\bin\subordinate-mcp.exe -Force
+            'staged subordinate-mcp.exe from the hosted build'
+          }
           New-Item -ItemType Directory -Force -Path C:\SubordinateTest\shots | Out-Null
           Get-ChildItem $dest -Recurse -File | Select-Object FullName, Length | Format-Table -AutoSize | Out-String -Width 200
 

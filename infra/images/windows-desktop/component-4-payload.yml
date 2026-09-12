@@ -47,17 +47,26 @@ phases:
               $log = Join-Path $env:TEMP 'subordinate-msi.log'
               $p = Start-Process -Wait -PassThru msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$log`""
               if ($p.ExitCode -ne 0) { Get-Content $log -Tail 40; throw "msiexec failed ($($p.ExitCode))" }
-              foreach ($exe in 'subordinate.exe', 'subordinate-cli.exe', 'subordinate-mcp.exe') {
+              foreach ($exe in 'subordinate.exe', 'subordinate-cli.exe') {
                 $path = "C:\Program Files\Subordinate\bin\$exe"
                 if (-not (Test-Path $path)) { throw "$exe missing from the install" }
                 "installed  $path"
               }
+              # The MSI does not ship the MCP bridge yet: packaging's
+              # build-msi.ps1 stages subordinate.exe and subordinate-cli.exe
+              # only (checked on v0.1.1). Record whether it is there rather
+              # than failing, and let the job supply its own copy when it is
+              # not - see the nvidia-desktop-windows job in gpu-smoke.yml.
+              $mcp = 'C:\Program Files\Subordinate\bin\subordinate-mcp.exe'
+              $hasMcp = Test-Path $mcp
+              "subordinate-mcp.exe in the MSI: $hasMcp"
               $lnk = 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Subordinate\Subordinate.lnk'
               if (-not (Test-Path $lnk)) { throw 'the Start Menu shortcut is missing' }
               "installed  $lnk"
               # Record what went in, so a job (and a human reading a failure)
               # can see which release this image carries.
-              @{ release = $rel.tag_name; asset = $asset.name; installed = (Get-Date).ToUniversalTime().ToString('s') } |
+              New-Item -ItemType Directory -Force -Path C:\SubordinateTest | Out-Null
+              @{ release = $rel.tag_name; asset = $asset.name; mcp_in_msi = $hasMcp; installed = (Get-Date).ToUniversalTime().ToString('s') } |
                 ConvertTo-Json | Set-Content -Encoding ASCII 'C:\SubordinateTest\image.json'
               Remove-Item $msi -Force -ErrorAction SilentlyContinue
 
@@ -140,11 +149,13 @@ phases:
               $ErrorActionPreference = 'Continue'
               foreach ($p in @(
                 'C:\Program Files\Subordinate\bin\subordinate.exe',
-                'C:\Program Files\Subordinate\bin\subordinate-mcp.exe',
+                'C:\Program Files\Subordinate\bin\subordinate-cli.exe',
                 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Subordinate\Subordinate.lnk',
                 'C:\SubordinateTest\{{ MediaKey }}',
                 'C:\SubordinateTest\bin\interactive-helper.ps1',
                 'C:\SubordinateTest\bin\InteractiveSession.psm1',
+                'C:\SubordinateTest\bin\apply-autologon.ps1',
+                'C:\Windows\Setup\Scripts\SetupComplete.cmd',
                 'C:\actions-runner\run.cmd'
               )) {
                 if (-not (Test-Path $p)) { throw "missing: $p" }
@@ -153,9 +164,19 @@ phases:
               if (-not (Get-ScheduledTask -TaskName 'SubordinateInteractiveHelper' -ErrorAction SilentlyContinue)) {
                 throw 'the SubordinateInteractiveHelper task is not registered'
               }
-              $wl = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
-              if ($wl.AutoAdminLogon -ne '1') { throw 'AutoAdminLogon is not set' }
-              if ($wl.DefaultUserName -ne '{{ TestUser }}') { throw "DefaultUserName is $($wl.DefaultUserName)" }
+              # Auto-logon is deliberately not configured yet - sysprep would
+              # hang on it (build 1.0.7) and generalize would clear it anyway.
+              # What has to be true here is that SetupComplete.cmd will apply
+              # it on the runtime instance's first boot.
+              if (-not (Select-String -Path 'C:\Windows\Setup\Scripts\SetupComplete.cmd' -SimpleMatch 'apply-autologon.ps1' -Quiet)) {
+                throw 'SetupComplete.cmd does not call apply-autologon.ps1'
+              }
+              if (-not (Select-String -Path 'C:\SubordinateTest\bin\apply-autologon.ps1' -SimpleMatch "DefaultUserName '{{ TestUser }}'" -Quiet)) {
+                throw 'apply-autologon.ps1 does not name the test user'
+              }
+              if (-not (Get-LocalUser -Name '{{ TestUser }}' -ErrorAction SilentlyContinue)) {
+                throw 'the test user does not exist'
+              }
               & "$env:SystemRoot\System32\nvidia-smi.exe" --query-gpu=name,driver_version --format=csv,noheader
               if ($LASTEXITCODE -ne 0) { throw 'nvidia-smi failed' }
               'validate ok'

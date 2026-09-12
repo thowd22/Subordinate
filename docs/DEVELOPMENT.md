@@ -896,12 +896,13 @@ on EC2 instances in the project's AWS account through
   | `gpu-nvidia-linux` | `g4dn.xlarge` (T4) | `ubuntu24-gpu-x64` | 0.526 | ready |
   | `gpu-amd-linux` | `g4ad.xlarge` (Radeon Pro V520) | `ubuntu26-full-x64` | 0.379 | ready |
   | `gpu-nvidia-windows` | `g4dn.xlarge` (T4) | `windows22-full-x64` | 0.752 | ready |
+  | `gpu-nvidia-desktop-windows` | `g4dn.xlarge` (T4) | custom AMI (TASK-138) | 0.752 | ready |
 
   There is no `gpu-amd-windows` runner and there cannot be one: AWS retired
   g4ad and offers no other AMD GPU instance type, so AMF (`amfh264enc`) has no
   cloud host at all.
 
-  All three need the EC2 G-family vCPU quotas (`L-DB2E81BA` on-demand,
+  All four need the EC2 G-family vCPU quotas (`L-DB2E81BA` on-demand,
   `L-3819A6DF` spot) above zero in us-east-1.
 - **The config is read from `main`, not from your branch.** For public repos
   RunsOn only reads `.github/runs-on.yml` from the default branch, so a runner

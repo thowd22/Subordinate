@@ -129,3 +129,36 @@ phases:
               '@
               Set-Content -Encoding UTF8 'C:\SubordinateTest\bin\InteractiveSession.psm1' $client
 
+
+      - name: ReRegisterTheTaskAfterSysprep
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $ErrorActionPreference = 'Stop'
+              $user = '{{ TestUser }}'
+              # Sysprep's generalize pass gives the machine a new SID, and a
+              # scheduled task whose principal was resolved against the old one
+              # can be orphaned by that. Registering it again from
+              # SetupComplete.cmd - which Windows runs at the end of Setup on
+              # the runtime instance, right where apply-autologon.ps1 runs -
+              # costs a second and removes the doubt.
+              $register = @"
+              `$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\SubordinateTest\bin\interactive-helper.ps1"'
+              `$trigger = New-ScheduledTaskTrigger -AtLogOn -User '$user'
+              `$principal = New-ScheduledTaskPrincipal -UserId '$user' -LogonType Interactive -RunLevel Highest
+              `$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+              Register-ScheduledTask -TaskName 'SubordinateInteractiveHelper' -Action `$action -Trigger `$trigger -Principal `$principal -Settings `$settings -Force | Out-Null
+              "@
+              Set-Content -Encoding ASCII 'C:\SubordinateTest\bin\register-helper-task.ps1' $register
+
+              $scripts = 'C:\Windows\Setup\Scripts'
+              New-Item -ItemType Directory -Force -Path $scripts | Out-Null
+              $sc = "$scripts\SetupComplete.cmd"
+              $line = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\SubordinateTest\bin\register-helper-task.ps1"'
+              if (Test-Path $sc) {
+                if (-not (Select-String -Path $sc -SimpleMatch 'register-helper-task.ps1' -Quiet)) { Add-Content $sc $line }
+              } else {
+                Set-Content -Encoding ASCII $sc "@echo off`r`n$line`r`n"
+              }
+              Get-Content $sc
