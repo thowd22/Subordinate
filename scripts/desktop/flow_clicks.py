@@ -263,7 +263,7 @@ def run(run: flowlib.Run) -> None:
             step.note(dialog=dialog)
 
         with run.step("choose the clip in the native file dialog") as step:
-            how = _choose_file(session, staged.media)
+            how = _choose_file(session, staged.media, dialog)
             step.note(chose_by=how)
             listed = _wait_until(
                 lambda: _items(read("media.list", {})),
@@ -640,27 +640,43 @@ def _x11_dialog(session, window) -> dict | None:
     return None
 
 
-def _choose_file(session, path: Path) -> str:
+def _choose_file(session, path: Path, dialog: dict) -> str:
     """Choose `path` in whichever native chooser came up, and say how.
 
-    The GTK chooser the XDG portal puts up publishes its own widgets over
-    AT-SPI, so the file can be picked by the name it has on disk - a
-    double-click on the row - which is both what a person does and proof the
-    right file was chosen. Typing the path into the location bar is the
-    fallback, and it is what the Windows common item dialog takes (its File
-    name box has the focus when it opens).
+    On Linux the chooser is GTK's, put up by the XDG desktop portal, and it
+    opens on `Recent` with nothing in it - so there is no row to click and the
+    path has to be typed. GTK opens its location bar as soon as a `/` is typed,
+    which is how a person does it; `Ctrl+L` is the fallback. The dialog is
+    given the keyboard first, because it is a window of its own and the
+    keystrokes go wherever the focus is (run 34682198476 typed into thin air).
+
+    The Windows common item dialog opens with its File name box focused, so
+    there the path is simply typed.
     """
     if platform.system() != "Windows":
+        window_id = dialog.get("window")
+        if window_id:
+            subprocess.run(
+                ["xdotool", "windowactivate", "--sync", window_id], check=False
+            )
+            subprocess.run(["xdotool", "windowraise", window_id], check=False)
+            # Into the part of the screen the pointer can reach, so its rows
+            # and its Open button can be clicked as well as typed at.
+            subprocess.run(
+                ["xdotool", "windowmove", "--sync", window_id, "520", "80"], check=False
+            )
+            time.sleep(1)
         try:
-            row = session.find(path.name, timeout=15)
+            row = session.find(path.name, timeout=5)
             session.click(row, double=True)
             time.sleep(2)
             return f"double-clicked the row named {path.name!r}"
         except DesktopError:
             pass
-        # GTK's chooser: Ctrl+L opens the location bar, and the path goes in it.
         session.key("ctrl+l")
+        time.sleep(0.5)
     session.type_text(str(path))
+    time.sleep(0.5)
     session.key("Return")
     time.sleep(2)
     return "typed the path"
