@@ -212,32 +212,28 @@ def run(run: flowlib.Run) -> None:
             # telling apart (run 34676801744).
             state = read("project.get", {})
             (out / "project-get.json").write_text(json.dumps(state, indent=1)[:200000])
-            before = _bins(state)
-            # By role, because `New folder` names two things: the button, and
-            # the hint text of the field beside it that says what to call the
-            # folder (crates/sub-ui/src/media_bin.rs).
-            try:
-                folder, how = _by_role(session, "New folder", BUTTON_ROLES, timeout=30), "name"
-            except DesktopError:
-                folder, how = locate(session, window, "New folder", "new_folder", offsets)
-            after = before
-            for point in _candidates(folder, window):
+            # The track header's mute button: small, always fully inside the
+            # timeline panel - so no clipping to reason about - and what it
+            # does is project state a read can see. The flow puts it back
+            # afterwards, so the probe leaves nothing behind.
+            mute = _by_role(session, "M", BUTTON_ROLES, timeout=60)
+            muted = False
+            for point in _candidates(mute, window):
                 session.click(point)
-                # The click is applied on the window's next frame and the read
-                # is a round trip of its own, so this is a wait, not a peek.
                 for _ in range(10):
-                    after = _bins(read("project.get", {}))
-                    if after > before:
+                    muted = _muted(read("project.get", {}))
+                    if muted:
                         break
                     time.sleep(0.5)
-                step.note(**{f"click_{point}": f"{before} -> {after} bins"})
-                if after > before:
+                step.note(**{f"click_{point}": f"muted={muted}"})
+                if muted:
+                    session.click(point)  # put it back
                     break
             else:
                 raise AssertionError(
-                    f"the click did not reach the editor: still {before} bins in the project"
+                    "the click did not reach the editor: no track was muted by it"
                 )
-            step.note(located_by=how, bins=after)
+            step.note(control=mute.as_dict(), bins=_bins(state))
 
         with run.step("click Import... in the media bin") as step:
             control, how = locate(session, window, "Import", "Import", offsets)
@@ -593,6 +589,12 @@ def _find_key(payload, key):
             if found is not None:
                 return found
     return None
+
+
+def _muted(project) -> bool:
+    """Whether any track of any sequence is muted."""
+    text = json.dumps(project)
+    return '"muted": true' in text or '"muted":true' in text
 
 
 def _bins(project) -> int:
