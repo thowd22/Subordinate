@@ -139,6 +139,30 @@ phases:
               }
               Get-ChildItem C:\runs-on -ErrorAction SilentlyContinue | Format-Table Name -AutoSize | Out-String
 
+
+      - name: PrepareForImagingWithoutSysprep
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              # The last thing the build does. This image is captured without
+              # Sysprep (see infra/images/windows-desktop/workflow-build-no-sysprep.yml
+              # for why), so EC2Launch's own reset takes generalize's place: it
+              # clears the launch agent's state and logs so an instance started
+              # from the AMI comes up as a new one - new host name, new
+              # administrator password, user data executed again, which is how
+              # RunsOn's agent gets started at all.
+              $ErrorActionPreference = 'Continue'
+              $exe = 'C:\Program Files\Amazon\EC2Launch\EC2Launch.exe'
+              if (-not (Test-Path $exe)) { throw "no EC2Launch v2 at $exe" }
+              'state before:'
+              Get-ChildItem 'C:\ProgramData\Amazon\EC2Launch\state' -ErrorAction SilentlyContinue |
+                Format-Table Name, Length -AutoSize | Out-String
+              & $exe reset --clean
+              "ec2launch reset exit=$LASTEXITCODE"
+              'state after:'
+              Get-ChildItem 'C:\ProgramData\Amazon\EC2Launch\state' -ErrorAction SilentlyContinue |
+                Format-Table Name, Length -AutoSize | Out-String
   - name: validate
     steps:
       - name: Validate

@@ -6,6 +6,10 @@
 #   ./build.sh 1.0.1            # create version 1.0.1 and start a build
 #   ./build.sh 1.0.1 --no-run   # create the resources, do not start a build
 #
+# SKIP_IAM=1 leaves the two IAM roles and the security group alone, for a
+# rebuild in an account where they already exist and the caller would rather
+# not hold IAM permissions.
+#
 # Everything is idempotent except the component and recipe versions, which
 # Image Builder makes immutable: pass a new semantic version each time.
 set -euo pipefail
@@ -17,6 +21,7 @@ REGION=us-east-1
 ACCOUNT=731537225673
 NAME=subordinate-windows-desktop
 ROLE=SubordinateWindowsDesktopImageBuilder
+WORKFLOW_ROLE=SubordinateImageBuilderWorkflow
 VPC=vpc-0358c69a2187d56aa
 SUBNET=subnet-06dfd78c962937569
 # RunsOn's stock Windows image. Refresh this when RunsOn publishes a new one:
@@ -28,6 +33,15 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 aws() { command aws --region "$REGION" "$@"; }
+
+workflow_role_arn="arn:aws:iam::$ACCOUNT:role/$WORKFLOW_ROLE"
+if [ "${SKIP_IAM:-}" = "1" ]; then
+echo "== IAM and security group left alone (SKIP_IAM=1)"
+sg="$(aws ec2 describe-security-groups \
+      --filters "Name=group-name,Values=$NAME" "Name=vpc-id,Values=$VPC" \
+      --output text --query 'SecurityGroups[0].GroupId')"
+echo "   $sg"
+else
 
 echo "== instance profile"
 if ! aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
@@ -50,6 +64,21 @@ fi
 echo "   $ROLE ready"
 echo "   NOTE: the test-media bucket policy must also allow this role - see README.md"
 
+echo "== workflow execution role"
+# A custom build workflow (this image is captured without Sysprep) needs a role
+# Image Builder assumes to drive the build; the managed service-linked role
+# only covers its own workflows.
+if ! aws iam get-role --role-name "$WORKFLOW_ROLE" >/dev/null 2>&1; then
+  aws iam create-role --role-name "$WORKFLOW_ROLE" \
+    --assume-role-policy-document "file://$here/iam-workflow-trust-policy.json" \
+    --description "Image Builder custom workflow execution role (TASK-138)" >/dev/null
+  sleep 10
+fi
+aws iam put-role-policy --role-name "$WORKFLOW_ROLE" --policy-name subordinate-windows-desktop \
+  --policy-document "file://$here/iam-workflow-policy.json"
+workflow_role_arn="arn:aws:iam::$ACCOUNT:role/$WORKFLOW_ROLE"
+echo "   $workflow_role_arn"
+
 echo "== security group"
 sg="$(aws ec2 describe-security-groups \
       --filters "Name=group-name,Values=$NAME" "Name=vpc-id,Values=$VPC" \
@@ -60,6 +89,7 @@ if [ -z "$sg" ] || [ "$sg" = "None" ]; then
         --output text --query 'GroupId')"
 fi
 echo "   $sg"
+fi
 
 # Four components rather than one: CreateComponent caps a component document
 # at 16000 characters, and the whole recipe is about twice that.
@@ -75,6 +105,13 @@ for part in gpu session helper payload; do
   echo "   $arn"
   sed_args+=(-e "s|COMPONENT_ARN_$n|$arn|")
 done
+
+echo "== build workflow $VERSION"
+workflow="$(aws imagebuilder create-workflow --name "$NAME-no-sysprep" \
+  --semantic-version "$VERSION" --type BUILD \
+  --data "file://$here/workflow-build-no-sysprep.yml" \
+  --output text --query 'workflowBuildVersionArn')"
+echo "   $workflow"
 
 echo "== recipe $VERSION"
 sed "${sed_args[@]}" "$here/recipe.json" > "$tmp/recipe.json"
@@ -114,13 +151,17 @@ if aws imagebuilder get-image-pipeline --image-pipeline-arn "$pipeline" >/dev/nu
   aws imagebuilder update-image-pipeline --image-pipeline-arn "$pipeline" \
     --image-recipe-arn "$recipe" --infrastructure-configuration-arn "$infra" \
     --distribution-configuration-arn "$dist" --status ENABLED \
-    --image-tests-configuration imageTestsEnabled=false >/dev/null
+    --image-tests-configuration imageTestsEnabled=false \
+    --execution-role "$workflow_role_arn" \
+    --workflows "workflowArn=$workflow" >/dev/null
 else
   pipeline="$(aws imagebuilder create-image-pipeline --name "$NAME" \
     --description "Windows NVIDIA desktop runner AMI (TASK-138). Rebuild at least every 30 days: GitHub stops dispatching jobs to a runner agent older than that." \
     --image-recipe-arn "$recipe" --infrastructure-configuration-arn "$infra" \
     --distribution-configuration-arn "$dist" --status ENABLED \
     --image-tests-configuration imageTestsEnabled=false \
+    --execution-role "$workflow_role_arn" \
+    --workflows "workflowArn=$workflow" \
     --output text --query 'imagePipelineArn')"
 fi
 echo "   $pipeline"

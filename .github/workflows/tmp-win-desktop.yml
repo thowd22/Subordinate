@@ -36,7 +36,7 @@ jobs:
   nvidia-desktop-windows:
     name: NVIDIA T4 desktop (g4dn.xlarge, Windows Server 2022, console session)
     needs: build-mcp-windows
-    runs-on: runs-on=${{ github.run_id }}/ami=AMI_ID/family=g4dn.xlarge/spot=false
+    runs-on: runs-on=${{ github.run_id }}/ami=ami-041900754467f620f/family=g4dn.xlarge/spot=false
     timeout-minutes: 20
     defaults:
       run:

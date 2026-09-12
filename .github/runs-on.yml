@@ -124,4 +124,4 @@ images:
     platform: windows
     arch: x64
     owner: "731537225673"
-    ami: AMI_ID_PLACEHOLDER
+    ami: ami-041900754467f620f
