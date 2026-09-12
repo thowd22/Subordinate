@@ -666,15 +666,25 @@ def _choose_file(session, path: Path, dialog: dict) -> str:
                 ["xdotool", "windowmove", "--sync", window_id, "520", "80"], check=False
             )
             time.sleep(1)
+        # Navigate to the folder first, then pick the file by name. Typing a
+        # whole path into GTK's location bar is at the mercy of its inline
+        # completion, which turned the clip's path into a file the editor
+        # answered `media.unsupported` for (runs 34682198476 and 34682903107);
+        # once the chooser is showing the folder, the row is a control with
+        # the file's own name on it.
+        session.key("ctrl+l")
+        time.sleep(0.5)
+        session.type_text(f"{path.parent}/")
+        time.sleep(0.5)
+        session.key("Return")
+        time.sleep(2)
         try:
-            row = session.find(path.name, timeout=5)
+            row = session.find(path.name, timeout=15)
             session.click(row, double=True)
             time.sleep(2)
             return f"double-clicked the row named {path.name!r}"
         except DesktopError:
             pass
-        session.key("ctrl+l")
-        time.sleep(0.5)
     session.type_text(str(path))
     time.sleep(0.5)
     session.key("Return")
