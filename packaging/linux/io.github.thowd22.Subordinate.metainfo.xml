@@ -33,6 +33,9 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.2" date="2026-09-12">
+      <description><p>The editor now serves the Command API on its local socket, so the MCP bridge and other agents drive the running window and their edits appear live.</p></description>
+    </release>
     <release version="0.1.1" date="2026-09-11">
       <description><p>Import and relink from the media bin now run as jobs in the app; the AppImage gains the gst-discoverer tool.</p></description>
     </release>
