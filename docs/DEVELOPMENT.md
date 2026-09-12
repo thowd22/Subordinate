@@ -983,7 +983,14 @@ on EC2 instances in the project's AWS account through
 - GPU smoke test: run the **GPU smoke** workflow (`workflow_dispatch`). It
   checks `nvidia-smi` plus `gst-inspect-1.0 --exists nvh264enc` on the NVIDIA
   Linux runner, `/dev/dri` + `vainfo` plus `vah264enc` on the AMD box, and
-  `nvidia-smi` plus `nvh264enc`/`mfh264enc` on the NVIDIA Windows runner.
+  `nvidia-smi` plus `nvh264enc`/`mfh264enc` on the NVIDIA Windows runner. Its
+  last job, `nvidia-desktop-windows`, is the desktop one: it opens the editor
+  from the Start Menu shortcut with `examples/sample-project/demo.sub`,
+  photographs the desktop, clicks the media bin's `Import...` button through
+  UI Automation and photographs the file dialog that opens, and round-trips
+  `project.new`, `sequence.create` and `timeline.get_state` through
+  `subordinate-mcp` against that same running window. The screenshots are
+  uploaded as the `windows-desktop-screenshots` artifact.
 - Cost: the RunsOn config schema has no per-runner price cap, so hourly prices
   are recorded in comments there and every GPU job must set `timeout-minutes`.
   Runners request spot (`price-capacity-optimized`) with
@@ -998,6 +1005,17 @@ on EC2 instances in the project's AWS account through
   (14s download, 86s install) and 1m19s was the GStreamer installer; the
   remaining 4m06s was Windows boot and runner registration before the job
   started. Windows spot is rarely discounted, so budget the on-demand rate.
+- Measured cost of the desktop image (TASK-138, 2026-09-12). Building it is one
+  on-demand `g4dn.xlarge` Windows instance: the successful build
+  (`ami-0b3c82cb19d31ac1d`, recipe 1.1.3) took **29 minutes**, about
+  **0.36 USD** - 6 min of NVIDIA driver plus a reboot, 90 s for the MSI, Python
+  and the 443 MB clip, and 20 min of stopping the instance and snapshotting 80
+  GB. Getting there cost about 2.5 USD across seven builds, most of it two runs
+  that hung in Sysprep before that step was removed. The snapshot then costs
+  about 1.50 USD a month, so deregister superseded AMIs and delete their
+  snapshots. A `nvidia-desktop-windows` smoke job is about **0.11 USD**: run
+  34670630488 was 3m05s inside the job on an instance billed for about 9
+  minutes, 4 of which are Windows booting before the job starts.
 - Idle cost: the stack runs in public mode (`Private: false`, changed
   2026-09-09) so there is no NAT gateway; the only idle cost is the small
   Fargate scheduler (about 9 USD/month). Do not enable private mode: the
