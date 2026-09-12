@@ -579,6 +579,24 @@ fn probe_element(name: &str) -> ElementProbe {
     probe
 }
 
+/// Elements the probe has made, kept for the life of the process.
+///
+/// Probing a hardware encoder loads a vendor library — `nvEncodeAPI64.dll`,
+/// `libnvidia-encode.so`, the AMF and VA runtimes — and dropping the last
+/// element of a family lets GStreamer unload it again. Holding one instance,
+/// in `NULL` and owning no session, keeps that library loaded for the export
+/// that follows. It costs one idle element per catalogued encoder and it is
+/// why a probe cannot leave the machine worse than it found it (TASK-146).
+static PROBED: OnceLock<Mutex<Vec<gst::Element>>> = OnceLock::new();
+
+/// Keeps `element` alive for the life of the process.
+fn keep_alive(element: gst::Element) {
+    let kept = PROBED.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(mut kept) = kept.lock() {
+        kept.push(element);
+    }
+}
+
 /// Drives `name` to `READY` without looking at its rank.
 fn probe_ready(name: &str) -> ElementProbe {
     let element = match gst::ElementFactory::make(name).build() {
@@ -588,6 +606,10 @@ fn probe_ready(name: &str) -> ElementProbe {
             return ElementProbe::missing();
         }
     };
+    if !opens_the_device() {
+        keep_alive(element);
+        return ElementProbe::ready();
+    }
     let outcome = match element.set_state(gst::State::Ready) {
         Ok(gst::StateChangeSuccess::Async) => {
             match element.state(gst::ClockTime::from_seconds(2)).0 {
@@ -599,7 +621,19 @@ fn probe_ready(name: &str) -> ElementProbe {
         Err(err) => ElementProbe::not_ready(err.to_string()),
     };
     let _ = element.set_state(gst::State::Null);
+    keep_alive(element);
     outcome
+}
+
+/// Whether the probe opens the device or only asks whether the element exists.
+///
+/// TEMPORARY (TASK-146): the Windows runner's NVENC cannot open an encode
+/// session once an earlier `nvh264enc` in the same process has been to `READY`
+/// and back. `SUBORDINATE_ENCODER_PROBE=presence` is how the hardware job asks
+/// for the cheaper answer, so the two can be compared on the same machine.
+fn opens_the_device() -> bool {
+    !std::env::var("SUBORDINATE_ENCODER_PROBE")
+        .is_ok_and(|how| how.eq_ignore_ascii_case("presence"))
 }
 
 /// Whether `name` has been deranked to `NONE`, by
