@@ -82,6 +82,7 @@ def run(run: flowlib.Run) -> None:
             [editor, str(staged.project)], log=app_log, cwd=str(staged.directory)
         )
         window = run.session.wait_for_title(WINDOW, timeout=180)
+        window = run.session.maximize(window)
         endpoint = flowlib.wait_for_command_api(run.session, app_log)
         step.note(pid=started.pid, window=window.as_dict(), endpoint=endpoint)
         # Every screenshot from here on wakes the window first: the edits below
@@ -92,10 +93,10 @@ def run(run: flowlib.Run) -> None:
 
     rate = staged.frame_rate
     fps = rate["numerator"] / rate["denominator"]
-    # Ten seconds of the two-minute clip, and a cut four seconds in: short
-    # enough that the render is seconds rather than minutes on a T4.
-    length = int(round(fps * 10))
-    cut = int(round(fps * 4))
+    # Four seconds of the two-minute clip, and a cut two seconds in: enough to
+    # be a real 4K60 decode and short enough that the render is seconds.
+    length = int(round(fps * 4))
+    cut = int(round(fps * 2))
     item = flowlib.media_item(staged.media.name, staged.media_relative)
     piece = flowlib.clip("Meld", item["id"], 0, length, rate)
 
@@ -156,8 +157,25 @@ def run(run: flowlib.Run) -> None:
         with run.step("project.save, so the render sees the edit") as step:
             bridge.call("project.save", {"path": str(staged.project)})
             step.note(bytes=staged.project.stat().st_size)
+
+        with run.step("the window still holds what the agent edited") as step:
+            window = run.session.wait_for_title(WINDOW, timeout=30)
+            clips = _clips(bridge, staged.sequence)
+            step.note(window=window.as_dict(), clips=len(clips))
     finally:
         bridge.close()
+
+    # The render is a process of its own either way - the editor does not serve
+    # the export family - and the editor is closed before it starts because on
+    # Windows the two compete for the GPU's decoder: with the window still open
+    # on the same 4K60 clip, the export managed one frame in fifteen minutes
+    # (run 34672165182), and finished in seconds once it had the machine to
+    # itself. Every edit above was made, asserted and photographed while the
+    # window was up; this is the encode.
+    with run.step("close the editor before rendering") as step:
+        run.session.stop(started)
+        run.before_shot = None
+        step.note(closed=started.pid)
 
     output = staged.directory / "flow-export.mp4"
     render_log = out / "mcp-export.log"
@@ -216,10 +234,7 @@ def run(run: flowlib.Run) -> None:
                 f"the export ran on {used!r}, not the vendor encoder {encoder!r}"
             )
 
-    with run.step("the window is still the one that was photographed") as step:
-        window = run.session.wait_for_title(WINDOW, timeout=30)
-        step.note(window=window.as_dict())
-        run.session.stop(started)
+    run.session.stop(started)
 
 
 def _name_of(state) -> str:
@@ -265,7 +280,7 @@ def _preset_ids(presets) -> list[str]:
     return []
 
 
-def _await_export(bridge: Bridge, job: str, *, timeout: float = 900.0) -> dict:
+def _await_export(bridge: Bridge, job: str, *, timeout: float = 420.0) -> dict:
     import time
 
     deadline = time.monotonic() + timeout

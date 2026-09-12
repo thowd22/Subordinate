@@ -45,9 +45,19 @@ WINDOW = "Subordinate"
 #: the timeline canvas is one widget with no named children, so a drop and a
 #: scrub have to land at a point. Everything that *is* a named control - the
 #: Import button, the encoder picker, the Export button - is found by name.
+#: Fractions of the window rectangle for the places with nothing to name.
 LAYOUT = {
     "timeline_drop": [0.55, 0.78],
     "ruler": [0.62, 0.66],
+}
+
+#: Pixel offsets from the window's top-left, used only when the accessibility
+#: tree is not there to be asked. The media bin's controls sit at the top-left
+#: of the window and stay put when it is resized, so an offset survives where a
+#: fraction would not. Override with FLOW_LAYOUT.
+OFFSETS = {
+    "Import": [35, 98],
+    "row": [180, 178],
 }
 
 #: The only methods this flow may call: reads, and nothing else.
@@ -82,6 +92,46 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name) or default
 
 
+#: The same role under each platform's spelling. UI Automation says
+#: `TabItem` and `Button`; AT-SPI says `page tab` and `push button`.
+TAB_ROLES = ("TabItem", "page tab", "Tab", "tab")
+BUTTON_ROLES = ("Button", "push button")
+
+
+def _by_role(session, name: str, roles, *, timeout: float = 30.0):
+    """The control with this name and one of these roles.
+
+    Roles matter where a name is used twice: the export panel is a *tab* named
+    `Export` holding a *button* named `Export`, and clicking the wrong one
+    either does nothing or starts a render before the encoder is pinned.
+    """
+    for role in roles:
+        try:
+            return session.find(name, role=role, timeout=timeout / len(roles))
+        except DesktopError:
+            continue
+    return session.find(name, timeout=timeout)
+
+
+def locate(session, window, name: str, key: str, offsets: dict, *, timeout: float = 60.0):
+    """The control called `name`, or the offset that stands in for it.
+
+    Names first, always: they are what the application itself publishes. The
+    offset is the documented fallback for a session whose accessibility bus is
+    not there - on Linux that is the difference between a machine with
+    `at-spi2-core` running and one without - and the flow records which of the
+    two it used, so a run that fell back says so rather than looking the same.
+    """
+    try:
+        return session.find(name, timeout=timeout), "name"
+    except DesktopError as error:
+        offset = offsets.get(key)
+        if not offset:
+            raise
+        print(f"    (no accessibility tree for {name!r}: {error})", flush=True)
+        return (window.rect.x + int(offset[0]), window.rect.y + int(offset[1])), "offset"
+
+
 def run(run: flowlib.Run) -> None:
     out = run.out
     session = run.session
@@ -93,7 +143,10 @@ def run(run: flowlib.Run) -> None:
     encoder = _env("FLOW_ENCODER", "nvh264enc")
     discoverer = _env("FLOW_DISCOVERER", "subordinate-gst-discoverer")
     layout = dict(LAYOUT)
-    layout.update(json.loads(os.environ.get("FLOW_LAYOUT") or "{}"))
+    offsets = dict(OFFSETS)
+    override = json.loads(os.environ.get("FLOW_LAYOUT") or "{}")
+    layout.update({k: v for k, v in override.items() if k in LAYOUT})
+    offsets.update({k: v for k, v in override.items() if k in OFFSETS})
 
     with run.step("stage the project folder") as step:
         staged = flowlib.stage(work, media, cli)
@@ -108,6 +161,10 @@ def run(run: flowlib.Run) -> None:
             env={"SUBORDINATE_LOG": "info,sub_export=debug"},
         )
         window = session.wait_for_title(WINDOW, timeout=180)
+        # Maximized first: a window bigger than the screen hides the timeline
+        # behind the taskbar, and a drop aimed at it lands on the desktop
+        # (run 34672165182).
+        window = session.maximize(window)
         endpoint = flowlib.wait_for_command_api(session, app_log)
         session.activate(window)
         step.note(pid=started.pid, window=window.as_dict(), endpoint=endpoint)
@@ -130,8 +187,8 @@ def run(run: flowlib.Run) -> None:
                 raise AssertionError("the staged project should start with no media")
 
         with run.step("click Import... in the media bin") as step:
-            control = session.find("Import", timeout=60)
-            step.note(control=control.as_dict())
+            control, how = locate(session, window, "Import", "Import", offsets)
+            step.note(control=getattr(control, "as_dict", lambda: control)(), located_by=how)
             session.click(control)
             dialog = _wait_for_dialog(session, window, timeout=60)
             step.note(dialog=dialog)
@@ -148,9 +205,13 @@ def run(run: flowlib.Run) -> None:
 
         with run.step("drag the clip from the bin onto the timeline") as step:
             session.activate(window)
-            row = session.find(staged.media.stem[:12], timeout=60)
+            row, how = locate(session, window, staged.media.stem[:12], "row", offsets)
             drop = window.rect.point(*layout["timeline_drop"])
-            step.note(row=row.as_dict(), drop={"x": drop[0], "y": drop[1]})
+            step.note(
+                row=getattr(row, "as_dict", lambda: row)(),
+                located_by=how,
+                drop={"x": drop[0], "y": drop[1]},
+            )
             session.drag(row, drop)
             clips = _wait_until(
                 lambda: _clips(read, staged.sequence),
@@ -180,23 +241,35 @@ def run(run: flowlib.Run) -> None:
             step.note(clips=len(clips))
 
         output = staged.directory / "clicks-export.mp4"
-        with run.step("pin the vendor encoder in the export panel") as step:
+        with run.step("open the export panel") as step:
             session.activate(window)
-            field = session.find("File", timeout=60, role=None)
-            step.note(file_field=field.as_dict())
-            # The output is a text field, so it is typed rather than chosen in
-            # a save dialog: click it, select everything, type the path.
-            session.click(field.rect.point(0.5, 0.5))
+            tab = _by_role(session, "Export", TAB_ROLES, timeout=60)
+            session.click(tab)
+            time.sleep(1)
+            tree = [control.as_dict() for control in session.controls()]
+            (out / "controls-export.json").write_text(json.dumps(tree, indent=1))
+            step.note(tab=tab.as_dict(), controls=len(tree))
+
+        with run.step("type the output path and pin the vendor encoder") as step:
+            # The output is a text field beside a `File` label, so it is typed
+            # rather than chosen in a save dialog. The field itself has no name
+            # of its own; the label does, and the field is immediately right of
+            # it.
+            label = session.find("File", timeout=60)
+            session.click((label.rect.x + label.rect.width + 60, label.rect.center[1]))
             session.key("ctrl+a")
             session.type_text(str(output))
-            picker = session.find("Encoder", timeout=30)
+            # `ComboBox::from_label("Encoder")` draws the label beside the
+            # button and the *selection* on it, so the button to click is the
+            # one reading `Automatic` (export_panel.rs).
+            picker = session.find("Automatic", timeout=30)
             session.click(picker)
             choice = session.find(encoder, timeout=30)
             session.click(choice)
-            step.note(encoder=encoder, picker=picker.as_dict())
+            step.note(encoder=encoder, picker=picker.as_dict(), file_label=label.as_dict())
 
         with run.step("click Export and wait for the file") as step:
-            session.click(session.find("Export", timeout=30))
+            session.click(_by_role(session, "Export", BUTTON_ROLES, timeout=30))
             _wait_until(
                 lambda: output.exists() and output.stat().st_size,
                 lambda size: bool(size),

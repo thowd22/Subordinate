@@ -247,6 +247,15 @@ class Session(abc.ABC):
         """Move the pointer to a point without pressing anything."""
 
     @abc.abstractmethod
+    def maximize(self, window: "Window") -> "Window":
+        """Fill the screen with `window`, and answer its new rectangle.
+
+        Worth doing before any gesture: a window larger than the screen hides
+        the panels at its bottom edge behind the taskbar, and a drop aimed at
+        the timeline lands on the desktop instead (run 34672165182).
+        """
+
+    @abc.abstractmethod
     def screenshot(self, name: str) -> Path:
         """Capture the whole desktop into `self.shots`, and return the file."""
 

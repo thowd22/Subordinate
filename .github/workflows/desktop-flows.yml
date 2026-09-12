@@ -176,6 +176,32 @@ jobs:
             xdg-desktop-portal xdg-desktop-portal-gtk
           dpkg -l | grep -E 'xdg-desktop-portal|at-spi2-core|pyatspi' || true
 
+      # The example flow, which is also the diagnosis when the clicks flow
+      # cannot find a control: it launches the editor, dumps the whole
+      # accessibility tree to controls.json and clicks `Import...`. Never
+      # fatal - the flow below is the job's verdict - but its artifact is the
+      # first thing to read when a name has moved or the a11y bus is not there.
+      - name: Accessibility diagnostics (never fatal)
+        continue-on-error: true
+        env:
+          XDG_CURRENT_DESKTOP: GNOME
+          XDG_SESSION_TYPE: x11
+          FLOW_OUT: ${{ github.workspace }}/flow-out/diagnostics
+        run: |
+          set -uo pipefail
+          export XDG_RUNTIME_DIR=/tmp/xdg-runtime-$(id -u)
+          mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
+          mkdir -p "$FLOW_OUT"
+          dbus-run-session -- sh -c '
+            echo "session bus: $DBUS_SESSION_BUS_ADDRESS"
+            busctl --user list 2>&1 | head -30
+            gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
+              --method org.a11y.Bus.GetAddress 2>&1 || echo "no org.a11y.Bus"
+            python3 -u scripts/desktop/example.py
+            echo "--- after the example ---"
+            busctl --user list 2>&1 | grep -i -E "a11y|atspi" || echo "no a11y names on the bus"
+          ' 2>&1 | tee "$FLOW_OUT/diagnostics.txt"
+
       - name: The clicks-only flow
         env:
           # The portal picks its backend from the desktop it is told it is on;

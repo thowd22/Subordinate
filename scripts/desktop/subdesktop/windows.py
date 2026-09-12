@@ -179,6 +179,21 @@ class WindowsSession(Session):
         time.sleep(0.3)
         return (x, y)
 
+    def maximize(self, window: Window) -> Window:
+        if self._window is not None:
+            try:
+                self._window.maximize()
+                time.sleep(1.0)
+                box = self._window.rectangle()
+                return Window(
+                    handle=window.handle,
+                    title=window.title,
+                    rect=Rect(box.left, box.top, box.width(), box.height()),
+                )
+            except Exception:  # noqa: BLE001 - a window that refuses stays as it is
+                pass
+        return window
+
     def click_free_move(self, x: int, y: int) -> None:
         self._mouse.move(coords=(int(x), int(y)))
         time.sleep(0.4)

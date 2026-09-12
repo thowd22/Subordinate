@@ -184,6 +184,21 @@ class LinuxSession(Session):
         time.sleep(0.3)
         return (x, y)
 
+    def maximize(self, window: Window) -> Window:
+        # openbox honours _NET_WM_STATE_MAXIMIZED, and xdotool asks for it
+        # through windowsize's percentage form, which is the same thing
+        # without needing a window manager hint.
+        subprocess.run(
+            [self._xdotool, "windowmove", "--sync", window.handle, "0", "0"], check=False
+        )
+        subprocess.run(
+            [self._xdotool, "windowsize", "--sync", window.handle, "100%", "100%"],
+            check=False,
+        )
+        time.sleep(1.0)
+        rect = self._geometry(window.handle) or window.rect
+        return Window(handle=window.handle, title=window.title, rect=rect)
+
     def click_free_move(self, x: int, y: int) -> None:
         run([self._xdotool, "mousemove", "--sync", str(x), str(y)])
         time.sleep(0.4)
