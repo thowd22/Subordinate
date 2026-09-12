@@ -112,7 +112,7 @@ def _candidates(control, window) -> list[tuple[int, int]]:
 #: The same role under each platform's spelling. UI Automation says
 #: `TabItem` and `Button`; AT-SPI says `page tab` and `push button`.
 TAB_ROLES = ("TabItem", "page tab", "Tab", "tab")
-BUTTON_ROLES = ("Button", "push button")
+BUTTON_ROLES = ("Button", "push button", "toggle button", "CheckBox")
 COMBO_ROLES = ("ComboBox", "combo box", "Button", "push button")
 TEXT_ROLES = ("Text", "label", "static text")
 
@@ -385,45 +385,46 @@ def run(run: flowlib.Run) -> None:
                 step.note(range="whole sequence", why=str(error)[:200])
 
         with run.step("type the output path and pin the vendor encoder") as step:
-            # The output is a text field beside a `File` label, so it is typed
-            # rather than chosen in a save dialog. The field itself has no name
-            # of its own; the label does, and the field is immediately right of
-            # it.
-            # The field itself, by the hint text it shows while it is empty
-            # (`choose a file to write`, export_panel.rs): clicking beside the
-            # `File` label was landing next to it, and `File` is the window's
-            # menu as well (runs 34678850753 and 34679600299).
-            try:
-                field = session.find("choose a file to write", timeout=20)
-                point, label = field.rect.center, field.as_dict()
-            except DesktopError:
-                # A field that already holds a path shows it instead of the
-                # hint, so fall back to the band right of the `File` label.
-                text = _by_role(session, "File", TEXT_ROLES, timeout=60)
-                point = (text.rect.x + text.rect.width + 60, text.rect.center[1])
-                label = text.as_dict()
+            # The output is a text field on the row beside the `File` label.
+            # The label is what the application publishes - the field itself
+            # has no name until it holds a path - and `choose a file to write`
+            # is not the field's hint but the reason the Export button is
+            # disabled, printed under it (run 34680515589 typed into that and
+            # left the field empty). `File` is also the window's menu, so the
+            # label is taken by role.
+            text = _by_role(session, "File", TEXT_ROLES, timeout=60)
+            point = (text.rect.x + text.rect.width + 60, text.rect.center[1])
             session.click(point)
             session.key("ctrl+a")
             session.type_text(str(output))
-            step.note(field_took_the_path=_shows(session, output.name))
-            # `ComboBox::from_label("Encoder")` draws the label beside the
-            # button and the *selection* on it, so the button to click is the
-            # one reading `Automatic` (export_panel.rs).
-            # The encoder picker is a combo box the application names
-            # `Encoder`; its menu items are the element names themselves
-            # (crates/sub-ui/src/export_panel.rs).
+            session.key("Return")
+            took = _shows(session, output.name)
+            step.note(file_label=text.as_dict(), typed_at=point, field_took_the_path=took)
+            if not took:
+                raise AssertionError(
+                    f"the output field did not take {output}: the panel still shows "
+                    f"{_field_row(session)}"
+                )
+            # `ComboBox::from_label("Encoder")` names the button after its
+            # label and draws the *selection* on it; its menu items are the
+            # element names themselves (crates/sub-ui/src/export_panel.rs).
             picker = _by_role(session, "Encoder", COMBO_ROLES, timeout=30)
             session.click(picker)
             choice = session.find(encoder, timeout=30)
             session.click(choice)
-            step.note(encoder=encoder, picker=picker.as_dict(), file_label=label)
+            pinned = _shows(session, encoder)
+            step.note(encoder=encoder, picker=picker.as_dict(), encoder_pinned=pinned)
+            if not pinned:
+                raise AssertionError(
+                    f"the encoder picker still reads {_selected_encoder(session)!r}"
+                )
 
         with run.step("click Export and wait for the file") as step:
             session.click(_by_role(session, "Export", BUTTON_ROLES, timeout=30))
             _wait_until(
                 lambda: output.exists() and output.stat().st_size,
                 lambda size: bool(size),
-                timeout=600,
+                timeout=420,
                 what="the exported file",
             )
             # The editor writes the file as it goes, so wait for it to settle.
@@ -493,6 +494,24 @@ def _shows(session, needle: str) -> bool:
     """Whether any control's name carries `needle`, which is how a text field
     says what is in it."""
     return any(needle in control.name for control in session.controls())
+
+
+def _field_row(session) -> str:
+    """What the panel says on and under its File row, for an error message."""
+    return " | ".join(
+        control.name
+        for control in session.controls()
+        if control.name in ("File", "Choose…", "Export")
+        or "choose a file" in control.name
+    )
+
+
+def _selected_encoder(session) -> str:
+    """What the encoder picker currently reads."""
+    for control in session.controls():
+        if control.name in ("Automatic",) or control.name.endswith("enc"):
+            return control.name
+    return "(nothing that looks like an encoder)"
 
 
 def _range_summary(session) -> str:

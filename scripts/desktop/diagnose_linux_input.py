@@ -83,7 +83,7 @@ def main() -> int:
     def muted() -> bool:
         return '"muted": true' in json.dumps(bridge.call("project.get", {}))
 
-    mute = session.find("M", role="push button", timeout=60)
+    mute = session.find("M", role="toggle button", timeout=60)
     x, y = mute.rect.center
     print("mute button:", json.dumps(mute.as_dict()))
 
