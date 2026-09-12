@@ -38,7 +38,8 @@ pub mod sequence;
 #[cfg(feature = "sequence")]
 pub use sequence::{
     FramePng, FrameSpan, SequenceAudio, SequenceFrames, clips_with_effects, frame_png, has_audio,
-    lift_render_error, open_streams, sequence_frames, settings_for_sequence,
+    lift_render_error, open_streams, sequence_frames, settings_for_sequence, unused_audio_streams,
+    unused_audio_streams_for_export,
 };
 
 pub use chroma::{CHROMA_FORMATS, ChromaFormat};

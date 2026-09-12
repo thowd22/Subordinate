@@ -683,3 +683,19 @@ fn the_import_status_matches_its_snapshot() {
     harness.run();
     support::snapshot(&mut harness, "media_bin_importing");
 }
+
+#[test]
+fn the_bin_displays_the_number_of_source_audio_streams() {
+    let (mut project, _) = fixture();
+    project.media[0].info.as_mut().unwrap().audio = vec![
+        sub_model::media::AudioStream {
+            channels: 2,
+            sample_rate: 48_000
+        };
+        3
+    ];
+    let mut panel = MediaBinPanel::new();
+    let ctx = egui::Context::default();
+    let (_, shapes) = frame(&ctx, &mut panel, &project, Vec::new(), Vec::new());
+    assert!(texts(&shapes).iter().any(|text| text == "3 streams"));
+}

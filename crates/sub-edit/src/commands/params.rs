@@ -9,7 +9,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sub_core::SubResult;
+use sub_core::{SubError, SubResult};
 use sub_model::{Clip, ClipId, GainDb, Opacity, Project, SequenceId, TrackId, Transform};
 use sub_time::RationalTime;
 
@@ -78,6 +78,10 @@ pub struct SetClipParams {
     /// Clip audio level in decibels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gain: Option<GainDb>,
+    /// Which of the source's audio streams the clip takes, counted from zero
+    /// (TASK-153).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_stream: Option<u16>,
     /// How long the clip ramps up from nothing at its head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade_in: Option<RationalTime>,
@@ -97,6 +101,7 @@ impl SetClipParams {
             opacity: None,
             transform: None,
             gain: None,
+            audio_stream: None,
             fade_in: None,
             fade_out: None,
         }
@@ -123,6 +128,17 @@ impl SetClipParams {
         self
     }
 
+    /// The same command, also naming which of the source's audio streams the
+    /// clip takes, counted from zero in the order the probe reported them.
+    ///
+    /// A stream the source does not carry is refused when the command is
+    /// applied, so a project never names a take that is not in the file.
+    #[must_use]
+    pub fn with_audio_stream(mut self, audio_stream: u16) -> Self {
+        self.audio_stream = Some(audio_stream);
+        self
+    }
+
     /// The same command, also setting the fade in.
     #[must_use]
     pub fn with_fade_in(mut self, fade_in: RationalTime) -> Self {
@@ -143,6 +159,7 @@ impl SetClipParams {
         self.opacity.is_none()
             && self.transform.is_none()
             && self.gain.is_none()
+            && self.audio_stream.is_none()
             && self.fade_in.is_none()
             && self.fade_out.is_none()
     }
@@ -157,10 +174,48 @@ impl SetClipParams {
             opacity: self.opacity.map(|_| clip.opacity),
             transform: self.transform.map(|_| clip.transform),
             gain: self.gain.map(|_| clip.gain),
+            audio_stream: self.audio_stream.map(|_| clip.audio_stream),
             fade_in: self.fade_in.map(|_| clip.fade_in),
             fade_out: self.fade_out.map(|_| clip.fade_out),
         }
     }
+}
+
+/// Refuses an audio stream index the clip's source does not carry.
+///
+/// A source whose streams have not been probed yet accepts any index: the
+/// project may be offline, and refusing an edit because a file has not been
+/// read would be worse than storing a choice the export later warns about.
+fn check_audio_stream(project: &Project, clip: ClipId, stream: u16) -> SubResult<()> {
+    let Some(media) = project
+        .sequences
+        .iter()
+        .flat_map(|sequence| sequence.tracks.iter())
+        .flat_map(sub_model::Track::clips)
+        .find(|on_track| on_track.id == clip)
+        .map(|on_track| on_track.media)
+    else {
+        return Ok(());
+    };
+    let Some(info) = project
+        .media
+        .iter()
+        .find(|item| item.id == media)
+        .and_then(|item| item.info.as_ref())
+    else {
+        return Ok(());
+    };
+    let streams = info.audio_stream_count();
+    if usize::from(stream) < streams {
+        return Ok(());
+    }
+    Err(SubError::new(
+        crate::codes::AUDIO_STREAM_NOT_FOUND,
+        "the clip's source carries no audio stream at that index",
+    )
+    .with_detail("clip_id", clip)
+    .with_detail("audio_stream", stream.to_string())
+    .with_detail("audio_streams", streams.to_string()))
 }
 
 impl Command for SetClipParams {
@@ -169,6 +224,9 @@ impl Command for SetClipParams {
         "Set a clip's inspector parameters: opacity, gain, transform and fades.";
 
     fn apply(&self, project: &mut Project) -> SubResult<Inverse> {
+        if let Some(stream) = self.audio_stream {
+            check_audio_stream(project, self.clip, stream)?;
+        }
         let clip = clip_mut(project, self.sequence, self.track, self.clip)?;
 
         let mut candidate = clip.clone();
@@ -180,6 +238,9 @@ impl Command for SetClipParams {
         }
         if let Some(gain) = self.gain {
             candidate.gain = gain;
+        }
+        if let Some(audio_stream) = self.audio_stream {
+            candidate.audio_stream = audio_stream;
         }
         if let Some(fade_in) = self.fade_in {
             candidate.fade_in = fade_in;

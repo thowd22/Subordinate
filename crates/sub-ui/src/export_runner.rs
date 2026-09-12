@@ -174,6 +174,11 @@ pub fn sequence_sources(
                 )
             })?
             .clone();
+        for warning in
+            sub_export::unused_audio_streams_for_export(&project, &sequence, &project_dir)
+        {
+            log::warn!("export: {warning}");
+        }
         let span = sub_export::FrameSpan::new(
             request.span.start().value(),
             u64::try_from(request.span.duration().value()).unwrap_or(0),
@@ -356,7 +361,10 @@ pub fn settings_for(
                 "the sequence this export was asked for is no longer open",
             )
         })?;
-    let (settings, warnings) = sub_export::settings_for_sequence(preset, sequence)?;
+    let (settings, mut warnings) = sub_export::settings_for_sequence(preset, sequence)?;
+    // A source with several audio streams is cut on one of them; an export
+    // that leaves the rest behind says so (TASK-153).
+    warnings.extend(sub_export::unused_audio_streams(project, sequence));
     for warning in warnings {
         log::info!("export: {warning}");
     }
