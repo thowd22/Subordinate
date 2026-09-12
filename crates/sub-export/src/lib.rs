@@ -17,23 +17,32 @@
 //! frames done, an ETA and encoder statistics, stops on a cancel token, and
 //! deletes the part-written file when an export does not reach its end.
 //!
+//! The rate-control mapping lives in [`rate_control`]: per catalogued
+//! encoder, which properties carry an average bitrate and which carry a
+//! constant-quality target, applied defensively so an element that spells a
+//! knob differently warns instead of failing the export.
+
 //! Presets live in [`presets`]: the container, codecs, resolution, rate and
 //! quality of a named export target, shipped as TOML data and extensible by a
 //! user file in the config directory.
 
+pub mod chroma;
 pub mod encoder;
 pub mod job;
 pub mod pipeline;
 pub mod presets;
+pub mod rate_control;
 #[cfg(feature = "sequence")]
 pub mod sequence;
 
 #[cfg(feature = "sequence")]
 pub use sequence::{
-    FrameSpan, SequenceAudio, SequenceFrames, clips_with_effects, has_audio, lift_render_error,
-    open_streams, sequence_frames, settings_for_sequence,
+    FramePng, FrameSpan, SequenceAudio, SequenceFrames, clips_with_effects, frame_png, has_audio,
+    lift_render_error, open_streams, sequence_frames, settings_for_sequence, unused_audio_streams,
+    unused_audio_streams_for_export,
 };
 
+pub use chroma::{CHROMA_FORMATS, ChromaFormat};
 pub use encoder::{
     CODECS, ElementProbe, EncodeRefusal, EncoderPreferences, EncoderProbe, EncoderStatus,
     EncoderVendor, VideoCodec, can_encode, element_is_usable, encoder_names,
@@ -44,13 +53,14 @@ pub use job::{
 };
 pub use pipeline::{
     AUDIO_CODECS, AudioCodec, AudioFrameSource, BYTES_PER_PIXEL, CONTAINERS, Container,
-    ExportElements, ExportPipeline, ExportReport, ExportSettings, PcmAudioSource, SolidFrames,
-    VideoFrameSource, export, export_with,
+    DEFAULT_STALL_TIMEOUT_MS, ExportElements, ExportPipeline, ExportReport, ExportSettings,
+    MAX_CRF, PcmAudioSource, SolidFrames, VideoFrameSource, VideoQuality, export, export_with,
 };
 pub use presets::{
-    AudioPreset, PRESETS_FILE_NAME, Preset, PresetLibrary, VideoPreset, VideoQuality, config_dir,
+    AudioPreset, PRESETS_FILE_NAME, Preset, PresetLibrary, VideoPreset, config_dir, preset_json,
     presets_path,
 };
+pub use rate_control::{apply_audio_bitrate, apply_video_quality};
 
 /// Stable [`sub_core::ErrorCode`] constants this crate returns.
 ///
@@ -71,6 +81,8 @@ pub mod codes {
     pub const ENCODER_UNAVAILABLE: ErrorCode = ErrorCode::from_static("export.encoder_unavailable");
     /// The export settings do not describe a file that can be written.
     pub const INVALID_SETTINGS: ErrorCode = ErrorCode::from_static("export.invalid_settings");
+    /// The chosen encoder cannot take the chroma format that was asked for.
+    pub const CHROMA_UNSUPPORTED: ErrorCode = ErrorCode::from_static("export.chroma_unsupported");
     /// The container cannot carry one of the chosen codecs.
     pub const UNSUPPORTED_COMBINATION: ErrorCode =
         ErrorCode::from_static("export.unsupported_combination");
@@ -81,7 +93,9 @@ pub mod codes {
     /// The pipeline refused a buffer, which is how a failing encoder surfaces
     /// in the middle of an export.
     pub const PUSH_FAILED: ErrorCode = ErrorCode::from_static("export.push_failed");
-    /// The pipeline never reached end of stream inside its time budget.
+    /// The export stopped making progress, or ran past the hard limit the
+    /// request set. The `reason` detail says which, and `element` names the
+    /// element the pipeline was waiting on.
     pub const EXPORT_TIMEOUT: ErrorCode = ErrorCode::from_static("export.timeout");
     /// A preset file is not TOML of the preset shape, or a preset's field is
     /// missing, empty, out of range or contradictory. The `field` detail names
@@ -105,6 +119,7 @@ mod tests {
             super::codes::ENCODER_UNAVAILABLE,
             super::codes::INVALID_SETTINGS,
             super::codes::UNSUPPORTED_COMBINATION,
+            super::codes::CHROMA_UNSUPPORTED,
             super::codes::MUXER_UNAVAILABLE,
             super::codes::PIPELINE_FAILED,
             super::codes::PUSH_FAILED,

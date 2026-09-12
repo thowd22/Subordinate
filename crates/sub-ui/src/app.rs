@@ -52,6 +52,7 @@ use crate::export_panel::{ExportAction, ExportPanel, ExportRequest};
 use crate::export_runner::ExportRunner;
 use crate::fullscreen::{FullscreenAction, FullscreenState, monitor_picker_ui};
 use crate::history_panel::{HistoryAction, HistoryList, edit_menu_ui};
+use crate::host_services::{GuiHost, GuiServices};
 use crate::inspector::{EffectEdit, InspectorPanel, InspectorResponse};
 use crate::keymap::LoadedKeymap;
 use crate::media_bin::{BinSelection, BinStatus, MediaBinAction, MediaBinPanel};
@@ -498,6 +499,12 @@ pub struct SubordinateApp {
     /// named; a refused bind is a [`CommandApi`] that is not serving, which is
     /// a different thing (see [`crate::command_api`]).
     command_api: Option<CommandApi>,
+    /// What the window and the Command API's host families share: where the
+    /// project file is, the exports an agent has asked for, and how far they
+    /// have got (see [`crate::host_services`]).
+    host: Arc<GuiHost>,
+    /// Last file context published by the GUI (socket open/save updates the bridge directly).
+    host_file: Option<(u64, Option<PathBuf>)>,
 }
 
 impl SubordinateApp {
@@ -600,10 +607,16 @@ impl SubordinateApp {
             recovery: RecoveryPrompt::new(),
             snapshots: SnapshotMenu::new(),
             command_api: None,
+            host: Arc::new(GuiHost::new()),
+            host_file: None,
         };
         if let Some(path) = startup_project {
             app.open_startup_project(&path);
         }
+        // Before the endpoint is bound, so the very first client reaches a
+        // dispatcher that already carries `export.*`, `media.probe`,
+        // `media.make_proxy` and `playback.render_frame_png`.
+        app.install_host_services();
         app.start_command_api();
         Ok(app)
     }
@@ -655,6 +668,123 @@ impl SubordinateApp {
                 error.message
             ),
         }
+    }
+
+    /// Puts the window's own host services on the session's dispatcher.
+    ///
+    /// Failing to install them is not a reason to refuse to start: the window
+    /// would still edit, and the socket would still serve the engine families.
+    /// It is logged and shown in the export panel, because what it costs is
+    /// exactly the agent surface this window advertises.
+    fn install_host_services(&mut self) {
+        self.sync_host_file();
+        let services = Arc::new(GuiServices::new(
+            Arc::clone(&self.host),
+            self.render.clone(),
+            Arc::clone(&self.export.presets),
+        ));
+        if let Err(error) = self.session.install_host_services(services) {
+            log::warn!("host services: [{}] {}", error.code, error.message);
+            self.export.panel.add_problem(error);
+        }
+    }
+
+    fn sync_host_file(&mut self) {
+        let file = (
+            self.session.generation(),
+            self.session.project_file().map(Path::to_path_buf),
+        );
+        if self.host_file.as_ref() != Some(&file) {
+            self.host
+                .set_project_dir(self.session.project_arc().id, self.project_dir());
+            self.host_file = Some(file);
+        }
+    }
+
+    /// Starts the exports asked for over the socket and publishes how the
+    /// running one is doing. Once a frame.
+    ///
+    /// This is the UI-thread half of [`crate::host_services`]: `export.render`
+    /// queues and returns, and everything it queued is started here — on the
+    /// window's own job pool, through the export panel's own request, so the
+    /// agent's export is the one the user can watch and cancel.
+    fn pump_host_exports(&mut self) {
+        self.sync_host_file();
+        for queued in self.host.take_queued() {
+            if let Err(error) = self.start_queued_export(&queued) {
+                log::warn!("export over the socket: [{}] {}", error.code, error.message);
+                self.export.panel.add_problem(error.clone());
+                self.host.refuse(&queued.job, &error);
+            }
+        }
+        if self.host.running_job().is_some() {
+            self.host.publish(self.export.panel.status());
+        }
+    }
+
+    /// Sets the panel to what `params` asked for and starts that export.
+    ///
+    /// The panel is driven rather than bypassed: the preset, the sequence, the
+    /// range and the output file are set on it and the request comes back out
+    /// of [`ExportPanel::request`], so an export asked for over the socket is
+    /// the same request a click on Export would have produced — and the panel
+    /// shows the choices the agent made.
+    fn start_queued_export(
+        &mut self,
+        queued: &crate::host_services::QueuedExport,
+    ) -> SubResult<()> {
+        if self.export.runner.is_running() {
+            return Err(SubError::new(
+                crate::codes::EXPORT_BUSY,
+                "an export is already running",
+            ));
+        }
+        let params = &queued.params;
+        let project = Arc::clone(&queued.project);
+        let sequence = sub_command::agent::pick_sequence(&project, params.sequence)?;
+        let frames = crate::export_panel::sequence_frames(sequence);
+        let sequence_id = sequence.id;
+        let panel = &mut self.export.panel;
+        panel.select_preset(&params.preset)?;
+        panel.select_sequence(&project, sequence_id);
+        panel.set_output(params.output.clone());
+        match params.range {
+            Some(range) => {
+                panel.set_range(crate::export_panel::ExportRange::InToOut);
+                panel.set_in_out(range.start_frame, range.end_frame.unwrap_or(frames));
+            }
+            None => panel.set_range(crate::export_panel::ExportRange::WholeSequence),
+        }
+        let request = panel.request(&project)?;
+        self.export.runner.start(
+            &self.jobs,
+            &self.export.presets,
+            &project,
+            &request,
+            &mut crate::export_runner::sequence_sources(
+                &self.render,
+                Arc::clone(&project),
+                queued.project_dir.clone(),
+            ),
+        )?;
+        // A previous terminal panel state must never complete the new job
+        // before its worker has posted its first event.
+        self.export
+            .panel
+            .apply_event(&sub_export::ExportEvent::Started {
+                path: request.output.clone(),
+                frames_total: request.frames_total(),
+                stats: sub_export::EncoderStats {
+                    video_encoder: String::new(),
+                    audio_encoder: None,
+                    muxer: String::new(),
+                    video_frames: 0,
+                    audio_frames: 0,
+                    bytes_written: 0,
+                    encoded: sub_time::RationalTime::from_frames(0, sub_time::Rational::FPS_30),
+                },
+            });
+        Ok(())
     }
 
     /// The Command API endpoint this window serves, when it serves one.
@@ -1464,7 +1594,8 @@ impl SubordinateApp {
                 frame.timeline = Some(response);
             }
             Panel::Inspector => {
-                let response = inspector.ui(ui, sequence, timeline.selection(), effect_catalog);
+                let response =
+                    inspector.ui(ui, &project, sequence, timeline.selection(), effect_catalog);
                 if !response.is_empty() {
                     frame.inspector = Some(response);
                 }
@@ -1532,28 +1663,38 @@ impl SubordinateApp {
     /// [`SubordinateApp::poll_export`], and the panel's Cancel button reaches
     /// the job's cancel token.
     fn start_export(&mut self, request: &ExportRequest) {
-        let Some(project_dir) = self.project_dir() else {
-            let error = SubError::new(crate::codes::EXPORT_NOT_READY, NO_RENDERER_REASON)
-                .with_detail("field", "project");
+        if let Err(error) = self.start_export_request(request) {
             log::warn!("[{}] {}", error.code, error.message);
             self.export.panel.add_problem(error);
-            return;
+        }
+    }
+
+    /// The body of [`SubordinateApp::start_export`], with the refusal handed
+    /// back rather than only shown: an export asked for over the socket has a
+    /// caller waiting to be told why it was refused.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::codes::EXPORT_NOT_READY`] for a project with no file of its
+    /// own, and whatever [`ExportRunner::start`] returns.
+    fn start_export_request(&mut self, request: &ExportRequest) -> SubResult<()> {
+        let Some(project_dir) = self.project_dir() else {
+            return Err(
+                SubError::new(crate::codes::EXPORT_NOT_READY, NO_RENDERER_REASON)
+                    .with_detail("field", "project"),
+            );
         };
         let project = self.session.project_arc();
         let render = self.render.clone();
         let jobs = &self.jobs;
         let export = &mut self.export;
-        let started = export.runner.start(
+        export.runner.start(
             jobs,
             &export.presets,
             &project,
             request,
             &mut crate::export_runner::sequence_sources(&render, Arc::clone(&project), project_dir),
-        );
-        if let Err(error) = started {
-            log::warn!("[{}] {}", error.code, error.message);
-            export.panel.add_problem(error);
-        }
+        )
     }
 
     /// The folder a clip's relative media path resolves against.
@@ -2247,6 +2388,11 @@ impl eframe::App for SubordinateApp {
         // Its events come from a worker thread, which egui has no reason to
         // wake for, so a running export asks for the next frame itself.
         self.poll_export();
+        // An export an agent asked for over the socket is started here and
+        // reported from here: the queue is drained after the panel has been
+        // polled, so what is published is this frame's progress.
+        self.host.set_repaint(ui.ctx());
+        self.pump_host_exports();
         if self.export.runner.is_running() {
             ui.ctx().request_repaint_after(EXPORT_POLL_INTERVAL);
         }
@@ -2320,7 +2466,11 @@ struct ExportHost {
     panel: ExportPanel,
     /// The presets the panel offers, kept so a started export can be resolved
     /// back to the settings its preset asks for.
-    presets: PresetLibrary,
+    ///
+    /// Shared rather than owned because `export.list_presets` answers out of
+    /// this very library: an agent is told about the ids this window can
+    /// resolve and no others.
+    presets: Arc<PresetLibrary>,
     /// The export running now, if one is.
     runner: ExportRunner,
 }
@@ -2343,7 +2493,7 @@ impl ExportHost {
         panel.set_unavailable(Some(NO_RENDERER_REASON));
         Self {
             panel,
-            presets,
+            presets: Arc::new(presets),
             runner: ExportRunner::new(),
         }
     }

@@ -1123,8 +1123,8 @@ def table(
         if source.audio_streams:
             lines.append(
                 f"- `{source.name}` carries {source.audio_streams} audio streams;"
-                " the exporter mixes the first one (uridecodebin exposes one"
-                " audio pad) and writes a single stereo track."
+                " this generated project selects the first stream by default"
+                " and exports a single stereo track."
             )
     return "\n".join(lines) + "\n"
 
@@ -1154,8 +1154,14 @@ def main() -> int:
         metavar="NAME::PROJECT[::SEQUENCE[::FRAMES]]",
         help="a project to render, its sequence and how many frames of it",
     )
-    run_parser.add_argument("--presets", nargs="*", default=None)
-    run_parser.add_argument("--only-encoders", nargs="*", default=None)
+    # Workflow filters travel as environment data, never interpolated shell code.
+    # Explicit CLI flags retain precedence; empty filters keep the full matrix.
+    run_parser.add_argument(
+        "--presets", nargs="*", default=os.environ.get("MATRIX_PRESETS", "").split() or None
+    )
+    run_parser.add_argument(
+        "--only-encoders", nargs="*", default=os.environ.get("MATRIX_ENCODERS", "").split() or None
+    )
     run_parser.add_argument(
         "--no-software-for",
         nargs="*",

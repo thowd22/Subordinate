@@ -53,6 +53,12 @@ use crate::effects::EffectCatalog;
 use crate::selection::{ClipRef, Selection};
 use crate::timeline_panel::clip_edits_allowed;
 
+/// The label the audio-stream picker carries.
+pub const AUDIO_STREAM_LABEL: &str = "Audio stream";
+
+/// The history entry choosing another audio stream makes.
+pub const AUDIO_STREAM_UNDO_LABEL: &str = "Change audio stream";
+
 /// The heading the effect stack sits under.
 pub const EFFECTS_HEADING: &str = "Effects";
 
@@ -328,6 +334,7 @@ impl InspectorPanel {
     pub fn ui(
         &mut self,
         ui: &mut Ui,
+        project: &Project,
         sequence: &Sequence,
         selection: &Selection,
         catalog: &EffectCatalog,
@@ -366,16 +373,76 @@ impl InspectorPanel {
             for field in InspectorField::ALL {
                 self.field_ui(ui, field, sequence, anchor, &editable, rate, &mut response);
             }
+            let target = anchor_ref.filter(|item| editable.contains(item));
+            Self::audio_stream_ui(ui, project, sequence.id, target, anchor, &mut response);
             ui.separator();
             ui.heading(EFFECTS_HEADING);
             // The anchor is the clip whose stack is shown, so its own track is
             // what decides whether the stack can be edited.
-            let target = anchor_ref.filter(|item| editable.contains(item));
             if let Some(target) = target {
                 self.effects_ui(ui, sequence.id, target, anchor, catalog, &mut response);
             }
         });
         response
+    }
+
+    /// Paints how many audio streams the anchor's source carries and, when it
+    /// carries more than one, which of them the clip takes (TASK-153).
+    ///
+    /// A camera master or a mix-minus feed holds several takes and a clip
+    /// plays exactly one of them, so the count is stated even when there is
+    /// nothing to choose: an editor has to be able to see that a file holds
+    /// more sound than the cut uses before the export tells them so.
+    ///
+    /// The choice is raised for the anchor alone, exactly as an effect edit
+    /// is: the stream is a position in one source, and a selection holds clips
+    /// of different sources whose streams have nothing to do with each other.
+    fn audio_stream_ui(
+        ui: &mut Ui,
+        project: &Project,
+        sequence: SequenceId,
+        target: Option<ClipRef>,
+        anchor: &Clip,
+        response: &mut InspectorResponse,
+    ) {
+        let streams = audio_streams_of(project, anchor);
+        let Some(streams) = streams else {
+            return;
+        };
+        ui.label(audio_streams_text(streams));
+        if streams < 2 {
+            return;
+        }
+        let mut chosen = anchor.audio_stream;
+        let painted = ui
+            .add_enabled_ui(target.is_some(), |ui| {
+                ComboBox::from_label(AUDIO_STREAM_LABEL)
+                    .selected_text(audio_stream_name(chosen))
+                    .show_ui(ui, |ui| {
+                        let mut changed = false;
+                        for index in 0..streams.min(usize::from(u16::MAX) + 1) {
+                            let index = u16::try_from(index).expect("bounded audio stream index");
+                            changed |= ui
+                                .selectable_value(&mut chosen, index, audio_stream_name(index))
+                                .changed();
+                        }
+                        changed
+                    })
+            })
+            .inner;
+        if painted.inner != Some(true) || chosen == anchor.audio_stream {
+            return;
+        }
+        let Some(target) = target else {
+            return;
+        };
+        if response.begin.is_none() {
+            response.begin = Some(AUDIO_STREAM_UNDO_LABEL.to_owned());
+        }
+        response.commands.push(
+            SetClipParams::new(sequence, target.track, target.clip).with_audio_stream(chosen),
+        );
+        response.commit = true;
     }
 
     /// Paints the anchor clip's effect stack and the add-effect picker.
@@ -676,6 +743,35 @@ impl InspectorPanel {
             response.commit = true;
         }
     }
+}
+
+/// How many audio streams `clip`'s source carries, or `None` when the project
+/// has not probed it.
+#[must_use]
+pub fn audio_streams_of(project: &Project, clip: &Clip) -> Option<usize> {
+    project
+        .media
+        .iter()
+        .find(|item| item.id == clip.media)
+        .and_then(|item| item.info.as_ref())
+        .map(sub_model::StreamInfo::audio_stream_count)
+}
+
+/// How the count of a source's audio streams reads in the inspector.
+#[must_use]
+pub fn audio_streams_text(streams: usize) -> String {
+    match streams {
+        0 => "Source carries no audio".to_owned(),
+        1 => "Source carries 1 audio stream".to_owned(),
+        streams => format!("Source carries {streams} audio streams"),
+    }
+}
+
+/// What one stream is called in the picker: one-based, as an editor counts
+/// tracks on a camera.
+#[must_use]
+pub fn audio_stream_name(stream: u16) -> String {
+    format!("Stream {}", u32::from(stream) + 1)
 }
 
 /// The longest fade the slider offers at `rate`, in frames.

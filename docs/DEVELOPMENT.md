@@ -1265,10 +1265,14 @@ does:
     rather than a hang.
   * So the readiness probe was answering the wrong question. It drove each
     element to `READY`, which a hardware encoder reaches long before it opens a
-    session. It now encodes a real frame, and the encoder an export is about to
-    plug encodes one frame of the *export's own canvas* before the pipeline is
-    built - a small frame is not the question either. A pinned encoder that
-    cannot is refused by name and reason; the automatic order walks on.
+    session. Hardware now encodes a real frame during discovery and another
+    at the export canvas before the pipeline is built. A pinned hardware
+    encoder that cannot is refused by name and reason; automatic selection
+    continues to the next candidate. Software only initializes to READY:
+    full-resolution CPU encoding may legitimately exceed the hardware probe's
+    five-second deadline (rav1enc on yodaddy, run 34710769860). The actual
+    software export validates its format and handles bus errors or missing
+    progress under the request's stall timeout.
 * **The editor's endpoint does not serve `export.*`.** Only
   `subordinate-cli serve` installs the host-backed families
   (`docs/schema/host-api.json`); the editor serves the engine's own methods and
@@ -1468,9 +1472,19 @@ deleted, because a 4K60 matrix writes gigabytes of them.
   (`settings_for_sequence`). A 4K60 source under `youtube-1080p` is written
   4K60, and the preset's own size and rate come back as warnings. The summary
   says so under every table.
-- **The preset's bitrate and CRF reach nothing.** `ExportSettings` carries no
-  quality field, so a preset currently selects the container, the codecs and
-  the audio format and nothing else (TASK-149).
+- **The preset's bitrate and CRF reach the encoder** (TASK-149).
+  `ExportSettings` carries the video quality and the audio bitrate, and
+  `sub_export::rate_control` maps them onto each catalogued element's own
+  properties - `bitrate`/`pass` on `x264enc`, `qp` on `x265enc`, `crf` on
+  `svtav1enc`, `rc-mode` plus `qp-const-{i,p,b}` on NVENC,
+  `quality = 1 - CRF/51` on VideoToolbox, and `rate-control` plus the
+  per-frame quantisers on VA-API and AMF. Media Foundation has no mapped CRF
+  equivalent; it supports bitrate requests. A knob an element does
+  not carry is a `tracing::warn!`, not a failed export, so a cell whose file
+  looks default-sized should be checked against the run's warnings.
+  The vendor mappings follow the [NVENC property reference](https://gstreamer.freedesktop.org/documentation/nvcodec/nvav1enc.html)
+  and [VideoToolbox implementation](https://github.com/GStreamer/gstreamer/blob/main/subprojects/gst-plugins-bad/sys/applemedia/vtenc.c).
+  Quantizer scaling preserves direction, not equal perceptual quality between codecs.
 - **`audio-only` is not in the matrix.** It has no video stream, and `render`
   refuses it before an encoder is chosen.
 - **Hardware encoders are ranked `NONE`,** so the driver treats "present and

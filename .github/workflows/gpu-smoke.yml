@@ -18,6 +18,7 @@ on:
           - nvidia-desktop-linux
           - amd-linux
           - nvidia-windows
+          - nvidia-desktop-windows
           - amd-windows
       desktop_runner:
         description: >-
@@ -514,6 +515,7 @@ jobs:
   # old config for about an hour).
   # ---------------------------------------------------------------------------
   build-mcp-windows:
+    if: inputs.only == '' || inputs.only == 'nvidia-desktop-windows'
     # The released MSI does not carry the MCP bridge: packaging's
     # build-msi.ps1 stages subordinate.exe and subordinate-cli.exe only
     # (v0.1.1, and v0.1.0 before it). subordinate-mcp has no GStreamer
@@ -536,6 +538,7 @@ jobs:
           if-no-files-found: error
 
   nvidia-desktop-windows:
+    if: inputs.only == '' || inputs.only == 'nvidia-desktop-windows'
     name: NVIDIA T4 desktop (g4dn.xlarge, Windows Server 2022, console session)
     needs: build-mcp-windows
     runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-desktop-windows

@@ -103,12 +103,15 @@ pub enum SortColumn {
     FrameRate,
     /// Pixel count of the first video stream, then width.
     Resolution,
+    /// How many audio streams the file carries (TASK-153).
+    Audio,
 }
 
 impl SortColumn {
     /// Every column, in the order the list view draws them.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Name,
+        Self::Audio,
         Self::Duration,
         Self::FrameRate,
         Self::Resolution,
@@ -122,6 +125,7 @@ impl SortColumn {
             Self::Duration => "Duration",
             Self::FrameRate => "FPS",
             Self::Resolution => "Resolution",
+            Self::Audio => "Audio",
         }
     }
 
@@ -131,6 +135,7 @@ impl SortColumn {
         match self {
             Self::Name => 220.0,
             Self::FrameRate => 64.0,
+            Self::Audio => 84.0,
             Self::Duration | Self::Resolution => 100.0,
         }
     }
@@ -143,6 +148,7 @@ impl SortColumn {
             Self::Duration => duration_text(item),
             Self::FrameRate => frame_rate_text(item),
             Self::Resolution => resolution_text(item),
+            Self::Audio => audio_text(item),
         }
     }
 }
@@ -824,6 +830,7 @@ pub fn sorted_media<'a>(project: &'a Project, bin: &Bin, sort: BinSort) -> Vec<&
             SortColumn::Duration => duration_of(left).cmp(&duration_of(right)),
             SortColumn::FrameRate => compare_rates(frame_rate_of(left), frame_rate_of(right)),
             SortColumn::Resolution => pixels_of(left).cmp(&pixels_of(right)),
+            SortColumn::Audio => audio_streams_of(left).cmp(&audio_streams_of(right)),
         }
         // Ties keep a stable, predictable order rather than the order the bin
         // happens to list them in.
@@ -950,6 +957,36 @@ pub fn resolution_text(item: &MediaItem) -> String {
             },
             |stream| format!("{}x{}", stream.width, stream.height),
         )
+}
+
+/// The audio column: how many audio streams the file carries (TASK-153).
+///
+/// A file with one stream reads as its channel count, because that is the only
+/// thing there is to say about it; a file with several reads as the count,
+/// because a multi-track camera master or a mix-minus feed is a different
+/// thing to cut and the editor has to see it before the export does. An
+/// unprobed file reads as unknown and a silent one says so.
+#[must_use]
+pub fn audio_text(item: &MediaItem) -> String {
+    let Some(info) = item.info.as_ref() else {
+        return UNKNOWN.to_owned();
+    };
+    match info.audio_stream_count() {
+        0 => "silent".to_owned(),
+        1 => match info.audio[0].channels {
+            1 => "1 stream, mono".to_owned(),
+            2 => "1 stream, stereo".to_owned(),
+            channels => format!("1 stream, {channels}ch"),
+        },
+        streams => format!("{streams} streams"),
+    }
+}
+
+/// How many audio streams an item carries, for the audio column's ordering.
+fn audio_streams_of(item: &MediaItem) -> usize {
+    item.info
+        .as_ref()
+        .map_or(0, sub_model::StreamInfo::audio_stream_count)
 }
 
 /// The proxy badge's text: which of the five proxy states the item is in.

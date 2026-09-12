@@ -61,6 +61,17 @@ pub trait Services: Send + Sync + fmt::Debug + 'static {
     /// what turns one back into a file a decoder can open.
     fn project_dir(&self) -> PathBuf;
 
+    /// Resolve media against the file associated with this project snapshot.
+    ///
+    /// # Errors
+    /// Returns an error when the project has no known file context.
+    fn project_dir_for(&self, _project: &Project) -> SubResult<PathBuf> {
+        Ok(self.project_dir())
+    }
+
+    /// Remember a successful project open/save, or a newly unsaved project.
+    fn project_file_changed(&self, _project: &Project, _path: Option<&Path>) {}
+
     /// Reads a media file's streams.
     ///
     /// # Errors
@@ -126,6 +137,10 @@ pub struct FrameRequest<'a> {
 /// `command.duplicate_method` when one of the names is already served, which
 /// would mean this was installed twice.
 pub fn register_methods(dispatcher: &mut Dispatcher, services: Arc<dyn Services>) -> SubResult<()> {
+    *dispatcher
+        .host_services
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&services));
     let host = Arc::clone(&services);
     dispatcher.register::<ProbeParams, Value, _>(
         MEDIA_PROBE,
@@ -136,7 +151,7 @@ pub fn register_methods(dispatcher: &mut Dispatcher, services: Arc<dyn Services>
                 (Some(path), None) => path,
                 (None, Some(media)) => {
                     let project = engine.snapshot();
-                    media_path(&project, &host.project_dir(), media)?
+                    media_path(&project, &host.project_dir_for(&project)?, media)?
                 }
                 _ => {
                     return Err(SubError::new(
@@ -273,6 +288,50 @@ pub struct FrameImage {
     pub height: u32,
     /// The time that was drawn.
     pub time: RationalTime,
+}
+
+impl FrameImage {
+    /// A PNG of `width` by `height` pixels drawn at `time`, encoded for the
+    /// wire.
+    ///
+    /// Every serving process answers `playback.render_frame_png` with this, so
+    /// the base64 and the media type are written once rather than once per
+    /// front end.
+    #[must_use]
+    pub fn png(png: &[u8], width: u32, height: u32, time: RationalTime) -> Self {
+        Self {
+            data: base64(png),
+            mime_type: "image/png".to_owned(),
+            width,
+            height,
+            time,
+        }
+    }
+}
+
+/// Standard base64, as an MCP image content block carries a picture.
+///
+/// Written out here rather than taken from a crate: it is twenty lines, it is
+/// the only encoding this workspace needs, and both serving processes — the
+/// editor and `subordinate-cli serve` — answer with it.
+#[must_use]
+pub fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let mut block = [0u8; 3];
+        block[..chunk.len()].copy_from_slice(chunk);
+        let triple = (u32::from(block[0]) << 16) | (u32::from(block[1]) << 8) | u32::from(block[2]);
+        for index in 0..4 {
+            if index <= chunk.len() {
+                let shift = 18 - index * 6;
+                out.push(char::from(ALPHABET[((triple >> shift) & 0x3f) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// The result of [`EXPORT_LIST_PRESETS`].
@@ -550,7 +609,7 @@ mod tests {
     use super::{
         EXPORT_LIST_PRESETS, EXPORT_PROGRESS, EXPORT_RENDER, ExportParams, ExportStatus,
         FrameImage, FrameRequest, MEDIA_MAKE_PROXY, MEDIA_PROBE, PLAYBACK_RENDER_FRAME_PNG,
-        Services, permille, register_methods,
+        Services, base64, permille, register_methods,
     };
     use crate::Dispatcher;
     use serde_json::{Value, json};
@@ -743,5 +802,18 @@ mod tests {
         assert_eq!(permille(0, 0), 0);
         assert_eq!(permille(1, 4), 250);
         assert_eq!(permille(100, 100), 1000);
+    }
+
+    #[test]
+    fn base64_matches_the_rfc_test_vectors() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        assert_eq!(base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        // The PNG signature, which is what a frame's data starts with.
+        assert_eq!(base64(&[0x89, b'P', b'N', b'G']), "iVBORw==");
     }
 }

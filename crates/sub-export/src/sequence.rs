@@ -93,9 +93,13 @@ pub fn settings_for_sequence(
         preset.container,
     )
     .with_video_codec(video.codec)
+    .with_chroma(video.chroma)
+    .with_video_quality(Some(video.quality))
     .with_audio_codec(preset.audio.as_ref().map(|audio| audio.codec));
     if let Some(audio) = &preset.audio {
-        settings = settings.with_audio_format(audio.sample_rate, audio.channels);
+        settings = settings
+            .with_audio_format(audio.sample_rate, audio.channels)
+            .with_audio_bitrate(audio.bitrate_kbps);
     }
     if !has_audio(sequence) {
         settings = settings.with_audio_codec(None);
@@ -139,6 +143,139 @@ pub fn clips_with_effects(sequence: &Sequence) -> Vec<String> {
         .filter(|clip| clip.effects.iter().any(|effect| effect.enabled))
         .map(|clip| clip.name.clone())
         .collect()
+}
+
+/// One line per source whose audio streams the sequence does not all use
+/// (TASK-153).
+///
+/// A multi-track camera master or a mix-minus feed carries several audio
+/// streams and a clip plays exactly one of them, so an export of such a source
+/// writes less than the file holds. That is a legitimate cut and not an error,
+/// but it is the kind of loss a user otherwise finds after delivery, so the
+/// export says which streams went unused instead of dropping them in silence.
+///
+/// Sources the sequence does not cut with at all are not mentioned: nothing of
+/// theirs was expected in the file. Nor are sources with a single audio stream,
+/// or none.
+#[must_use]
+pub fn unused_audio_streams(project: &Project, sequence: &Sequence) -> Vec<String> {
+    unused_audio_streams_with(project, sequence, |item| {
+        item.info
+            .as_ref()
+            .map(sub_model::StreamInfo::audio_stream_count)
+    })
+}
+
+/// Export warnings including sources that have never been probed. Each source
+/// path is probed at most once, without scanning frame timing or changing the project.
+#[must_use]
+pub fn unused_audio_streams_for_export(
+    project: &Project,
+    sequence: &Sequence,
+    project_dir: &Path,
+) -> Vec<String> {
+    let mut probes = std::collections::HashMap::new();
+    let mut failures = Vec::new();
+    let mut warnings = unused_audio_streams_with(project, sequence, |item| {
+        if let Some(info) = &item.info {
+            return Some(info.audio_stream_count());
+        }
+        let path = item.absolute_source(project_dir, MediaUse::Export);
+        let result = probes.entry(path.clone()).or_insert_with(|| {
+            sub_media::probe_with(
+                &path,
+                sub_media::ProbeOptions {
+                    scan_frame_timing: false,
+                    ..Default::default()
+                },
+            )
+            .map(|info| info.audio.len())
+            .map_err(|error| error.to_string())
+        });
+        match result {
+            Ok(count) => Some(*count),
+            Err(error) => {
+                failures.push(format!(
+                    "'{}': could not determine unused audio streams: {error}",
+                    item.name
+                ));
+                None
+            }
+        }
+    });
+    warnings.append(&mut failures);
+    warnings
+}
+
+fn unused_audio_streams_with(
+    project: &Project,
+    sequence: &Sequence,
+    mut count: impl FnMut(&sub_model::MediaItem) -> Option<usize>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for item in &project.media {
+        if !sequence
+            .tracks
+            .iter()
+            .flat_map(sub_model::Track::clips)
+            .any(|clip| clip.media == item.id)
+        {
+            continue;
+        }
+        let Some(streams) = count(item).filter(|count| *count > 1) else {
+            continue;
+        };
+        let solo = sequence
+            .tracks
+            .iter()
+            .any(|track| track.kind == TrackKind::Audio && track.solo);
+        let mut used: Vec<u16> = sequence
+            .tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Audio && !track.muted && (!solo || track.solo))
+            .flat_map(sub_model::Track::clips)
+            .filter(|clip| clip.media == item.id)
+            .map(|clip| clip.audio_stream)
+            .collect();
+        used.sort_unstable();
+        used.dedup();
+        let unused: Vec<String> = (0..streams)
+            .filter_map(|index| u16::try_from(index).ok())
+            .filter(|index| !used.contains(index))
+            .map(|index| (u32::from(index) + 1).to_string())
+            .collect();
+        if unused.is_empty() {
+            continue;
+        }
+        lines.push(format!(
+            "'{}' carries {streams} audio streams and this export uses {}; {} {} unused",
+            item.name,
+            describe_streams(&used),
+            if unused.len() == 1 {
+                "stream"
+            } else {
+                "streams"
+            },
+            unused.join(", "),
+        ));
+    }
+    lines
+}
+
+/// The one-based stream numbers a warning names, as a list a person reads.
+fn describe_streams(used: &[u16]) -> String {
+    let numbers: Vec<String> = used
+        .iter()
+        .map(|index| u32::from(*index) + 1)
+        .map(|number| number.to_string())
+        .collect();
+    if numbers.is_empty() {
+        "none of them".to_owned()
+    } else if numbers.len() == 1 {
+        format!("stream {}", numbers[0])
+    } else {
+        format!("streams {}", numbers.join(", "))
+    }
 }
 
 /// The half-open frame range an export covers, in the sequence's own frames.
@@ -610,7 +747,7 @@ fn clip_pcm(
     }
 
     let has_video = source_has_video(item, &path, routing);
-    let decoded = decode_audio(&path, has_video)?;
+    let decoded = decode_audio(&path, has_video, clip.audio_stream)?;
     let decoded = to_channels(decoded, settings.channels);
     let decoded = resample(decoded, settings.sample_rate)?;
     Ok(trim_to_source_start(decoded, clip.source_range))
@@ -667,12 +804,17 @@ fn source_has_video(
 
 /// Decodes a whole file's audio: through GStreamer when the file carries
 /// video, through symphonia when it does not.
-fn decode_audio(path: &Path, has_video: bool) -> SubResult<Pcm> {
+///
+/// `stream` is the clip's chosen audio stream, counted from zero: a camera
+/// master carries several and the export writes the one the clip was cut with
+/// rather than always the first (TASK-153).
+fn decode_audio(path: &Path, has_video: bool, stream: u16) -> SubResult<Pcm> {
     if !has_video {
-        return sub_audio::decode::decode_file(path);
+        return sub_audio::decode::decode_file_stream(path, stream);
     }
     let options = DecoderOptions {
         streams: StreamSelection::AudioOnly,
+        audio_stream: stream,
         ..DecoderOptions::default()
     };
     let mut decoder = Decoder::open_with(path, options)?;
@@ -761,6 +903,127 @@ pub fn lift_render_error(error: &RenderError) -> SubError {
     SubError::new(code, error.to_string())
 }
 
+/// One composited frame, encoded as a PNG.
+///
+/// This is what lets an agent *look* at the timeline instead of reading it
+/// (docs/PLAN.md §7): the same compositor, the same decoders and the same
+/// exact frame the export writes, stopped after one picture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FramePng {
+    /// The encoded file.
+    pub png: Vec<u8>,
+    /// The picture's width in pixels.
+    pub width: u32,
+    /// The picture's height in pixels.
+    pub height: u32,
+}
+
+/// Composites `time` of `sequence` on `context` and encodes it as a PNG.
+///
+/// The context is the caller's: `subordinate-cli serve` passes a headless one
+/// and the editor passes the very device the viewer paints with, so a frame an
+/// agent asks the running window for comes off the compositor the user is
+/// looking at rather than off a second GPU context of its own.
+///
+/// `width` scales the canvas down by whole-area averaging, which is what makes
+/// a 1080p frame small enough to hand to a model; a width at or above the
+/// canvas is drawn at the canvas size rather than blown up.
+///
+/// # Errors
+///
+/// Whatever the compositor and the decoders return, and [`codes::INTERNAL`]
+/// when the picture cannot be encoded.
+pub fn frame_png(
+    context: &RenderContext,
+    project: &Project,
+    project_dir: &Path,
+    sequence: &Sequence,
+    time: RationalTime,
+    width: Option<u32>,
+) -> SubResult<FramePng> {
+    let mut frames = SequenceFrames::new(
+        context,
+        Arc::new(project.clone()),
+        Arc::new(sequence.clone()),
+        project_dir,
+        FrameSpan::new(0, 1),
+    );
+    let pixels = frames.frame_at(time)?;
+    let canvas = (
+        sequence.settings.resolution.width(),
+        sequence.settings.resolution.height(),
+    );
+    let (pixels, width, height) = match width {
+        Some(target) if target > 0 && target < canvas.0 => downscale(&pixels, canvas, target),
+        _ => (pixels, canvas.0, canvas.1),
+    };
+    Ok(FramePng {
+        png: encode_png(&pixels, width, height)?,
+        width,
+        height,
+    })
+}
+
+/// Scales an RGBA image down to `target` pixels wide by averaging each source
+/// block, keeping the aspect ratio.
+///
+/// Averaging rather than sampling because a nearest-neighbour shrink of a
+/// timeline frame drops exactly the thin detail — a caption, a slate — an
+/// agent is looking for.
+fn downscale(pixels: &[u8], (width, height): (u32, u32), target: u32) -> (Vec<u8>, u32, u32) {
+    // Everything below is one flat RGBA buffer, so the whole shrink is done in
+    // `usize` and each edge is converted once.
+    let size = |value: u32| usize::try_from(value).unwrap_or(usize::MAX);
+    let (source_width, source_height, out_width) = (size(width), size(height), size(target));
+    let out_height = (source_height * out_width / source_width.max(1)).max(1);
+    let mut out = vec![0u8; out_width * out_height * 4];
+    for y in 0..out_height {
+        let y0 = y * source_height / out_height;
+        let y1 = ((y + 1) * source_height / out_height)
+            .max(y0 + 1)
+            .min(source_height);
+        for x in 0..out_width {
+            let x0 = x * source_width / out_width;
+            let x1 = ((x + 1) * source_width / out_width)
+                .max(x0 + 1)
+                .min(source_width);
+            let mut sums = [0u64; 4];
+            let mut count = 0u64;
+            for row in y0..y1 {
+                for column in x0..x1 {
+                    let at = (row * source_width + column) * 4;
+                    for (sum, channel) in sums.iter_mut().zip(&pixels[at..at + 4]) {
+                        *sum += u64::from(*channel);
+                    }
+                    count += 1;
+                }
+            }
+            let at = (y * out_width + x) * 4;
+            for (channel, sum) in out[at..at + 4].iter_mut().zip(sums) {
+                *channel = u8::try_from(sum / count.max(1)).unwrap_or(u8::MAX);
+            }
+        }
+    }
+    (out, target, u32::try_from(out_height).unwrap_or(1))
+}
+
+/// Encodes RGBA pixels as an 8-bit PNG.
+fn encode_png(pixels: &[u8], width: u32, height: u32) -> SubResult<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let failed = |error: &png::EncodingError| {
+        SubError::new(codes::INTERNAL, "the frame could not be encoded as a PNG").with_cause(error)
+    };
+    let mut writer = encoder.write_header().map_err(|error| failed(&error))?;
+    writer
+        .write_image_data(pixels)
+        .map_err(|error| failed(&error))?;
+    writer.finish().map_err(|error| failed(&error))?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -809,6 +1072,30 @@ mod tests {
         assert!(
             warnings.iter().any(|line| line.contains("fps")),
             "the rate difference is reported: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn sequence_exports_keep_the_presets_chroma_and_quality() {
+        let library = PresetLibrary::builtin();
+        let mut preset = library
+            .iter()
+            .find(|preset| preset.video.is_some())
+            .unwrap()
+            .clone();
+        let video = preset.video.as_mut().unwrap();
+        video.chroma = crate::ChromaFormat::Yuv444;
+        video.quality = crate::VideoQuality::Crf { value: 12 };
+        let (settings, _) =
+            settings_for_sequence(&preset, &sequence_at(64, 48, Rational::FPS_24)).unwrap();
+        assert_eq!(settings.chroma, crate::ChromaFormat::Yuv444);
+        assert_eq!(
+            settings.video_quality,
+            Some(crate::VideoQuality::Crf { value: 12 })
+        );
+        assert_eq!(
+            settings.audio_bitrate_kbps,
+            preset.audio.as_ref().and_then(|audio| audio.bitrate_kbps)
         );
     }
 
@@ -934,5 +1221,63 @@ mod tests {
         // Cached, so this answers "video" for a file that is not there at all:
         // one probe per file per mix, not one per clip.
         assert!(source_has_video(&item, &path, &mut routing));
+    }
+}
+
+#[cfg(test)]
+mod audio_stream_warning_tests {
+    use super::*;
+    use sub_model::{
+        Clip, MediaItem, MediaPath, Project, Sequence, StreamInfo, Track, TrackItem, TrackKind,
+    };
+    use sub_time::{Rational, RationalTime, TimeRange};
+
+    #[test]
+    fn unused_streams_are_reported_once_and_disappear_when_selected() {
+        let mut project = Project::new("multi audio");
+        let mut item = MediaItem::new(MediaPath::new("take.mkv").unwrap());
+        item.info = Some(StreamInfo {
+            audio: vec![
+                sub_model::media::AudioStream {
+                    channels: 2,
+                    sample_rate: 48_000
+                };
+                3
+            ],
+            ..Default::default()
+        });
+        let media = item.id;
+        project.media.push(item);
+        let mut sequence = Sequence::new("cut", sub_model::SequenceSettings::default());
+        let mut track = Track::new("A1", TrackKind::Audio);
+        let clip = Clip::new(
+            "take",
+            media,
+            TimeRange::new(
+                RationalTime::new(0, Rational::FPS_24),
+                RationalTime::new(24, Rational::FPS_24),
+            )
+            .unwrap(),
+        );
+        track.items.push(TrackItem::Clip(clip.clone()));
+        sequence.tracks.push(track);
+        let warnings = unused_audio_streams(&project, &sequence);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("streams 2, 3 unused"), "{warnings:?}");
+        for audio_stream in 1..3 {
+            let mut next = clip.clone();
+            next.audio_stream = audio_stream;
+            sequence.tracks[0].items.push(TrackItem::Clip(next));
+        }
+        assert!(unused_audio_streams(&project, &sequence).is_empty());
+        sequence.tracks[0].muted = true;
+        let warnings = unused_audio_streams(&project, &sequence);
+        assert!(
+            warnings[0].contains("streams 1, 2, 3 unused"),
+            "{warnings:?}"
+        );
+        sequence.tracks[0].muted = false;
+        sequence.tracks[0].kind = TrackKind::Video;
+        assert_eq!(unused_audio_streams(&project, &sequence), warnings);
     }
 }

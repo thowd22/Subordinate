@@ -191,6 +191,10 @@ pub mod codes {
     pub const AUTOSAVE_FAILED: ErrorCode = ErrorCode::from_static("edit.autosave_failed");
     /// A snapshot named for restoring is no longer on disk.
     pub const SNAPSHOT_NOT_FOUND: ErrorCode = ErrorCode::from_static("edit.snapshot_not_found");
+    /// A clip was pointed at an audio stream its source does not carry
+    /// (TASK-153).
+    pub const AUDIO_STREAM_NOT_FOUND: ErrorCode =
+        ErrorCode::from_static("edit.audio_stream_not_found");
 }
 
 /// Small commands the unit tests apply to a project.

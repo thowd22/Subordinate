@@ -58,6 +58,14 @@ on:
           - nvidia-linux
           - nvidia-windows
           - amd-windows
+      encoders:
+        description: 'Optional space-separated encoder names for a focused verification'
+        type: string
+        default: ''
+      presets:
+        description: 'Optional space-separated preset IDs for a focused verification'
+        type: string
+        default: ''
   schedule:
     # 05:40 UTC, an hour after hardware.yml, so the two never bid for the same
     # GPU quota.
@@ -71,6 +79,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  MATRIX_ENCODERS: ${{ inputs.encoders }}
+  MATRIX_PRESETS: ${{ inputs.presets }}
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1

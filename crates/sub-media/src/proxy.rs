@@ -1082,6 +1082,58 @@ fn is_written(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
 }
 
+/// The folder a project's proxies are written into, relative to the project
+/// file.
+pub const PROXY_DIR: &str = "proxies";
+
+/// Transcodes a proxy for one of `project`'s media items and returns its
+/// project-relative path.
+///
+/// This is what `media.make_proxy` does in whichever process is serving the
+/// Command API — the editor or `subordinate-cli serve` — so the file lands in
+/// the same `proxies/` folder and the path recorded on the media item stays
+/// project-relative either way (docs/PLAN.md §5.6).
+///
+/// Slow: it decodes and re-encodes the whole source, so a caller on a UI
+/// thread runs it on a worker.
+///
+/// # Errors
+///
+/// `core.not_found` when the project references no such item,
+/// `core.invalid_argument` for a source with no video stream, and whatever the
+/// prober and the proxy pipeline return.
+pub fn proxy_for_media(
+    project: &sub_model::Project,
+    project_dir: &Path,
+    media: sub_model::MediaId,
+) -> SubResult<String> {
+    let source = project.absolute_path(project_dir, media).ok_or_else(|| {
+        SubError::new(
+            sub_core::codes::NOT_FOUND,
+            "no such media item in the project",
+        )
+        .with_detail("media", media.to_string())
+    })?;
+    let info = probe(&source)?;
+    let video = info.video.first().ok_or_else(|| {
+        SubError::new(
+            sub_core::codes::INVALID_ARGUMENT,
+            "a proxy needs a source with a video stream",
+        )
+        .with_detail("media", media.to_string())
+    })?;
+    let defaults = ProxyOptions::default();
+    let (width, height) = proxy_size(video.width, video.height, defaults.scale);
+    let options = ProxyOptions {
+        codec: ProxyCodec::preferred_at(width, height),
+        ..defaults
+    };
+    let proxy = Proxy::generate(&source, &project_dir.join(PROXY_DIR), options)?;
+    let file = proxy.path();
+    let relative = file.strip_prefix(project_dir).unwrap_or(&file);
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::probe::{FrameTiming, Rotation, VideoStreamInfo};

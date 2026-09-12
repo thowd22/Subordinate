@@ -423,6 +423,13 @@
       "additionalProperties": false,
       "description": "A reference to a slice of a [`MediaItem`](crate::MediaItem) placed on a\ntrack.\n\nOTIO counterpart: `Clip`, whose `media_reference` is an\n`ExternalReference` and whose `source_range` selects the used portion of it.\nPlacement on the track is positional, exactly as in OTIO: a clip starts\nwhere the preceding items end.\n\nThe fixed set of per-clip parameters the MVP supports (docs/PLAN.md §5.1)\nlive on the clip itself: [`Clip::opacity`], [`Clip::transform`],\n[`Clip::gain`] and the two fades. Their invariants are checked by\n[`Clip::validate`].",
       "properties": {
+        "audio_stream": {
+          "description": "Which of the source's audio streams this clip takes, counted from zero\nin the order the probe reported them (TASK-153).\n\nA camera master or a mix-minus feed carries several audio streams and a\nclip plays exactly one of them; the first is the default, which is what\nevery clip written before this field existed meant, so the field is\nleft out of the project file when it is zero and reads back as zero\nwhen it is absent.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
         "effects": {
           "description": "Plugin effects applied to this clip, first applied first.\n\nEach entry names the plugin that declares the shader and binds the\nparameter values the user changed; the declaration itself comes from\nthe installed plugin at load time (see [`crate::effect`]). Empty by\ndefault, and left out of the saved file when empty, so a project\nwritten before effects existed still loads unchanged.",
           "items": {
@@ -2515,6 +2522,16 @@
       "additionalProperties": false,
       "description": "Sets any of a clip's parameters, leaving the ones it does not name alone.\n\nThe inverse names exactly the same fields, carrying the values they had, so\nundoing an opacity edit does not also reset a gain the user changed\nearlier.\n\n```\nuse sub_edit::History;\nuse sub_edit::commands::SetClipParams;\nuse sub_model::{\n    Clip, MediaItem, MediaPath, Opacity, Project, Sequence, SequenceSettings, Track, TrackKind,\n};\nuse sub_time::{Rational, RationalTime, TimeRange};\n\nlet mut project = Project::new(\"Doc cut\");\nlet media = MediaItem::new(MediaPath::new(\"a.mp4\").unwrap());\nlet media_id = media.id;\nproject.media.push(media);\n\nlet rate = Rational::FPS_24;\nlet source = TimeRange::new(RationalTime::zero(rate), RationalTime::new(48, rate)).unwrap();\nlet clip = Clip::new(\"shot 1\", media_id, source);\nlet clip_id = clip.id;\nlet mut track = Track::new(\"V1\", TrackKind::Video);\ntrack.items.push(clip.into());\nlet track_id = track.id;\nlet mut sequence = Sequence::new(\"Main\", SequenceSettings::default());\nsequence.tracks.push(track);\nlet sequence_id = sequence.id;\nproject.sequences.push(sequence);\n\nlet mut history = History::new();\nhistory\n    .apply(\n        &mut project,\n        SetClipParams::new(sequence_id, track_id, clip_id).with_opacity(Opacity::TRANSPARENT),\n    )\n    .unwrap();\nlet clip_of = |project: &Project| project.sequences[0].tracks[0].clip(clip_id).unwrap().opacity;\nassert!(clip_of(&project).is_transparent());\n\nhistory.undo(&mut project).unwrap();\nassert_eq!(clip_of(&project), Opacity::OPAQUE);\n```",
       "properties": {
+        "audio_stream": {
+          "description": "Which of the source's audio streams the clip takes, counted from zero\n(TASK-153).",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "clip": {
           "$ref": "#/$defs/ClipId",
           "description": "The clip to edit."

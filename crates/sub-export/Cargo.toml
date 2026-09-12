@@ -24,6 +24,9 @@ sub-audio = { path = "../sub-audio", optional = true }
 sub-media = { path = "../sub-media", optional = true }
 sub-model = { path = "../sub-model", optional = true }
 sub-render = { path = "../sub-render", optional = true }
+# playback.render_frame_png hands an agent a picture, so a composited frame is
+# encoded here rather than left as raw pixels.
+png = { version = "0.18", optional = true }
 wgpu = { version = "30", default-features = false, optional = true }
 
 [features]
@@ -33,6 +36,7 @@ sequence = [
     "dep:sub-model",
     "dep:sub-render",
     "dep:wgpu",
+    "dep:png",
 ]
 
 [lints]
@@ -45,3 +49,6 @@ sub-export = { path = ".", features = ["sequence"] }
 sub-audio = { path = "../sub-audio" }
 sub-media = { path = "../sub-media" }
 sub-model = { path = "../sub-model" }
+# The chroma test reads the profile back off a written file exactly as a player
+# would: through the discoverer, not through anything the exporter told it.
+gstreamer-pbutils = "0.25"

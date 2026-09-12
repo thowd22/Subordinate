@@ -32,9 +32,7 @@ use symphonia::core::codecs::CodecParameters;
 use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{
-    FormatOptions, FormatReader, SeekMode, SeekTo, TrackType, probe::Probe,
-};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, probe::Probe};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::{TimeBase, Timestamp};
@@ -155,8 +153,23 @@ impl Pcm {
 /// corrupt.
 pub fn probe_audio(path: &Path) -> SubResult<AudioInfo> {
     let reader = open_reader(path)?;
-    let (_, info) = track_info(reader.as_ref(), path)?;
+    let (_, info) = track_info(reader.as_ref(), 0, path)?;
     Ok(info)
+}
+
+/// How many audio tracks the demuxer identifies in the file
+/// (TASK-153).
+///
+/// A file with more than one is a camera master or a mix-minus feed, and a
+/// clip names which of them it takes.
+///
+/// # Errors
+///
+/// Returns [`codes::FILE_UNREADABLE`] when the path cannot be opened and
+/// [`codes::UNSUPPORTED`] when no demuxer in this build understands it.
+pub fn audio_track_count(path: &Path) -> SubResult<usize> {
+    let reader = open_reader(path)?;
+    Ok(audio_tracks(reader.as_ref()).count())
 }
 
 /// A decoder for one audio-only file.
@@ -198,17 +211,28 @@ impl FileDecoder {
     /// The same codes as [`probe_audio`], plus [`codes::UNSUPPORTED`] when the
     /// codec has no decoder registered in this build.
     pub fn open(path: &Path) -> SubResult<Self> {
+        Self::open_stream(path, 0)
+    }
+
+    /// Opens `path` and prepares audio track `stream` for decoding, counting
+    /// from zero in the order the container lists them (TASK-153).
+    ///
+    /// This is what a clip on a multi-track source decodes through: the file
+    /// carries several takes and the clip names the one it was cut with, so
+    /// nothing is silently reduced to track one.
+    ///
+    /// # Errors
+    ///
+    /// The same codes as [`FileDecoder::open`]; [`codes::NO_AUDIO_TRACK`]
+    /// when the file carries no audio track at that index.
+    pub fn open_stream(path: &Path, stream: u16) -> SubResult<Self> {
         let reader = open_reader(path)?;
-        let (params, info) = track_info(reader.as_ref(), path)?;
-        let track_id = reader
-            .first_track_known_codec(TrackType::Audio)
-            .map(|track| track.id)
-            .ok_or_else(|| no_audio_track(path))?;
-        let time_base = reader
-            .tracks()
-            .iter()
-            .find(|track| track.id == track_id)
-            .and_then(|track| track.time_base)
+        let (params, info) = track_info(reader.as_ref(), stream, path)?;
+        let track =
+            audio_track(reader.as_ref(), stream).ok_or_else(|| no_audio_track_at(path, stream))?;
+        let track_id = track.id;
+        let time_base = track
+            .time_base
             .unwrap_or_else(|| default_time_base(info.sample_rate));
 
         let decoder = get_codecs()
@@ -434,6 +458,17 @@ pub fn decode_file(path: &Path) -> SubResult<Pcm> {
     FileDecoder::open(path)?.decode_to_end()
 }
 
+/// Decodes audio track `stream` of an audio-only file into interleaved `f32`
+/// frames (TASK-153).
+///
+/// # Errors
+///
+/// The same codes as [`FileDecoder::open_stream`] and
+/// [`FileDecoder::next_block`].
+pub fn decode_file_stream(path: &Path, stream: u16) -> SubResult<Pcm> {
+    FileDecoder::open_stream(path, stream)?.decode_to_end()
+}
+
 /// Opens the file and finds its container.
 fn open_reader(path: &Path) -> SubResult<Box<dyn FormatReader + 'static>> {
     let file = File::open(path).map_err(|e| {
@@ -457,16 +492,34 @@ fn open_reader(path: &Path) -> SubResult<Box<dyn FormatReader + 'static>> {
         .map_err(|e| symphonia_error(&e, path, "reading the audio container"))
 }
 
-/// Reads the first audio track's codec parameters and describes the file.
+/// Every audio track in container order. Unsupported codecs retain their
+/// positions so choosing a stream never silently selects another one.
+fn audio_tracks<'a>(
+    reader: &'a (dyn FormatReader + 'static),
+) -> impl Iterator<Item = &'a symphonia::core::formats::Track> {
+    reader
+        .tracks()
+        .iter()
+        .filter(|track| matches!(&track.codec_params, Some(CodecParameters::Audio(_))))
+}
+
+/// The `stream`th audio track of the file, counted from zero.
+fn audio_track<'a>(
+    reader: &'a (dyn FormatReader + 'static),
+    stream: u16,
+) -> Option<&'a symphonia::core::formats::Track> {
+    audio_tracks(reader).nth(usize::from(stream))
+}
+
+/// Reads audio track `stream`'s codec parameters and describes the file.
 fn track_info(
     reader: &(dyn FormatReader + 'static),
+    stream: u16,
     path: &Path,
 ) -> SubResult<(AudioCodecParameters, AudioInfo)> {
-    let track = reader
-        .first_track_known_codec(TrackType::Audio)
-        .ok_or_else(|| no_audio_track(path))?;
+    let track = audio_track(reader, stream).ok_or_else(|| no_audio_track_at(path, stream))?;
     let Some(CodecParameters::Audio(params)) = track.codec_params.as_ref() else {
-        return Err(no_audio_track(path));
+        return Err(no_audio_track_at(path, stream));
     };
 
     let sample_rate = params.sample_rate.filter(|rate| *rate > 0).ok_or_else(|| {
@@ -590,6 +643,19 @@ fn ticks_to_frames(ticks: u64, time_base: TimeBase, sample_rate: u32) -> u64 {
 fn no_audio_track(path: &Path) -> SubError {
     SubError::new(codes::NO_AUDIO_TRACK, "the file has no audio track")
         .with_detail("path", path.display().to_string())
+}
+
+/// The same error for a file that has audio tracks but not the one asked for.
+fn no_audio_track_at(path: &Path, stream: u16) -> SubError {
+    if stream == 0 {
+        return no_audio_track(path);
+    }
+    SubError::new(
+        codes::NO_AUDIO_TRACK,
+        "the file has no audio track at the index this decode asked for",
+    )
+    .with_detail("path", path.display().to_string())
+    .with_detail("audio_stream", stream.to_string())
 }
 
 /// Maps a symphonia error onto a stable audio code.

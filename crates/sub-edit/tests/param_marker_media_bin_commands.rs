@@ -857,3 +857,29 @@ fn commands_carry_labels_for_the_undo_menu() {
         "Move media to bin"
     );
 }
+
+#[test]
+fn choosing_an_audio_stream_round_trips_and_rejects_missing_streams() {
+    let (mut project, fixture) = fixture();
+    project.media[0].info = Some(sub_model::StreamInfo {
+        audio: vec![
+            sub_model::media::AudioStream {
+                channels: 2,
+                sample_rate: 48_000
+            };
+            3
+        ],
+        ..Default::default()
+    });
+    round_trip(
+        &mut project,
+        SetClipParams::new(fixture.sequence, fixture.track, fixture.clip).with_audio_stream(2),
+    );
+    let before = json::to_json(&project).unwrap();
+    let error = SetClipParams::new(fixture.sequence, fixture.track, fixture.clip)
+        .with_audio_stream(3)
+        .apply(&mut project)
+        .expect_err("missing stream rejected");
+    assert_eq!(error.code, codes::AUDIO_STREAM_NOT_FOUND);
+    assert_eq!(json::to_json(&project).unwrap(), before);
+}

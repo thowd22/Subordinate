@@ -30,8 +30,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use sub_core::{SubError, SubResult, codes};
 use sub_export::sequence::{
-    FrameSpan, SequenceFrames, clips_with_effects, lift_render_error, open_streams,
-    sequence_frames, settings_for_sequence,
+    FramePng, FrameSpan, clips_with_effects, lift_render_error, open_streams, sequence_frames,
+    settings_for_sequence, unused_audio_streams_for_export,
 };
 use sub_export::{
     AudioFrameSource, EncoderPreferences, ExportElements, ExportEvent, ExportJob, ExportSettings,
@@ -178,6 +178,13 @@ pub fn run_with(options: &Options, on_event: &mut dyn FnMut(&ExportEvent)) -> Su
             "clip '{clip}' carries plugin effects, which a headless render does not run yet",
         ));
     }
+    // A source with several audio streams is cut on one of them; the others
+    // are named here rather than dropped in silence (TASK-153).
+    warnings.extend(unused_audio_streams_for_export(
+        &project,
+        &sequence,
+        &project_dir,
+    ));
     // The same adapters the editor window exports through (TASK-135): one
     // bridge from a sequence to an export, so a GUI export and this render
     // write the same file.
@@ -225,32 +232,19 @@ pub fn run_with(options: &Options, on_event: &mut dyn FnMut(&ExportEvent)) -> Su
     Ok(answer)
 }
 
-/// One composited frame, encoded as a PNG.
+/// Composites `time` of `sequence` headlessly and encodes it as a PNG.
 ///
-/// This is what lets an agent *look* at the timeline instead of reading it
-/// (docs/PLAN.md §7): the same compositor, the same decoders and the same
-/// exact frame the export writes, stopped after one picture.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FramePng {
-    /// The encoded file.
-    pub png: Vec<u8>,
-    /// The picture's width in pixels.
-    pub width: u32,
-    /// The picture's height in pixels.
-    pub height: u32,
-}
-
-/// Composites `time` of `sequence` and encodes it as a PNG.
-///
-/// `width` scales the canvas down by whole-area averaging, which is what makes
-/// a 1080p frame small enough to hand to a model; a width at or above the
-/// canvas is drawn at the canvas size rather than blown up.
+/// A serving process passes its own render context to
+/// [`sub_export::sequence::frame_png`]; this is the headless caller, which
+/// makes a context of its own for the one picture. The editor passes the
+/// device the viewer paints with instead, so a frame an agent asks the running
+/// window for comes off the compositor the user is looking at.
 ///
 /// # Errors
 ///
 /// Whatever the compositor and the decoders return, `render.no_adapter` when
-/// this machine enumerates no GPU, and [`codes::INTERNAL`] when the picture
-/// cannot be encoded.
+/// this machine enumerates no GPU, and `core.internal` when the picture cannot
+/// be encoded.
 pub fn frame_png(
     project: &Project,
     project_dir: &Path,
@@ -259,88 +253,7 @@ pub fn frame_png(
     width: Option<u32>,
 ) -> SubResult<FramePng> {
     let context = RenderContext::headless().map_err(|error| lift_render_error(&error))?;
-    let mut frames = SequenceFrames::new(
-        &context,
-        Arc::new(project.clone()),
-        Arc::new(sequence.clone()),
-        project_dir,
-        FrameSpan::new(0, 1),
-    );
-    let pixels = frames.frame_at(time)?;
-    let canvas = (
-        sequence.settings.resolution.width(),
-        sequence.settings.resolution.height(),
-    );
-    let (pixels, width, height) = match width {
-        Some(target) if target > 0 && target < canvas.0 => downscale(&pixels, canvas, target),
-        _ => (pixels, canvas.0, canvas.1),
-    };
-    Ok(FramePng {
-        png: encode_png(&pixels, width, height)?,
-        width,
-        height,
-    })
-}
-
-/// Scales an RGBA image down to `target` pixels wide by averaging each source
-/// block, keeping the aspect ratio.
-///
-/// Averaging rather than sampling because a nearest-neighbour shrink of a
-/// timeline frame drops exactly the thin detail — a caption, a slate — an
-/// agent is looking for.
-fn downscale(pixels: &[u8], (width, height): (u32, u32), target: u32) -> (Vec<u8>, u32, u32) {
-    // Everything below is one flat RGBA buffer, so the whole shrink is done in
-    // `usize` and each edge is converted once.
-    let size = |value: u32| usize::try_from(value).unwrap_or(usize::MAX);
-    let (source_width, source_height, out_width) = (size(width), size(height), size(target));
-    let out_height = (source_height * out_width / source_width.max(1)).max(1);
-    let mut out = vec![0u8; out_width * out_height * 4];
-    for y in 0..out_height {
-        let y0 = y * source_height / out_height;
-        let y1 = ((y + 1) * source_height / out_height)
-            .max(y0 + 1)
-            .min(source_height);
-        for x in 0..out_width {
-            let x0 = x * source_width / out_width;
-            let x1 = ((x + 1) * source_width / out_width)
-                .max(x0 + 1)
-                .min(source_width);
-            let mut sums = [0u64; 4];
-            let mut count = 0u64;
-            for row in y0..y1 {
-                for column in x0..x1 {
-                    let at = (row * source_width + column) * 4;
-                    for (sum, channel) in sums.iter_mut().zip(&pixels[at..at + 4]) {
-                        *sum += u64::from(*channel);
-                    }
-                    count += 1;
-                }
-            }
-            let at = (y * out_width + x) * 4;
-            for (channel, sum) in out[at..at + 4].iter_mut().zip(sums) {
-                *channel = u8::try_from(sum / count.max(1)).unwrap_or(u8::MAX);
-            }
-        }
-    }
-    (out, target, u32::try_from(out_height).unwrap_or(1))
-}
-
-/// Encodes RGBA pixels as an 8-bit PNG.
-fn encode_png(pixels: &[u8], width: u32, height: u32) -> SubResult<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut encoder = png::Encoder::new(&mut out, width, height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let failed = |error: &png::EncodingError| {
-        SubError::new(codes::INTERNAL, "the frame could not be encoded as a PNG")
-            .with_detail("reason", error.to_string())
-    };
-    let mut writer = encoder.write_header().map_err(|error| failed(&error))?;
-    writer
-        .write_image_data(pixels)
-        .map_err(|error| failed(&error))?;
-    writer.finish().map_err(|error| failed(&error))?;
-    Ok(out)
+    sub_export::sequence::frame_png(&context, project, project_dir, sequence, time, width)
 }
 
 /// `path` made absolute against the working directory, without touching the

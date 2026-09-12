@@ -125,6 +125,13 @@
       "additionalProperties": false,
       "description": "A reference to a slice of a [`MediaItem`](crate::MediaItem) placed on a\ntrack.\n\nOTIO counterpart: `Clip`, whose `media_reference` is an\n`ExternalReference` and whose `source_range` selects the used portion of it.\nPlacement on the track is positional, exactly as in OTIO: a clip starts\nwhere the preceding items end.\n\nThe fixed set of per-clip parameters the MVP supports (docs/PLAN.md §5.1)\nlive on the clip itself: [`Clip::opacity`], [`Clip::transform`],\n[`Clip::gain`] and the two fades. Their invariants are checked by\n[`Clip::validate`].",
       "properties": {
+        "audio_stream": {
+          "description": "Which of the source's audio streams this clip takes, counted from zero\nin the order the probe reported them (TASK-153).\n\nA camera master or a mix-minus feed carries several audio streams and a\nclip plays exactly one of them; the first is the default, which is what\nevery clip written before this field existed meant, so the field is\nleft out of the project file when it is zero and reads back as zero\nwhen it is absent.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
         "effects": {
           "description": "Plugin effects applied to this clip, first applied first.\n\nEach entry names the plugin that declares the shader and binds the\nparameter values the user changed; the declaration itself comes from\nthe installed plugin at load time (see [`crate::effect`]). Empty by\ndefault, and left out of the saved file when empty, so a project\nwritten before effects existed still loads unchanged.",
           "items": {

@@ -197,6 +197,22 @@ lossless, software), `h265-archive`, `av1-archive` and `audio-only`. Presets are
 code: a TOML file in the config directory adds presets and replaces built-ins by
 id, and exporter plugins contribute presets that sit in the same list.
 
+A preset's quality — an average bitrate for a delivery target, a CRF for a
+master — is set on whichever encoder runs, in that encoder's own spelling, with bitrate and constant-quality settings applied explicitly. VideoToolbox
+uses its 0–1 compression-quality scale, and hardware quantizers use their own
+ranges; these mappings preserve the quality direction, not identical perceptual
+quality or guaranteed losslessness. Media Foundation has no mapped CRF
+equivalent and logs a warning when a preset requests one.
+
+Exports default to 4:2:0 chroma for playback compatibility. A custom preset can
+set `chroma = "4:2:2"` or `chroma = "4:4:4"`; an encoder that cannot accept the
+requested format reports `export.chroma_unsupported` with its name.
+
+Export requests can set `stall_timeout_ms` (default 120000) to control how long
+to wait without progress. Queue draining, encoded buffers, file growth and
+position changes reset this window. `timeout_ms` optionally caps the final
+encoder/muxer drain; it has no default limit.
+
 The range is either the whole sequence or the in-to-out range set with `I` and
 `O`. The encoder is **Automatic** unless one is pinned — see
 [Troubleshooting](#troubleshooting).

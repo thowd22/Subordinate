@@ -68,6 +68,17 @@ impl StreamInfo {
     pub fn has_audio(&self) -> bool {
         !self.audio.is_empty()
     }
+
+    /// How many audio streams the file carries (TASK-153).
+    ///
+    /// A clip takes exactly one of them ([`Clip::audio_stream`](crate::Clip::audio_stream));
+    /// the bin shows this so a multi-track camera master is recognisable
+    /// before anything is cut, and an export warns about the streams no clip
+    /// asked for rather than dropping them silently.
+    #[must_use]
+    pub fn audio_stream_count(&self) -> usize {
+        self.audio.len()
+    }
 }
 
 /// Whether a reduced-resolution proxy exists for a media item (TASK-69,

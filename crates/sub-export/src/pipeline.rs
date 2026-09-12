@@ -32,6 +32,10 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use gstreamer as gst;
@@ -41,13 +45,20 @@ use serde::{Deserialize, Serialize};
 use sub_core::{ErrorCode, SubError, SubResult};
 use sub_time::{Rational, RationalTime};
 
+use crate::chroma::ChromaFormat;
 use crate::codes;
 use crate::encoder::{
     EncoderPreferences, EncoderProbe, EncoderStatus, VideoCodec, can_encode, element_is_usable,
 };
+use crate::rate_control;
 
 /// Nanoseconds in one second, the unit GStreamer timestamps use.
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
+
+/// The largest CRF any of the exporter's encoders accepts, on the H.264
+/// scale the presets are written in. Encoders with a wider quantiser range are
+/// given the value rescaled onto theirs (see [`crate::rate_control`]).
+pub const MAX_CRF: u8 = 51;
 
 /// Bytes of RGBA per pixel, matching `sub_render::readback::BYTES_PER_PIXEL`.
 pub const BYTES_PER_PIXEL: usize = 4;
@@ -74,17 +85,23 @@ fn video_queue_bytes(settings: &ExportSettings) -> u64 {
     APPSRC_MAX_BYTES.max(frame.saturating_mul(APPSRC_MIN_FRAMES))
 }
 
-/// How long [`ExportPipeline::finish`] waits for the muxer before giving up.
-const EOS_TIMEOUT_SECONDS: u64 = 120;
-
-/// How long a push waits for the pipeline to make room before giving up.
+/// How long [`ExportPipeline::finish`] waits for an export that is making no
+/// progress at all before it gives up, when the request does not say.
 ///
-/// A branch that stops draining is either an encoder that is simply slow or
-/// one that has failed, and the difference is on the bus: the wait is long
-/// enough that a 4K frame on a busy software encoder is never mistaken for a
-/// stall, and the bus is read on every slice so a real failure is reported the
-/// moment it is posted rather than after the whole budget.
-pub const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
+/// This is patience for a *stalled* export, never a budget for a slow one: a
+/// libaom AV1 encode of a minute a frame resets the window with every frame it
+/// produces and runs as long as it needs to.
+pub const DEFAULT_STALL_TIMEOUT_MS: u64 = 120_000;
+
+/// How often the end-of-stream wait looks for progress while the bus is quiet.
+const PROGRESS_POLL: Duration = Duration::from_millis(250);
+
+/// The shortest a bus poll ever blocks, so a tiny limit cannot spin the wait.
+const MIN_POLL: Duration = Duration::from_millis(1);
+
+/// The legacy one-minute push budget, available for callers setting an explicit
+/// override. New pipelines use [`ExportSettings::stall_timeout`] by default.
+pub const PUSH_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// How long each slice of that wait is.
 ///
@@ -249,6 +266,34 @@ fn video_parser(codec: VideoCodec) -> &'static str {
     }
 }
 
+/// How a video stream's quality is asked for: a rate, or a quality target.
+///
+/// The two are mutually exclusive, and a preset that gives both or neither is
+/// rejected naming the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoQuality {
+    /// An average bitrate in kbit/s, what a delivery target asks for.
+    Bitrate {
+        /// Kilobits per second.
+        kbps: u32,
+    },
+    /// A constant-quality factor, where lower is better and 0 is lossless.
+    Crf {
+        /// The CRF value, 0 through 51.
+        value: u8,
+    },
+}
+
+impl std::fmt::Display for VideoQuality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bitrate { kbps } => write!(f, "{kbps} kbit/s"),
+            Self::Crf { value } => write!(f, "CRF {value}"),
+        }
+    }
+}
+
 /// What an export writes: the canvas, the rates and the codecs.
 ///
 /// The audio side is optional: an export with no audio builds a video-only
@@ -265,12 +310,49 @@ pub struct ExportSettings {
     pub container: Container,
     /// The video codec to encode.
     pub video_codec: VideoCodec,
+    /// The chroma format the encoder is fed.
+    ///
+    /// 4:2:0 unless a preset asks for more: it is what every delivery profile
+    /// and every hardware decoder takes, and what an unpinned pipeline does
+    /// *not* produce.
+    #[serde(default)]
+    pub chroma: ChromaFormat,
     /// The audio codec to encode, or `None` for a video-only export.
     pub audio_codec: Option<AudioCodec>,
     /// The sample rate of the audio handed to the pipeline, in hertz.
     pub sample_rate: u32,
     /// Channels per audio frame.
     pub channels: u16,
+    /// The bitrate or CRF the video encoder is driven with, or `None` to let
+    /// the element keep its own default rate control.
+    #[serde(default)]
+    pub video_quality: Option<VideoQuality>,
+    /// The audio bitrate in kbit/s, or `None` for a lossless codec or for the
+    /// encoder's own default.
+    #[serde(default)]
+    pub audio_bitrate_kbps: Option<u32>,
+    /// How long the export may make no progress at all before it is
+    /// abandoned, in milliseconds.
+    ///
+    /// The window is measured from the last sign of life — a byte written, a
+    /// buffer leaving an `appsrc`, the pipeline's position moving — not from
+    /// the start of the export, so an encoder that is slow but working is
+    /// never abandoned.
+    #[serde(default = "default_stall_timeout_ms")]
+    pub stall_timeout_ms: u64,
+    /// A hard limit on the whole end-of-stream wait, in milliseconds, or
+    /// `None` for no limit.
+    ///
+    /// This is the budget a caller sets when it would rather have an error
+    /// than a long wait; it belongs to the request, and there is no limit
+    /// unless the request asks for one.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// The stall window a request that does not name one is given.
+fn default_stall_timeout_ms() -> u64 {
+    DEFAULT_STALL_TIMEOUT_MS
 }
 
 impl ExportSettings {
@@ -283,9 +365,14 @@ impl ExportSettings {
             frame_rate,
             container,
             video_codec: VideoCodec::H264,
+            chroma: ChromaFormat::default(),
             audio_codec: Some(AudioCodec::Aac),
             sample_rate: 48_000,
             channels: 2,
+            video_quality: None,
+            audio_bitrate_kbps: None,
+            stall_timeout_ms: DEFAULT_STALL_TIMEOUT_MS,
+            timeout_ms: None,
         }
     }
 
@@ -293,6 +380,14 @@ impl ExportSettings {
     #[must_use]
     pub fn with_video_codec(mut self, codec: VideoCodec) -> Self {
         self.video_codec = codec;
+        self
+    }
+
+    /// The same settings with `chroma` as the chroma format handed to the
+    /// encoder.
+    #[must_use]
+    pub fn with_chroma(mut self, chroma: ChromaFormat) -> Self {
+        self.chroma = chroma;
         self
     }
 
@@ -311,6 +406,52 @@ impl ExportSettings {
         self
     }
 
+    /// The same settings driving the video encoder at `quality`.
+    ///
+    /// `None` leaves the encoder element on its own default rate control,
+    /// which is what an export that names no preset gets.
+    #[must_use]
+    pub fn with_video_quality(mut self, quality: Option<VideoQuality>) -> Self {
+        self.video_quality = quality;
+        self
+    }
+
+    /// The same settings asking the audio encoder for `kbps` kbit/s.
+    ///
+    /// `None` is the lossless case and the no-opinion case alike: nothing is
+    /// set on the element.
+    #[must_use]
+    pub fn with_audio_bitrate(mut self, kbps: Option<u32>) -> Self {
+        self.audio_bitrate_kbps = kbps;
+        self
+    }
+
+    /// The same settings with `millis` of patience for an export that is
+    /// making no progress at all.
+    #[must_use]
+    pub fn with_stall_timeout_ms(mut self, millis: u64) -> Self {
+        self.stall_timeout_ms = millis;
+        self
+    }
+
+    /// The same settings with a hard limit of `millis` on the end-of-stream
+    /// wait, or no limit at all.
+    #[must_use]
+    pub fn with_timeout_ms(mut self, millis: Option<u64>) -> Self {
+        self.timeout_ms = millis;
+        self
+    }
+
+    /// The stall window as a [`Duration`].
+    pub fn stall_timeout(&self) -> Duration {
+        Duration::from_millis(self.stall_timeout_ms)
+    }
+
+    /// The hard limit as a [`Duration`], when the request set one.
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout_ms.map(Duration::from_millis)
+    }
+
     /// Bytes in one RGBA frame of this canvas.
     pub fn frame_bytes(&self) -> usize {
         self.width as usize * self.height as usize * BYTES_PER_PIXEL
@@ -320,8 +461,8 @@ impl ExportSettings {
     ///
     /// # Errors
     ///
-    /// - [`codes::INVALID_SETTINGS`] for a zero dimension, sample rate or
-    ///   channel count.
+    /// - [`codes::INVALID_SETTINGS`] for a zero dimension, sample rate,
+    ///   channel count or bitrate, and for a CRF above 51.
     /// - [`codes::UNSUPPORTED_COMBINATION`] when the container cannot carry
     ///   one of the codecs.
     pub fn validate(&self) -> SubResult<()> {
@@ -332,6 +473,45 @@ impl ExportSettings {
             )
             .with_detail("width", self.width)
             .with_detail("height", self.height));
+        }
+        match self.video_quality {
+            Some(VideoQuality::Bitrate { kbps: 0 }) => {
+                return Err(SubError::new(
+                    codes::INVALID_SETTINGS,
+                    "a video bitrate is strictly positive",
+                )
+                .with_detail("video_bitrate_kbps", 0));
+            }
+            Some(VideoQuality::Crf { value }) if value > MAX_CRF => {
+                return Err(SubError::new(
+                    codes::INVALID_SETTINGS,
+                    format!("a CRF is 0 through {MAX_CRF}"),
+                )
+                .with_detail("video_crf", u32::from(value)));
+            }
+            _ => {}
+        }
+        if self.audio_bitrate_kbps == Some(0) {
+            return Err(SubError::new(
+                codes::INVALID_SETTINGS,
+                "an audio bitrate is strictly positive",
+            )
+            .with_detail("audio_bitrate_kbps", 0));
+        }
+
+        if self.stall_timeout_ms == 0 {
+            return Err(SubError::new(
+                codes::INVALID_SETTINGS,
+                "an export needs a non-zero stall timeout",
+            )
+            .with_detail("stall_timeout_ms", self.stall_timeout_ms));
+        }
+        if self.timeout_ms == Some(0) {
+            return Err(SubError::new(
+                codes::INVALID_SETTINGS,
+                "an export time limit, when set, has to be non-zero",
+            )
+            .with_detail("timeout_ms", 0));
         }
         if !self.container.accepts_video(self.video_codec) {
             return Err(SubError::new(
@@ -547,17 +727,15 @@ impl ExportElements {
     }
 }
 
-/// Confirms `chosen` can encode this export's canvas, or finds one that can.
+/// Confirms a hardware encoder can open a session for this export's canvas.
 ///
-/// The session probe encodes a small frame, and a small frame is not the
-/// question: on the Windows GPU runner every NVENC element encodes 640x480 and
-/// then refuses to open a session for 1920x1080 seconds later in the same
-/// process (TASK-146). So the encoder an export is about to plug encodes one
-/// frame of the *export's* canvas first, which costs a few tens of
-/// milliseconds and is the difference between an export that runs and one that
-/// dies on its first frame.
+/// Small hardware probes cannot reveal every resolution-specific device
+/// failure (TASK-146), so hardware also gets a full-canvas check. Software
+/// bypasses frame preflight: CPU latency is not an availability failure, and
+/// its real export already validates caps and reports bus errors or stalls.
+/// This also applies when software is the fallback for a failed device.
 ///
-/// An encoder the user pinned is never swapped — the pin is the decision the
+/// A hardware encoder the user pinned is never swapped — the pin is the decision the
 /// order withholds — but it is still asked, so the refusal names the element
 /// and says what it answered. The automatic order walks on to the next usable
 /// encoder and says in the log which one it left behind.
@@ -572,8 +750,22 @@ fn verify_at_canvas<'a>(
     preferences: &EncoderPreferences,
     chosen: &'a EncoderStatus,
 ) -> SubResult<&'a EncoderStatus> {
+    verify_at_canvas_with(probe, settings, preferences, chosen, &can_encode)
+}
+
+/// Hardware preflight with an injectable encode operation for regression tests.
+fn verify_at_canvas_with<'a>(
+    probe: &'a EncoderProbe,
+    settings: &ExportSettings,
+    preferences: &EncoderPreferences,
+    chosen: &'a EncoderStatus,
+    encode: &dyn Fn(&str, u32, u32) -> Result<(), crate::encoder::EncodeRefusal>,
+) -> SubResult<&'a EncoderStatus> {
+    if !chosen.hardware {
+        return Ok(chosen);
+    }
     let (width, height) = (settings.width, settings.height);
-    let refusal = match can_encode(&chosen.element, width, height) {
+    let refusal = match encode(&chosen.element, width, height) {
         Ok(()) => return Ok(chosen),
         Err(refusal) => refusal,
     };
@@ -603,12 +795,17 @@ fn verify_at_canvas<'a>(
         if candidate.element == chosen.element {
             continue;
         }
-        match can_encode(&candidate.element, width, height) {
+        let result = if candidate.hardware {
+            encode(&candidate.element, width, height)
+        } else {
+            Ok(())
+        };
+        match result {
             Ok(()) => {
                 tracing::info!(
                     element = %candidate.element,
                     skipped = ?skipped,
-                    "encoding with the first encoder that can take this canvas"
+                    "using the first available fallback encoder"
                 );
                 return Ok(candidate);
             }
@@ -671,6 +868,7 @@ pub struct ExportPipeline {
     video_frames: u64,
     audio_frames: u64,
     finished: bool,
+    activity: Arc<EncoderActivity>,
     push_timeout: Duration,
 }
 
@@ -728,6 +926,8 @@ impl ExportPipeline {
             _ => None,
         };
 
+        let activity = observe_encoders(&pipeline, elements);
+
         pipeline.set_state(gst::State::Playing).map_err(|e| {
             let error = pipeline_error("the export pipeline would not start", &e)
                 .with_detail("path", path.display().to_string());
@@ -756,13 +956,14 @@ impl ExportPipeline {
             video_frames: 0,
             audio_frames: 0,
             finished: false,
-            push_timeout: PUSH_TIMEOUT,
+            activity,
+            push_timeout: settings.stall_timeout(),
         })
     }
 
     /// How long a push waits for a branch to make room before it gives up.
     ///
-    /// [`PUSH_TIMEOUT`] by default. A test that wants to see a stalled branch
+    /// The request stall timeout by default. A test that wants to see a stalled branch
     /// reported rather than waited on shortens it; nothing else needs to.
     #[must_use]
     pub fn with_push_timeout(mut self, timeout: Duration) -> Self {
@@ -824,7 +1025,7 @@ impl ExportPipeline {
     /// - [`codes::PIPELINE_FAILED`] when an element failed while the branch
     ///   was full, which is how a failing encoder surfaces mid-export.
     /// - [`codes::EXPORT_TIMEOUT`] when the branch stops taking buffers for
-    ///   [`PUSH_TIMEOUT`] with nothing on the bus to say why.
+    ///   the configured stall window with nothing on the bus to say why.
     /// - [`codes::PUSH_FAILED`] when the pipeline refuses the buffer outright.
     pub fn push_video_frame(&mut self, pixels: &[u8]) -> SubResult<()> {
         let expected = self.settings.frame_bytes();
@@ -967,6 +1168,14 @@ impl ExportPipeline {
     }
 
     /// Waits for end of stream, failing on the first error the bus carries.
+    ///
+    /// The wait is about progress, not about elapsed time: the bus is polled
+    /// in short slices, and every slice that shows the export moving — a byte
+    /// on disk, a buffer leaving an `appsrc`, the pipeline's position
+    /// advancing — restarts the patience window. An encoder that takes a
+    /// minute a frame therefore runs to the end; only an export that has
+    /// genuinely stopped runs out of patience, and a request that asked for a
+    /// hard limit gets that limit as well.
     fn wait_for_eos(&self) -> SubResult<()> {
         let Some(bus) = self.pipeline.bus() else {
             return Err(SubError::new(
@@ -974,29 +1183,47 @@ impl ExportPipeline {
                 "the export pipeline has no bus",
             ));
         };
-        let Some(message) = bus.timed_pop_filtered(
-            gst::ClockTime::from_seconds(EOS_TIMEOUT_SECONDS),
-            &[gst::MessageType::Eos, gst::MessageType::Error],
-        ) else {
-            return Err(SubError::new(
-                codes::EXPORT_TIMEOUT,
-                "the export pipeline never finished writing",
-            )
-            .with_detail("path", self.path.display().to_string())
-            .with_detail("timeout_seconds", EOS_TIMEOUT_SECONDS));
-        };
-        match message.view() {
-            gst::MessageView::Eos(_) => Ok(()),
-            gst::MessageView::Error(err) => {
-                Err(
-                    element_error(codes::PIPELINE_FAILED, "the export pipeline failed", err)
-                        .with_detail("path", self.path.display().to_string()),
-                )
-            }
-            _ => Err(SubError::new(
-                codes::PIPELINE_FAILED,
-                "the export pipeline posted something other than end of stream",
-            )),
+        let stall = self.settings.stall_timeout();
+        let limit = self.settings.timeout();
+        let started = Instant::now();
+        let mut last_progress = started;
+        let mut mark = self.progress_mark();
+        loop {
+            let slice = poll_slice(stall, limit, started.elapsed());
+            let message = bus.timed_pop_filtered(
+                gst::ClockTime::from_nseconds(clock_nanos(slice)),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            );
+            let Some(message) = message else {
+                let now = Instant::now();
+                let current = self.progress_mark();
+                if current != mark {
+                    mark = current;
+                    last_progress = now;
+                }
+                if let Some(verdict) = timeout_verdict(
+                    now.duration_since(last_progress),
+                    stall,
+                    now.duration_since(started),
+                    limit,
+                ) {
+                    return Err(self.timeout_error(verdict, &mark, now.duration_since(started)));
+                }
+                continue;
+            };
+            return match message.view() {
+                gst::MessageView::Eos(_) => Ok(()),
+                gst::MessageView::Error(err) => {
+                    Err(
+                        element_error(codes::PIPELINE_FAILED, "the export pipeline failed", err)
+                            .with_detail("path", self.path.display().to_string()),
+                    )
+                }
+                _ => Err(SubError::new(
+                    codes::PIPELINE_FAILED,
+                    "the export pipeline posted something other than end of stream",
+                )),
+            };
         }
     }
 
@@ -1015,7 +1242,9 @@ impl ExportPipeline {
     /// A buffer larger than the whole queue is let through when the queue is
     /// empty: a canvas whose frame does not fit the cap must still export.
     fn wait_for_room(&self, src: &AppSrc, stream: &'static str, bytes: u64) -> SubResult<()> {
-        let deadline = Instant::now() + self.push_timeout;
+        let started = Instant::now();
+        let mut last_progress = started;
+        let mut mark = self.progress_mark();
         loop {
             let queued = src.current_level_bytes();
             if queued == 0 || queued.saturating_add(bytes) <= src.max_bytes() {
@@ -1026,17 +1255,21 @@ impl ExportPipeline {
                     .with_detail("stream", stream)
                     .with_detail("path", self.path.display().to_string()));
             }
-            if Instant::now() >= deadline {
-                return Err(SubError::new(
-                    codes::EXPORT_TIMEOUT,
-                    format!("the export's {stream} branch stopped taking buffers"),
-                )
-                .with_detail("stream", stream)
-                .with_detail("video_encoder", self.elements.video_encoder.clone())
-                .with_detail("audio_encoder", self.elements.audio_encoder.clone())
-                .with_detail("queued_bytes", queued)
-                .with_detail("timeout_seconds", self.push_timeout.as_secs())
-                .with_detail("path", self.path.display().to_string()));
+            let now = Instant::now();
+            let current = self.progress_mark();
+            if current != mark {
+                last_progress = now;
+                mark = current;
+            }
+            if let Some(verdict) = timeout_verdict(
+                now.duration_since(last_progress),
+                self.push_timeout,
+                now.duration_since(started),
+                None,
+            ) {
+                return Err(self
+                    .timeout_error(verdict, &mark, started.elapsed())
+                    .with_detail("stream", stream));
             }
             std::thread::sleep(PUSH_POLL);
         }
@@ -1057,6 +1290,58 @@ impl ExportPipeline {
         None
     }
 
+    /// Everything that says the export is still moving, sampled at once.
+    ///
+    /// Any one of these changing means work is being done: the muxer has
+    /// written more of the file, an encoder has taken another buffer out of an
+    /// `appsrc`, or the pipeline's position has advanced.
+    fn progress_mark(&self) -> ProgressMark {
+        ProgressMark {
+            bytes_written: self.bytes_written(),
+            encoded_buffers: self.activity.buffers.load(Ordering::Relaxed),
+            video_eos: self.activity.video_eos.load(Ordering::Relaxed),
+            audio_eos: self.activity.audio_eos.load(Ordering::Relaxed),
+            video_queued: queued_bytes(&self.video_src),
+            audio_queued: self.audio_src.as_ref().map_or(0, queued_bytes),
+            position_nanos: self
+                .pipeline
+                .query_position::<gst::ClockTime>()
+                .map(gst::ClockTime::nseconds),
+        }
+    }
+
+    /// The [`codes::EXPORT_TIMEOUT`] error for an export that ran out of time,
+    /// naming the element it was waiting on.
+    fn timeout_error(&self, verdict: Timeout, mark: &ProgressMark, elapsed: Duration) -> SubError {
+        let element = waiting_on(
+            mark,
+            &self.elements.video_encoder,
+            self.elements.audio_encoder.as_deref(),
+            self.settings.container.muxer(),
+        );
+        let message = match verdict {
+            Timeout::Stalled => {
+                format!("the export stopped making progress while waiting for {element}")
+            }
+            Timeout::Expired => {
+                format!("the export ran out of its time limit while waiting for {element}")
+            }
+        };
+        let error = SubError::new(codes::EXPORT_TIMEOUT, message)
+            .with_detail("reason", verdict.as_str())
+            .with_detail("element", element)
+            .with_detail("path", self.path.display().to_string())
+            .with_detail("stall_timeout_ms", self.settings.stall_timeout_ms)
+            .with_detail("elapsed_ms", elapsed_ms(elapsed))
+            .with_detail("video_frames", self.video_frames)
+            .with_detail("bytes_written", mark.bytes_written);
+        let error = match self.settings.timeout_ms {
+            Some(millis) => error.with_detail("timeout_ms", millis),
+            None => error,
+        };
+        with_bus_error(&self.pipeline, error)
+    }
+
     /// The error a refused push turns into, enriched with whatever the bus
     /// says went wrong underneath.
     fn push_failed(&self, stream: &'static str, flow: gst::FlowError) -> SubError {
@@ -1069,6 +1354,181 @@ impl ExportPipeline {
         .with_detail("path", self.path.display().to_string());
         with_bus_error(&self.pipeline, error)
     }
+}
+
+/// Output activity shared with encoder streaming threads.
+#[derive(Default)]
+struct EncoderActivity {
+    buffers: AtomicU64,
+    video_eos: AtomicBool,
+    audio_eos: AtomicBool,
+}
+
+/// Observe produced buffers and final EOS, including output buffered by a muxer.
+fn observe_encoders(pipeline: &gst::Pipeline, elements: &ExportElements) -> Arc<EncoderActivity> {
+    let activity = Arc::new(EncoderActivity {
+        audio_eos: AtomicBool::new(elements.audio_encoder.is_none()),
+        ..EncoderActivity::default()
+    });
+    for element in pipeline
+        .iterate_elements()
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let Some(factory) = element.factory() else {
+            continue;
+        };
+        let video = factory.name() == elements.video_encoder;
+        if !video && elements.audio_encoder.as_deref() != Some(factory.name().as_str()) {
+            continue;
+        }
+        if let Some(pad) = element.static_pad("src") {
+            let activity = activity.clone();
+            pad.add_probe(
+                gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+                move |_, info| {
+                    if info.buffer().is_some() {
+                        activity.buffers.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if info
+                        .event()
+                        .is_some_and(|event| event.type_() == gst::EventType::Eos)
+                    {
+                        let eos = if video {
+                            &activity.video_eos
+                        } else {
+                            &activity.audio_eos
+                        };
+                        eos.store(true, Ordering::Relaxed);
+                    }
+                    gst::PadProbeReturn::Ok
+                },
+            );
+        }
+    }
+    activity
+}
+
+/// What the export had done the last time it was looked at.
+///
+/// Two equal marks a patience window apart are what a stalled export looks
+/// like; any field moving means the encoders and the muxer are still working,
+/// however slowly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProgressMark {
+    /// Whether each encoder has completed its own output stream.
+    video_eos: bool,
+    audio_eos: bool,
+    /// Encoded buffers emitted, including frames the muxer has not written yet.
+    encoded_buffers: u64,
+    /// Bytes the muxer has written to the file.
+    bytes_written: u64,
+    /// Bytes still queued in the video `appsrc`.
+    video_queued: u64,
+    /// Bytes still queued in the audio `appsrc`, zero without an audio branch.
+    audio_queued: u64,
+    /// The pipeline's position, when it answers a position query.
+    position_nanos: Option<u64>,
+}
+
+/// Why an export ran out of time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Timeout {
+    /// Nothing moved for the whole stall window: the export has stopped.
+    Stalled,
+    /// The request's own hard limit ran out while the export was still going.
+    Expired,
+}
+
+impl Timeout {
+    /// The stable `reason` detail the error carries.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stalled => "stalled",
+            Self::Expired => "time_limit",
+        }
+    }
+}
+
+/// Whether a wait that has seen no progress for `since_progress`, and has been
+/// running for `elapsed` in total, is over.
+///
+/// The hard limit is checked first so a request that set one gets the error it
+/// asked for rather than a stall report, and both are exclusive of nothing:
+/// reaching the window is reaching it.
+fn timeout_verdict(
+    since_progress: Duration,
+    stall: Duration,
+    elapsed: Duration,
+    limit: Option<Duration>,
+) -> Option<Timeout> {
+    if limit.is_some_and(|limit| elapsed >= limit) {
+        return Some(Timeout::Expired);
+    }
+    if since_progress >= stall {
+        return Some(Timeout::Stalled);
+    }
+    None
+}
+
+/// The element an export that stopped was waiting on.
+///
+/// A branch whose `appsrc` is still holding buffers is waiting on the encoder
+/// that has not taken them. An empty appsrc does not mean the encoder has
+/// finished flushing: only its output EOS proves that. Once both encoders
+/// emitted EOS, the remaining wait belongs to the muxer.
+fn waiting_on(
+    mark: &ProgressMark,
+    video_encoder: &str,
+    audio_encoder: Option<&str>,
+    muxer: &str,
+) -> String {
+    if mark.video_queued > 0 {
+        return video_encoder.to_owned();
+    }
+    if mark.audio_queued > 0
+        && let Some(encoder) = audio_encoder
+    {
+        return encoder.to_owned();
+    }
+    if !mark.video_eos {
+        return video_encoder.to_owned();
+    }
+    if !mark.audio_eos
+        && let Some(encoder) = audio_encoder
+    {
+        return encoder.to_owned();
+    }
+    muxer.to_owned()
+}
+
+/// How many bytes an `appsrc` is still holding for its branch.
+fn queued_bytes(src: &AppSrc) -> u64 {
+    src.property::<u64>("current-level-bytes")
+}
+
+/// How long the next bus poll may block.
+///
+/// Short enough to notice progress promptly, never longer than the patience
+/// window, and never past a hard limit the request set: a limit that is only
+/// noticed a poll interval late is not the limit that was asked for.
+fn poll_slice(stall: Duration, limit: Option<Duration>, elapsed: Duration) -> Duration {
+    let mut slice = PROGRESS_POLL.min(stall);
+    if let Some(limit) = limit {
+        slice = slice.min(limit.saturating_sub(elapsed));
+    }
+    slice.max(MIN_POLL)
+}
+
+/// `duration` in whole milliseconds, for an error detail.
+fn elapsed_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// `duration` as the nanoseconds a [`gst::ClockTime`] takes, saturating rather
+/// than wrapping on a window nobody will ever wait out.
+fn clock_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// Deletes a part-written export, reporting whether anything was there.
@@ -1233,8 +1693,10 @@ pub fn export_with(
 
 /// Builds `appsrc ! videoconvert ! capsfilter ! encoder ! parser ! muxer`.
 ///
-/// The `capsfilter` is what makes `videoconvert` do the colour conversion
-/// rather than the encoder; see [`encoder_input_caps`].
+/// The capsfilter is the point of the branch: without it `videoconvert`
+/// negotiates whatever the encoder likes best, which for `x264enc` is `Y444`
+/// and a file in High 4:4:4 Predictive. With it the encoder is fed the chroma
+/// format the settings ask for — 4:2:0 unless a preset says otherwise.
 fn build_video_branch(
     pipeline: &gst::Pipeline,
     muxer: &gst::Element,
@@ -1244,13 +1706,22 @@ fn build_video_branch(
     let src = make_element("appsrc")?;
     let convert = make_element("videoconvert")?;
     let encoder = make_coded_element(&elements.video_encoder, codes::ENCODER_UNAVAILABLE)?;
-    let mut chain = vec![src.clone(), convert];
-    if let Some(caps) = encoder_input_caps(&elements.video_encoder) {
-        let filter = make_element("capsfilter")?;
-        filter.set_property("caps", &caps);
-        chain.push(filter);
+    if let Some(quality) = settings.video_quality {
+        for warning in rate_control::apply_video_quality(&encoder, &elements.video_encoder, quality)
+        {
+            tracing::warn!(
+                element = elements.video_encoder.as_str(),
+                quality = %quality,
+                "{warning}"
+            );
+        }
     }
-    chain.push(encoder);
+    let filter = make_element("capsfilter")?;
+    filter.set_property(
+        "caps",
+        chroma_caps(settings.chroma, &elements.video_encoder, &encoder)?,
+    );
+    let mut chain = vec![src.clone(), convert, filter, encoder];
     let parser = video_parser(settings.video_codec);
     if element_is_usable(parser) {
         chain.push(make_element(parser)?);
@@ -1265,57 +1736,6 @@ fn build_video_branch(
     Ok(src)
 }
 
-/// The planar formats an export asks its video encoder for, best first.
-///
-/// Every codec this exporter targets is encoded from one of these, and every
-/// encoder in the catalogue takes at least one of them.
-const ENCODER_FORMATS: [&str; 2] = ["NV12", "I420"];
-
-/// What the video branch pins between `videoconvert` and `name`, if anything.
-///
-/// The compositor reads back RGBA and several hardware encoders advertise RGBA
-/// on their sink pad, so without this `videoconvert` hands the encoder RGBA
-/// and the encoder does the colour conversion itself — down a vendor path that
-/// is not the one anybody tests. On the Windows NVENC build that path cannot
-/// even open an encode session: `nvh264enc` answers
-/// `NV_ENC_ERR_INVALID_VERSION` and rejects the caps, while the very same
-/// element encodes NV12 on the same machine (TASK-146). Pinning a planar
-/// format puts the conversion in `videoconvert`, where it is one known step on
-/// every platform.
-///
-/// The caps are the intersection of [`ENCODER_FORMATS`] with what the encoder
-/// actually accepts, so an encoder that takes neither is left to negotiate as
-/// it always did rather than being made unlinkable.
-fn encoder_input_caps(name: &str) -> Option<gst::Caps> {
-    let factory = gst::ElementFactory::find(name)?;
-    let accepted = factory
-        .static_pad_templates()
-        .into_iter()
-        .find(|template| template.direction() == gst::PadDirection::Sink)
-        .map(|template| template.caps())?;
-    let wanted = gst::Caps::builder("video/x-raw")
-        .field("format", gst::List::new(ENCODER_FORMATS))
-        .build();
-    let common = wanted.intersect(&accepted);
-    (!common.is_empty()).then(|| {
-        // The intersection carries whatever else the template says — widths,
-        // features, memory kinds. Only the format is being chosen here, so the
-        // filter is rebuilt from the formats that survived.
-        let formats: Vec<&str> = ENCODER_FORMATS
-            .into_iter()
-            .filter(|format| {
-                let one = gst::Caps::builder("video/x-raw")
-                    .field("format", *format)
-                    .build();
-                !one.intersect(&accepted).is_empty()
-            })
-            .collect();
-        gst::Caps::builder("video/x-raw")
-            .field("format", gst::List::new(formats))
-            .build()
-    })
-}
-
 /// Builds `appsrc ! audioconvert ! audioresample ! encoder ! parser ! muxer`.
 fn build_audio_branch(
     pipeline: &gst::Pipeline,
@@ -1328,6 +1748,11 @@ fn build_audio_branch(
     let convert = make_element("audioconvert")?;
     let resample = make_element("audioresample")?;
     let encoder = make_coded_element(encoder_name, codes::ENCODER_UNAVAILABLE)?;
+    if let Some(kbps) = settings.audio_bitrate_kbps {
+        for warning in rate_control::apply_audio_bitrate(&encoder, encoder_name, kbps) {
+            tracing::warn!(element = encoder_name, bitrate_kbps = kbps, "{warning}");
+        }
+    }
     let mut chain = vec![src.clone(), convert, resample, encoder];
     if let Some(parser) = codec.parser().filter(|name| element_is_usable(name)) {
         chain.push(make_element(parser)?);
@@ -1382,6 +1807,88 @@ fn video_caps(settings: &ExportSettings) -> gst::Caps {
             ),
         )
         .build()
+}
+
+/// The caps pinned between `videoconvert` and the encoder.
+///
+/// Every raw format of the requested family that `encoder` declares, in the
+/// element's own order, so the element's first choice within the family is
+/// what it gets: `I420` for `x264enc`, `NV12` for a VA-API or NVENC element.
+///
+/// # Errors
+///
+/// [`codes::CHROMA_UNSUPPORTED`] when the element declares no format of the
+/// family at all. Negotiating something else instead is exactly the silence
+/// this function exists to break.
+fn chroma_caps(chroma: ChromaFormat, name: &str, encoder: &gst::Element) -> SubResult<gst::Caps> {
+    chroma_caps_for(chroma, name, &declared_sink_formats(encoder))
+}
+
+/// [`chroma_caps`] against the formats an element declares, so the choice can
+/// be tested without an element that declares them.
+///
+/// # Errors
+///
+/// [`codes::CHROMA_UNSUPPORTED`], as [`chroma_caps`].
+fn chroma_caps_for(chroma: ChromaFormat, name: &str, declared: &[String]) -> SubResult<gst::Caps> {
+    let chosen: Vec<&'static str> = if declared.is_empty() {
+        // An element that declares nothing readable still has to be fed
+        // something: the family's own order is the best guess there is, and a
+        // format it truly cannot take fails to negotiate loudly.
+        chroma.formats().to_vec()
+    } else {
+        let chosen = chroma.declared_in(declared);
+        if chosen.is_empty() {
+            return Err(SubError::new(
+                codes::CHROMA_UNSUPPORTED,
+                format!("{name} cannot encode {chroma} chroma"),
+            )
+            .with_detail("encoder", name)
+            .with_detail("chroma", chroma.as_str())
+            .with_detail("wanted", chroma.formats())
+            .with_detail("declared", declared));
+        }
+        chosen
+    };
+    let mut caps = gst::Caps::new_empty();
+    {
+        let caps = caps
+            .get_mut()
+            .ok_or_else(|| SubError::new(codes::PIPELINE_FAILED, "fresh caps are not writable"))?;
+        for format in chosen {
+            caps.append_structure(
+                gst::Structure::builder("video/x-raw")
+                    .field("format", format)
+                    .build(),
+            );
+        }
+    }
+    Ok(caps)
+}
+
+/// Every `format` an element's sink pad template names, in template order.
+///
+/// An element whose template carries no `format` field, or none this build can
+/// read, yields an empty list, which the caller reads as "unknown" rather than
+/// as "nothing".
+fn declared_sink_formats(encoder: &gst::Element) -> Vec<String> {
+    let mut formats: Vec<String> = Vec::new();
+    let Some(template) = encoder.pad_template("sink") else {
+        return formats;
+    };
+    let caps = template.caps();
+    for structure in caps.iter() {
+        let Ok(value) = structure.value("format") else {
+            continue;
+        };
+        if let Ok(one) = value.get::<String>() {
+            formats.push(one);
+        } else if let Ok(list) = value.get::<gst::List>() {
+            formats.extend(list.iter().filter_map(|item| item.get::<String>().ok()));
+        }
+    }
+    formats.dedup();
+    formats
 }
 
 /// The caps of the mix: interleaved `f32`, as the mixer produces it.
@@ -1445,11 +1952,27 @@ fn pipeline_error(message: &str, source: &dyn std::error::Error) -> SubError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUDIO_CODECS, AudioCodec, AudioFrameSource, CONTAINERS, Container, ExportSettings,
-        PcmAudioSource, SolidFrames, VideoFrameSource, audio_nanos, element_is_usable, gst,
-        video_parser,
+        AUDIO_CODECS, AudioCodec, AudioFrameSource, CONTAINERS, ChromaFormat, Container,
+        DEFAULT_STALL_TIMEOUT_MS, ExportSettings, MAX_CRF, PcmAudioSource, ProgressMark,
+        SolidFrames, Timeout, VideoFrameSource, VideoQuality, audio_nanos, chroma_caps_for, codes,
+        declared_sink_formats, poll_slice, timeout_verdict, video_parser, waiting_on,
     };
+    use gstreamer as gst;
+    use std::time::Duration;
     use sub_time::Rational;
+
+    /// The formats a list of names stands for, as an element would declare
+    /// them.
+    fn declared(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// The `format` of every structure of `caps`, in order.
+    fn caps_formats(caps: &gst::Caps) -> Vec<String> {
+        caps.iter()
+            .filter_map(|structure| structure.get::<String>("format").ok())
+            .collect()
+    }
 
     fn settings(rate: Rational) -> ExportSettings {
         ExportSettings::new(16, 16, rate, Container::Mkv)
@@ -1516,6 +2039,65 @@ mod tests {
         silent
             .validate()
             .expect("a video-only export needs no audio format");
+    }
+
+    #[test]
+    fn settings_default_to_the_encoder_s_own_rate_control() {
+        let settings = settings(Rational::FPS_24);
+        assert_eq!(settings.video_quality, None);
+        assert_eq!(settings.audio_bitrate_kbps, None);
+        settings.validate().expect("no quality is a valid export");
+    }
+
+    #[test]
+    fn a_quality_and_an_audio_bitrate_survive_the_builders_and_serde() {
+        let settings = settings(Rational::FPS_24)
+            .with_video_quality(Some(VideoQuality::Bitrate { kbps: 12_000 }))
+            .with_audio_bitrate(Some(192));
+        assert_eq!(
+            settings.video_quality,
+            Some(VideoQuality::Bitrate { kbps: 12_000 })
+        );
+        assert_eq!(settings.audio_bitrate_kbps, Some(192));
+        settings.validate().expect("a bitrate export is valid");
+        let json = serde_json::to_string(&settings).expect("settings serialise");
+        let back: ExportSettings = serde_json::from_str(&json).expect("settings deserialise");
+        assert_eq!(back, settings);
+    }
+
+    #[test]
+    fn settings_written_before_quality_existed_still_load() {
+        let json = r#"{"width":16,"height":16,"frame_rate":{"numerator":24,"denominator":1},
+            "container":"mkv","video_codec":"h264","audio_codec":"aac","sample_rate":48000,
+            "channels":2}"#;
+        let settings: ExportSettings = serde_json::from_str(json).expect("old settings load");
+        assert_eq!(settings.video_quality, None);
+        assert_eq!(settings.audio_bitrate_kbps, None);
+    }
+
+    #[test]
+    fn validation_rejects_a_zero_bitrate_and_an_out_of_range_crf() {
+        let zero_video =
+            settings(Rational::FPS_24).with_video_quality(Some(VideoQuality::Bitrate { kbps: 0 }));
+        let error = zero_video
+            .validate()
+            .expect_err("a zero bitrate is refused");
+        assert_eq!(error.code, crate::codes::INVALID_SETTINGS);
+        let wild_crf = settings(Rational::FPS_24)
+            .with_video_quality(Some(VideoQuality::Crf { value: MAX_CRF + 1 }));
+        let error = wild_crf
+            .validate()
+            .expect_err("a CRF above the scale is refused");
+        assert_eq!(error.code, crate::codes::INVALID_SETTINGS);
+        let zero_audio = settings(Rational::FPS_24).with_audio_bitrate(Some(0));
+        let error = zero_audio
+            .validate()
+            .expect_err("a zero audio bitrate is refused");
+        assert_eq!(error.code, crate::codes::INVALID_SETTINGS);
+        settings(Rational::FPS_24)
+            .with_video_quality(Some(VideoQuality::Crf { value: MAX_CRF }))
+            .validate()
+            .expect("the worst CRF on the scale is still valid");
     }
 
     #[test]
@@ -1592,43 +2174,6 @@ mod tests {
     }
 
     #[test]
-    fn a_video_encoder_is_asked_for_a_planar_format_rather_than_rgba() {
-        if gst::init().is_err() || !element_is_usable("x264enc") {
-            eprintln!("skipping: no GStreamer or no x264enc here");
-            return;
-        }
-        let caps = super::encoder_input_caps("x264enc").expect("x264enc takes a planar format");
-        let text = caps.to_string();
-        assert!(text.contains("video/x-raw"), "{text}");
-        assert!(
-            text.contains("NV12") || text.contains("I420"),
-            "the filter names the planar formats: {text}"
-        );
-        assert!(
-            !text.contains("RGBA"),
-            "RGBA is exactly what the filter keeps out: {text}"
-        );
-    }
-
-    #[test]
-    fn an_element_that_takes_no_planar_video_is_left_to_negotiate() {
-        if gst::init().is_err() {
-            eprintln!("skipping: no GStreamer here");
-            return;
-        }
-        assert!(
-            super::encoder_input_caps("does-not-exist-at-all").is_none(),
-            "an element that is not installed pins nothing"
-        );
-        if element_is_usable("opusenc") {
-            assert!(
-                super::encoder_input_caps("opusenc").is_none(),
-                "an audio element takes no raw video, so nothing is pinned"
-            );
-        }
-    }
-
-    #[test]
     fn a_pcm_source_hands_out_whole_frames_then_runs_dry() {
         let mut source = PcmAudioSource::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let mut out = [0.0; 4];
@@ -1650,4 +2195,274 @@ mod tests {
         }
         assert!(frames.next_frame().expect("a frame").is_none());
     }
+    #[test]
+    fn an_export_is_four_two_zero_unless_it_is_told_otherwise() {
+        let settings = settings(Rational::FPS_24);
+        assert_eq!(settings.chroma, ChromaFormat::Yuv420);
+        assert_eq!(
+            settings.with_chroma(ChromaFormat::Yuv444).chroma,
+            ChromaFormat::Yuv444,
+        );
+    }
+
+    #[test]
+    fn the_pinned_caps_are_the_family_in_the_elements_own_order() {
+        gst::init().expect("GStreamer must initialise");
+        // x264enc's own order: Y444 first, which is exactly what an unpinned
+        // videoconvert used to hand it.
+        let x264 = declared(&["Y444", "Y42B", "I420", "YV12", "NV12", "GRAY8"]);
+        let caps = chroma_caps_for(ChromaFormat::Yuv420, "x264enc", &x264).expect("4:2:0 fits");
+        assert_eq!(caps_formats(&caps), ["I420", "YV12", "NV12"]);
+        assert!(
+            !caps_formats(&caps).contains(&"Y444".to_owned()),
+            "the 4:4:4 format the encoder prefers must not be offered",
+        );
+
+        let caps = chroma_caps_for(ChromaFormat::Yuv444, "x264enc", &x264).expect("4:4:4 fits too");
+        assert_eq!(caps_formats(&caps), ["Y444"]);
+    }
+
+    #[test]
+    fn a_hardware_encoder_is_pinned_to_the_one_format_it_takes() {
+        gst::init().expect("GStreamer must initialise");
+        let caps = chroma_caps_for(ChromaFormat::Yuv420, "vah264enc", &declared(&["NV12"]))
+            .expect("NV12 is 4:2:0");
+        assert_eq!(caps_formats(&caps), ["NV12"]);
+    }
+
+    #[test]
+    fn an_element_that_cannot_take_the_chroma_asked_for_fails_by_name() {
+        gst::init().expect("GStreamer must initialise");
+        let error = chroma_caps_for(ChromaFormat::Yuv444, "vah264enc", &declared(&["NV12"]))
+            .expect_err("NV12 is not 4:4:4");
+        assert_eq!(error.code, codes::CHROMA_UNSUPPORTED);
+        assert!(
+            error.to_string().contains("vah264enc"),
+            "the message names the element: {error}",
+        );
+    }
+
+    #[test]
+    fn an_element_that_declares_nothing_readable_still_gets_the_family() {
+        gst::init().expect("GStreamer must initialise");
+        let caps = chroma_caps_for(ChromaFormat::Yuv420, "mystery", &[]).expect("a best guess");
+        assert_eq!(caps_formats(&caps), ChromaFormat::Yuv420.formats());
+    }
+
+    #[test]
+    fn the_software_encoders_declare_the_formats_they_are_pinned_to() {
+        if gst::init().is_err() {
+            eprintln!("skipping: GStreamer will not initialise here");
+            return;
+        }
+        for name in ["x264enc", "x265enc"] {
+            let Ok(encoder) = gst::ElementFactory::make(name).build() else {
+                eprintln!("skipping {name}: this machine does not have it");
+                continue;
+            };
+            let formats = declared_sink_formats(&encoder);
+            assert!(
+                formats.contains(&"I420".to_owned()),
+                "{name} declares the 4:2:0 format an export pins: {formats:?}",
+            );
+            let caps = chroma_caps_for(ChromaFormat::Yuv420, name, &formats)
+                .expect("a software encoder takes 4:2:0");
+            assert_eq!(
+                caps_formats(&caps).first().map(String::as_str),
+                Some("I420"),
+                "{name} prefers I420 within the family",
+            );
+        }
+    }
+    /// A mark with `video` and `audio` bytes still queued and nothing written.
+    fn mark(video: u64, audio: u64) -> ProgressMark {
+        ProgressMark {
+            bytes_written: 0,
+            encoded_buffers: 0,
+            video_eos: video == 0,
+            audio_eos: audio == 0,
+            video_queued: video,
+            audio_queued: audio,
+            position_nanos: None,
+        }
+    }
+
+    #[test]
+    fn a_slow_export_is_never_abandoned_while_it_is_still_moving() {
+        let stall = Duration::from_mins(2);
+        // An export a full hour old that produced something a second ago is
+        // working, however long the whole encode is taking.
+        assert_eq!(
+            timeout_verdict(Duration::from_secs(1), stall, Duration::from_hours(1), None),
+            None
+        );
+        // Only the time since the last sign of life is counted.
+        assert_eq!(
+            timeout_verdict(
+                Duration::from_secs(119),
+                stall,
+                Duration::from_hours(24),
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_export_that_stopped_is_given_up_on_after_the_stall_window() {
+        let stall = Duration::from_secs(30);
+        assert_eq!(
+            timeout_verdict(stall, stall, Duration::from_secs(30), None),
+            Some(Timeout::Stalled)
+        );
+        assert_eq!(
+            timeout_verdict(
+                Duration::from_secs(31),
+                stall,
+                Duration::from_secs(400),
+                None
+            ),
+            Some(Timeout::Stalled)
+        );
+    }
+
+    #[test]
+    fn a_hard_limit_ends_even_an_export_that_is_making_progress() {
+        let stall = Duration::from_mins(2);
+        let limit = Some(Duration::from_secs(10));
+        assert_eq!(
+            timeout_verdict(
+                Duration::from_millis(1),
+                stall,
+                Duration::from_secs(9),
+                limit
+            ),
+            None,
+            "inside the limit the export runs"
+        );
+        assert_eq!(
+            timeout_verdict(
+                Duration::from_millis(1),
+                stall,
+                Duration::from_secs(10),
+                limit
+            ),
+            Some(Timeout::Expired),
+            "the request's own limit is what ran out, not patience"
+        );
+    }
+
+    #[test]
+    fn the_poll_never_blocks_past_the_patience_window_or_a_hard_limit() {
+        let stall = Duration::from_mins(2);
+        assert_eq!(
+            poll_slice(stall, None, Duration::ZERO),
+            Duration::from_millis(250),
+            "with no limit the wait polls at its own interval"
+        );
+        assert_eq!(
+            poll_slice(Duration::from_millis(50), None, Duration::ZERO),
+            Duration::from_millis(50),
+            "patience shorter than the interval shortens the poll"
+        );
+        assert_eq!(
+            poll_slice(
+                stall,
+                Some(Duration::from_millis(80)),
+                Duration::from_millis(20)
+            ),
+            Duration::from_millis(60),
+            "the poll ends when the request's limit does"
+        );
+        assert_eq!(
+            poll_slice(
+                stall,
+                Some(Duration::from_millis(10)),
+                Duration::from_secs(9)
+            ),
+            Duration::from_millis(1),
+            "a limit already spent still leaves a poll that cannot spin"
+        );
+    }
+
+    #[test]
+    fn the_timeout_names_the_element_the_export_was_waiting_on() {
+        assert_eq!(
+            waiting_on(&mark(4_096, 0), "av1enc", Some("avenc_aac"), "matroskamux"),
+            "av1enc",
+            "video buffers nobody has taken name the video encoder"
+        );
+        assert_eq!(
+            waiting_on(&mark(0, 512), "av1enc", Some("avenc_aac"), "matroskamux"),
+            "avenc_aac"
+        );
+        assert_eq!(
+            waiting_on(&mark(0, 0), "av1enc", Some("avenc_aac"), "matroskamux"),
+            "matroskamux",
+            "with both branches drained the muxer is what has not finished"
+        );
+        assert_eq!(
+            waiting_on(&mark(0, 512), "av1enc", None, "mp4mux"),
+            "mp4mux",
+            "a video-only export has no audio encoder to blame"
+        );
+    }
+
+    #[test]
+    fn timeouts_default_to_patience_and_no_limit_and_come_from_the_request() {
+        let base = settings(Rational::FPS_24);
+        assert_eq!(base.stall_timeout_ms, DEFAULT_STALL_TIMEOUT_MS);
+        assert_eq!(base.timeout_ms, None);
+        assert_eq!(base.timeout(), None);
+
+        let asked = base
+            .clone()
+            .with_stall_timeout_ms(5_000)
+            .with_timeout_ms(Some(60_000));
+        assert_eq!(asked.stall_timeout(), Duration::from_secs(5));
+        assert_eq!(asked.timeout(), Some(Duration::from_mins(1)));
+        asked.validate().expect("a request may set its own limits");
+
+        assert_eq!(
+            base.clone()
+                .with_stall_timeout_ms(0)
+                .validate()
+                .unwrap_err()
+                .code
+                .as_str(),
+            "export.invalid_settings"
+        );
+        assert_eq!(
+            base.with_timeout_ms(Some(0))
+                .validate()
+                .unwrap_err()
+                .code
+                .as_str(),
+            "export.invalid_settings"
+        );
+    }
+
+    #[test]
+    fn a_request_written_before_the_timeouts_existed_still_deserialises() {
+        let json = serde_json::json!({
+            "width": 16,
+            "height": 16,
+            "frame_rate": { "numerator": 24, "denominator": 1 },
+            "container": "mkv",
+            "video_codec": "h264",
+            "audio_codec": null,
+            "sample_rate": 48_000,
+            "channels": 2,
+        });
+        let settings: ExportSettings =
+            serde_json::from_value(json).expect("the old shape still parses");
+        assert_eq!(settings.stall_timeout_ms, DEFAULT_STALL_TIMEOUT_MS);
+        assert_eq!(settings.timeout_ms, None);
+    }
 }
+
+#[cfg(test)]
+mod slow_tests;
+
+#[cfg(test)]
+mod canvas_tests;

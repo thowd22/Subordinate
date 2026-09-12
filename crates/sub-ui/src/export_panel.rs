@@ -516,6 +516,25 @@ impl ExportPanel {
         &self.problems
     }
 
+    /// What this export will leave behind, in the words the panel paints
+    /// above the button.
+    ///
+    /// Only one thing is reported so far: a source carrying several audio
+    /// streams of which the sequence cuts with some and not others, which
+    /// would otherwise be a silent loss the user finds after delivery
+    /// (TASK-153). The same lines go into `subordinate-cli render`'s report,
+    /// because they come from the same `sub_export::unused_audio_streams`.
+    #[must_use]
+    pub fn warnings(&self, project: &Project) -> Vec<String> {
+        let Some(sequence) = self
+            .sequence
+            .and_then(|id| project.sequences.iter().find(|sequence| sequence.id == id))
+        else {
+            return Vec::new();
+        };
+        sub_export::unused_audio_streams(project, sequence)
+    }
+
     /// Every preset offered, in list order.
     #[must_use]
     pub fn presets(&self) -> &[PresetEntry] {
@@ -818,6 +837,9 @@ impl ExportPanel {
         self.range_ui(ui, project);
         self.output_ui(ui);
         self.encoder_ui(ui);
+        for warning in self.warnings(project) {
+            ui.colored_label(ui.visuals().warn_fg_color, warning);
+        }
         for problem in &self.problems {
             ui.colored_label(
                 ui.visuals().warn_fg_color,

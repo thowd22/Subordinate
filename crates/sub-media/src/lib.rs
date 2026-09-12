@@ -35,12 +35,13 @@ pub use index::{
     CancelToken, INDEX_CACHE_VERSION, IndexEntry, IndexJob, IndexedDecoder, LazyPtsIndex, PtsIndex,
 };
 pub use probe::{
-    FrameTiming, MediaInfo, ProbeOptions, Rotation, VideoStreamInfo, probe, probe_with,
+    FrameTiming, MediaInfo, ProbeOptions, Rotation, VideoStreamInfo, media_info_json, probe,
+    probe_with,
 };
 pub use proxy::{
     DEFAULT_PROXY_MIN_HEIGHT, DEFAULT_PROXY_MIN_WIDTH, MAX_PROXY_PTS_DRIFT_NS, PROXY_CODECS,
-    PROXY_JOB_KIND, PROXY_MANIFEST_VERSION, Proxy, ProxyCodec, ProxyJob, ProxyOptions, ProxyPolicy,
-    ProxyScale, is_long_gop, proxy_size, spawn_proxy_job,
+    PROXY_DIR, PROXY_JOB_KIND, PROXY_MANIFEST_VERSION, Proxy, ProxyCodec, ProxyJob, ProxyOptions,
+    ProxyPolicy, ProxyScale, is_long_gop, proxy_for_media, proxy_size, spawn_proxy_job,
 };
 pub use thumbnail::{
     MAX_THUMBNAIL_WIDTH, MAX_THUMBNAILS, THUMBNAIL_JOB_KIND, THUMBNAIL_MANIFEST_VERSION,
