@@ -252,7 +252,16 @@ fi
 # its own right.
 banner "read an H.264/AAC MKV written by this package"
 mkv=$out_dir/h264-aac.mkv
-if sub_tool gst-launch-1.0 --version >/dev/null 2>&1; then
+can_write_mkv=1
+sub_tool gst-launch-1.0 --version >/dev/null 2>&1 || can_write_mkv=0
+# x264enc, voaacenc and matroskamux are all required entries in the AppImage's
+# plugin allowlist, so this never skips there. Another package's runtime may
+# genuinely not have them, and "this machine cannot write the file" is not the
+# same finding as "this machine cannot read it".
+for element in x264enc voaacenc matroskamux; do
+    sub_tool gst-inspect-1.0 --exists "$element" >/dev/null 2>&1 || can_write_mkv=0
+done
+if [ "$can_write_mkv" -eq 1 ]; then
     sub_tool gst-launch-1.0 -q \
         videotestsrc num-buffers=50 \
         ! video/x-raw,width=320,height=240,framerate=25/1 \
@@ -285,10 +294,10 @@ if sub_tool gst-launch-1.0 --version >/dev/null 2>&1; then
     fi
     fact h264_aac_mkv "written and probed"
 else
-    # Not fatal for a package that does not ship gst-launch; the AppImage does,
-    # and packaging/validate.sh fails if it ever stops.
-    fact h264_aac_mkv "skipped (this package has no gst-launch-1.0)"
-    echo "this package ships no gst-launch-1.0; skipping the H.264/AAC file"
+    # Not fatal for a package that cannot write one; the AppImage always can,
+    # and packaging/validate.sh fails if it ever stops shipping gst-launch-1.0.
+    fact h264_aac_mkv "skipped (no gst-launch-1.0, x264enc, voaacenc or matroskamux)"
+    echo "this package cannot write an H.264/AAC MKV itself; skipping that file"
 fi
 
 # --------------------------------------------------------------- export -----
