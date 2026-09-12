@@ -62,10 +62,10 @@ const APPSRC_MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// canvas.
 ///
 /// A 4K RGBA frame is 33 177 600 bytes, so [`APPSRC_MAX_BYTES`] holds exactly
-/// none of them: every push would have to wait for the queue to empty, which
-/// serialises the compositor against the encoder and gives an asynchronous
-/// encoder no run of frames to work on. The cap is raised to hold this many
-/// instead, which is what lets the two overlap.
+/// one of them and never two: every push after the first would have to wait
+/// for the queue to empty, which serialises the compositor against the encoder
+/// and gives an asynchronous encoder no run of frames to work on. The cap is
+/// raised to hold this many instead, which is what lets the two overlap.
 const APPSRC_MIN_FRAMES: u64 = 4;
 
 /// The queue cap for a video branch on `settings`' canvas.

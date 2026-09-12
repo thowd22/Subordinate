@@ -106,16 +106,17 @@ fn a_branch_that_stops_draining_ends_the_export_instead_of_stalling_it() {
 }
 
 #[test]
-fn a_frame_larger_than_the_whole_queue_still_exports_with_sound() {
-    // 4K RGBA is 33 177 600 bytes, which is larger than the 32 MiB an appsrc
-    // queues: the wait for room has to let a lone oversized buffer through or
-    // a UHD export could never push its first frame. The Windows runner's
-    // clip is UHD with three audio tracks, which is why this is the shape the
-    // regression test takes.
+fn a_uhd_export_with_sound_finishes_rather_than_taking_turns() {
+    // 4K RGBA is 33 177 600 bytes, so two of them do not fit the 32 MiB an
+    // appsrc queues by default: a UHD export that did not raise the cap would
+    // have to empty the queue for every single frame, taking turns with the
+    // encoder instead of overlapping with it. The Windows runner's clip is UHD
+    // with three audio tracks, which is why this is the shape the regression
+    // test takes.
     let settings = settings(3840, 2160);
     assert!(
-        settings.frame_bytes() > 32 * 1024 * 1024,
-        "the canvas is meant to be larger than the queue"
+        settings.frame_bytes() * 2 > 32 * 1024 * 1024,
+        "a canvas two of whose frames fit the default cap proves nothing"
     );
     let Some(elements) = can_export(&settings) else {
         eprintln!("skipping: this machine has no usable H.264 or Opus encoder");
