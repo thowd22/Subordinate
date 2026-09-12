@@ -133,7 +133,12 @@ jobs:
           # setsid + nohup: the window has to outlive this step, because the
           # screenshot, the window queries and the MCP round-trip are separate
           # steps and each one gets its own shell.
+          # The pop-out is placed in the bottom-right corner rather than left
+          # where it lands by default, where it covers the editor's own bar -
+          # and that bar is where the adapter is named, which is the thing the
+          # screenshot is taken to show.
           setsid nohup subordinate --ui-smoke --hold-seconds 300 \
+            --popout-position 940,520 \
             crates/sub-model/tests/fixtures/sample-project.sub >"$out/app.log" 2>&1 &
           echo "app_pid=$!" >>"$GITHUB_OUTPUT"
           for _ in $(seq 1 120); do
@@ -160,6 +165,10 @@ jobs:
             xwininfo -id "$id" | sed -n 's/^ *\(xwininfo\|Absolute\|Width\|Height\|Window id\)/\1/p'
           done | tee "$out/windows.txt"
           xwininfo -root -tree >"$out/window-tree.txt"
+          # Raise the editor so its own bar - the one naming the adapter - is
+          # what the picture shows, rather than whatever the window manager
+          # happened to stack on top.
+          xdotool search --name '^Subordinate$' windowactivate --sync windowraise || true
           scrot -o "$out/display0.png"
           identify "$out/display0.png" | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -195,19 +204,28 @@ jobs:
       # The editor does not bind the Command API endpoint yet, so the bridge
       # starts `subordinate-cli serve` - the same engine and the same
       # dispatcher with nothing drawn - and speaks to that. The round-trip is
-      # still the real one: a mutation goes over the socket and the timeline
-      # that comes back is the one it produced, while the editor window is up
-      # on :0 beside it.
+      # still the real one: mutations go over the socket and the timeline that
+      # comes back is the one they produced, while the editor window is up on
+      # :0 beside it.
+      #
+      # `project.new` alone cannot demonstrate a read: the project it creates
+      # is empty, so `timeline.get_state` on it fails - correctly - with
+      # `core.invalid_argument: the project has no sequences` (verified, run
+      # 34661369585). The new project is therefore opened over with the
+      # committed sample project, which has one, and that is what is read back.
       - name: MCP round-trip while the window is up
         run: |
           set -o pipefail
           out="${{ steps.editor.outputs.out }}"
+          project="$PWD/crates/sub-model/tests/fixtures/sample-project.sub"
           # timeout, because a stdio bridge that never answers would otherwise
           # hold a GPU instance open until the job's own 30-minute limit.
           timeout 180 python3 scripts/mcp-roundtrip.py --mcp /usr/local/bin/subordinate-mcp \
-            'project.new={"name":"Desktop smoke"}' 'timeline.get_state={}' \
+            'project.new={"name":"Desktop smoke"}' \
+            "project.open={\"path\":\"$project\"}" \
+            'timeline.get_state={}' \
             | tee "$out/mcp.txt"
-          grep -q 'timeline.get_state' "$out/mcp.txt"
+          grep -q '^timeline.get_state: ' "$out/mcp.txt"
           # The window is still the one that was photographed.
           xdotool search --name 'Subordinate' >/dev/null
 
