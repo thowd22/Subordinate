@@ -174,28 +174,59 @@ pub fn sequence_sources(
                 )
             })?
             .clone();
-        for warning in
-            sub_export::unused_audio_streams_for_export(&project, &sequence, &project_dir)
-        {
-            log::warn!("export: {warning}");
-        }
         let span = sub_export::FrameSpan::new(
             request.span.start().value(),
             u64::try_from(request.span.duration().value()).unwrap_or(0),
         );
+        let sequence = Arc::new(sequence);
         let (video, audio) = sub_export::open_streams(
             &render,
             Arc::clone(&project),
-            Arc::new(sequence),
+            Arc::clone(&sequence),
             &project_dir,
             settings,
             span,
         );
+        // Opening sources happens on the UI thread. Discovering unprobed
+        // streams can take seconds, so defer it until the export worker asks
+        // for its first frame, retaining this export's snapshot and folder.
+        let warning_project = Arc::clone(&project);
+        let warning_sequence = sequence;
+        let warning_dir = project_dir.clone();
+        let video = BeforeFirstFrame {
+            source: video,
+            prepare: Some(move || {
+                for warning in sub_export::unused_audio_streams_for_export(
+                    &warning_project,
+                    &warning_sequence,
+                    &warning_dir,
+                ) {
+                    log::warn!("export: {warning}");
+                }
+            }),
+        };
         let streams = ExportStreams::video(Box::new(video));
         Ok(match audio {
             Some(audio) => streams.with_audio(Box::new(audio)),
             None => streams,
         })
+    }
+}
+
+/// Runs potentially blocking preparation once, on the thread that consumes
+/// the stream. `spawn_export_job` owns that thread; source construction stays
+/// cheap enough for the UI thread.
+struct BeforeFirstFrame<S, F> {
+    source: S,
+    prepare: Option<F>,
+}
+
+impl<S: VideoFrameSource, F: FnOnce()> VideoFrameSource for BeforeFirstFrame<S, F> {
+    fn next_frame(&mut self) -> SubResult<Option<&[u8]>> {
+        if let Some(prepare) = self.prepare.take() {
+            prepare();
+        }
+        self.source.next_frame()
     }
 }
 
@@ -464,6 +495,39 @@ mod tests {
     /// Settings at `rate`, for the frame-count arithmetic on its own.
     fn settings_at(rate: Rational) -> ExportSettings {
         ExportSettings::new(640, 480, rate, sub_export::Container::Mkv)
+    }
+
+    #[test]
+    fn export_warning_preparation_runs_once_on_the_consuming_worker() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let ui_thread = std::thread::current().id();
+        let video = super::BeforeFirstFrame {
+            source: SolidFrames::new(4, 2),
+            prepare: Some(move || {
+                assert_ne!(std::thread::current().id(), ui_thread);
+                counted.fetch_add(1, Ordering::SeqCst);
+            }),
+        };
+        let mut streams = ExportStreams::video(Box::new(video));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "opening streams must not probe on the UI thread"
+        );
+        std::thread::spawn(move || {
+            assert!(streams.video.next_frame().unwrap().is_some());
+            assert!(streams.video.next_frame().unwrap().is_some());
+            assert!(streams.video.next_frame().unwrap().is_none());
+        })
+        .join()
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
