@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - codex
 created_date: '2026-09-12 21:44'
-updated_date: '2026-09-12 22:14'
+updated_date: '2026-09-12 22:33'
 labels: []
 dependencies: []
 priority: high
@@ -21,9 +21,9 @@ Fresh projects currently refuse import until saved and only accept media beneath
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 An unsaved editor imports and previews media from arbitrary folders without copying sources
-- [ ] #2 First Save As, reopen, and import undo/redo preserve source references
-- [ ] #3 Routine UI and MCP checks cover fresh-project import, track creation and save/reopen
+- [x] #1 An unsaved editor imports and previews media from arbitrary folders without copying sources
+- [x] #2 First Save As, reopen, and import undo/redo preserve source references
+- [x] #3 Routine UI and MCP checks cover fresh-project import, track creation and save/reopen
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -40,4 +40,8 @@ Added explicit tagged external media references alongside legacy strict relative
 Routine coverage is wired into normal workspace UI/MCP tests and Desktop flows for Linux/Windows GPU runners plus box/yodaddy. Hosted builders package the selected commit with SHA/hash verification; focused regressions generate their own fixtures, reject skipped tests, and isolate configuration and MCP endpoints. All four relocated regressions passed locally. Remote runner validation pending.
 
 Review also fixed proxies created before first Save: proxies of external sources retain their actual generation path through Save As and undo/redo. Focused Command API save/reopen and proxy path regressions pass, and sub-command/sub-media strict Clippy passes.
+
+Hosted Linux, Windows and macOS full workspace tests passed at 88b3b03, exercising the new ordinary UI/MCP regressions. Final proxy-followup commit 4b602fd passed Linux CI and Windows tests/lints. Focused box/yodaddy artifact provisioning run 34721910424 remains pending its cold hosted builds.
+
+First focused artifact run exposed missing wasm32-wasip2 target on the new hosted builders (sub-plugin guest build failed before runner tests). Added the target to both builders, matching ordinary CI; focused retry pending.
 <!-- SECTION:NOTES:END -->
