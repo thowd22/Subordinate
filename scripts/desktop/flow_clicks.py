@@ -210,11 +210,26 @@ def run(run: flowlib.Run) -> None:
             # pointer not reaching the application; a failure in the next step
             # with this one green is the file dialog, and the two are worth
             # telling apart (run 34676801744).
-            before = _bins(read("project.get", {}))
-            folder, how = locate(session, window, "New folder", "new_folder", offsets)
+            state = read("project.get", {})
+            (out / "project-get.json").write_text(json.dumps(state, indent=1)[:200000])
+            before = _bins(state)
+            # By role, because `New folder` names two things: the button, and
+            # the hint text of the field beside it that says what to call the
+            # folder (crates/sub-ui/src/media_bin.rs).
+            try:
+                folder, how = _by_role(session, "New folder", BUTTON_ROLES, timeout=30), "name"
+            except DesktopError:
+                folder, how = locate(session, window, "New folder", "new_folder", offsets)
+            after = before
             for point in _candidates(folder, window):
                 session.click(point)
-                after = _bins(read("project.get", {}))
+                # The click is applied on the window's next frame and the read
+                # is a round trip of its own, so this is a wait, not a peek.
+                for _ in range(10):
+                    after = _bins(read("project.get", {}))
+                    if after > before:
+                        break
+                    time.sleep(0.5)
                 step.note(**{f"click_{point}": f"{before} -> {after} bins"})
                 if after > before:
                     break
@@ -557,6 +572,29 @@ def _choose_file(session, path: Path) -> None:
 # ------------------------------------------------------------------- reading
 
 
+def _find_key(payload, key):
+    """The first value under `key` anywhere in a result.
+
+    The Command API's own shapes are documented, but what a bridge wraps them
+    in is not the flow's business: `project.get` answers a `ProjectResult`, and
+    whether it arrives as itself, inside `structuredContent` or inside one more
+    envelope, `root_bin` is `root_bin`.
+    """
+    if isinstance(payload, dict):
+        if key in payload:
+            return payload[key]
+        for value in payload.values():
+            found = _find_key(value, key)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _find_key(value, key)
+            if found is not None:
+                return found
+    return None
+
+
 def _bins(project) -> int:
     """How many bins the project holds, at any depth."""
 
@@ -565,11 +603,7 @@ def _bins(project) -> int:
             return 0
         return 1 + sum(count(child) for child in bin_.get("children", []))
 
-    if isinstance(project, dict):
-        root = project.get("project", project)
-        if isinstance(root, dict) and "root_bin" in root:
-            return count(root["root_bin"])
-    return 0
+    return count(_find_key(project, "root_bin"))
 
 
 def _items(listed) -> list:
