@@ -1123,8 +1123,8 @@ def table(
         if source.audio_streams:
             lines.append(
                 f"- `{source.name}` carries {source.audio_streams} audio streams;"
-                " the exporter mixes the first one (uridecodebin exposes one"
-                " audio pad) and writes a single stereo track."
+                " this generated project selects the first stream by default"
+                " and exports a single stereo track."
             )
     return "\n".join(lines) + "\n"
 
