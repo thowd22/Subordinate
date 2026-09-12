@@ -23,8 +23,11 @@ on:
         description: >-
           RunsOn selector for nvidia-desktop-linux. RunsOn reads
           .github/runs-on.yml from the default branch only, so a new or
-          changed AMI has to be spelled out inline until it is merged:
-          image=ami-0123.../family=g4dn.xlarge/spot=false
+          changed AMI has to be spelled out inline until it is merged.
+          Note the key is `ami=`, not `image=`: `image=` takes the *name* of
+          a built-in or configured image and rejects a raw id with
+          "not found in default images or repo config".
+          ami=ami-0123.../family=g4dn.xlarge/spot=false
         type: string
         default: runner=gpu-nvidia-desktop-linux
 

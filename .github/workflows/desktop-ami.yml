@@ -89,7 +89,7 @@ jobs:
                   echo
                   echo "Smoke test it before adopting it: dispatch **GPU smoke**"
                   echo "with \`only=nvidia-desktop-linux\` and"
-                  echo "\`desktop_runner=image=$ami/family=g4dn.xlarge/spot=false\`,"
+                  echo "\`desktop_runner=ami=$ami/family=g4dn.xlarge/spot=false\`,"
                   echo "then set \`images.subordinate-desktop-linux.ami\` in"
                   echo "\`.github/runs-on.yml\` to it."
                 } >>"$GITHUB_STEP_SUMMARY"

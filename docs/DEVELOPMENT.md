@@ -1055,7 +1055,9 @@ Then, before adopting the new AMI:
 1. Smoke it from a branch. RunsOn reads `.github/runs-on.yml` from the default
    branch only, so a new AMI has to be named inline - dispatch **GPU smoke**
    with `only=nvidia-desktop-linux` and
-   `desktop_runner=image=<ami-id>/family=g4dn.xlarge/spot=false`.
+   `desktop_runner=ami=<ami-id>/family=g4dn.xlarge/spot=false`. The key is
+   `ami=`; `image=` takes the *name* of a built-in or configured image and
+   rejects a raw id with "not found in default images or repo config".
 2. Only once that passes, set `images.subordinate-desktop-linux.ami` in
    `.github/runs-on.yml` to the new id and merge. The id is pinned rather than
    matched by `name:` on purpose: a name filter takes the lexicographically
