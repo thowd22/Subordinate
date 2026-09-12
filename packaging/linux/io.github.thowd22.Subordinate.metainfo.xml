@@ -33,6 +33,9 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.4" date="2026-09-12">
+      <description><p>Export quality and chroma fixes, progress-aware encoder timeouts, explicit audio-stream selection, and export, probe, proxy and frame services in the running editor Command API.</p></description>
+    </release>
     <release version="0.1.3" date="2026-09-12">
       <description><p>Live preview: the viewer shows decoded video while scrubbing and playing, with 4K scrub above 45 fps on hardware decoders; the MCP bridge ships inside every package.</p></description>
     </release>
