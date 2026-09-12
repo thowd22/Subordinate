@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-task-139'
 created_date: '2026-09-11 22:18'
-updated_date: '2026-09-12 10:00'
+updated_date: '2026-09-12 10:01'
 labels:
   - ui
   - test
@@ -78,6 +78,8 @@ Earlier runs used for the findings: 34671892159, 34672010010, 34672165182, 34673
 Cost: a Linux flow is 3-4 minutes of g4dn.xlarge (about 0.03 USD on spot, 0.08 USD at the 20-minute cap); a Windows flow is 8-11 minutes on demand (0.10-0.14 USD, 0.27 USD at the 22-minute cap). All four together are about 0.30 USD a night. Total spent iterating: roughly 3 USD.
 
 AC 3 and AC 4 are checked for Linux and NOT for Windows: both Windows flows do everything the criteria ask except produce the file, because rendering the baked 4K60 clip on that runner stalls after one frame. That is not the harness - subordinate-cli render reproduces it in session 0 with no window and no bridge (the 'Render the same project with the CLI' step of run 34685619604, '1/48 frames 2% 1 fps' and then nothing) - so the criteria are left unchecked and the defect is handed over.
+
+Two commits land after run 34685619604 and touch no flow logic: the temporary dispatcher workflow and the temporary Linux input-diagnosis step and script are removed (the finding they produced - the pointer's reachable band - is handled in the harness and documented). The probe-the-clip step is kept: ten seconds, and it tells a packaging regression apart from a broken gesture.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
