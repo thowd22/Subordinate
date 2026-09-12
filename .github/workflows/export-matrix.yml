@@ -148,9 +148,10 @@ jobs:
 
   build-windows:
     name: Build the Windows CLI (hosted, free)
+    # TEMP TASK-143: the push guard comes out before this merges.
     if: >-
       github.event_name != 'push' && (inputs.only == ''
-      || inputs.only == 'nvidia-windows' || inputs.only == 'amd-windows')  # TEMP TASK-143
+      || inputs.only == 'nvidia-windows' || inputs.only == 'amd-windows')
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
