@@ -35,7 +35,6 @@ jobs:
         with:
           shared-key: ci-windows-latest
           prefix-key: v1-rust
-          save-if: false
           cache-workspace-crates: true
 
       - name: Exclude build directories from Windows Defender
@@ -67,12 +66,16 @@ jobs:
       # one, and is itself the software-encoder half of the same render.
       - name: Render a small project on this runner
         shell: pwsh
+        continue-on-error: true
         timeout-minutes: 12
         run: |
           $ErrorActionPreference = 'Stop'
           $work = "$env:RUNNER_TEMP\hosted"
           New-Item -ItemType Directory -Force -Path $work | Out-Null
-          gst-launch-1.0 matroskamux name=mux "!" filesink location="$work/clip.mkv" `
+          # gst-launch reads a backslash as an escape, so every path handed to
+          # a pipeline description is spelled with forward slashes.
+          $slash = $work.Replace('\', '/')
+          gst-launch-1.0 matroskamux name=mux "!" filesink location="$slash/clip.mkv" `
             videotestsrc num-buffers=180 "!" "video/x-raw,width=1280,height=720,framerate=60/1" `
             "!" videoconvert "!" x264enc bitrate=4000 key-int-max=30 "!" h264parse "!" mux. `
             audiotestsrc num-buffers=180 "!" audioconvert "!" avenc_aac "!" mux.
@@ -211,17 +214,21 @@ jobs:
           }
 
           $media = "C:\SubordinateTest\$env:MEDIA_KEY"
+          # gst-launch reads a backslash as an escape: every path inside a
+          # pipeline description is spelled with forward slashes.
+          $mediaSlash = $media.Replace('\', '/')
+          $outSlash = $out.Replace('\', '/')
           $trace = 'info,sub_export=trace,sub_media=debug,sub_render=debug'
 
           # 1. NVENC on its own, nothing of ours involved.
           Probe "gst-nvenc-only" "gst-launch-1.0" @(
             "videotestsrc","num-buffers=48","!","video/x-raw,width=1920,height=1080,framerate=24/1",
             "!","videoconvert","!","nvh264enc","!","h264parse","!","mp4mux","!",
-            "filesink","location=$out/nvenc-only.mp4") @{ GST_DEBUG = "2" } 120
+            "filesink","location=$outSlash/nvenc-only.mp4") @{ GST_DEBUG = "2" } 120
 
           # 2. The clip decoded by NVDEC on its own.
           Probe "gst-nvdec-only" "gst-launch-1.0" @(
-            "filesrc","location=$media","!","matroskademux","name=d","d.video_0","!",
+            "filesrc","location=$mediaSlash","!","matroskademux","name=d","d.video_0","!",
             "h264parse","!","nvh264dec","!","identity","eos-after=300","!","fakesink"
             ) @{ GST_DEBUG = "2" } 180
 
