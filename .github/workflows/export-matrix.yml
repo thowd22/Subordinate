@@ -162,10 +162,9 @@ jobs:
 
   build-windows:
     name: Build the Windows CLI (hosted, free)
-    # TEMP TASK-143: the push guard comes out before this merges.
     if: >-
-      github.event_name != 'push' && (inputs.only == ''
-      || inputs.only == 'nvidia-windows' || inputs.only == 'amd-windows')
+      inputs.only == '' || inputs.only == 'nvidia-windows'
+      || inputs.only == 'amd-windows'
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
@@ -375,6 +374,7 @@ jobs:
             --machine "AMD Cezanne APU (box)" \
             --cli ./target/debug/subordinate-cli \
             --out target/export-matrix \
+            --timeout 300 \
             "${sources[@]}"
 
       # The GUI half (TASK-143 AC 3): the assembled window exports the sample
@@ -417,7 +417,7 @@ jobs:
   # ---------------------------------------------------------------- NVIDIA T4
   nvidia-linux:
     name: NVIDIA T4 (g4dn.xlarge, Ubuntu 24.04)
-    if: github.event_name != 'push' && (inputs.only == '' || inputs.only == 'nvidia-linux')  # TEMP TASK-143
+    if: inputs.only == '' || inputs.only == 'nvidia-linux'
     needs: build-linux
     runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-linux
     timeout-minutes: 35
@@ -547,10 +547,8 @@ jobs:
 
   nvidia-windows:
     name: NVIDIA T4 (g4dn.xlarge, Windows Server 2022)
-    # TEMP TASK-143: the push guard comes out before this merges.
     if: >-
-      ${{ !cancelled() && github.event_name != 'push'
-      && (inputs.only == '' || inputs.only == 'nvidia-windows') }}
+      ${{ !cancelled() && (inputs.only == '' || inputs.only == 'nvidia-windows') }}
     # Chained rather than parallel: one g4dn of this workflow's at a time.
     needs: [build-windows, nvidia-linux]
     runs-on: runs-on=${{ github.run_id }}/runner=gpu-nvidia-windows
@@ -665,10 +663,8 @@ jobs:
   # directory emptied at the end whatever happened.
   amd-windows:
     name: AMD RX 9070 XT (yodaddy, self-hosted, Windows 11)
-    # TEMP TASK-143: the push guard comes out before this merges.
     if: >-
-      ${{ !cancelled() && github.event_name != 'push'
-      && (inputs.only == '' || inputs.only == 'amd-windows') }}
+      ${{ !cancelled() && (inputs.only == '' || inputs.only == 'amd-windows') }}
     needs: [build-windows, amd-linux]
     runs-on: [self-hosted, windows, yodaddy, amd-gpu]
     timeout-minutes: 40
