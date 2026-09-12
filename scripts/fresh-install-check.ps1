@@ -280,17 +280,58 @@ $requests = @(
 Set-Content -Encoding ASCII -Path $mcpIn -Value ($requests -join "`r`n")
 $env:SUBORDINATE_INSTANCE = 'fresh-install-check'
 $env:SUBORDINATE_LOG = 'info'
-# Piping through cmd keeps stdin, stdout and stderr straight without
-# Start-Process redirection games; the bridge exits when stdin reaches EOF.
-cmd /c "type `"$mcpIn`" | `"$mcp`" > `"$mcpOut`" 2> `"$mcpErr`""
-$mcpExit = $LASTEXITCODE
-Write-Host '--- subordinate-mcp stderr (last 20 lines)'
-Get-Content $mcpErr -Tail 20 -ErrorAction SilentlyContinue | Write-Host
+
+# A request at a time, each answered before the next goes out, the way any MCP
+# client works. The server dispatches each request as a task of its own, so a
+# client that pipes a whole session in at once can have timeline.get_state
+# answered before the sequence.create it depends on (seen on fedora in run
+# 34672425215). stderr is left attached to this console rather than redirected:
+# it is the bridge's log, it belongs in the job output, and a redirected pipe
+# nobody drains is how this kind of thing deadlocks.
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = $mcp
+$psi.UseShellExecute = $false
+$psi.RedirectStandardInput = $true
+$psi.RedirectStandardOutput = $true
+$proc = [System.Diagnostics.Process]::Start($psi)
+$lines = New-Object System.Collections.Generic.List[string]
+
+function Read-McpReply {
+    param([int]$Id)
+    while ($true) {
+        $pending = $proc.StandardOutput.ReadLineAsync()
+        if (-not $pending.Wait(120000)) { return $null }
+        $line = $pending.Result
+        if ($null -eq $line) { return $null }
+        $lines.Add($line)
+        if ($line -match "`"id`":\s*$Id[,}]") { return $line }
+    }
+}
+
+$answered = $true
+foreach ($request in $requests) {
+    $proc.StandardInput.WriteLine($request)
+    $proc.StandardInput.Flush()
+    if ($request -match '"id":\s*(\d+)') {
+        if ($null -eq (Read-McpReply -Id ([int]$Matches[1]))) {
+            Write-Host "::warning::no answer to request $($Matches[1]); ending the session"
+            $answered = $false
+            break
+        }
+    }
+}
+# Closing stdin is how a stdio MCP session ends, and how the bridge is told to
+# stop the headless engine it launched.
+$proc.StandardInput.Close()
+if (-not $proc.WaitForExit(60000)) { $proc.Kill() }
+$mcpExit = $proc.ExitCode
+Set-Content -Encoding utf8 -Path $mcpOut -Value $lines
+Set-Content -Encoding utf8 -Path $mcpErr -Value 'the bridge log went to this job''s console, not to a file'
 Write-Host '--- subordinate-mcp stdout'
-$lines = @(Get-Content $mcpOut -ErrorAction SilentlyContinue)
 foreach ($line in $lines) {
     if ($line.Length -gt 400) { Write-Host ($line.Substring(0, 400) + ' ...') } else { Write-Host $line }
 }
+if (-not $answered) { Stop-WithFailure 'the installed MCP bridge stopped answering' mcp }
 if ($mcpExit -ne 0) { Stop-WithFailure "the installed MCP bridge exited $mcpExit" mcp }
 
 # One reply per request id, each a result rather than an error. `isError` is

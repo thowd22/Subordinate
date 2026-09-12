@@ -327,37 +327,57 @@ mcp_err=$out_dir/mcp-err.txt
 # in between: a mutation goes in and the timeline that comes back is the one it
 # produced.
 settings='{"resolution":{"width":1920,"height":1080},"frame_rate":{"numerator":30,"denominator":1},"sample_rate":48000,"color":{"space":"rec709","transfer":"bt709","primaries":"bt709"}}'
-cat >"$mcp_in" <<EOF
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fresh-install-check","version":"1"}}}
-{"jsonrpc":"2.0","method":"notifications/initialized"}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_new","arguments":{"name":"Fresh install"}}}
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sequence_create","arguments":{"name":"Installed by MCP","settings":$settings}}}
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"timeline_get_state","arguments":{}}}
-EOF
+req_initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fresh-install-check","version":"1"}}}'
+req_initialized='{"jsonrpc":"2.0","method":"notifications/initialized"}'
+req_new='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_new","arguments":{"name":"Fresh install"}}}'
+req_sequence='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sequence_create","arguments":{"name":"Installed by MCP","settings":'$settings'}}}'
+req_timeline='{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"timeline_get_state","arguments":{}}}'
+printf '%s\n' "$req_initialize" "$req_initialized" "$req_new" "$req_sequence" \
+    "$req_timeline" >"$mcp_in"
 
 SUBORDINATE_INSTANCE=fresh-install-check
 SUBORDINATE_LOG=info
 export SUBORDINATE_INSTANCE SUBORDINATE_LOG
 
-# The bridge reads to EOF and exits, so this normally takes a second or two. A
-# bridge that never answers would otherwise sit here until the job's own
-# timeout, and `timeout` cannot be used on a shell function, so the watchdog is
-# written out: the adapter's function runs in the background and is killed if
-# it outstays three minutes.
+: >"$mcp_out"
+: >"$mcp_err"
+
+# Wait for the reply to request $1 before sending the request that depends on
+# it, the way any MCP client does. The server dispatches each request as a task
+# of its own, so a client that pipes a whole session in at once can have
+# timeline.get_state answered before the sequence.create it depends on -- which
+# is exactly what happened on fedora in run 34672425215 and passed on ubuntu in
+# the same run. The answers land in $mcp_out, so that is where the wait looks.
+mcp_await() {
+    waited=0
+    while [ "$waited" -lt 120 ]; do
+        if grep -qE "\"id\":[[:space:]]*$1[,}]" "$mcp_out" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    # Not a failure here: this runs in the pipeline's subshell, where exiting
+    # would say nothing useful. Closing stdin ends the session and the checks
+    # below report the reply that never came.
+    echo "no answer to request $1 after ${waited}s; ending the session" >&2
+    return 1
+}
+
+mcp_session() {
+    printf '%s\n' "$req_initialize"
+    mcp_await 1 || return 0
+    printf '%s\n' "$req_initialized"
+    printf '%s\n' "$req_new"
+    mcp_await 2 || return 0
+    printf '%s\n' "$req_sequence"
+    mcp_await 3 || return 0
+    printf '%s\n' "$req_timeline"
+    mcp_await 4 || return 0
+}
+
 mcp_status=0
-sub_mcp <"$mcp_in" >"$mcp_out" 2>"$mcp_err" &
-mcp_pid=$!
-waited=0
-while kill -0 "$mcp_pid" 2>/dev/null && [ "$waited" -lt 180 ]; do
-    sleep 1
-    waited=$((waited + 1))
-done
-if kill -0 "$mcp_pid" 2>/dev/null; then
-    kill "$mcp_pid" 2>/dev/null || true
-    tail -n20 "$mcp_err" 2>/dev/null || true
-    fail "the package's MCP bridge answered nothing in ${waited}s" mcp
-fi
-wait "$mcp_pid" || mcp_status=$?
+mcp_session 2>>"$mcp_err" | sub_mcp >"$mcp_out" 2>>"$mcp_err" || mcp_status=$?
 echo "--- subordinate-mcp stderr (last 20 lines)"
 tail -n20 "$mcp_err" 2>/dev/null || true
 echo "--- subordinate-mcp stdout"
