@@ -1,11 +1,11 @@
 ---
 id: TASK-149
 title: Export presets carry a bitrate and a CRF that never reach the encoder
-status: In Progress
+status: Done
 assignee:
   - '@codex'
 created_date: '2026-09-12 08:11'
-updated_date: '2026-09-12 17:55'
+updated_date: '2026-09-12 18:03'
 labels:
   - export
   - bug
@@ -21,9 +21,9 @@ The export matrix (TASK-143) crosses every encoder with every preset, and the ce
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 ExportSettings carries the preset video quality (average bitrate or CRF) and its audio bitrate
-- [ ] #2 The pipeline sets the matching rate-control properties on each catalogued encoder, with a documented mapping per vendor (NVENC, VA, AMF, VideoToolbox, Media Foundation, x264/x265 and the AV1 encoders) and a warning rather than a failure when an element has no equivalent
-- [ ] #3 A test proves two presets of different bitrates over the same source write files of materially different size
+- [x] #1 ExportSettings carries the preset video quality (average bitrate or CRF) and its audio bitrate
+- [x] #2 The pipeline sets the matching rate-control properties on each catalogued encoder, with a documented mapping per vendor (NVENC, VA, AMF, VideoToolbox, Media Foundation, x264/x265 and the AV1 encoders) and a warning rather than a failure when an element has no equivalent
+- [x] #3 A test proves two presets of different bitrates over the same source write files of materially different size
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -38,3 +38,15 @@ The export matrix (TASK-143) crosses every encoder with every preset, and the ce
 
 Resume preserved agent implementation; integrate with TASK-146 and the other export fixes on a shared export branch, then validate locally without AWS.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Integrated quality mapping with TASK-146 NVENC additions: nvd3d11h264enc/nvd3d11h265enc/nvautogpuh264enc/nvautogpuh265enc now have mappings. Preserved chroma and quality together in sequence settings; fixed stale error.code() assertions. Hardware property mappings remain defensive and log unsupported properties.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Preset video quality and audio bitrate reach pipeline settings and defensive per-encoder properties, including all TASK-146 NVENC variants. Verified with the combined sub-export suite: preset propagation and catalogue mapping unit tests, actual H.264 bitrate/CRF file-size comparisons, and clippy for all sub-export targets with warnings denied. Hardware vendor execution remains for the existing matrix.
+<!-- SECTION:FINAL_SUMMARY:END -->

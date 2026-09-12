@@ -3,11 +3,11 @@ id: TASK-154
 title: >-
   Software exports are written in 4:4:4, which most players and devices cannot
   decode
-status: In Progress
+status: Done
 assignee:
   - '@codex'
 created_date: '2026-09-12 04:40'
-updated_date: '2026-09-12 17:55'
+updated_date: '2026-09-12 18:03'
 labels:
   - export
   - bug
@@ -23,9 +23,9 @@ The export matrix (TASK-143) read back every file it wrote, and every x264enc ce
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The export pipeline pins the encoder input to 4:2:0 (I420 or NV12 as the element prefers) so a default export is High or Main profile, not High 4:4:4
-- [ ] #2 A preset may still ask for a higher chroma format where the codec and the element support it, and an element that cannot take what was asked for fails with a named error rather than silently negotiating something else
-- [ ] #3 A test asserts the profile of a written file for at least the software H.264 and H.265 encoders
+- [x] #1 The export pipeline pins the encoder input to 4:2:0 (I420 or NV12 as the element prefers) so a default export is High or Main profile, not High 4:4:4
+- [x] #2 A preset may still ask for a higher chroma format where the codec and the element support it, and an element that cannot take what was asked for fails with a named error rather than silently negotiating something else
+- [x] #3 A test asserts the profile of a written file for at least the software H.264 and H.265 encoders
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -40,3 +40,15 @@ The export matrix (TASK-143) read back every file it wrote, and every x264enc ce
 
 Resume preserved agent implementation; integrate with TASK-146 and the other export fixes on a shared export branch, then validate locally without AWS.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Integrated caps pinning with TASK-146 and quality settings. Fixed sequence settings propagation so explicit higher chroma survives the GUI/sequence export path, with a regression assertion. Superseded the old redundant planar-caps helper.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Default exports pin 4:2:0 and explicit higher chroma propagates through both preset and sequence export paths, with named rejection for unsupported formats. Combined sub-export tests passed, including written H.264/H.265 profile checks, explicit 4:4:4 export, format rejection, and sequence propagation; clippy passed with warnings denied.
+<!-- SECTION:FINAL_SUMMARY:END -->

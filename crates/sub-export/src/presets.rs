@@ -630,16 +630,7 @@ impl RawPreset {
                 ));
             }
         };
-        let chroma = match self.chroma.as_deref() {
-            None => ChromaFormat::default(),
-            Some(name) => ChromaFormat::parse(name).ok_or_else(|| {
-                invalid(
-                    id,
-                    "chroma",
-                    &format!("'{name}' is not a chroma format this exporter encodes"),
-                )
-            })?,
-        };
+        let chroma = self.validate_chroma(id)?;
         Ok(Some(VideoPreset {
             codec,
             width,
@@ -648,6 +639,20 @@ impl RawPreset {
             quality,
             chroma,
         }))
+    }
+
+    /// Validate the optional chroma family independently of geometry and quality.
+    fn validate_chroma(&self, id: &str) -> SubResult<ChromaFormat> {
+        Ok(match self.chroma.as_deref() {
+            None => ChromaFormat::default(),
+            Some(name) => ChromaFormat::parse(name).ok_or_else(|| {
+                invalid(
+                    id,
+                    "chroma",
+                    &format!("'{name}' is not a chroma format this exporter encodes"),
+                )
+            })?,
+        })
     }
 
     /// The audio half, or `None` when the preset names no audio field at all.

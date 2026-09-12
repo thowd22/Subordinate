@@ -175,6 +175,54 @@ const MAPPINGS: &[Mapping] = &[
         None,
     ),
     mapping(
+        "nvd3d11h264enc",
+        NVENC_BITRATE,
+        &[
+            knob(&["rc-mode"], Setting::Mode(&["constqp", "cqp"])),
+            knob(
+                &["qp-const", "qp-const-i", "qp-i"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+        ],
+        None,
+    ),
+    mapping(
+        "nvd3d11h265enc",
+        NVENC_BITRATE,
+        &[
+            knob(&["rc-mode"], Setting::Mode(&["constqp", "cqp"])),
+            knob(
+                &["qp-const", "qp-const-i", "qp-i"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+        ],
+        None,
+    ),
+    mapping(
+        "nvautogpuh264enc",
+        NVENC_BITRATE,
+        &[
+            knob(&["rc-mode"], Setting::Mode(&["constqp", "cqp"])),
+            knob(
+                &["qp-const", "qp-const-i", "qp-i"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+        ],
+        None,
+    ),
+    mapping(
+        "nvautogpuh265enc",
+        NVENC_BITRATE,
+        &[
+            knob(&["rc-mode"], Setting::Mode(&["constqp", "cqp"])),
+            knob(
+                &["qp-const", "qp-const-i", "qp-i"],
+                Setting::Quantiser { max: QP_51 },
+            ),
+        ],
+        None,
+    ),
+    mapping(
         "nvav1enc",
         NVENC_BITRATE,
         &[

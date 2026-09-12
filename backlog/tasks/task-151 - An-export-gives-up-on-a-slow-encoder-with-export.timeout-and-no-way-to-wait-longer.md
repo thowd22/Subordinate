@@ -3,11 +3,11 @@ id: TASK-151
 title: >-
   An export gives up on a slow encoder with export.timeout and no way to wait
   longer
-status: In Progress
+status: Done
 assignee:
   - '@codex'
 created_date: '2026-09-12 12:00'
-updated_date: '2026-09-12 17:55'
+updated_date: '2026-09-12 18:03'
 labels:
   - export
   - bug
@@ -25,25 +25,27 @@ So an export that would have succeeded is abandoned, and the user is told the pi
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 An export that is still making progress is not abandoned, however slow the encoder is
-- [ ] #2 An export that has genuinely stopped is failed with an error that says so and names the element it was waiting on
-- [ ] #3 A test covers a deliberately slow encoder finishing an export that the current fixed timeout would abandon
+- [x] #1 An export that is still making progress is not abandoned, however slow the encoder is
+- [x] #2 An export that has genuinely stopped is failed with an error that says so and names the element it was waiting on
+- [x] #3 A test covers a deliberately slow encoder finishing an export that the current fixed timeout would abandon
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Replace the fixed 120 s EOS wait in ExportPipeline::wait_for_eos with a progress watch: poll the bus in short slices, sample a progress mark (bytes on disk, both appsrc queue levels, pipeline position) and reset the patience window whenever it moves.
-2. Move the limits into the export request: ExportSettings gains stall_timeout_seconds (default 120) and an optional hard timeout_seconds, both serde-defaulted so existing requests deserialise, with builders and validation.
-3. Fail a genuinely stopped export with export.timeout naming the element it was waiting on (the video/audio encoder whose queue is still full, else the muxer), and separate that message from the hard-limit message.
-4. Tests: unit tests for the stall verdict, the element naming and validation; an integration test that exports through av1enc (the encoder from run 34689001087) with a one-second stall window and shows it finishes, plus one showing a hard limit fails with the element named.
-5. Verify with cargo fmt, clippy pedantic and cargo test -p sub-export under the GStreamer env.
-
-Resume preserved agent implementation; integrate with TASK-146 and the other export fixes on a shared export branch, then validate locally without AWS.
+1. Keep TASK-146 bus-aware bounded pushes and planar conversion. Apply request stall_timeout_ms to push and EOS waits, resetting patience for queue, file, position or encoder-output progress. 2. Honor an optional timeout_ms cap on final EOS draining even when progress continues. 3. Preserve stable timeout reason and element details. 4. Replace machine-dependent noisy AV1 tests with an x264 stream delayed by a pad probe, proving continuous progress survives a short patience window and an explicit deadline still wins. 5. Run combined export tests and clippy locally.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Reproduced the shape from the report: the only time budget is EOS_TIMEOUT_SECONDS = 120 in crates/sub-export/src/pipeline.rs, spent entirely in wait_for_eos after both appsrc streams have ended, so a slow encoder draining its queue is indistinguishable from a dead one.
+
+Replaced the expensive 240-frame AV1 test with deterministic 50 ms delays on 24 x264 input buffers. Continuous progress completes beyond a 300 ms patience window; a 400 ms explicit drain limit fails despite ongoing progress and names x264enc. Encoded-output pad probes additionally prevent buffered muxer output from hiding encoder progress. Existing starved-branch regression checks stopped pushes and cleanup. timeout_ms intentionally caps final EOS draining, while stall_timeout_ms governs both pushes and EOS.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Replaced fixed EOS patience with progress-aware request settings and integrated them with bus-aware push backpressure. Encoder output, queue levels, file growth and position reset patience; explicit final-drain limits still apply. Combined sub-export tests passed, including deterministic delayed x264 completion, deadline failure naming x264enc, timeout verdicts, and the existing starved-branch regression; clippy passed with warnings denied.
+<!-- SECTION:FINAL_SUMMARY:END -->

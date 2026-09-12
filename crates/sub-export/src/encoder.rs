@@ -733,7 +733,7 @@ fn run_probe_pipeline(pipeline: &gst::Element, name: &str) -> Result<(), EncodeR
                 tracing::debug!(element = name, reason, "encoder cannot encode here");
                 return Err(EncodeRefusal::Refused(reason));
             }
-            _ => continue,
+            _ => {}
         }
     }
 }
