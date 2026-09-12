@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-12 05:32'
-updated_date: '2026-09-12 15:32'
+updated_date: '2026-09-12 19:06'
 labels:
   - export
   - gpu
@@ -60,4 +60,6 @@ And a fourth, on a fourth vendor: nvh264enc on the Tesla T4 (Ubuntu 24.04, GStre
 A parallel investigation on another branch has found what turns this into a hang: the export pushes into appsrc with a blocking push and never reads the bus, so an element that stops taking buffers leaves the render waiting on a condition variable that only a flush wakes - no error, no file, no end. Their fix waits for room in slices and reads the bus between them. That changes the symptom this task describes from a hang into an error; whether a 4K H.264 export then *succeeds* on any of these four encoders is the part that remains, and their own note that mfh264enc "takes about twenty frames of a 4K canvas and then stops taking buffers" matches the frame 19 to 27 this matrix measured on all four.
 
 2026-09-12 supervisor: same mechanism as TASK-146 (blocking appsrc push, bus not read). After TASK-146 merges, re-run export-matrix.yml on box and the T4 and close this if vah264enc/nvh264enc finish the 4K60 export.
+
+Integration verification on 2026-09-12, run https://github.com/thowd22/Subordinate/actions/runs/34710769860 at c775441: box passed 17/20 cells, with all three UHD vah264enc presets still timing out after about 147-148 seconds. Yodaddy passed 23/30; six UHD H.264 cells (AMF and Media Foundation, three presets each) still hit the external 120-second cap. A seventh, separate UHD rav1enc preflight regression is being fixed under TASK-151. Hardware HEVC and software x264/x265 UHD cases passed. This run does not establish the remaining H.264 root cause or satisfy the UHD hardware acceptance criteria. Only box/yodaddy and hosted builders ran; no EC2 jobs were requested.
 <!-- SECTION:NOTES:END -->

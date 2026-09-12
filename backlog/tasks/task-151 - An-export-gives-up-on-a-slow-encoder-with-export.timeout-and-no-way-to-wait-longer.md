@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@codex'
 created_date: '2026-09-12 12:00'
-updated_date: '2026-09-12 19:01'
+updated_date: '2026-09-12 19:39'
 labels:
   - export
   - bug
@@ -50,6 +50,8 @@ Replaced the expensive 240-frame AV1 test with deterministic 50 ms delays on 24 
 Post-integration review now observes each encoder output EOS. An empty appsrc no longer falsely attributes an encoder flush stall to the muxer. A deterministic test holds x264 input EOS after the queue drains and verifies export.timeout names x264enc; all 33 pipeline unit tests and clippy across export targets pass.
 
 Run34710769860 revealed a new yodaddy UHD rav1enc refusal before rendering: the TASK146 full-canvas probe required software to finish a dummy4K frame in5s. Hardware still gets real-frame discovery and full-canvas session checks. Software now only initializes to READY during discovery; both pinned software and hardware-to-software fallback enter the actual export directly, where existing bus/error/progress timeouts remain authoritative. No timeout was increased. Five added regressions verify software discovery/preflight bypass and retained hardware failures/fallback behavior. Local full sub-export suite passed117 unit+19 integration+5 doctests; clippy all-targets with-D warnings and fmt passed. Local rav1enc plugin absent; targeted yodaddy UHD validation remains for the parent.
+
+Final integrated code 3256fe0 passed Linux, Windows and macOS CI in https://github.com/thowd22/Subordinate/actions/runs/34713122748. Focused rav1enc / av1-archive verification on yodaddy passed both requested cells in https://github.com/thowd22/Subordinate/actions/runs/34713120381: sample 4 seconds, UHD 21 seconds, each 8/8 frames with AV1 video and stereo Opus audio. Both NVIDIA jobs were skipped. Final integrated export suite passed 144 tests locally. The initial box matrix also completed slow libaom AV1 in 143 seconds, beyond the former fixed 120-second completion timeout.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

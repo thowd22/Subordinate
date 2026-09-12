@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-09-12 04:44'
-updated_date: '2026-09-12 18:17'
+updated_date: '2026-09-12 19:39'
 labels:
   - ui
   - api
@@ -54,6 +54,8 @@ Validation: local egui command_api_host regression PASSED with an actual GPU ada
 AC4 remains unchecked only because the desktop-image GUI-versus-CLI export matrix was not run; its requested egui socket regression is implemented and passed locally. Existing session limitation: socket project.open/save does not update EditorSession.project_file (GUI Save/autosave/title), although the host media/export directory now updates immediately and safely. Direct low-level project.replace of an unknown project requires open/save to establish its host file context.
 
 Integration review with TASK-153 found that probing unprobed media for unused-stream warnings could block the UI. Commit e80a30e defers this preparation to the export worker first frame read, preserving the queued project snapshot and directory. The thread-identity/once-only regression and strict UI clippy pass. Combined workspace clippy, Command API/export suites, documentation tests and CLI diagnostics also pass; desktop-image validation remains pending to avoid release/AMI and EC2 work during this low-spend pass.
+
+Final integration code 3256fe0 passed Linux, Windows and macOS CI: https://github.com/thowd22/Subordinate/actions/runs/34713122748. The real socket regression passes on all three systems after using a short Unix endpoint path and comparing canonical media paths. Windows CLI render error tests now accept driver diagnostics preceding compact structured errors. Full local UI suite passed 627 tests. AC4 remains open for actual desktop-image verification; no release, AMI rebuild or paid desktop runner was used. Draft integration PR: https://github.com/thowd22/Subordinate/pull/6.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
