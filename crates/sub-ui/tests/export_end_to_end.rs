@@ -449,7 +449,7 @@ fn window_export(project: &Path, output: &Path, element: &str) -> sub_export::Ex
         .apply_export(ExportAction::Start(Box::new(request)));
     run_until_settled(&mut harness);
     match harness.state().export_status() {
-        ExportStatus::Finished(report) => report.clone(),
+        ExportStatus::Finished(report) => report.as_ref().clone(),
         ExportStatus::Failed { error, .. } => {
             panic!(
                 "the window's export with {element} failed: [{}] {}",
