@@ -71,7 +71,10 @@ fn a_branch_that_stops_draining_ends_the_export_instead_of_stalling_it() {
     let mut pipeline = ExportPipeline::new(&path, &settings, &elements)
         .expect("the pipeline builds")
         .with_push_timeout(PUSH_TIMEOUT);
-    assert!(pipeline.has_audio(), "the muxer needs a second pad to wait on");
+    assert!(
+        pipeline.has_audio(),
+        "the muxer needs a second pad to wait on"
+    );
 
     // Picture and nothing else: the muxer holds the video branch waiting for
     // sound that never comes, which is the same back-pressure a failed

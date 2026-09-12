@@ -1083,7 +1083,11 @@ impl ExportPipeline {
         self.wait_for_room(src, "audio", bytes_len)?;
         src.push_buffer(buffer)
             .map_err(|flow| self.push_failed("audio", flow))?;
-        tracing::trace!(from = self.audio_frames, frames, "the audio branch took them");
+        tracing::trace!(
+            from = self.audio_frames,
+            frames,
+            "the audio branch took them"
+        );
         self.audio_frames += frames;
         Ok(())
     }

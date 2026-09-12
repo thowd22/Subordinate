@@ -51,7 +51,7 @@ images:
     platform: windows
     arch: x64
     owner: "731537225673"
-    ami: ami-0b3c82cb19d31ac1d
+    ami: ami-0659059240f50646f
 
 runners:
   # NVIDIA T4 (16 GB), 4 vCPU / 16 GB RAM.

@@ -379,7 +379,7 @@ available. The first one in this order that gets there wins:
 
 | Platform | Order |
 | --- | --- |
-| NVIDIA | `nvh264enc`, `nvh265enc`, `nvav1enc` (plugin `nvcodec`) |
+| NVIDIA | `nvh264enc`, `nvh265enc`, `nvav1enc`, and on Windows the Direct3D 11 and auto-GPU variants `nvd3d11h264enc`, `nvd3d11h265enc`, `nvautogpuh264enc`, `nvautogpuh265enc` (plugin `nvcodec`) |
 | AMD/Intel on Linux | `vah264enc`, `vah265enc`, `vaav1enc` (plugin `va`) |
 | AMD on Windows | `amfh264enc`, `amfh265enc`, `amfav1enc` (plugin `amfcodec`) |
 | macOS | `vtenc_h264`, `vtenc_h265` (plugin `applemedia`) |
