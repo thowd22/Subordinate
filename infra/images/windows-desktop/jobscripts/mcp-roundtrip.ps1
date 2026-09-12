@@ -23,11 +23,16 @@ Get-Content $lock
 # window on screen answering, not a server the bridge launched for itself.
 $env:SUBORDINATE_MCP_NO_LAUNCH = '1'
 
+# project.new leaves an empty project, and timeline.get_state on a project with
+# no sequences - or with the two that demo.sub carries - answers a domain error
+# rather than a timeline, so the round trip creates one sequence in between.
+$settings = '{"resolution":{"width":1920,"height":1080},"frame_rate":{"numerator":30,"denominator":1},"sample_rate":48000,"color":{"space":"rec709","transfer":"bt709","primaries":"bt709"}}'
 $requests = @(
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"gpu-smoke","version":"1"}}}'
   '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_new","arguments":{}}}'
-  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"timeline_get_state","arguments":{}}}'
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_new","arguments":{"name":"gpu-smoke"}}}'
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sequence_create","arguments":{"name":"Smoke","settings":' + $settings + '}}}'
+  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"timeline_get_state","arguments":{}}}'
 )
 Set-Content -Encoding ASCII C:\SubordinateTest\mcp-in.jsonl ($requests -join "`r`n")
 
@@ -49,10 +54,12 @@ foreach ($line in $lines) {
   $message = $line | ConvertFrom-Json
   if ($null -ne $message.id) { $seen[[int]$message.id] = $message }
 }
-foreach ($id in 1, 2, 3) {
-  if (-not $seen.ContainsKey($id)) { throw "no answer to request $id" }
-  if ($seen[$id].error) { throw "request $id failed: $($seen[$id].error | ConvertTo-Json -Compress)" }
+$named = @{ 1 = 'initialize'; 2 = 'project.new'; 3 = 'sequence.create'; 4 = 'timeline.get_state' }
+foreach ($id in 1, 2, 3, 4) {
+  if (-not $seen.ContainsKey($id)) { throw "no answer to $($named[$id]) (request $id)" }
+  if ($seen[$id].error) { throw "$($named[$id]) failed: $($seen[$id].error | ConvertTo-Json -Compress)" }
+  if ($seen[$id].result.isError) {
+    throw "$($named[$id]) answered a tool error: $($seen[$id].result | ConvertTo-Json -Depth 6 -Compress)"
+  }
 }
-if ($seen[2].result.isError) { throw "project.new answered a tool error: $($seen[2].result | ConvertTo-Json -Depth 6 -Compress)" }
-if ($seen[3].result.isError) { throw "timeline.get_state answered a tool error: $($seen[3].result | ConvertTo-Json -Depth 6 -Compress)" }
-'project.new and timeline.get_state both round-tripped through the editor on screen'
+'project.new, sequence.create and timeline.get_state all round-tripped through the editor on screen'
