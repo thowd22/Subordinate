@@ -59,6 +59,9 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
+  # The pinned GStreamer, for the Windows jobs: the Linux ones take theirs from
+  # apt on the image (TASK-1.3).
+  GST_VERSION: "1.28.6"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   # The preset the sample project is rendered with: H.264 in MP4 with AAC, so
