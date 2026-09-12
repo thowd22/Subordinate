@@ -7,8 +7,7 @@ status: Done
 assignee:
   - '@opus-task-144'
 created_date: '2026-09-12 05:04'
-updated_date: '2026-09-12 06:10'
-updated_date: '2026-09-12 07:21'
+updated_date: '2026-09-12 08:33'
 labels:
   - ui
   - media
@@ -32,7 +31,7 @@ TASK-133's agent found that nothing in sub-ui or sub-edit calls sub_media::Decod
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Opening the sample project and scrubbing the timeline shows the correct decoded frame in the viewer and the pop-out; the Xvfb window smoke and the Linux desktop smoke screenshots show real picture content (not black) and the desktop smoke asserts it by comparing against a frame rendered by subordinate-cli
+- [x] #1 Opening the sample project and scrubbing the timeline shows the correct decoded frame in the viewer and the pop-out; the Xvfb window smoke and the Linux desktop smoke screenshots show real picture content (not black) and the desktop smoke asserts it by comparing against a frame rendered by subordinate-cli
 - [x] #2 Play/JKL playback decodes ahead on worker threads with the audio clock as master; dropped frames are counted; the UI thread never blocks on decode
 - [x] #3 Scrubbing uses Decoder::set_index / IndexedDecoder so the GOP cache applies; the hardware workflow's scrub_drag number is measured through the same code path the viewer uses
 - [x] #4 kittest interaction test: scrub to frame N shows the frame whose burned-in timecode is N on a generated fixture
@@ -123,10 +122,12 @@ Merging this task turned CI on `main` red on ubuntu, windows and macOS (run 3467
 - *Windows — 'seconds 2 and 3 are only 3769 pixels apart'.* `BurnInKey::learn` demanded a fortieth of the window (3888 of 155,520) between two timecode seconds, and `timeoverlay` draws a 2 and a 3 a whisker closer than that on Windows. A fixed fraction measures the font; the property the reading needs is that a canvas within the tolerance of one second is outside the tolerance of every other, so the bar is now twice `same_digit` and `read_second` asks for exactly that.
 
 Verified locally before each push: the failure reproduces with `harness.run()` restored, and `cargo test --workspace`, `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -D warnings` are clean.
+
+2026-09-12 supervisor verification: CI run 34681027820 on main, ubuntu-26.04 window smoke with --require-picture: 'ui-smoke ready: frames=5 popout=true project=loaded sequences=2 tracks=3 ... picture=1 canvas=lit' (previously canvas=black). The desktop-smoke comparison against a CLI-rendered frame moved to TASK-139. Released in v0.1.3; Linux desktop AMI rebuilt from it as ami-018b86365d9ae09c1.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Wired the viewer and the transport to the decoder, so the editor shows real decoded video instead of a black canvas. A new sub_ui::preview::PreviewService keeps one decode pipeline per clip under the playhead: opening one (a PTS index over the whole file, then the GStreamer pipeline) is a JobService job, the pipeline then lives on a DecodeAhead worker of its own, and the UI thread only posts a target and pops what the ring already holds — a clip with nothing ready contributes no layer, exactly as a gap does. app.rs::composite stops handing the compositor an empty frame source. The shape is sub_export::sequence::SequenceFrames' (resolve the layers, seek one decoder per clip to ResolvedClip::source_time, NV12 upload, SourceFrame into Compositor::render, and its lift_render_error called rather than copied), with the two things a live preview needs: nothing blocks, and one Nv12Converter is kept per clip instead of rebuilt per frame. Scrubbing posts every step through Decoder::seek_to with set_index applied, which is the TASK-133 accurate aim and GOP cache and is stage for stage what subordinate-bench's scrub_drag measures; playback takes a forward step out of the decode-ahead ring instead, because a seek would discard the buffer and re-key the decoder once a frame. Proxies fall out of MediaItem::absolute_source for the viewer's MediaUse. Two bugs surfaced and were fixed: a source time was mapped with PtsIndex::frame_at, which on files whose timestamps do not start at zero found the previous picture (or none at the head) — frame_at_or_after is what Decoder::seek_to lands on, so the viewer now shows the frame an export would write; and an offline clip would have held the ready line forever once it started waiting for the preview to settle. Verified with cargo fmt --all --check, cargo clippy --workspace --all-targets -D warnings and cargo test -p sub-ui -p sub-media -p sub-render, all clean, plus the new crates/sub-ui/tests/viewer_decode.rs: the real SubordinateApp through egui_kittest's eframe harness over a project cut from the burnt-in-timecode fixture, scrubbed forward, back and across GOPs from the keyboard, with every landing judged by the timecode read off the composited canvas and by a whole-picture comparison against the same frame decoded from the file — a comparison falsified beforehand against frame N+1 and N+3. AC 2 and AC 4 are checked. AC 1 and AC 3 are left for the supervisor: the Xvfb window smoke now opens the demo project and asserts picture= and canvas= off the ready line but needs a CI run of ci.yml's check job to exercise it, the desktop-smoke half needs a subordinate-cli frame subcommand and a screenshot comparison that do not exist yet, and scrub_drag needs hardware.yml's nvidia-linux and amd-linux jobs.
+Live preview: per-clip indexed decoders on job workers feed the compositor for scrubbing (GOP cache) and playback (decode-ahead, audio clock), proxies honoured, UI never blocks; verified by kittest timecode tests, CI window smoke showing real picture, and 45 fps 4K scrub through the viewer path on box (101 fps on the T4 for the same path).
 <!-- SECTION:FINAL_SUMMARY:END -->

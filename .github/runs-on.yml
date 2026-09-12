@@ -41,7 +41,7 @@ images:
   subordinate-desktop-linux:
     platform: linux
     arch: x64
-    ami: ami-08dbaf8367717a9a3
+    ami: ami-018b86365d9ae09c1
 
 runners:
   # NVIDIA T4 (16 GB), 4 vCPU / 16 GB RAM.
