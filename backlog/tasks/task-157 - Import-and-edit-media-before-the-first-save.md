@@ -1,11 +1,11 @@
 ---
 id: TASK-157
 title: Import and edit media before the first save
-status: In Progress
+status: Done
 assignee:
   - codex
 created_date: '2026-09-12 21:44'
-updated_date: '2026-09-12 23:23'
+updated_date: '2026-09-12 23:27'
 labels: []
 dependencies: []
 priority: high
@@ -46,4 +46,12 @@ Hosted Linux, Windows and macOS full workspace tests passed at 88b3b03, exercisi
 First focused artifact run exposed missing wasm32-wasip2 target on the new hosted builders (sub-plugin guest build failed before runner tests). Added the target to both builders, matching ordinary CI; focused retry pending.
 
 All hosted Linux/Windows/macOS CI checks pass at 33e8ac0. Box passed all four relocated regressions. Windows artifact built successfully; yodaddy exposed gst-launch executable lookup failure before tests. Fixed explicit bundled Windows executable path and added verified prior-run artifact replay so harness-only retries do not recompile the application.
+
+Final focused replay 34725388417 passed all four UI/MCP regressions on BOTH box and yodaddy. Harness382e920 reused SHA/hash-verified application/test binaries33e8ac0 from34723105729; both hosted builders and all paid desktop jobs were skipped. Windows harness needed an explicit gst-launch-1.0.exe path and forward-slash GStreamer output path; generated files now checked before tests. Full hosted Linux/Windows/macOS CI passed on the unchanged Rust application/test source at33e8ac0 (34723101364).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Unsaved projects import and preview external media without copying or saving first. First Save As, reopen, import undo/redo and proxies retain source locations. Empty-timeline drop and both track menus create real editable tracks. Routine workspace and desktop UI/MCP checks now cover first-use flows; verified portable artifact replay passes on box/yodaddy without recompilation or EC2 usage. PR7.
+<!-- SECTION:FINAL_SUMMARY:END -->
