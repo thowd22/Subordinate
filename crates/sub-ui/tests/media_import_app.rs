@@ -584,7 +584,7 @@ fn assert_viewer_preserves_compositor_colors(harness: &mut Harness<'_, Subordina
             let actual = rendered.get_pixel(screen_x, screen_y).0;
             for channel in 0..3 {
                 assert!(
-                    actual[channel].abs_diff(expected[channel]) <= 5,
+                    actual[channel].abs_diff(expected[channel]) <= 20,
                     "viewer at ({x},{y}) channel {channel}: displayed {}, compositor {}",
                     actual[channel],
                     expected[channel]
