@@ -1972,8 +1972,14 @@ impl TimelinePanel {
         };
         if !self.scrubbing {
             let playhead_x = layout.content.left() + self.view.pixel_of(self.playhead);
+            // A zero-length fade handle sits on the clip edge, which can be
+            // within the playhead grab radius at the sequence origin. Give
+            // the edit handle priority so a fade drag is not swallowed by
+            // playhead scrubbing.
+            let over_fade_handle = self.fade_target_at(pos, layout, sequence).is_some();
             let grabbed_playhead = layout.content.contains(pos)
                 && (pos.x - playhead_x).abs() <= 4.0
+                && !over_fade_handle
                 && response.ctx.input(|input| {
                     input
                         .pointer
