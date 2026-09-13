@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-09-13 00:04'
-updated_date: '2026-09-13 00:32'
+updated_date: '2026-09-13 00:37'
 labels: []
 dependencies: []
 priority: high
@@ -40,4 +40,6 @@ Investigate viewer texture transfer, scheduler-to-panel synchronization, decode-
 User confirms SDR 4K60 source about90minutes. Reproduced double sRGB display conversion, scrub mode parking audio clock, overshot decode-ahead consuming future frames, and timeline playhead hit testing. Actual viewer color and assembled transport regressions now pass locally. Adding bounded rolling PCM source windows and shared GUI/MCP transport; no new paid EC2 runs dispatched.
 
 Implemented and locally validated: sRGB display view, red-playhead dragging, scrub-to-play clock release, overshot/EOF decode-ahead hold, shared GUI/MCP transport with project revision guards, paired A/V source drops, and worker-decoded4s PCM windows with64MiB cache+pending budget. Long-source regression seeks near89:58 of90min60fps sources without full decode. Exact audio seek/EOF tests pass. Final local checks:637 UI/audio/edit unit tests, all5 focused UI test binaries,17 audio-window/decode tests,3 native harness parser tests, strict Clippy across6 changed crates. Box/yodaddy packaging now includes playback tests; native flow project-envelope parsing corrected from release logs. Remote regression verification pending.
+
+Final review added explicit retry for GUI transport mailbox contention/newer revisions so a paused MCP seek cannot lose its only wakeup.119 edit unit tests and4 assembled transport tests pass; targeted strict Clippy passes. Superseded free CI/regression runs canceled before restarting at final revision.
 <!-- SECTION:NOTES:END -->

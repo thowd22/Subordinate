@@ -1413,13 +1413,18 @@ impl SubordinateApp {
     }
 
     /// Applies remote transport requests before advancing the window's audio master.
-    fn poll_remote_playback(&mut self) {
-        let Some(request) = self
+    fn poll_remote_playback(&mut self, ctx: &egui::Context) {
+        let request = match self
             .session
             .handle()
             .take_external_playback_request(self.session.revision())
-        else {
-            return;
+        {
+            sub_edit::engine::ExternalPlaybackPoll::Request(request) => request,
+            sub_edit::engine::ExternalPlaybackPoll::Retry => {
+                ctx.request_repaint();
+                return;
+            }
+            sub_edit::engine::ExternalPlaybackPoll::Empty => return,
         };
         if let Some(sequence) = request.sequence {
             let project = self.session.project_arc();
@@ -2510,7 +2515,7 @@ impl eframe::App for SubordinateApp {
         self.shortcuts_window
             .show_with_problems(ui.ctx(), &self.keymap.map, &self.keymap.problems);
 
-        self.poll_remote_playback();
+        self.poll_remote_playback(ui.ctx());
 
         // Where the playhead started this frame, so a drag on the scrub bar
         // or the timeline ruler can be heard (docs/PLAN.md §5.4).

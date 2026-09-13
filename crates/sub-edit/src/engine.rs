@@ -176,6 +176,17 @@ pub struct ExternalPlaybackRequest {
     pub sequence: Option<SequenceId>,
 }
 
+/// The result of a nonblocking GUI transport poll.
+#[derive(Debug, Clone)]
+pub enum ExternalPlaybackPoll {
+    /// An accepted request ready for this project revision.
+    Request(Box<ExternalPlaybackRequest>),
+    /// Contention or a newer project revision requires another UI frame.
+    Retry,
+    /// No request is waiting.
+    Empty,
+}
+
 struct ExternalPlayback {
     scheduler: PlaybackScheduler,
     sequence: Option<SequenceId>,
@@ -666,17 +677,26 @@ impl EngineHandle {
     }
 
     /// Takes the latest accepted transport request without waiting on the engine.
-    pub fn take_external_playback_request(&self, revision: u64) -> Option<ExternalPlaybackRequest> {
-        let mut slot = self.published.external_playback.try_lock().ok()?;
-        let external = slot.as_mut()?;
-        if !external.pending || external.revision != revision {
-            return None;
+    pub fn take_external_playback_request(&self, revision: u64) -> ExternalPlaybackPoll {
+        let mut slot = match self.published.external_playback.try_lock() {
+            Ok(slot) => slot,
+            Err(std::sync::TryLockError::WouldBlock) => return ExternalPlaybackPoll::Retry,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        };
+        let Some(external) = slot.as_mut() else {
+            return ExternalPlaybackPoll::Empty;
+        };
+        if !external.pending {
+            return ExternalPlaybackPoll::Empty;
+        }
+        if external.revision != revision {
+            return ExternalPlaybackPoll::Retry;
         }
         external.pending = false;
-        Some(ExternalPlaybackRequest {
+        ExternalPlaybackPoll::Request(Box::new(ExternalPlaybackRequest {
             scheduler: external.scheduler.clone(),
             sequence: external.sequence.take(),
-        })
+        }))
     }
 
     /// Publishes the editor's actual audio-driven transport state without an RPC.
@@ -1144,6 +1164,42 @@ mod tests {
         }
     }
 
+    fn take_external_request(handle: &EngineHandle, revision: u64) -> ExternalPlaybackRequest {
+        match handle.take_external_playback_request(revision) {
+            ExternalPlaybackPoll::Request(request) => *request,
+            other => panic!("expected a playback request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn external_playback_poll_retries_contention_and_newer_revisions_without_losing_request() {
+        let (project, sequence) = fixture();
+        let engine = Engine::spawn(project).unwrap();
+        let handle = engine.handle();
+        handle.enable_external_playback();
+        handle.play_forward().unwrap();
+        let lock = handle.published.external_playback.lock().unwrap();
+        assert!(matches!(
+            handle.take_external_playback_request(0),
+            ExternalPlaybackPoll::Retry
+        ));
+        drop(lock);
+        handle
+            .apply(AddTrack::new(sequence, "Audio", TrackKind::Audio))
+            .unwrap();
+        assert!(matches!(
+            handle.take_external_playback_request(0),
+            ExternalPlaybackPoll::Retry
+        ));
+        let request = take_external_request(handle, handle.revision());
+        assert!(request.scheduler.is_playing());
+        assert!(matches!(
+            handle.take_external_playback_request(handle.revision()),
+            ExternalPlaybackPoll::Empty
+        ));
+        engine.shutdown().unwrap();
+    }
+
     #[test]
     fn external_playback_preserves_pending_requests_and_reports_gui_progress() {
         let engine = Engine::spawn(Project::new("GUI")).unwrap();
@@ -1157,7 +1213,7 @@ mod tests {
         // The UI finished an old frame before noticing the remote seek.
         handle.publish_external_playback(&ui, None, 0);
         assert_eq!(handle.playback_status().unwrap().position, target);
-        let request = handle.take_external_playback_request(0).unwrap();
+        let request = take_external_request(handle, 0);
         assert_eq!(request.scheduler.position(), target);
         ui = request.scheduler;
         ui.play_forward();
@@ -1169,14 +1225,11 @@ mod tests {
         handle.pause_playback().unwrap();
         handle.publish_external_playback(&ui, None, 0);
         assert!(!handle.playback_status().unwrap().playing);
-        assert!(
-            !handle
-                .take_external_playback_request(0)
-                .unwrap()
-                .scheduler
-                .is_playing()
-        );
-        assert!(handle.take_external_playback_request(0).is_none());
+        assert!(!take_external_request(handle, 0).scheduler.is_playing());
+        assert!(matches!(
+            handle.take_external_playback_request(0),
+            ExternalPlaybackPoll::Empty
+        ));
         engine.shutdown().unwrap();
     }
 
@@ -1191,11 +1244,10 @@ mod tests {
         handle
             .apply(crate::commands::ReplaceProject::new(Project::new("Fresh")))
             .unwrap();
-        assert!(
-            handle
-                .take_external_playback_request(handle.revision())
-                .is_none()
-        );
+        assert!(matches!(
+            handle.take_external_playback_request(handle.revision()),
+            ExternalPlaybackPoll::Empty
+        ));
         assert!(!handle.playback_status().unwrap().playing);
         assert!(handle.playback_status().unwrap().duration.is_zero());
 
@@ -1223,12 +1275,13 @@ mod tests {
             RationalTime::from_seconds(8).rescaled_to(Rational::FPS_24)
         );
         assert!(
-            handle.take_external_playback_request(0).is_none(),
+            matches!(
+                handle.take_external_playback_request(0),
+                ExternalPlaybackPoll::Retry
+            ),
             "an old project frame cannot consume the request"
         );
-        let request = handle
-            .take_external_playback_request(handle.revision())
-            .unwrap();
+        let request = take_external_request(handle, handle.revision());
         assert_eq!(request.scheduler.position(), target);
         handle.publish_external_playback(&request.scheduler, Some(new_id), 0);
         assert_eq!(handle.playback_status().unwrap().position, target);
