@@ -1047,6 +1047,49 @@ impl Decoder {
         self.audio.as_ref().map(|branch| &branch.format)
     }
 
+    /// Flushes queued samples and seeks the audio branch without pulling video.
+    ///
+    /// Use with [`StreamSelection::AudioOnly`] for bounded audio-window reads.
+    /// The next block reports its new source timestamp, including after EOS.
+    ///
+    /// # Errors
+    /// Returns `media.no_audio_stream` if no audio was requested, or the same
+    /// seek errors as [`Self::seek_to`].
+    pub fn seek_audio(&mut self, target: RationalTime) -> SubResult<()> {
+        let Some(audio) = self.audio.as_ref() else {
+            return Err(SubError::new(
+                codes::NO_AUDIO_STREAM,
+                "this decoder has no audio stream",
+            ));
+        };
+        let rate = audio.format.frame_rate();
+        let target = if target.is_negative() {
+            RationalTime::zero(target.rate())
+        } else {
+            target
+        };
+        // Audio clipping counts whole samples from the seek timestamp. Floor
+        // into source samples first, then ceil into nanoseconds: flooring that
+        // last conversion asks for a fraction of the previous sample instead.
+        // Keep the video seek path's floor unchanged.
+        let target = target
+            .checked_rescaled_to_rounding(rate, Rounding::Floor)
+            .and_then(|time| time.checked_rescaled_to_rounding(NANOSECONDS, Rounding::Ceil))
+            .ok_or_else(|| {
+                SubError::new(
+                    codes::SEEK_FAILED,
+                    "audio seek target is not a reachable instant",
+                )
+            })?;
+        self.flushing_seek(target, SeekMode::Accurate)?;
+        if let Some(branch) = self.audio.as_mut() {
+            branch.finished = false;
+            branch.next_frame = None;
+            branch.delivered.clear();
+        }
+        Ok(())
+    }
+
     /// Pulls the next run of audio frames, or `None` once the audio stream has
     /// ended.
     ///

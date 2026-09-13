@@ -9,7 +9,7 @@ import shutil
 out = Path("dist")
 out.mkdir(exist_ok=True)
 expected = {"subordinate", "subordinate-cli", "subordinate-mcp", "empty_timeline_drop",
-            "empty_track_menu", "media_import_app", "stdio"}
+            "empty_track_menu", "media_import_app", "app_transport_sync", "playback_audio", "stdio"}
 found = {}
 for line in Path("desktop-build.json").read_text(encoding="utf-8").splitlines():
     item = json.loads(line)

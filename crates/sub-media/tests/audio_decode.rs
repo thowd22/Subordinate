@@ -495,3 +495,40 @@ fn every_audio_stream_is_probed_and_the_requested_stream_is_decoded() {
     assert_eq!(error.code.as_str(), "media.no_audio_stream");
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn seeking_audio_after_eos_resets_positions_and_delivers_source_samples() {
+    let Some(path) = av_file(STEREO) else { return };
+    let mut decoder = open(&path, audio_options(AudioChannels::StereoDownmix));
+    let reference: Vec<f32> = drain_audio(&mut decoder)
+        .into_iter()
+        .flat_map(|(_, samples)| samples)
+        .collect();
+    assert!(decoder.next_audio_block().unwrap().is_none());
+    for start in [17_123_i64, 17_124, 17_125, 48_123, 0] {
+        decoder
+            .seek_audio(RationalTime::new(start, Rational::HZ_48000))
+            .unwrap();
+        let blocks = drain_audio(&mut decoder);
+        assert!(!blocks.is_empty(), "seek must restart an EOS audio branch");
+        assert_eq!(blocks[0].0, RationalTime::new(start, Rational::HZ_48000));
+        let mut next = start;
+        for (position, samples) in &blocks {
+            assert_eq!(
+                position.value(),
+                next,
+                "seeked timestamps must remain contiguous"
+            );
+            next += i64::try_from(samples.len() / 2).unwrap();
+        }
+        let actual: Vec<f32> = blocks
+            .into_iter()
+            .flat_map(|(_, samples)| samples)
+            .collect();
+        let expected = &reference[usize::try_from(start).unwrap() * 2..];
+        assert_eq!(actual.len(), expected.len());
+        for (i, (a, b)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "sample {i}");
+        }
+    }
+}

@@ -39,7 +39,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from subdesktop import flow as flowlib  # noqa: E402
-from subdesktop.mcp import Bridge  # noqa: E402
+from subdesktop.mcp import Bridge, project_from_result as _project  # noqa: E402
 
 WINDOW = "Subordinate"
 
@@ -266,16 +266,8 @@ def _external_paths(value):
     return []
 
 
-def _project(state):
-    return state.get("project", state)
-
-
 def _name_of(state) -> str:
-    if isinstance(state, dict):
-        project = state.get("project", state)
-        if isinstance(project, dict):
-            return str(project.get("name", ""))
-    return ""
+    return str(_project(state).get("name", ""))
 
 
 def _clips(bridge: Bridge, sequence: str) -> list:

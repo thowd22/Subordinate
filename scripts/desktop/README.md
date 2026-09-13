@@ -232,8 +232,11 @@ Ubuntu runtime. The image supplies the isolated desktop and test media only.
 
 Routine hardware/nightly/release runs include noninteractive `box` and
 `yodaddy` jobs. They execute the real egui application harness tests
-`empty_timeline_drop`, `empty_track_menu`, `media_import_app`, and the MCP stdio
-import/save/reopen regression. They create temporary configuration and endpoint
+`empty_timeline_drop`, `empty_track_menu`, `media_import_app`,
+`app_transport_sync`, `playback_audio`, and the MCP stdio import/save/reopen
+regression. These check displayed SDR colors, playhead and timecode movement,
+GUI transport through the real MCP bridge, and decoded A/V audio through the
+callback mixer. They create temporary configuration and endpoint
 directories, inject no desktop input, and do not open the user's editor. Missing
 GPU adapters and missing test filters fail rather than silently pass. Use
 `only=regressions` for just these two free runner jobs (or `box`/`yodaddy` for

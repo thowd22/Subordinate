@@ -767,11 +767,23 @@ impl Compositor {
 
     /// The offscreen target.
     ///
-    /// Register it with egui once. [`Compositor::render`] only replaces it
+    /// Use [`Self::display_view`] to register it with egui once. [`Compositor::render`] only replaces it
     /// when the sequence resolution changes, so a consumer that caches the
     /// handle re-reads it when [`Compositor::resolution`] moves.
     pub fn output(&self) -> &wgpu::Texture {
         &self.output
+    }
+
+    /// A gamma-encoded view for UI renderers such as egui.
+    ///
+    /// The compositor stores sRGB codes, but its normal sRGB view decodes
+    /// them to linear light when sampled. egui expects gamma-encoded samples,
+    /// so it must use this non-sRGB view of the same bytes.
+    pub fn display_view(&self) -> wgpu::TextureView {
+        self.output.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(wgpu::TextureFormat::Rgba8Unorm),
+            ..wgpu::TextureViewDescriptor::default()
+        })
     }
 
     /// Point the compositor at a new canvas size, rebuilding the target.
@@ -1280,7 +1292,7 @@ fn target_texture(device: &wgpu::Device, resolution: Resolution) -> wgpu::Textur
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
+        view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
     })
 }
 

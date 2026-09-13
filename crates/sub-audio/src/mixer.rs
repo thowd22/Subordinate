@@ -554,6 +554,44 @@ fn compile_clip(clip: &ClipSpec, rate: Rational) -> SubResult<ClipNode> {
 /// displaces travels back over the retire ring and is freed by
 /// [`MixerControl::collect_retired`].
 #[derive(Debug)]
+enum ClipInput {
+    Ring(PcmReader),
+    Cached {
+        samples: Arc<[f32]>,
+        source_start: usize,
+        window_start: usize,
+    },
+}
+
+impl ClipInput {
+    fn read(&mut self, out: &mut [f32], offset: usize, channels: usize) -> usize {
+        match self {
+            Self::Ring(reader) => reader.read(out),
+            Self::Cached {
+                samples,
+                source_start,
+                window_start,
+            } => {
+                out.fill(0.0);
+                let source = source_start.saturating_add(offset);
+                let leading = window_start
+                    .saturating_sub(source)
+                    .min(out.len() / channels);
+                let start = source
+                    .saturating_sub(*window_start)
+                    .saturating_mul(channels)
+                    .min(samples.len());
+                let count = (out.len() - leading * channels).min(samples.len() - start) / channels
+                    * channels;
+                out[leading * channels..leading * channels + count]
+                    .copy_from_slice(&samples[start..start + count]);
+                (leading + count / channels).min(out.len() / channels)
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 enum MixerUpdate {
     /// A whole new graph, swapped in at the top of a callback.
     Graph(Arc<MixGraph>),
@@ -562,7 +600,7 @@ enum MixerUpdate {
         /// Which slot the reader belongs to.
         index: usize,
         /// The reader, or `None` to empty the slot.
-        source: Option<PcmReader>,
+        source: Option<ClipInput>,
     },
     /// A new transport position, in frames from sequence zero.
     Position(u64),
@@ -731,7 +769,37 @@ impl MixerControl {
         }
         self.send(MixerUpdate::Slot {
             index,
-            source: Some(reader),
+            source: Some(ClipInput::Ring(reader)),
+        })
+    }
+
+    /// Installs immutable worker-decoded PCM, addressed by clip-local time.
+    /// Late completion and seeks therefore never play stale queued samples.
+    /// The displaced allocation is retired on the control thread.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid slot, channel alignment, or full queue.
+    pub fn install_pcm(
+        &mut self,
+        index: usize,
+        samples: Arc<[f32]>,
+        source_start: usize,
+        window_start: usize,
+    ) -> SubResult<()> {
+        self.check_slot(index)?;
+        if !samples.len().is_multiple_of(usize::from(self.channels)) {
+            return Err(SubError::new(
+                codes::UNSUPPORTED_LAYOUT,
+                "cached PCM is not channel-aligned",
+            ));
+        }
+        self.send(MixerUpdate::Slot {
+            index,
+            source: Some(ClipInput::Cached {
+                samples,
+                source_start,
+                window_start,
+            }),
         })
     }
 
@@ -831,7 +899,7 @@ impl MixerControl {
 /// overlap.
 struct RenderScratch<'a> {
     /// The reading end of each clip's ring, indexed by slot.
-    slots: &'a mut [Option<PcmReader>],
+    slots: &'a mut [Option<ClipInput>],
     /// Room for one clip's frames within the block.
     clip: &'a mut [f32],
     /// Room for one track's frames within the block.
@@ -848,7 +916,7 @@ pub struct Mixer {
     /// The graph in force, swapped whole when the engine publishes a new one.
     graph: Arc<MixGraph>,
     /// The reading end of each clip's ring, indexed by slot.
-    slots: Vec<Option<PcmReader>>,
+    slots: Vec<Option<ClipInput>>,
     /// Preallocated room for one clip's frames within a block.
     scratch: Vec<f32>,
     /// Preallocated room for one track's frames within a block. A track is
@@ -1101,7 +1169,11 @@ impl Mixer {
                     underruns += to - from;
                     continue;
                 };
-                let taken = reader.read(&mut scratch[..wanted * channels]);
+                let taken = reader.read(
+                    &mut scratch[..wanted * channels],
+                    clip.offset_of(from) as usize,
+                    channels,
+                );
                 underruns += (wanted - taken) as u64;
                 if !track.audible {
                     // Drained above, so a muted track stays in sync.
@@ -1197,6 +1269,39 @@ mod tests {
             (left - right).abs() < 1e-4,
             "expected {right}, rendered {left}"
         );
+    }
+
+    #[test]
+    fn cached_windows_follow_transport_source_offset_and_late_installation() {
+        let graph = MixGraphBuilder::new(48_000, 1)
+            .track(TrackSpec::new().with_clip(ClipSpec::new(0, frames(100), frames(100))))
+            .build()
+            .unwrap();
+        let (mut control, mut render) = build(graph);
+        control.seek(frames(110)).unwrap();
+        let mut out = [0.0; 4];
+        render.process(&mut out);
+        for actual in out {
+            close(actual, 0.0);
+        }
+        // The clip begins at source frame 20. This decoded window starts at 30;
+        // late delivery must read source 34, not restart the decoded window.
+        let samples: Arc<[f32]> = (0_u16..40).map(|i| f32::from(i) / 100.0).collect();
+        control.install_pcm(0, samples, 20, 30).unwrap();
+        render.process(&mut out);
+        for (actual, expected) in out.into_iter().zip([0.04, 0.05, 0.06, 0.07]) {
+            close(actual, expected);
+        }
+        control.seek(frames(108)).unwrap();
+        render.process(&mut out);
+        for (actual, expected) in out.into_iter().zip([0.0, 0.0, 0.0, 0.01]) {
+            close(actual, expected);
+        }
+        control.seek(frames(114)).unwrap();
+        render.process(&mut out);
+        for (actual, expected) in out.into_iter().zip([0.04, 0.05, 0.06, 0.07]) {
+            close(actual, expected);
+        }
     }
 
     #[test]

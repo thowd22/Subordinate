@@ -167,6 +167,84 @@ pub struct PlaybackStatus {
     pub dropped_frames: u64,
 }
 
+/// A transport request accepted for the editor's next frame.
+#[derive(Debug, Clone)]
+pub struct ExternalPlaybackRequest {
+    /// Requested transport state; the editor supplies its own audio master.
+    pub scheduler: PlaybackScheduler,
+    /// A requested sequence switch, when one has not yet reached the editor.
+    pub sequence: Option<SequenceId>,
+}
+
+/// The result of a nonblocking GUI transport poll.
+#[derive(Debug, Clone)]
+pub enum ExternalPlaybackPoll {
+    /// An accepted request ready for this project revision.
+    Request(Box<ExternalPlaybackRequest>),
+    /// Contention or a newer project revision requires another UI frame.
+    Retry,
+    /// No request is waiting.
+    Empty,
+}
+
+struct ExternalPlayback {
+    scheduler: PlaybackScheduler,
+    sequence: Option<SequenceId>,
+    pending: bool,
+    active_sequence: Option<SequenceId>,
+    revision: u64,
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl std::fmt::Debug for ExternalPlayback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalPlayback")
+            .field("scheduler", &self.scheduler)
+            .field("pending", &self.pending)
+            .finish_non_exhaustive()
+    }
+}
+
+fn scheduler_status(scheduler: &PlaybackScheduler) -> PlaybackStatus {
+    PlaybackStatus {
+        position: scheduler.position(),
+        duration: scheduler.duration(),
+        speed: scheduler.speed(),
+        playing: scheduler.is_playing(),
+        loop_range: scheduler.loop_range(),
+        dropped_frames: scheduler.dropped_frames(),
+    }
+}
+
+fn apply_playback_op(
+    scheduler: &mut PlaybackScheduler,
+    project: &Project,
+    op: PlaybackOp,
+) -> SubResult<()> {
+    match op {
+        PlaybackOp::Status => {}
+        PlaybackOp::PlayForward => scheduler.play_forward(),
+        PlaybackOp::PlayBackward => scheduler.play_backward(),
+        PlaybackOp::Pause => scheduler.pause(),
+        PlaybackOp::Toggle => scheduler.toggle(),
+        PlaybackOp::SetSpeed(speed) => scheduler.set_speed(speed),
+        PlaybackOp::Seek(position) => scheduler.seek(position),
+        PlaybackOp::SetLoopRange(range) => scheduler.set_loop_range(range)?,
+        PlaybackOp::SetTimebase { rate, duration } => {
+            scheduler.set_rate(rate);
+            scheduler.set_duration(duration);
+        }
+        PlaybackOp::FollowSequence(id) => {
+            let sequence = project.sequence(id).ok_or_else(|| {
+                SubError::new(codes::SEQUENCE_NOT_FOUND, "no such sequence")
+                    .with_detail("sequence", id.to_string())
+            })?;
+            scheduler.follow_sequence(sequence);
+        }
+    }
+    Ok(())
+}
+
 /// The clock a new engine starts with: the first sequence of the project, or
 /// an empty one at 24 fps when the project has none yet.
 fn initial_scheduler(project: &Project) -> PlaybackScheduler {
@@ -226,6 +304,7 @@ struct Published {
     revision: AtomicU64,
     bus: EventBus,
     playhead: EventBus<PlayheadEvent>,
+    external_playback: Mutex<Option<ExternalPlayback>>,
 }
 
 impl Published {
@@ -234,8 +313,41 @@ impl Published {
     /// at least that new.
     fn store(&self, project: &Arc<Project>, revision: u64) {
         let mut slot = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
+        let replaced = slot.id != project.id;
         *slot = Arc::clone(project);
         drop(slot);
+        let mut transport = self
+            .external_playback
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(external) = transport.as_mut() {
+            external.revision = revision;
+            if replaced {
+                external.scheduler = initial_scheduler(project);
+                external.pending = false;
+                external.sequence = None;
+                external.active_sequence = project.sequences.first().map(|sequence| sequence.id);
+            } else {
+                let selected = external
+                    .active_sequence
+                    .and_then(|id| project.sequence(id))
+                    .or_else(|| project.sequences.first());
+                if let Some(sequence) = selected {
+                    if external.active_sequence != Some(sequence.id) {
+                        external.pending = false;
+                        external.sequence = None;
+                    }
+                    external.active_sequence = Some(sequence.id);
+                    external.scheduler.follow_sequence(sequence);
+                } else {
+                    external.scheduler = initial_scheduler(project);
+                    external.active_sequence = None;
+                    external.pending = false;
+                    external.sequence = None;
+                }
+            }
+        }
+        drop(transport);
         self.revision.store(revision, Ordering::Release);
     }
 }
@@ -293,6 +405,7 @@ impl Engine {
             revision: AtomicU64::new(0),
             bus: EventBus::new(config.event_capacity)?,
             playhead: EventBus::new(config.event_capacity)?,
+            external_playback: Mutex::new(None),
         });
 
         let (sender, receiver) = mpsc::channel();
@@ -530,6 +643,88 @@ impl EngineHandle {
         self.request(|reply| Request::Playback { op, reply })
     }
 
+    /// Gives transport advancement to an editor with an audio-master clock.
+    /// Call before exposing this handle to clients. Headless engines retain
+    /// their own wall clock unless this mode is enabled.
+    pub fn enable_external_playback(&self) {
+        let project = self.snapshot();
+        let scheduler = initial_scheduler(&project);
+        *self
+            .published
+            .external_playback
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(ExternalPlayback {
+            scheduler,
+            sequence: None,
+            pending: false,
+            active_sequence: project.sequences.first().map(|sequence| sequence.id),
+            revision: self.revision(),
+            wake: None,
+        });
+    }
+
+    /// Wakes the editor when a remote client requests a transport change.
+    pub fn set_external_playback_waker(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        if let Some(external) = self
+            .published
+            .external_playback
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+        {
+            external.wake = Some(wake);
+        }
+    }
+
+    /// Takes the latest accepted transport request without waiting on the engine.
+    pub fn take_external_playback_request(&self, revision: u64) -> ExternalPlaybackPoll {
+        let mut slot = match self.published.external_playback.try_lock() {
+            Ok(slot) => slot,
+            Err(std::sync::TryLockError::WouldBlock) => return ExternalPlaybackPoll::Retry,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        };
+        let Some(external) = slot.as_mut() else {
+            return ExternalPlaybackPoll::Empty;
+        };
+        if !external.pending {
+            return ExternalPlaybackPoll::Empty;
+        }
+        if external.revision != revision {
+            return ExternalPlaybackPoll::Retry;
+        }
+        external.pending = false;
+        ExternalPlaybackPoll::Request(Box::new(ExternalPlaybackRequest {
+            scheduler: external.scheduler.clone(),
+            sequence: external.sequence.take(),
+        }))
+    }
+
+    /// Publishes the editor's actual audio-driven transport state without an RPC.
+    /// An unconsumed request wins over an older UI frame's publication.
+    pub fn publish_external_playback(
+        &self,
+        scheduler: &PlaybackScheduler,
+        sequence: Option<SequenceId>,
+        revision: u64,
+    ) {
+        let Ok(mut slot) = self.published.external_playback.try_lock() else {
+            return;
+        };
+        let Some(external) = slot.as_mut() else {
+            return;
+        };
+        if external.pending || external.revision != revision {
+            return;
+        }
+        external.active_sequence = sequence;
+        let changed = scheduler_status(&external.scheduler) != scheduler_status(scheduler);
+        external.scheduler = scheduler.clone();
+        drop(slot);
+        if changed {
+            self.published.playhead.publish([scheduler.event(false)]);
+        }
+    }
+
     /// L: play forward, shuttling faster on every repeat.
     ///
     /// # Errors
@@ -683,32 +878,40 @@ impl EngineThread {
 
     /// Applies one transport operation and reports the transport state.
     fn playback(&mut self, op: PlaybackOp) -> SubResult<PlaybackStatus> {
-        match op {
-            PlaybackOp::Status => return Ok(self.playback_status()),
-            PlaybackOp::PlayForward => self.scheduler.play_forward(),
-            PlaybackOp::PlayBackward => self.scheduler.play_backward(),
-            PlaybackOp::Pause => self.scheduler.pause(),
-            PlaybackOp::Toggle => self.scheduler.toggle(),
-            PlaybackOp::SetSpeed(speed) => self.scheduler.set_speed(speed),
-            PlaybackOp::Seek(position) => self.scheduler.seek(position),
-            PlaybackOp::SetLoopRange(range) => self.scheduler.set_loop_range(range)?,
-            PlaybackOp::SetTimebase { rate, duration } => {
-                self.scheduler.set_rate(rate);
-                self.scheduler.set_duration(duration);
+        let mut slot = self
+            .published
+            .external_playback
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(external) = slot.as_mut() {
+            if op != PlaybackOp::Status {
+                let mut scheduler = external.scheduler.clone();
+                apply_playback_op(&mut scheduler, &self.project, op)?;
+                external.scheduler = scheduler;
+                if let PlaybackOp::FollowSequence(sequence) = op {
+                    external.sequence = Some(sequence);
+                    external.active_sequence = Some(sequence);
+                }
+                external.pending = true;
+                self.published
+                    .playhead
+                    .publish([external.scheduler.event(false)]);
             }
-            PlaybackOp::FollowSequence(id) => {
-                let sequence = self
-                    .project
-                    .sequences
-                    .iter()
-                    .find(|sequence| sequence.id == id)
-                    .ok_or_else(|| {
-                        SubError::new(codes::SEQUENCE_NOT_FOUND, "no such sequence")
-                            .with_detail("sequence", id.to_string())
-                    })?;
-                self.scheduler.follow_sequence(sequence);
+            let status = scheduler_status(&external.scheduler);
+            let wake = external.wake.clone();
+            drop(slot);
+            if op != PlaybackOp::Status
+                && let Some(wake) = wake
+            {
+                wake();
             }
+            return Ok(status);
         }
+        drop(slot);
+        if op == PlaybackOp::Status {
+            return Ok(self.playback_status());
+        }
+        apply_playback_op(&mut self.scheduler, &self.project, op)?;
         // The clock starts from this moment, not from whenever the thread
         // last woke, so pressing play does not immediately drop frames.
         self.last_tick = Some(Instant::now());
@@ -959,6 +1162,130 @@ mod tests {
             kind: TrackKind::Video,
             index: None,
         }
+    }
+
+    fn take_external_request(handle: &EngineHandle, revision: u64) -> ExternalPlaybackRequest {
+        match handle.take_external_playback_request(revision) {
+            ExternalPlaybackPoll::Request(request) => *request,
+            other => panic!("expected a playback request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn external_playback_poll_retries_contention_and_newer_revisions_without_losing_request() {
+        let (project, sequence) = fixture();
+        let engine = Engine::spawn(project).unwrap();
+        let handle = engine.handle();
+        handle.enable_external_playback();
+        handle.play_forward().unwrap();
+        let lock = handle.published.external_playback.lock().unwrap();
+        assert!(matches!(
+            handle.take_external_playback_request(0),
+            ExternalPlaybackPoll::Retry
+        ));
+        drop(lock);
+        handle
+            .apply(AddTrack::new(sequence, "Audio", TrackKind::Audio))
+            .unwrap();
+        assert!(matches!(
+            handle.take_external_playback_request(0),
+            ExternalPlaybackPoll::Retry
+        ));
+        let request = take_external_request(handle, handle.revision());
+        assert!(request.scheduler.is_playing());
+        assert!(matches!(
+            handle.take_external_playback_request(handle.revision()),
+            ExternalPlaybackPoll::Empty
+        ));
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn external_playback_preserves_pending_requests_and_reports_gui_progress() {
+        let engine = Engine::spawn(Project::new("GUI")).unwrap();
+        let handle = engine.handle();
+        handle.enable_external_playback();
+        let mut ui = PlaybackScheduler::new(Rational::FPS_24);
+        ui.set_duration(RationalTime::from_seconds(10));
+        handle.publish_external_playback(&ui, None, 0);
+        let target = RationalTime::new(48, Rational::FPS_24);
+        handle.seek(target).unwrap();
+        // The UI finished an old frame before noticing the remote seek.
+        handle.publish_external_playback(&ui, None, 0);
+        assert_eq!(handle.playback_status().unwrap().position, target);
+        let request = take_external_request(handle, 0);
+        assert_eq!(request.scheduler.position(), target);
+        ui = request.scheduler;
+        ui.play_forward();
+        ui.advance(Duration::from_millis(250));
+        handle.publish_external_playback(&ui, None, 0);
+        let status = handle.playback_status().unwrap();
+        assert_eq!(status.position, RationalTime::new(54, Rational::FPS_24));
+        assert!(status.playing);
+        handle.pause_playback().unwrap();
+        handle.publish_external_playback(&ui, None, 0);
+        assert!(!handle.playback_status().unwrap().playing);
+        assert!(!take_external_request(handle, 0).scheduler.is_playing());
+        assert!(matches!(
+            handle.take_external_playback_request(0),
+            ExternalPlaybackPoll::Empty
+        ));
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn replacing_a_project_discards_old_transport_and_refreshes_new_sequence_length() {
+        let (project, sequence) = fixture();
+        let engine = Engine::spawn(project).unwrap();
+        let handle = engine.handle();
+        handle.enable_external_playback();
+        handle.follow_sequence(sequence).unwrap();
+        handle.play_forward().unwrap();
+        handle
+            .apply(crate::commands::ReplaceProject::new(Project::new("Fresh")))
+            .unwrap();
+        assert!(matches!(
+            handle.take_external_playback_request(handle.revision()),
+            ExternalPlaybackPoll::Empty
+        ));
+        assert!(!handle.playback_status().unwrap().playing);
+        assert!(handle.playback_status().unwrap().duration.is_zero());
+
+        let mut new_sequence = Sequence::new("New timeline", SequenceSettings::default());
+        let mut track = sub_model::Track::new("V1", TrackKind::Video);
+        track
+            .items
+            .push(sub_model::TrackItem::Gap(sub_model::Gap::new(
+                RationalTime::from_seconds(8),
+            )));
+        new_sequence.tracks.push(track);
+        let new_id = new_sequence.id;
+        handle
+            .apply(crate::commands::InsertSequence::new(0, new_sequence))
+            .unwrap();
+        let target = RationalTime::from_seconds(3).rescaled_to(Rational::FPS_24);
+        handle.seek(target).unwrap();
+        let status = handle.playback_status().unwrap();
+        assert_eq!(
+            status.position, target,
+            "new media duration is usable before a UI pump"
+        );
+        assert_eq!(
+            status.duration,
+            RationalTime::from_seconds(8).rescaled_to(Rational::FPS_24)
+        );
+        assert!(
+            matches!(
+                handle.take_external_playback_request(0),
+                ExternalPlaybackPoll::Retry
+            ),
+            "an old project frame cannot consume the request"
+        );
+        let request = take_external_request(handle, handle.revision());
+        assert_eq!(request.scheduler.position(), target);
+        handle.publish_external_playback(&request.scheduler, Some(new_id), 0);
+        assert_eq!(handle.playback_status().unwrap().position, target);
+        engine.shutdown().unwrap();
     }
 
     #[test]

@@ -35,7 +35,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from subdesktop import flow as flowlib  # noqa: E402
-from subdesktop.mcp import Bridge, McpError  # noqa: E402
+from subdesktop.mcp import Bridge, McpError, project_from_result as _project  # noqa: E402
 from subdesktop.session import DesktopError, Rect  # noqa: E402
 
 WINDOW = "Subordinate"
@@ -680,10 +680,6 @@ def _external_paths(value):
     if isinstance(value, list):
         return [path for child in value for path in _external_paths(child)]
     return []
-
-
-def _project(state):
-    return state.get("project", state)
 
 
 def _enter_save_path(session, path):

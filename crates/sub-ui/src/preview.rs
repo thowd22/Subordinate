@@ -321,7 +321,10 @@ impl ClipPreview {
         let Some(wanted) = self.wanted else {
             return Ok(());
         };
-        if self.current_frame == Some(wanted) {
+        // Once a target settled for an overshooting picture, draining more
+        // decode-ahead cannot improve it. Hold that picture until request()
+        // changes the target, just as pending() promises the repaint loop.
+        if !self.pending() {
             return Ok(());
         }
         while self.ahead.occupancy() > 0 {
@@ -346,6 +349,9 @@ impl ClipPreview {
                 break;
             }
         }
+        // Occupancy counts pictures only: an empty ring can also mean EOF
+        // or a worker failure. Observe those without blocking a repaint.
+        self.eos = self.ahead.is_drained()?;
         Ok(())
     }
 
@@ -920,6 +926,104 @@ mod tests {
     use super::{MAX_OPEN_CLIPS, PreviewFrames, PreviewService, PreviewStats, Step, plan_step};
     use sub_model::MediaUse;
 
+    #[test]
+    fn overshot_decode_ahead_holds_until_the_requested_media_time_changes() {
+        use super::{
+            ClipPreview, DecodeAhead, Decoder, DecoderOptions, FrameFormat, OpenedClip, PtsIndex,
+            StreamSelection,
+        };
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let Some(path) = sub_test_support::try_fixture("bars_1080p_h264.mp4") else {
+            eprintln!("skipping: no bars_1080p_h264.mp4 fixture for real preview decode");
+            return;
+        };
+        let index = Arc::new(PtsIndex::build(&path).expect("index the fixture"));
+        assert!(index.len() > 8);
+        let mut decoder = Decoder::open_with(
+            &path,
+            DecoderOptions {
+                streams: StreamSelection::Video,
+                format: FrameFormat::Nv12,
+                ..DecoderOptions::default()
+            },
+        )
+        .expect("open the real decoder");
+        decoder.set_index(Arc::clone(&index));
+        let ahead = DecodeAhead::with_decoder(decoder, 8);
+        let mut preview = ClipPreview::new(
+            OpenedClip {
+                ahead,
+                index: Arc::clone(&index),
+            },
+            0,
+        );
+
+        // Reproduce a decoder that can only answer a target with a later
+        // picture. Manipulating the private target avoids relying on a
+        // particular driver's inaccurate seek or dropped frame to trigger it.
+        preview.ahead.seek_to(index.pts(5).unwrap()).unwrap();
+        preview.wanted = Some(0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !preview.overshot && Instant::now() < deadline {
+            preview.poll().unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            preview.overshot,
+            "the worker landed past the requested frame"
+        );
+        assert!(!preview.pending());
+        let landed = preview.current_frame.unwrap();
+        let shown_pts = preview.current.as_ref().unwrap().pts();
+        let delivered = preview.ahead.stats().frames_delivered;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while preview.ahead.occupancy() == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            preview.ahead.occupancy() > 0,
+            "future frames must be available to expose a drain"
+        );
+        for playing in [false, true] {
+            for _ in 0..16 {
+                preview.request(index.pts(0).unwrap(), playing).unwrap();
+                preview.poll().unwrap();
+                assert_eq!(
+                    preview.current_frame,
+                    Some(landed),
+                    "repaints must not run video ahead of a parked playhead"
+                );
+                assert_eq!(preview.current.as_ref().unwrap().pts(), shown_pts);
+                assert_eq!(preview.ahead.stats().frames_delivered, delivered);
+            }
+        }
+
+        // A moving playhead releases the hold and consumes the matching
+        // buffered picture, without replacing the decoder or seeking ahead.
+        preview
+            .request(index.pts(landed + 1).unwrap(), true)
+            .unwrap();
+        assert!(!preview.overshot);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !preview.on_target() && Instant::now() < deadline {
+            preview.poll().unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(preview.current_frame, Some(landed + 1));
+        assert!(preview.ahead.stats().frames_delivered > delivered);
+
+        // Holding an overshoot must not block a subsequent scrub backwards.
+        preview.request(index.pts(0).unwrap(), false).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !preview.on_target() && Instant::now() < deadline {
+            preview.poll().unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(preview.current_frame, Some(0));
+    }
+
     /// The ring depth every planning case below is judged against.
     const RING: usize = super::DECODE_AHEAD_FRAMES;
 
@@ -1020,5 +1124,44 @@ mod tests {
         assert_eq!(frames.len(), 0);
         assert!(!frames.changed());
         assert!(!frames.busy());
+    }
+    #[test]
+    fn empty_ring_eof_settles_a_target_beyond_the_last_decoded_picture() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let Some(path) = sub_test_support::try_fixture("bars_1080p_h264.mp4") else {
+            eprintln!("skipping: no video fixture");
+            return;
+        };
+        let index = Arc::new(super::PtsIndex::build(&path).unwrap());
+        let last = index.len() - 1;
+        let mut decoder = super::Decoder::open(&path).unwrap();
+        decoder.set_index(index.clone());
+        let ahead = super::DecodeAhead::with_decoder(decoder, 2);
+        let mut preview = super::ClipPreview::new(
+            super::OpenedClip {
+                ahead,
+                index: index.clone(),
+            },
+            0,
+        );
+        preview.ahead.seek_to(index.pts(last).unwrap()).unwrap();
+        // Simulate a target/index mismatch past the worker's final picture.
+        preview.wanted = Some(index.len());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while preview.pending() && Instant::now() < deadline {
+            preview.poll().unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(preview.current_frame, Some(last));
+        assert!(preview.eos);
+        assert!(!preview.pending(), "EOF must stop the repaint loop");
+        preview.request(index.pts(0).unwrap(), false).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while preview.pending() && Instant::now() < deadline {
+            preview.poll().unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(preview.current_frame, Some(0));
     }
 }

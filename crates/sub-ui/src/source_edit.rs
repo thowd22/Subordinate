@@ -145,6 +145,7 @@ pub struct PlannedEdit {
     pub range: TimeRange,
     create_sequence: Option<InsertSequence>,
     create_track: Option<InsertTrack>,
+    companion_audio: Option<Box<PlannedEdit>>,
 }
 
 impl PlannedEdit {
@@ -170,7 +171,11 @@ impl PlannedEdit {
         if let Some(command) = self.create_track.take() {
             commands.push(Box::new(command));
         }
+        let companion = self.companion_audio.take();
         commands.push(self.into_clip_command());
+        if let Some(audio) = companion {
+            commands.extend(audio.into_commands());
+        }
         commands
     }
 
@@ -253,11 +258,16 @@ pub fn plan_source_edit(
         range,
         create_sequence: None,
         create_track: None,
+        companion_audio: None,
     })
 }
 
 /// Plans a bin edit, creating a first lane only when the timeline has none.
 /// The fallback sequence is inserted only when it is absent from the project.
+/// A video drop carrying sound also places a synchronized clip on the first
+/// audio lane, creating A1 when no audio lane exists. A locked audio lane
+/// refuses the whole gesture. Dropping explicitly onto audio takes sound only.
+/// The pair shares one history entry; it is not a persistent linked-edit group.
 ///
 /// # Errors
 /// Returns the same media and placement refusals as [`plan_source_edit`].
@@ -270,7 +280,8 @@ pub fn plan_timeline_source_edit(
     mode: EditMode,
 ) -> Result<PlannedEdit, SourceRefusal> {
     if !sequence.tracks.is_empty() {
-        return plan_source_edit(project, sequence, media, track_index, start, mode);
+        let plan = plan_source_edit(project, sequence, media, track_index, start, mode)?;
+        return pair_source_audio(project, sequence, plan);
     }
     let item = project
         .media_item(media)
@@ -292,6 +303,48 @@ pub fn plan_timeline_source_edit(
         ));
     }
     plan.create_track = Some(InsertTrack::new(sequence.id, 0, track));
+    pair_source_audio(project, &destination, plan)
+}
+
+/// Pair normal picture drops with the source's default audio stream, so the
+/// preview and exporter (both of which mix audio tracks) receive its sound.
+fn pair_source_audio(
+    project: &Project,
+    sequence: &Sequence,
+    mut plan: PlannedEdit,
+) -> Result<PlannedEdit, SourceRefusal> {
+    let has_audio = project
+        .media_item(plan.clip.media)
+        .and_then(|item| item.info.as_ref())
+        .is_some_and(sub_model::StreamInfo::has_audio);
+    if sequence.tracks[plan.track_index].kind != TrackKind::Video || !has_audio {
+        return Ok(plan);
+    }
+    let mut destination = sequence.clone();
+    let mut create_track = None;
+    let audio_index = if let Some(index) = destination
+        .tracks
+        .iter()
+        .position(|track| track.kind == TrackKind::Audio)
+    {
+        index
+    } else {
+        let index = destination.tracks.len();
+        let track = Track::new("A1", TrackKind::Audio);
+        create_track = Some(InsertTrack::new(sequence.id, index, track.clone()));
+        destination.tracks.push(track);
+        index
+    };
+    let mut audio = plan_source_edit(
+        project,
+        &destination,
+        plan.clip.media,
+        audio_index,
+        plan.start(),
+        plan.mode,
+    )?;
+    audio.create_track = create_track;
+    plan.companion_audio = Some(Box::new(audio));
     Ok(plan)
 }
 
@@ -441,6 +494,145 @@ mod tests {
                 assert_eq!(project, after);
             }
         }
+    }
+
+    #[test]
+    fn audiovisual_drop_pairs_both_streams_and_undoes_every_created_entity() {
+        for mode in [EditMode::Insert, EditMode::Overwrite] {
+            for existing_sequence in [false, true] {
+                let source = item("camera", 48, true, true);
+                let media = source.id;
+                let mut project = Project::new("Untitled");
+                project.media.push(source);
+                let sequence = Sequence::new("Main", SequenceSettings::default());
+                if existing_sequence {
+                    project.sequences.push(sequence.clone());
+                }
+                let before = project.clone();
+                let plan =
+                    plan_timeline_source_edit(&project, &sequence, media, 0, frames(24), mode)
+                        .expect("an A/V drop");
+                assert_eq!(project, before, "planning is read-only");
+                let mut history = History::new();
+                apply_source_edit(&mut history, &mut project, plan).unwrap();
+                let tracks = &project.sequences[0].tracks;
+                assert_eq!(tracks.len(), 2);
+                assert_eq!(tracks[0].kind, TrackKind::Video);
+                assert_eq!(tracks[1].kind, TrackKind::Audio);
+                let (video, video_span) = tracks[0].clip_placements(RATE).next().unwrap();
+                let (audio, audio_span) = tracks[1].clip_placements(RATE).next().unwrap();
+                assert_ne!(video.id, audio.id);
+                assert_eq!(video.media, media);
+                assert_eq!(audio.media, media);
+                assert_eq!(video.source_range, audio.source_range);
+                assert_eq!(video_span, audio_span);
+                assert_eq!(video_span.start(), frames(24));
+                assert_eq!(
+                    audio.audio_stream, 0,
+                    "one default source stream, not a duplicate mix"
+                );
+                let after = project.clone();
+                history.undo(&mut project).unwrap();
+                assert_eq!(project, before);
+                history.redo(&mut project).unwrap();
+                assert_eq!(project, after);
+            }
+        }
+    }
+
+    #[test]
+    fn paired_insert_and_overwrite_use_the_existing_audio_lane_and_respect_mute() {
+        for mode in [EditMode::Insert, EditMode::Overwrite] {
+            let source = item("camera", 48, true, true);
+            let media = source.id;
+            let (mut project, _) = fixture(vec![source]);
+            project.sequences[0].tracks[1].muted = true;
+            let audio_track = project.sequences[0].tracks[1].id;
+            let mut history = History::new();
+            for start in [frames(0), frames(24)] {
+                let sequence = project.sequences[0].clone();
+                let plan =
+                    plan_timeline_source_edit(&project, &sequence, media, 0, start, mode).unwrap();
+                apply_source_edit(&mut history, &mut project, plan).unwrap();
+            }
+            let tracks = &project.sequences[0].tracks;
+            assert_eq!(tracks.len(), 2, "reuse the audio destination");
+            assert_eq!(tracks[1].id, audio_track);
+            assert!(
+                tracks[1].muted,
+                "placing source audio does not unmute a lane"
+            );
+            let video: Vec<_> = tracks[0]
+                .clip_placements(RATE)
+                .map(|(clip, span)| (clip.media, clip.source_range, span))
+                .collect();
+            let audio: Vec<_> = tracks[1]
+                .clip_placements(RATE)
+                .map(|(clip, span)| (clip.media, clip.source_range, span))
+                .collect();
+            assert_eq!(video, audio, "both streams receive the same edit mode");
+        }
+    }
+
+    #[test]
+    fn silent_video_and_explicit_audio_drops_do_not_create_companions() {
+        for (video, audio, target) in [(true, false, 0), (true, true, 1), (false, true, 1)] {
+            let source = item("source", 48, video, audio);
+            let media = source.id;
+            let (mut project, sequence) = fixture(vec![source]);
+            let plan = plan_timeline_source_edit(
+                &project,
+                &sequence,
+                media,
+                target,
+                frames(0),
+                EditMode::Overwrite,
+            )
+            .unwrap();
+            apply_source_edit(&mut History::new(), &mut project, plan).unwrap();
+            assert_eq!(project.sequences[0].tracks[target].clips().count(), 1);
+            assert_eq!(project.sequences[0].tracks[1 - target].clips().count(), 0);
+            assert_eq!(project.sequences[0].tracks.len(), 2);
+        }
+    }
+
+    #[test]
+    fn locked_companion_refuses_the_pair_and_late_failure_rolls_back_picture() {
+        let source = item("camera", 48, true, true);
+        let media = source.id;
+        let (mut project, mut sequence) = fixture(vec![source]);
+        sequence.tracks[1].locked = true;
+        assert_eq!(
+            plan_timeline_source_edit(
+                &project,
+                &sequence,
+                media,
+                0,
+                frames(0),
+                EditMode::Overwrite
+            )
+            .unwrap_err(),
+            SourceRefusal::LockedTrack
+        );
+        sequence.tracks[1].locked = false;
+        let plan = plan_timeline_source_edit(
+            &project,
+            &sequence,
+            media,
+            0,
+            frames(0),
+            EditMode::Overwrite,
+        )
+        .unwrap();
+        // The destination disappears between planning and committing. Picture
+        // must not remain applied after the companion command fails.
+        project.sequences[0].tracks.pop();
+        let before = project.clone();
+        let mut history = History::new();
+        assert!(apply_source_edit(&mut history, &mut project, plan).is_err());
+        assert_eq!(project, before);
+        history.begin_group("no dangling group").unwrap();
+        history.abort_group(&mut project).unwrap();
     }
 
     #[test]
