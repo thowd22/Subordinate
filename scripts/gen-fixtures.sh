@@ -177,6 +177,7 @@ gen_video() {
         run mp4mux name=mux ! filesink location="$out_dir/$1" \
             videotestsrc num-buffers=120 \
             ! video/x-raw,width=320,height=180,framerate=60/1 \
+            ! videoconvert ! video/x-raw,format=I420,colorimetry=bt709 \
             ! x264enc speed-preset=ultrafast ! h264parse ! queue ! mux. \
             audiotestsrc wave=sine freq=440 samplesperbuffer=480 num-buffers=200 \
             ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! avenc_aac \
