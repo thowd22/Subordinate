@@ -480,6 +480,7 @@ fn unsaved_import_preview_and_first_save_keep_sources_and_pending_jobs() {
     harness.drop_at(to);
     support::run_settled(&mut harness);
     pump(&mut harness, |app| app.previews().stats().showing > 0);
+    assert_viewer_preserves_compositor_colors(&mut harness);
     assert!(
         harness.state().project_file().is_none(),
         "preview works before Save"
@@ -519,4 +520,81 @@ fn unsaved_import_preview_and_first_save_keep_sources_and_pending_jobs() {
         );
     }
     assert!(problems(harness.state_mut()).is_empty());
+}
+
+/// Compare the displayed video to the same compositor pixels used for export.
+/// Sampling the broad SMPTE bars avoids interpolation and codec-edge noise.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn assert_viewer_preserves_compositor_colors(harness: &mut Harness<'_, SubordinateApp>) {
+    let bounds = harness
+        .output()
+        .shapes
+        .iter()
+        .filter_map(|shape| {
+            if let egui::Shape::Mesh(mesh) = &shape.shape
+                && matches!(mesh.texture_id, egui::TextureId::User(_))
+            {
+                Some(mesh.calc_bounds())
+            } else {
+                None
+            }
+        })
+        .max_by(|a, b| a.area().total_cmp(&b.area()))
+        .expect("viewer texture is painted");
+    let compositor = harness.state().compositor();
+    let resolution = compositor.resolution();
+    let reference = compositor.read_rgba();
+    let rendered = harness.render().expect("the assembled editor renders");
+    let mut checked = 0;
+    for row in 1..20 {
+        for column in 1..28 {
+            let x = column as f32 / 28.0;
+            let y = row as f32 / 20.0;
+            let source_x = (resolution.width() as f32 * x) as u32;
+            let source_y = (resolution.height() as f32 * y) as u32;
+            let offset = ((source_y * resolution.width() + source_x) * 4) as usize;
+            let expected = &reference[offset..offset + 3];
+            if !expected.iter().any(|v| (64..224).contains(v)) {
+                continue;
+            }
+            // Do not compare codec edges, text or the SMPTE noise patch.
+            if [
+                -4_i64,
+                4,
+                -4 * i64::from(resolution.width()),
+                4 * i64::from(resolution.width()),
+            ]
+            .iter()
+            .any(|delta| {
+                let nearby =
+                    (i64::from(source_y * resolution.width() + source_x) + delta) as usize * 4;
+                reference[nearby..nearby + 3]
+                    .iter()
+                    .zip(expected)
+                    .any(|(a, b)| a.abs_diff(*b) > 2)
+            }) {
+                continue;
+            }
+            let screen_x = (bounds.left() + bounds.width() * x) as u32;
+            let screen_y = (bounds.top() + bounds.height() * y) as u32;
+            let actual = rendered.get_pixel(screen_x, screen_y).0;
+            for channel in 0..3 {
+                assert!(
+                    actual[channel].abs_diff(expected[channel]) <= 5,
+                    "viewer at ({x},{y}) channel {channel}: displayed {}, compositor {}",
+                    actual[channel],
+                    expected[channel]
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 0,
+        "fixture must exercise midtones, not just black and white"
+    );
 }

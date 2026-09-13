@@ -67,6 +67,10 @@ $catalogue = @(
         duration_ns = 5000000000L; fps_num = 25; fps_den = 1; vfr = $false; lossy = $false; tier = 'always'
         description = '1080p SMPTE colour bars, H.264, timecode burn-in'
     }
+    [pscustomobject]@{ name = 'playback_av.mp4'; kind = 'video'; width = 320; height = 180
+        duration_ns = 2000000000L; fps_num = 60; fps_den = 1; vfr = $false; lossy = $true; tier = 'always'
+        description = '2 s 60 fps H.264 with stereo 48 kHz 440 Hz AAC audio'
+    }
     [pscustomobject]@{ name = 'bars_2160p_h264.mp4'; kind = 'video'; width = 3840; height = 2160
         duration_ns = 5000000000L; fps_num = 25; fps_den = 1; vfr = $false; lossy = $false; tier = 'always'
         description = '4K SMPTE colour bars, H.264, timecode burn-in'
@@ -172,6 +176,16 @@ function New-VideoFixture {
     param([string]$Name)
     switch ($Name) {
         'bars_1080p_h264.mp4' { New-BarsFixture $Name 1920 1080 125 25 1 }
+        'playback_av.mp4' {
+            Invoke-Pipeline @(
+                'mp4mux', 'name=mux', '!', 'filesink', "location=$(Join-Path $OutDir $Name)",
+                'videotestsrc', 'num-buffers=120', '!', 'video/x-raw,width=320,height=180,framerate=60/1',
+                '!', 'x264enc', 'speed-preset=ultrafast', '!', 'h264parse', '!', 'queue', '!', 'mux.',
+                'audiotestsrc', 'wave=sine', 'freq=440', 'samplesperbuffer=480', 'num-buffers=200',
+                '!', 'audio/x-raw,rate=48000,channels=2', '!', 'audioconvert', '!', 'avenc_aac',
+                '!', 'aacparse', '!', 'queue', '!', 'mux.'
+            )
+        }
         'bars_2160p_h264.mp4' { New-BarsFixture $Name 3840 2160 125 25 1 }
         # timecodestamper flags the timecode drop-frame automatically for
         # 30000/1001, which is what makes this a genuine 29.97 DF fixture.

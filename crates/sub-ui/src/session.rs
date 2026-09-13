@@ -67,6 +67,7 @@ pub struct EditorSession {
     autosave: Option<Autosave>,
     /// What the last command, save or open reported, for the status bar.
     last_error: Option<SubError>,
+    playback_waker: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl EditorSession {
@@ -77,6 +78,7 @@ impl EditorSession {
     /// Whatever [`Engine::spawn`] returns.
     pub fn new(project: Project) -> SubResult<Self> {
         let engine = Engine::spawn(project)?;
+        engine.handle().enable_external_playback();
         let events = engine.handle().subscribe();
         let project = engine.handle().snapshot();
         let revision = engine.handle().revision();
@@ -92,6 +94,7 @@ impl EditorSession {
             project_file: None,
             autosave: None,
             last_error: None,
+            playback_waker: None,
         })
     }
 
@@ -187,6 +190,12 @@ impl EditorSession {
     #[must_use]
     pub fn project_file(&self) -> Option<&Path> {
         self.project_file.as_deref()
+    }
+
+    /// Installs the window wakeup used by remote transport requests.
+    pub fn set_playback_waker(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.handle().set_external_playback_waker(Arc::clone(&wake));
+        self.playback_waker = Some(wake);
     }
 
     /// What the last operation reported, if it failed.
@@ -393,6 +402,12 @@ impl EditorSession {
         // watching.
         self.autosave = None;
         let engine = Engine::spawn(project)?;
+        engine.handle().enable_external_playback();
+        if let Some(wake) = &self.playback_waker {
+            engine
+                .handle()
+                .set_external_playback_waker(Arc::clone(wake));
+        }
         self.events = engine.handle().subscribe();
         self.project = engine.handle().snapshot();
         self.revision = engine.handle().revision();

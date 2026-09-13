@@ -23,6 +23,17 @@ PROTOCOL_VERSION = "2025-06-18"
 EDITOR_NOTE = "Connected to the editor already running at"
 
 
+def project_from_result(state):
+    """Read a project through Command API and project-file envelopes."""
+    while isinstance(state, dict):
+        if isinstance(state.get("sequences"), list):
+            return state
+        if "project" not in state:
+            break
+        state = state["project"]
+    raise AssertionError(f"project.get did not contain a project: {json.dumps(state)[:600]}")
+
+
 class McpError(RuntimeError):
     """A tool call the editor rejected, or a bridge that would not start."""
 

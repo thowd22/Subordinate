@@ -24,6 +24,7 @@ pub mod markers;
 pub mod media_bin;
 pub mod media_import;
 pub mod meter;
+pub mod playback_audio;
 pub mod plugins;
 pub mod plugins_panel;
 pub mod popout;

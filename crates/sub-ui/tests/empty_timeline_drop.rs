@@ -3,7 +3,7 @@ mod support;
 
 use eframe::egui;
 use egui_kittest::kittest::Queryable;
-use sub_model::{Project, Sequence, SequenceSettings, TrackItem};
+use sub_model::{Project, Sequence, SequenceSettings, TrackItem, TrackKind};
 use sub_ui::media_bin::drag_source_id;
 use sub_ui::{AppOptions, SubordinateApp};
 
@@ -18,9 +18,9 @@ fn a_bin_drag_bootstraps_an_empty_timeline_and_undo_restores_it() {
             .media
             .iter()
             .find(|item| {
-                item.info
-                    .as_ref()
-                    .is_some_and(|info| !info.video.is_empty() && info.duration.is_some())
+                item.info.as_ref().is_some_and(|info| {
+                    !info.video.is_empty() && !info.audio.is_empty() && info.duration.is_some()
+                })
             })
             .expect("a probed video fixture")
             .clone();
@@ -74,6 +74,20 @@ fn a_bin_drag_bootstraps_an_empty_timeline_and_undo_restores_it() {
                 .any(|item| { matches!(item, TrackItem::Clip(clip) if clip.media == media) })),
             "the pointer drop must place the imported clip"
         );
+        let placed = |kind| {
+            result.sequences[0]
+                .tracks
+                .iter()
+                .filter(|track| track.kind == kind)
+                .flat_map(|track| track.clip_placements(result.sequences[0].settings.frame_rate))
+                .find(|(clip, _)| clip.media == media)
+                .expect("the real A/V pointer drop places both source streams")
+        };
+        let (video, video_span) = placed(TrackKind::Video);
+        let (audio, audio_span) = placed(TrackKind::Audio);
+        assert_ne!(video.id, audio.id);
+        assert_eq!(video.source_range, audio.source_range);
+        assert_eq!(video_span, audio_span, "picture and sound start in sync");
         harness.get_by_label("Edit").click();
         support::run_settled(&mut harness);
         harness.get_by_label_contains("Undo ").click();
