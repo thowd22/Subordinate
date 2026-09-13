@@ -227,7 +227,7 @@ fn seeking_a_lossy_fixture_lands_on_the_requested_frame() {
         let duration = decoder
             .info()
             .duration
-            .map(|value| value.value())
+            .map(sub_time::RationalTime::value)
             .or(manifest_frames)
             .zip(manifest_frames)
             .map(|(reported, manifest)| reported.min(manifest));
