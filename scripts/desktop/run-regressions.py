@@ -2,12 +2,17 @@
 """Run relocated first-use regressions without opening or controlling a desktop."""
 import hashlib
 import json
+import math
+import struct
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import wave
+
+subprocess.run([sys.executable, "-B", "-m", "unittest", "discover", "-s",
+                "scripts/desktop", "-p", "test_flow_mcp.py"], check=True, timeout=30)
 
 artifact = Path(sys.argv[1]).resolve()
 manifest = json.loads((artifact / "build-info.json").read_text(encoding="utf-8"))
@@ -36,15 +41,25 @@ with tempfile.TemporaryDirectory(prefix="sub-reg-") as scratch:
         wav.setnchannels(2)
         wav.setsampwidth(2)
         wav.setframerate(48000)
-        wav.writeframes(bytes(48000 * 2 * 2))
+        wav.writeframes(b"".join(struct.pack("<hh", value, value) for value in
+            (int(12000 * math.sin(2 * math.pi * 440 * frame / 48000)) for frame in range(48000))))
     gst_launch = str(artifact / "runtime" / "bin" / "gst-launch-1.0.exe") if os.name == "nt" else "gst-launch-1.0"
     subprocess.run([gst_launch, "-q", "-e", "videotestsrc", "num-buffers=125", "!",
         "video/x-raw,width=1920,height=1080,framerate=25/1", "!", "x264enc", "speed-preset=ultrafast",
         "!", "h264parse", "!", "mp4mux", "!", "filesink", "location=" + (fixtures / "bars_1080p_h264.mp4").as_posix()],
         env=env, check=True, timeout=90)
+    subprocess.run([gst_launch, "-q", "-e", "mp4mux", "name=mux", "!", "filesink",
+        "location=" + (fixtures / "playback_av.mp4").as_posix(),
+        "videotestsrc", "num-buffers=120", "!", "video/x-raw,width=320,height=180,framerate=60/1",
+        "!", "videoconvert", "!", "video/x-raw,format=I420,colorimetry=bt709",
+        "!", "x264enc", "speed-preset=ultrafast", "!", "h264parse", "!", "queue", "!", "mux.",
+        "audiotestsrc", "wave=sine", "freq=440", "samplesperbuffer=480", "num-buffers=200",
+        "!", "audio/x-raw,rate=48000,channels=2", "!", "audioconvert", "!", "avenc_aac",
+        "!", "aacparse", "!", "queue", "!", "mux."], env=env, check=True, timeout=90)
     entries = []
     for name, kind, width, height, seconds, fps in [
             ("bars_1080p_h264.mp4", "video", 1920, 1080, 5, 25),
+            ("playback_av.mp4", "video", 320, 180, 2, 60),
             ("tone_48k_stereo.wav", "audio", 0, 0, 1, 0)]:
         fixture_file = fixtures / name
         if not fixture_file.is_file() or fixture_file.stat().st_size == 0:
@@ -59,7 +74,7 @@ with tempfile.TemporaryDirectory(prefix="sub-reg-") as scratch:
     env["SUBORDINATE_CLI"] = str(artifact / manifest["executables"]["subordinate-cli"]["file"])
     # The MCP acceptance test serves its own temporary endpoint. No session
     # discovery, key injection, window launch or user configuration mutation.
-    tests = [("empty_timeline_drop", []), ("empty_track_menu", []), ("media_import_app", ["unsaved_import_preview_and_first_save_keep_sources_and_pending_jobs", "--exact"]),
+    tests = [("app_transport_sync", []), ("playback_audio", []), ("empty_timeline_drop", []), ("empty_track_menu", []), ("media_import_app", ["unsaved_import_preview_and_first_save_keep_sources_and_pending_jobs", "--exact"]),
              ("stdio", ["unsaved_external_import_survives_undo_save_and_reopen_over_stdio", "--exact"])]
     for name, select in tests:
         command = [str(artifact / manifest["executables"][name]["file"]), *select]

@@ -217,8 +217,25 @@ fn seeking_a_lossy_fixture_lands_on_the_requested_frame() {
         let mut decoder =
             FileDecoder::open(&path).unwrap_or_else(|e| panic!("[{}] opening {name}: {e}", e.code));
         let rate = Rational::new(decoder.info().sample_rate, 1).expect("a positive sample rate");
+        let manifest_frames = i64::try_from(
+            entry
+                .duration_ns
+                .saturating_mul(u64::from(decoder.info().sample_rate))
+                / 1_000_000_000,
+        )
+        .ok();
+        let duration = decoder
+            .info()
+            .duration
+            .map(|value| value.value())
+            .or(manifest_frames)
+            .zip(manifest_frames)
+            .map(|(reported, manifest)| reported.min(manifest));
 
         for frame in [0_i64, 4_001, 96_000, 200_000] {
+            if duration.is_some_and(|end| frame >= end) {
+                continue;
+            }
             let target = RationalTime::new(frame, rate);
             let landed = decoder
                 .seek(target)

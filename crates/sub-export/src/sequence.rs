@@ -39,6 +39,9 @@ use crate::ExportSettings;
 use crate::pipeline::{AudioFrameSource, PcmAudioSource, VideoFrameSource};
 use crate::presets::Preset;
 
+mod audio_window;
+pub use audio_window::decode_media_pcm_window;
+
 /// The settings for `preset` over `sequence`, and what they differ on.
 ///
 /// The preset chooses the container, the codecs and the audio format; the

@@ -1944,7 +1944,8 @@ impl TimelinePanel {
     /// straight away so the frame it is about to paint already shows the
     /// answer.
     ///
-    /// A press anywhere else — a lane, the header column — is not a seek and
+    /// The visible playhead line in a lane is also a narrow scrub handle.
+    /// A press elsewhere in a lane or the header column is not a seek and
     /// leaves the playhead alone: it belongs to clip selection instead, which
     /// [`TimelinePanel::handle_lanes`] takes. A drag that started in a lane
     /// and wandered up into the ruler stays that drag, so a gesture in
@@ -1970,8 +1971,15 @@ impl TimelinePanel {
             return None;
         };
         if !self.scrubbing {
-            if !layout.ruler.contains(pos) {
-                self.scrubbing = false;
+            let playhead_x = layout.content.left() + self.view.pixel_of(self.playhead);
+            let grabbed_playhead = layout.content.contains(pos)
+                && (pos.x - playhead_x).abs() <= 4.0
+                && response.ctx.input(|input| {
+                    input
+                        .pointer
+                        .button_pressed(eframe::egui::PointerButton::Primary)
+                });
+            if !layout.ruler.contains(pos) && !grabbed_playhead {
                 return None;
             }
             self.scrubbing = true;

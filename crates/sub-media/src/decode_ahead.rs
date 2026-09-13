@@ -324,6 +324,32 @@ impl DecodeAhead {
         self.shared.lock().map_or(0, |state| state.frames.len())
     }
 
+    /// Reports EOF once all buffered pictures have been consumed, without
+    /// waiting for another picture. False means frames remain or work is pending.
+    ///
+    /// # Errors
+    /// Reports the worker's pending decode/seek error, or a stopped worker,
+    /// once buffered pictures have been consumed, just as `next_frame` does.
+    pub fn is_drained(&mut self) -> SubResult<bool> {
+        let mut state = self.shared.lock()?;
+        if !state.frames.is_empty() {
+            return Ok(false);
+        }
+        if let Some(error) = state.error.take() {
+            return Err(error);
+        }
+        if state.eos {
+            return Ok(true);
+        }
+        if self.worker.as_ref().is_none_or(JoinHandle::is_finished) {
+            return Err(SubError::new(
+                codes::DECODE_FAILED,
+                "the decode-ahead worker stopped without delivering a frame",
+            ));
+        }
+        Ok(false)
+    }
+
     /// Frames the ring can hold.
     pub fn capacity(&self) -> usize {
         self.capacity
@@ -535,5 +561,25 @@ mod tests {
         stats.frames_decoded = 4;
         stats.decode_time_total = Duration::from_millis(40);
         assert_eq!(stats.decode_time_mean(), Some(Duration::from_millis(10)));
+    }
+    #[test]
+    fn an_empty_ring_exposes_eof_and_errors_without_waiting() {
+        let mut ahead = super::DecodeAhead {
+            shared: std::sync::Arc::new(Shared::new(1)),
+            worker: None,
+            capacity: 1,
+        };
+        ahead.shared.lock().unwrap().eos = true;
+        assert!(ahead.is_drained().unwrap());
+        assert!(ahead.is_drained().unwrap(), "EOF is stable between polls");
+        let code = super::codes::SEEK_FAILED;
+        ahead.shared.lock().unwrap().error =
+            Some(sub_core::SubError::new(code.clone(), "failed seek"));
+        assert_eq!(ahead.is_drained().unwrap_err().code, code);
+        ahead.shared.lock().unwrap().eos = false;
+        assert_eq!(
+            ahead.is_drained().unwrap_err().code,
+            super::codes::DECODE_FAILED
+        );
     }
 }

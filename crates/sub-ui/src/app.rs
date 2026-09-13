@@ -36,7 +36,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sub_audio::mixer::{MixGraphBuilder, MixerConfig, MixerControl, mixer};
+use crate::playback_audio::PlaybackAudio;
+use sub_audio::mixer::MixerControl;
 use sub_audio::scrub::{ScrubControl, ScrubSettings, scrub};
 use sub_audio::{AudioOutput, CpalBackend, MeterBank, OutputOptions};
 use sub_command::endpoint::{Address, DEFAULT_INSTANCE, Endpoint};
@@ -362,6 +363,12 @@ impl MediaHost {
     }
 }
 
+#[derive(Clone, Copy)]
+enum AudioPublication {
+    Current,
+    Pending,
+}
+
 /// The Subordinate editor window.
 pub struct SubordinateApp {
     render: RenderContext,
@@ -407,6 +414,10 @@ pub struct SubordinateApp {
     /// audio transport can be seeked to the playhead. `None` until a stream
     /// has been opened.
     audio_control: Rc<RefCell<Option<MixerControl>>>,
+    /// Worker-decoded PCM and graph shared with the output factory.
+    playback_audio: Rc<RefCell<PlaybackAudio>>,
+    /// Retry slot publication if the callback update queue was temporarily full.
+    audio_publication: AudioPublication,
     /// The engine half of the scrub player attached to that mixer, so a drag
     /// on the playhead can ask for a grain (docs/PLAN.md §5.4). `None` until a
     /// stream has been opened.
@@ -500,6 +511,7 @@ impl SubordinateApp {
     /// - `render.no_render_state` when eframe was built without its wgpu
     ///   backend, in which case there is no device to share.
     /// - Whatever starting the engine thread returns.
+    #[allow(clippy::too_many_lines)] // Assemble the window and its shared services together.
     pub fn new(cc: &eframe::CreationContext<'_>, options: AppOptions) -> SubResult<Self> {
         let state = cc
             .wgpu_render_state
@@ -541,8 +553,11 @@ impl SubordinateApp {
         let audio_control = Rc::new(RefCell::new(None));
         let scrub_control = Rc::new(RefCell::new(None));
         let scrub_settings = Rc::new(Cell::new(ScrubSettings::default()));
-        let audio = audio_output(
+        let playback_audio = Rc::new(RefCell::new(PlaybackAudio::new(
             sequence.settings.sample_rate,
+        )?));
+        let audio = audio_output(
+            Rc::clone(&playback_audio),
             Arc::clone(&meters),
             Rc::clone(&audio_control),
             Rc::clone(&scrub_control),
@@ -569,6 +584,8 @@ impl SubordinateApp {
             popout,
             scheduler,
             audio_control,
+            playback_audio,
+            audio_publication: AudioPublication::Current,
             scrub_control,
             scrub_settings,
             scrub_until: None,
@@ -595,6 +612,9 @@ impl SubordinateApp {
             host: Arc::new(GuiHost::new()),
             host_file: None,
         };
+        let context = cc.egui_ctx.clone();
+        app.session
+            .set_playback_waker(Arc::new(move || context.request_repaint()));
         if let Some(path) = startup_project {
             app.open_startup_project(&path);
         }
@@ -910,6 +930,43 @@ impl SubordinateApp {
         self.sync_project();
     }
 
+    /// Polls bounded audio work and publishes prepared windows to the callback.
+    fn playback_audio_ui(&mut self, ui: &mut egui::Ui) {
+        let audio_changed = self
+            .playback_audio
+            .borrow_mut()
+            .update(self.viewer.state.playhead());
+        if audio_changed {
+            self.audio_publication = AudioPublication::Pending;
+        }
+        if matches!(self.audio_publication, AudioPublication::Pending)
+            && let Some(control) = self.audio_control.borrow_mut().as_mut()
+        {
+            match self.playback_audio.borrow().install_ready(control) {
+                Ok(()) => self.audio_publication = AudioPublication::Current,
+                Err(error) => log::warn!(
+                    "could not install playback audio: [{}] {}",
+                    error.code,
+                    error.message
+                ),
+            }
+        }
+        {
+            let audio = self.playback_audio.borrow();
+            if let Some(error) = audio.error() {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("Audio unavailable: {error}"),
+                );
+            } else if audio.loading() {
+                ui.label("Preparing audio…");
+            }
+            if audio.loading() {
+                ui.ctx().request_repaint_after(PREVIEW_POLL_INTERVAL);
+            }
+        }
+    }
+
     /// Reconciles the tab strip and the cached sequence with the engine.
     ///
     /// Called once a frame and after every command: reading the project is a
@@ -957,6 +1014,26 @@ impl SubordinateApp {
             self.viewer.state.set_duration(sequence_duration(&sequence));
         }
         self.sequence = sequence;
+        self.stop_audio();
+        *self.audio_control.borrow_mut() = None;
+        let configured = match self.project_dir() {
+            Some(directory) => self.playback_audio.borrow_mut().configure(
+                self.session.project(),
+                &self.sequence,
+                &directory,
+            ),
+            None => self
+                .playback_audio
+                .borrow_mut()
+                .clear_with_error("The project media directory is unavailable"),
+        };
+        if let Err(error) = configured {
+            log::warn!(
+                "could not configure playback audio: [{}] {}",
+                error.code,
+                error.message
+            );
+        }
         self.needs_composite = true;
     }
 
@@ -1053,7 +1130,8 @@ impl SubordinateApp {
             return;
         }
         if let Some(control) = self.scrub_control.borrow().as_ref()
-            && let Err(error) = control.apply(settings)
+            && let Err(error) = control
+                .apply(settings.with_enabled(settings.enabled && !self.scheduler.is_playing()))
         {
             self.audio_settings.set_error(Some(error));
             return;
@@ -1087,6 +1165,7 @@ impl SubordinateApp {
             return;
         }
         if let Some(control) = self.scrub_control.borrow().as_ref() {
+            control.set_enabled(true);
             match control.grain_at(position) {
                 Ok(()) => self.scrub_until = Some(Instant::now() + grain_duration(settings)),
                 Err(error) => log::warn!(
@@ -1333,6 +1412,42 @@ impl SubordinateApp {
         self.sync_project();
     }
 
+    /// Applies remote transport requests before advancing the window's audio master.
+    fn poll_remote_playback(&mut self, ctx: &egui::Context) {
+        let request = match self
+            .session
+            .handle()
+            .take_external_playback_request(self.session.revision())
+        {
+            sub_edit::engine::ExternalPlaybackPoll::Request(request) => request,
+            sub_edit::engine::ExternalPlaybackPoll::Retry => {
+                ctx.request_repaint();
+                return;
+            }
+            sub_edit::engine::ExternalPlaybackPoll::Empty => return,
+        };
+        if let Some(sequence) = request.sequence {
+            let project = self.session.project_arc();
+            if self
+                .tabs
+                .switch_to(
+                    &project.sequences,
+                    sequence,
+                    &mut self.timeline,
+                    &mut self.viewer.state,
+                )
+                .is_err()
+            {
+                return;
+            }
+            self.sync_project();
+        }
+        self.scheduler = request.scheduler;
+        self.viewer.state.seek_to(self.scheduler.position());
+        self.seek_audio(self.viewer.state.playhead());
+        self.needs_composite = true;
+    }
+
     /// Runs the transport for this frame and returns whether the playhead
     /// moved.
     ///
@@ -1363,6 +1478,20 @@ impl SubordinateApp {
             // The user scrubbed or stepped while playing; carry on from there.
             self.scheduler.seek(self.viewer.state.playhead());
             self.seek_audio(self.viewer.state.playhead());
+        }
+        // Keep picture and sound at the requested instant while its bounded
+        // decode window arrives. Advancing the fallback clock here would skip
+        // the beginning of the clip before the device has any samples.
+        let preparing_audio = self.options.open_audio_output
+            && self.scheduler.speed() == ShuttleSpeed::Forward1x
+            && {
+                let audio = self.playback_audio.borrow();
+                !audio.ready() && audio.error().is_none()
+            };
+        if preparing_audio {
+            self.stop_audio();
+            ctx.request_repaint_after(PREVIEW_POLL_INTERVAL);
+            return false;
         }
         self.follow_audio();
         let master = self
@@ -1406,18 +1535,22 @@ impl SubordinateApp {
             self.stop_audio();
             return;
         }
-        if self.audio.is_open() {
-            return;
+        if !self.audio.is_open() {
+            if let Err(error) = self.audio.start() {
+                log::warn!(
+                    "no audio output; playback follows the monotonic clock: [{}] {}",
+                    error.code,
+                    error.message
+                );
+                return;
+            }
+            self.seek_audio(self.viewer.state.playhead());
         }
-        if let Err(error) = self.audio.start() {
-            log::warn!(
-                "no audio output; playback follows the monotonic clock: [{}] {}",
-                error.code,
-                error.message
-            );
-            return;
+        // Scrub mode parks the mixer between grains. Normal playback must
+        // release that transport ownership so its audio clock can advance.
+        if let Some(control) = self.scrub_control.borrow().as_ref() {
+            release_scrub_transport(control);
         }
-        self.seek_audio(self.viewer.state.playhead());
     }
 
     /// Closes the output stream, if one is open, and drops the master
@@ -1507,10 +1640,7 @@ impl SubordinateApp {
             if let Some((stale, _)) = self.preview.take() {
                 renderer.free_texture(&stale);
             }
-            let view = self
-                .compositor
-                .output()
-                .create_view(&wgpu::TextureViewDescriptor::default());
+            let view = self.compositor.display_view();
             let texture = renderer.register_native_texture(
                 self.render.device(),
                 &view,
@@ -2385,6 +2515,8 @@ impl eframe::App for SubordinateApp {
         self.shortcuts_window
             .show_with_problems(ui.ctx(), &self.keymap.map, &self.keymap.problems);
 
+        self.poll_remote_playback(ui.ctx());
+
         // Where the playhead started this frame, so a drag on the scrub bar
         // or the timeline ruler can be heard (docs/PLAN.md §5.4).
         let playhead_was = self.viewer.state.playhead();
@@ -2394,6 +2526,8 @@ impl eframe::App for SubordinateApp {
         if self.apply_shortcuts(ui.ctx()) {
             self.needs_composite = true;
         }
+
+        self.playback_audio_ui(ui);
 
         // The meters are read once a frame, straight out of the atomics the
         // audio callback stores into: two loads, no lock, and nothing the
@@ -2451,6 +2585,18 @@ impl eframe::App for SubordinateApp {
         if playhead != playhead_was && !self.scheduler.is_playing() {
             self.scrub_audio(playhead);
         }
+
+        if self.scheduler.position() != self.viewer.state.playhead() {
+            self.scheduler.seek(self.viewer.state.playhead());
+            if self.scheduler.is_playing() {
+                self.seek_audio(self.viewer.state.playhead());
+            }
+        }
+        self.session.handle().publish_external_playback(
+            &self.scheduler,
+            self.tabs.active(),
+            self.session.revision(),
+        );
 
         self.frames_painted = self.frames_painted.saturating_add(1);
 
@@ -2633,16 +2779,21 @@ pub fn run(options: AppOptions) -> eframe::Result {
     )
 }
 
+/// Hands the mixer's transport back to continuous playback after a scrub.
+fn release_scrub_transport(control: &ScrubControl) {
+    control.set_enabled(false);
+}
+
 /// The output stage for a sequence at `sample_rate`, closed.
 ///
 /// The factory it carries builds a fresh mixer every time a stream opens,
 /// because a reopened stream needs a mixer paired with a fresh control half.
 /// That control half is handed back through `control` so the transport can
 /// seek the mixer to the playhead: it is the same clock the picture follows.
-/// The graph itself is still empty — feeding it the sequence's clips is the
-/// next task — so what plays is silence at the right position.
+/// The graph reflects the active sequence. Workers decode PCM; the callback
+/// reads immutable source frames at the transport position.
 fn audio_output(
-    sample_rate: u32,
+    playback: Rc<RefCell<PlaybackAudio>>,
     meters: Arc<MeterBank>,
     control: Rc<RefCell<Option<MixerControl>>>,
     scrub_control: Rc<RefCell<Option<ScrubControl>>>,
@@ -2651,15 +2802,26 @@ fn audio_output(
     AudioOutput::new(
         CpalBackend::new(),
         OutputOptions::default(),
-        Box::new(move || {
-            let graph = MixGraphBuilder::new(sample_rate, 2).build()?;
-            let (fresh, mixer) = mixer(graph, MixerConfig::default())?;
-            *control.borrow_mut() = Some(fresh);
-            let (scrubber, player) = scrub(scrub_settings.get(), sample_rate)?;
-            *scrub_control.borrow_mut() = Some(scrubber);
-            Ok(mixer.with_meters(Arc::clone(&meters)).with_scrub(player))
-        }),
+        audio_mixer_factory(playback, meters, control, scrub_control, scrub_settings),
     )
+}
+
+/// Builds the exact mixer callback installed whenever the audio device opens.
+fn audio_mixer_factory(
+    playback: Rc<RefCell<PlaybackAudio>>,
+    meters: Arc<MeterBank>,
+    control: Rc<RefCell<Option<MixerControl>>>,
+    scrub_control: Rc<RefCell<Option<ScrubControl>>>,
+    scrub_settings: Rc<Cell<ScrubSettings>>,
+) -> sub_audio::output::MixerFactory {
+    Box::new(move || {
+        let (fresh, mixer) = playback.borrow().create_mixer()?;
+        let sample_rate = fresh.sample_rate();
+        *control.borrow_mut() = Some(fresh);
+        let (scrubber, player) = scrub(scrub_settings.get().with_enabled(false), sample_rate)?;
+        *scrub_control.borrow_mut() = Some(scrubber);
+        Ok(mixer.with_meters(Arc::clone(&meters)).with_scrub(player))
+    })
 }
 
 /// How long a grain of these settings lasts, as a wall-clock duration.
@@ -2688,6 +2850,162 @@ pub(crate) fn draft_project_dir(project: sub_model::ProjectId) -> Option<PathBuf
 mod tests {
     use super::{AppOptions, ProjectState, UI_SMOKE_READY};
     use std::time::Duration;
+
+    #[test]
+    fn device_factory_after_av_drop_renders_sound_with_default_scrub_settings() {
+        use super::*;
+        use crate::source_edit::{EditMode, apply_source_edit, plan_timeline_source_edit};
+        use sub_model::media::{AudioStream, StreamInfo, VideoStream};
+        use sub_model::{MediaItem, MediaPath};
+        use sub_time::Rational;
+        let Some(path) = sub_test_support::try_fixture("playback_av.mp4") else {
+            eprintln!("skipping: missing playback_av.mp4");
+            return;
+        };
+        sub_media::init().unwrap();
+        let mut item = MediaItem::new(MediaPath::external(&path).unwrap());
+        item.info = Some(StreamInfo {
+            duration: Some(RationalTime::new(2, Rational::ONE)),
+            video: vec![VideoStream {
+                width: 320,
+                height: 180,
+                frame_rate: Rational::FPS_60,
+                sample_aspect: Rational::ONE,
+                color: sub_model::sequence::ColorTags::REC709,
+            }],
+            audio: vec![AudioStream {
+                channels: 2,
+                sample_rate: 48_000,
+            }],
+        });
+        let media = item.id;
+        let mut project = Project::new("First drop");
+        project.media.push(item);
+        let sequence = Sequence::new("Main", SequenceSettings::default());
+        let zero = RationalTime::new(0, Rational::FPS_60);
+        let plan =
+            plan_timeline_source_edit(&project, &sequence, media, 0, zero, EditMode::Overwrite)
+                .unwrap();
+        apply_source_edit(&mut sub_edit::History::new(), &mut project, plan).unwrap();
+        let playback = Rc::new(RefCell::new(PlaybackAudio::new(48_000).unwrap()));
+        playback
+            .borrow_mut()
+            .configure(&project, &project.sequences[0], path.parent().unwrap())
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            playback.borrow_mut().update(zero);
+            assert!(playback.borrow().error().is_none());
+            if playback.borrow().ready() {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let control = Rc::new(RefCell::new(None));
+        let mut factory = audio_mixer_factory(
+            playback,
+            Arc::new(MeterBank::new(METERED_TRACKS)),
+            Rc::clone(&control),
+            Rc::new(RefCell::new(None)),
+            Rc::new(Cell::new(ScrubSettings::default())),
+        );
+        let mut callback = factory().unwrap();
+        let mut samples = vec![0.0; 9_600];
+        callback.process(&mut samples);
+        assert!(
+            samples.iter().any(|sample| sample.abs() > 0.01),
+            "production factory must connect decoded timeline PCM"
+        );
+        assert_eq!(
+            callback.position_frames(),
+            4_800,
+            "default scrub settings must not freeze playback"
+        );
+        assert!(
+            control.borrow().is_some(),
+            "transport must receive the control paired with this callback"
+        );
+    }
+
+    #[test]
+    fn playback_releases_a_finished_scrub_grain_so_callback_time_can_advance() {
+        use crate::viewer::{TransportAction, ViewerState};
+        use std::sync::Arc;
+        use sub_audio::clock::AudioClock;
+        use sub_audio::mixer::{MixGraphBuilder, MixerConfig, mixer};
+        use sub_audio::output::{
+            OutputDeviceInfo, OutputMetrics, OutputRenderer, OutputSampleFormat, SupportedFormat,
+        };
+        use sub_audio::scrub::{ScrubSettings, scrub};
+        use sub_edit::playback::PlaybackScheduler;
+        use sub_model::{Gap, Sequence, SequenceSettings, Track, TrackItem, TrackKind};
+        use sub_time::{Rational, RationalTime};
+
+        let (scrubber, player) = scrub(ScrubSettings::default(), 48_000).unwrap();
+        let graph = MixGraphBuilder::new(48_000, 2).build().unwrap();
+        let (_, mixer) = mixer(graph, MixerConfig::default()).unwrap();
+        let device = OutputDeviceInfo::new(
+            "test",
+            "Test",
+            vec![SupportedFormat::new(
+                2,
+                48_000,
+                48_000,
+                OutputSampleFormat::F32,
+            )],
+        );
+        let format = device.negotiate(48_000, 2).unwrap();
+        let mut renderer = OutputRenderer::new(
+            mixer.with_scrub(player),
+            format,
+            Arc::new(OutputMetrics::new()),
+            1_024,
+        )
+        .unwrap();
+        let clock: Arc<AudioClock> = Arc::clone(renderer.clock());
+        let mut block = vec![0.0; 2_048];
+        scrubber.grain_at(RationalTime::from_seconds(1)).unwrap();
+        for _ in 0..8 {
+            renderer.render(&mut block);
+        }
+        let parked = clock.rendered_frames();
+        renderer.render(&mut block);
+        assert_eq!(
+            clock.rendered_frames(),
+            parked,
+            "scrub mode parks between grains"
+        );
+
+        let mut sequence = Sequence::new("Clock", SequenceSettings::default());
+        sequence.settings.frame_rate = Rational::FPS_24;
+        let mut track = Track::new("V1", TrackKind::Video);
+        track
+            .items
+            .push(TrackItem::Gap(Gap::new(RationalTime::from_seconds(10))));
+        sequence.tracks.push(track);
+        let mut scheduler = PlaybackScheduler::for_sequence(&sequence);
+        let mut viewer = ViewerState::for_sequence(&sequence);
+        TransportAction::Toggle.apply(&mut scheduler);
+        if let Some(tick) = scheduler.follow(clock.position().unwrap()) {
+            viewer.seek_to(tick.position);
+        }
+        let before = viewer.playhead_frame();
+        // This is the operation follow_audio applies when playback takes over.
+        super::release_scrub_transport(&scrubber);
+        for _ in 0..12 {
+            renderer.render(&mut block);
+            if let Some(tick) = scheduler.follow(clock.position().unwrap()) {
+                viewer.seek_to(tick.position);
+            }
+        }
+        assert_eq!(clock.rendered_frames() - parked, 12 * 1_024);
+        assert!(
+            viewer.playhead_frame() > before,
+            "the viewer follows the released audio clock"
+        );
+        assert_ne!(viewer.timecode_label(), "00:00:00:00");
+    }
 
     #[test]
     fn options_default_to_a_normal_run() {

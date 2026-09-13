@@ -168,7 +168,7 @@ jobs:
       - name: Build the current app and focused acceptance tests
         run: |
           cargo build -p subordinate -p subordinate-cli -p subordinate-mcp --message-format=json > desktop-build.json
-          cargo test -p sub-ui --test empty_timeline_drop --test empty_track_menu --test media_import_app --no-run --message-format=json >> desktop-build.json
+          cargo test -p sub-ui --test empty_timeline_drop --test empty_track_menu --test media_import_app --test app_transport_sync --test playback_audio --no-run --message-format=json >> desktop-build.json
           cargo test -p subordinate-mcp --test stdio --no-run --message-format=json >> desktop-build.json
           python3 scripts/desktop/package-build.py
       - uses: actions/upload-artifact@v4
@@ -398,7 +398,7 @@ jobs:
         run: |
           cargo build -p subordinate -p subordinate-cli -p subordinate-mcp --message-format=json | Out-File -Encoding utf8 desktop-build.json
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo test -p sub-ui --test empty_timeline_drop --test empty_track_menu --test media_import_app --no-run --message-format=json | Out-File -Encoding utf8 -Append desktop-build.json
+          cargo test -p sub-ui --test empty_timeline_drop --test empty_track_menu --test media_import_app --test app_transport_sync --test playback_audio --no-run --message-format=json | Out-File -Encoding utf8 -Append desktop-build.json
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo test -p subordinate-mcp --test stdio --no-run --message-format=json | Out-File -Encoding utf8 -Append desktop-build.json
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

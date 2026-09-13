@@ -87,6 +87,7 @@ done
 catalogue=$(
     cat <<'EOF'
 bars_1080p_h264.mp4	video	1920	1080	5000000000	25	1	false	false	always	1080p SMPTE colour bars, H.264, timecode burn-in
+playback_av.mp4	video	320	180	2000000000	60	1	false	true	always	2 s 60 fps H.264 with stereo 48 kHz 440 Hz AAC audio
 bars_2160p_h264.mp4	video	3840	2160	5000000000	25	1	false	false	always	4K SMPTE colour bars, H.264, timecode burn-in
 dropframe_2997_h264.mp4	video	1920	1080	10010000000	30000	1001	false	false	always	29.97 drop-frame clip with drop-frame timecode burn-in
 vfr_60_30.mkv	video	1280	720	6000000000	60	1	true	false	always	Variable-frame-rate clip: 3 s at 30 fps then 3 s at 60 fps
@@ -172,6 +173,16 @@ gen_bars() {
 gen_video() {
     case "$1" in
     bars_1080p_h264.mp4) gen_bars "$1" 1920 1080 125 25 1 ;;
+    playback_av.mp4)
+        run mp4mux name=mux ! filesink location="$out_dir/$1" \
+            videotestsrc num-buffers=120 \
+            ! video/x-raw,width=320,height=180,framerate=60/1 \
+            ! videoconvert ! video/x-raw,format=I420,colorimetry=bt709 \
+            ! x264enc speed-preset=ultrafast ! h264parse ! queue ! mux. \
+            audiotestsrc wave=sine freq=440 samplesperbuffer=480 num-buffers=200 \
+            ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! avenc_aac \
+            ! aacparse ! queue ! mux.
+        ;;
     bars_2160p_h264.mp4) gen_bars "$1" 3840 2160 125 25 1 ;;
     dropframe_2997_h264.mp4)
         # timecodestamper flags the timecode drop-frame automatically for
