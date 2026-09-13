@@ -1976,10 +1976,11 @@ impl TimelinePanel {
             // within the playhead grab radius at the sequence origin. Give
             // the edit handle priority so a fade drag is not swallowed by
             // playhead scrubbing.
-            let over_fade_handle = self.fade_target_at(pos, layout, sequence).is_some();
+            let over_edit_handle = self.fade_target_at(pos, layout, sequence).is_some()
+                || self.trim_target_at(pos, layout, sequence).is_some();
             let grabbed_playhead = layout.content.contains(pos)
                 && (pos.x - playhead_x).abs() <= 4.0
-                && !over_fade_handle
+                && !over_edit_handle
                 && response.ctx.input(|input| {
                     input
                         .pointer
